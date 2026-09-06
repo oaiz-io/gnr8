@@ -95,6 +95,10 @@ pub(crate) enum Commands {
         #[arg(long, value_parser = non_empty_tag)]
         exempt_tag: Vec<String>,
 
+        /// Exact HTTP method and normalized route path to include in the breaking-change gate.
+        #[arg(long, value_parser = parse_gate_operation)]
+        gate_operation: Vec<GateOperation>,
+
         /// Print the report as Markdown for a job summary or pull-request comment.
         ///
         /// Selects the report format, so it cannot be combined with the global --json.
@@ -109,6 +113,25 @@ pub(crate) enum Commands {
     },
     /// Summarize unsupported patterns and lifecycle issues.
     Doctor,
+}
+
+/// One exact operation selected for API change enforcement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GateOperation {
+    method: String,
+    path: String,
+}
+
+impl GateOperation {
+    pub(crate) fn selector(&self) -> gnr8_engine::sdk::prelude::OperationSelector {
+        gnr8_engine::sdk::prelude::OperationSelector::route(&self.method, &self.path)
+    }
+}
+
+impl std::fmt::Display for GateOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} {}", self.method, self.path)
+    }
 }
 
 /// Source frontend presets for `gnr8 init`.
@@ -173,13 +196,49 @@ fn non_empty_tag(value: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+fn parse_gate_operation(value: &str) -> Result<GateOperation, String> {
+    if value.trim() != value || value.chars().any(char::is_control) {
+        return Err(
+            "expected `METHOD /normalized/path` with no surrounding whitespace or control characters"
+                .to_string(),
+        );
+    }
+    let mut parts = value.split_ascii_whitespace();
+    let Some(method) = parts.next() else {
+        return Err("expected `METHOD /normalized/path`".to_string());
+    };
+    let Some(path) = parts.next() else {
+        return Err("expected `METHOD /normalized/path`".to_string());
+    };
+    if parts.next().is_some() {
+        return Err("expected exactly one HTTP method and one route path".to_string());
+    }
+    let method = method.to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "PUT" | "POST" | "DELETE" | "PATCH" | "OPTIONS" | "HEAD" | "TRACE"
+    ) {
+        return Err(format!("unsupported HTTP method `{method}`"));
+    }
+    if !path.starts_with('/') || path.contains(['?', '#']) {
+        return Err(
+            "route path must be a normalized absolute path beginning with `/`, without a query or fragment"
+                .to_string(),
+        );
+    }
+    Ok(GateOperation {
+        method,
+        path: path.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     // Tests legitimately use unwrap/expect/panic (rust-best-practices skill ch.4); scope the allow to
     // the test module so the workspace-wide RUST-04 deny stays intact for production code.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{Cli, Commands, GuideTopic, InspectAction, SdkPreset, SourcePreset};
+    use super::{Cli, Commands, GateOperation, GuideTopic, InspectAction, SdkPreset, SourcePreset};
     use clap::Parser;
 
     #[test]
@@ -240,6 +299,8 @@ mod tests {
             "internal",
             "--exempt-tag",
             "beta",
+            "--gate-operation",
+            "post /events",
         ])
         .unwrap();
         assert!(matches!(
@@ -247,8 +308,14 @@ mod tests {
             Commands::Changes {
                 base,
                 exempt_tag,
+                gate_operation,
                 markdown: false
-            } if base == "origin/main" && exempt_tag == ["internal", "beta"]
+            } if base == "origin/main"
+                && exempt_tag == ["internal", "beta"]
+                && gate_operation == [GateOperation {
+                    method: "POST".to_string(),
+                    path: "/events".to_string(),
+                }]
         ));
         assert!(Cli::try_parse_from(["gnr8", "changes"]).is_err());
         assert!(matches!(
@@ -291,6 +358,46 @@ mod tests {
             "partner APIs",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn changes_gate_operations_require_an_exact_method_and_normalized_path() {
+        for invalid in [
+            "",
+            "POST",
+            "POST events",
+            "POST /events?limit=1",
+            "CONNECT /events",
+            "POST /events extra",
+            " POST /events",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "gnr8",
+                    "changes",
+                    "--base",
+                    "main",
+                    "--gate-operation",
+                    invalid,
+                ])
+                .is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        let cli = Cli::try_parse_from([
+            "gnr8",
+            "changes",
+            "--base",
+            "main",
+            "--gate-operation",
+            "post /events/{provider}",
+        ])
+        .expect("valid exact operation selector");
+        assert!(matches!(
+            cli.command,
+            Commands::Changes { gate_operation, .. }
+                if gate_operation[0].to_string() == "POST /events/{provider}"
+        ));
     }
 
     #[test]

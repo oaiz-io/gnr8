@@ -57,8 +57,9 @@ fn run() -> Result<()> {
         Commands::Changes {
             base,
             exempt_tag,
+            gate_operation,
             markdown,
-        } => run_changes(base, exempt_tag, *markdown, policy, output),
+        } => run_changes(base, exempt_tag, gate_operation, *markdown, policy, output),
         Commands::Watch { debounce_ms } => run_watch(*debounce_ms, policy, output),
         Commands::Doctor => run_doctor(policy, output),
     }
@@ -69,6 +70,7 @@ fn run() -> Result<()> {
 fn run_changes(
     base_reference: &str,
     exempt_tags: &[String],
+    gate_operations: &[cli::GateOperation],
     markdown: bool,
     policy: WorkerPolicy,
     output: Output,
@@ -105,7 +107,16 @@ fn run_changes(
     }
 
     let exempt_tags: std::collections::BTreeSet<String> = exempt_tags.iter().cloned().collect();
-    let report = gnr8_engine::changes::diff_graphs(&base.graph, &current.graph, &exempt_tags);
+    let gate_operations = gate_operations
+        .iter()
+        .map(cli::GateOperation::selector)
+        .collect::<Vec<_>>();
+    let report = gnr8_engine::changes::diff_graphs_with_gate_operations(
+        &base.graph,
+        &current.graph,
+        &exempt_tags,
+        &gate_operations,
+    )?;
     print_diagnostics(output, &run.outcome.diagnostics);
     match format {
         changes::ReportFormat::Markdown => print!("{}", changes::render_markdown(&base, &report)),

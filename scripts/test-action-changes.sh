@@ -43,9 +43,11 @@ Base: <code>HEAD</code> → <code>0123456789012345678901234567890123456789</code
 
 Exempt tags: <code>internal</code>
 
-Summary: 1 breaking, 0 additive, 0 doc-only, 1 gating.
+Protected operations: <code>POST /books</code>
 
-Breaking — gating (1)
+Summary: 1 breaking changes detected; 1 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.
+
+Breaking — protected surface (1)
 
     BREAKING  DELETE /books/{id}  operation removed ## injected heading
         Code: operation.removed
@@ -59,8 +61,16 @@ cat <<'JSON'
 {
   "schema_version": 1,
   "base": {"ref": "HEAD", "resolved": "0123456789012345678901234567890123456789"},
-  "policy": {"exempt_tags": ["internal"]},
-  "summary": {"breaking": 1, "additive": 0, "doc_only": 0, "gating": 1},
+  "policy": {
+    "exempt_tags": ["internal"],
+    "gate_operations": ["POST /books"]
+  },
+  "summary": {
+    "breaking": 1,
+    "additive": 0,
+    "doc_only": 0,
+    "gating": 1
+  },
   "changes": [{
     "kind": "breaking",
     "code": "operation.removed",
@@ -74,6 +84,7 @@ cat <<'JSON'
     },
     "tags": {"base": ["books"], "current": null},
     "exempt": {"base": false, "current": null},
+    "protected": {"base": true, "current": null},
     "gating": true,
     "message": "operation removed\n## injected heading",
     "file": "handlers/<books>.go",
@@ -95,6 +106,7 @@ log="$tmp/args"
 GNR8_BIN="$fake" \
 BASE_REF=HEAD \
 EXEMPT_TAGS=$'internal\ninternal\n#partner\n partner APIs ' \
+GATE_OPERATIONS=$'POST /books\nGET /reports' \
 WORKING_DIRECTORIES="$repo_root/examples/bookstore" \
 RUNNER_TEMP="$tmp" \
 GITHUB_OUTPUT="$output" \
@@ -104,6 +116,10 @@ FAKE_LOG="$log" \
   "$runner" > "$tmp/run-stdout"
 
 grep -Fx 'gating=true' "$output" >/dev/null
+grep -Fx 'breaking-changes=true' "$output" >/dev/null
+grep -Fx 'breaking-count=1' "$output" >/dev/null
+grep -Fx 'gating-count=1' "$output" >/dev/null
+grep -Ex 'report-digest=[0-9a-f]+' "$output" >/dev/null
 grep -F 'artifact-name=gnr8-api-changes-test-' "$output" >/dev/null
 grep -F 'BREAKING  DELETE /books/{id}  operation removed ## injected heading' "$summary" >/dev/null
 grep -F 'SDK operations: deleteBook (DELETE /books/{id}), listBooks (GET /books)' "$summary" >/dev/null
@@ -122,6 +138,7 @@ grep -E -- '^changes --base HEAD .*--markdown $' "$log" >/dev/null
 grep -F -- '--exempt-tag internal --exempt-tag internal' "$log" >/dev/null
 grep -F -- '--exempt-tag \#partner' "$log" >/dev/null
 grep -F -- '--exempt-tag \ partner\ APIs\ ' "$log" >/dev/null
+grep -F -- '--gate-operation POST\ /books --gate-operation GET\ /reports' "$log" >/dev/null
 report_root="$(sed -n 's/^report-root=//p' "$output")"
 test -s "$report_root/001/report.json"
 test -s "$report_root/001/report.md"
@@ -148,9 +165,14 @@ FAKE_LOG="$empty_log" \
   "$runner" > "$tmp/run-stdout"
 
 grep -Fx 'gating=true' "$empty_output" >/dev/null
+grep -Fx 'breaking-count=1' "$empty_output" >/dev/null
 grep -F -- '--base HEAD' "$empty_log" >/dev/null
 if grep -F -- '--exempt-tag' "$empty_log" >/dev/null; then
   echo "empty exempt-tags must not pass --exempt-tag" >&2
+  exit 1
+fi
+if grep -F -- '--gate-operation' "$empty_log" >/dev/null; then
+  echo "empty gate-operations must not pass --gate-operation" >&2
   exit 1
 fi
 # The heading is the one value this script renders, so it escapes it.
@@ -182,7 +204,7 @@ grep -F 'checkout with fetch-depth: 0' "$stderr" >/dev/null
 # A complete first project survives a failed second project. Only completion outputs stay absent.
 : > "$output"
 : > "$summary"
-if GNR8_BIN="$fake" BASE_REF=HEAD FAIL_PROJECT="$weird_dir" \
+if GNR8_BIN="$fake" BASE_REF=HEAD FAIL_ON_BREAKING=false FAIL_PROJECT="$weird_dir" \
   WORKING_DIRECTORIES="$repo_root/examples/bookstore"$'\n'"$weird_dir" \
   RUNNER_TEMP="$tmp" GITHUB_OUTPUT="$output" GITHUB_STEP_SUMMARY="$summary" \
   GITHUB_JOB=test FAKE_LOG="$log" "$runner" > "$tmp/run-stdout" 2> "$stderr"; then
@@ -195,6 +217,24 @@ assert_absent -E '^(combined-report|gating)=' "$output"
 report_root="$(sed -n 's/^report-root=//p' "$output")"
 test -s "$report_root/001/report.md"
 test -s "$report_root/001/report.json"
+
+# Advisory mode accepts the CLI's status 1, keeps every publication output, and downgrades a
+# protected breaking annotation to a warning. Status 2 above remains a hard failure in this mode.
+: > "$output"
+: > "$summary"
+GNR8_BIN="$fake" BASE_REF=HEAD FAIL_ON_BREAKING=false \
+  WORKING_DIRECTORIES="$repo_root/examples/bookstore" RUNNER_TEMP="$tmp" \
+  GITHUB_OUTPUT="$output" GITHUB_STEP_SUMMARY="$summary" FAKE_LOG="$log" \
+  "$runner" > "$tmp/advisory"
+grep -Fx 'gating=true' "$output" >/dev/null
+grep -Fx 'gating-count=1' "$output" >/dev/null
+grep -F 'Enforcement: advisory' "$summary" >/dev/null
+grep -F '::warning file=' "$tmp/advisory" >/dev/null
+assert_absent -F '::error file=' "$tmp/advisory"
+report_root="$(sed -n 's/^report-root=//p' "$output")"
+test -s "$report_root/001/report.json"
+test -s "$report_root/001/report.md"
+test -s "$(sed -n 's/^combined-report=//p' "$output")"
 
 # Keep both full artifacts when the summary budget cannot accommodate a whole project block.
 : > "$output"
@@ -278,7 +318,8 @@ for line in lines:
     else:
         name, value = line.split('=', 1)
         outputs[name] = value
-assert set(outputs) == {'report-root', 'artifact-name', 'marker', 'gating', 'combined-report'}
+assert set(outputs) == {'report-root', 'artifact-name', 'marker', 'gating', 'breaking-changes',
+                        'breaking-count', 'gating-count', 'combined-report', 'report-digest'}
 assert outputs['gating'] == 'true'
 assert '\ngating=false/' in outputs['report-root']
 assert Path(outputs['combined-report']).is_file()
@@ -297,4 +338,30 @@ assert_absent -E '^## injected heading$' "$summary"
 grep -Fx '::group::gnr8 changes project 1' "$tmp/control" >/dev/null
 grep -F '%0D## injected heading/' "$tmp/control" >/dev/null
 
-echo "action changes tests: OK (12 cases)"
+# Action metadata and its reference table expose the same advisory/filter contract. The default
+# remains enforcing, and only the final status-1 gate step observes fail-on-breaking.
+python3 - "$repo_root/action.yml" "$repo_root/docs/operations/artifacts-and-ci.md" <<'PYTHON'
+from pathlib import Path
+import re, sys
+action = Path(sys.argv[1]).read_text()
+docs = Path(sys.argv[2]).read_text()
+inputs = action.split('\noutputs:\n', 1)[0].split('\ninputs:\n', 1)[1]
+outputs = action.split('\noutputs:\n', 1)[1].split('\nruns:\n', 1)[0]
+input_names = set(re.findall(r'^  ([a-z][a-z0-9-]*):$', inputs, re.M))
+output_names = set(re.findall(r'^  ([a-z][a-z0-9-]*):$', outputs, re.M))
+for name in ('fail-on-breaking', 'gate-operations'):
+    assert name in input_names
+    assert f'| `{name}` |' in docs
+for name in ('breaking-changes', 'breaking-count', 'gating-count', 'report-artifact',
+             'report-path', 'report-digest'):
+    assert name in output_names
+    assert f'`{name}`' in docs
+fail_block = re.search(r'^  fail-on-breaking:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)',
+                       inputs, re.M | re.S).group(1)
+assert 'default: "true"' in fail_block
+gate_step = action.split('    - name: Enforce API change gate\n', 1)[1]
+assert "inputs.fail-on-breaking == 'true'" in gate_step.split('\n      shell:', 1)[0]
+assert 'exit 1' in gate_step
+PYTHON
+
+echo "action changes tests: OK (14 cases)"

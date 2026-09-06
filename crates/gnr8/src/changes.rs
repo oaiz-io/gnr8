@@ -98,6 +98,13 @@ pub(crate) fn render_human(report: &ChangeReport) -> String {
             report.policy.exempt_tags.join(", ")
         );
     }
+    if !report.policy.gate_operations.is_empty() {
+        let _ = writeln!(
+            text,
+            "changes: protected operations: {}",
+            report.policy.gate_operations.join(", ")
+        );
+    }
     if report.changes.is_empty() {
         text.push_str("No API changes.\n");
         return text;
@@ -138,25 +145,14 @@ pub(crate) fn render_markdown(base: &BaseGraph, report: &ChangeReport) -> String
         escape_html(&base.reference),
         escape_html(&base.commit)
     );
-    let tags = report
-        .policy
-        .exempt_tags
-        .iter()
-        .map(|tag| format!("<code>{}</code>", escape_html(tag)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    render_markdown_policy(&mut text, report);
     let _ = writeln!(
         text,
-        "Exempt tags: {}\n",
-        if tags.is_empty() { "none" } else { &tags }
-    );
-    let _ = writeln!(
-        text,
-        "Summary: {} breaking, {} additive, {} doc-only, {} gating.\n",
+        "Summary: {} breaking changes detected; {} protected-surface breaking changes; {} additive changes; {} documentation-only changes.\n",
         report.summary.breaking,
+        report.summary.gating,
         report.summary.additive,
-        report.summary.doc_only,
-        report.summary.gating
+        report.summary.doc_only
     );
     if report.changes.is_empty() {
         text.push_str("    No API changes.\n");
@@ -165,8 +161,8 @@ pub(crate) fn render_markdown(base: &BaseGraph, report: &ChangeReport) -> String
     // Partition without re-sorting: retain the machine report's order within every group.
     // Headings are static text plus counts, never values drawn from analyzed source.
     for (heading, kind, gating) in [
-        ("Breaking — gating", ChangeKind::Breaking, true),
-        ("Breaking — not gating", ChangeKind::Breaking, false),
+        ("Breaking — protected surface", ChangeKind::Breaking, true),
+        ("Breaking — advisory or exempt", ChangeKind::Breaking, false),
         ("Additive", ChangeKind::Additive, false),
         ("Documentation-only", ChangeKind::DocOnly, false),
     ] {
@@ -226,6 +222,37 @@ pub(crate) fn render_markdown(base: &BaseGraph, report: &ChangeReport) -> String
     text
 }
 
+fn render_markdown_policy(text: &mut String, report: &ChangeReport) {
+    let tags = report
+        .policy
+        .exempt_tags
+        .iter()
+        .map(|tag| format!("<code>{}</code>", escape_html(tag)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        text,
+        "Exempt tags: {}\n",
+        if tags.is_empty() { "none" } else { &tags }
+    );
+    let operations = report
+        .policy
+        .gate_operations
+        .iter()
+        .map(|operation| format!("<code>{}</code>", escape_html(operation)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(
+        text,
+        "Protected operations: {}\n",
+        if operations.is_empty() {
+            "all non-exempt operations"
+        } else {
+            &operations
+        }
+    );
+}
+
 /// Collapse a value onto a single line so it cannot escape the structure it is rendered into.
 fn one_line(value: &str) -> String {
     let mut text = String::with_capacity(value.len());
@@ -274,11 +301,18 @@ fn exemption_suffix(change: &Change) -> &'static str {
     if change.kind != ChangeKind::Breaking || change.gating {
         return "";
     }
-    match (change.exempt.base, change.exempt.current) {
-        (Some(true), Some(true)) => "  (exempt on both sides; not gating)",
-        (Some(true), None) => "  (exempt on base side; not gating)",
-        (None, Some(true)) => "  (exempt on current side; not gating)",
-        _ => "",
+    let selected = change.protected.base == Some(true) || change.protected.current == Some(true);
+    if !selected {
+        return "  (outside protected surface; advisory)";
+    }
+    let base_exempt = change.protected.base == Some(true) && change.exempt.base == Some(true);
+    let current_exempt =
+        change.protected.current == Some(true) && change.exempt.current == Some(true);
+    match (base_exempt, current_exempt) {
+        (true, true) => "  (exempt on both sides; advisory)",
+        (true, false) => "  (exempt on base side; advisory)",
+        (false, true) => "  (exempt on current side; advisory)",
+        _ => "  (advisory)",
     }
 }
 
@@ -304,6 +338,10 @@ mod tests {
     use super::{render_human, render_json, render_markdown, ReportFormat};
 
     fn finding(kind: ChangeKind, gating: bool, exempt: Sides<bool>) -> Change {
+        let protected = Sides {
+            base: Some(gating || exempt.base == Some(true)),
+            current: exempt.current.map(|_| true),
+        };
         Change {
             kind,
             code: "operation.removed".to_string(),
@@ -322,6 +360,7 @@ mod tests {
                 current: None,
             },
             exempt,
+            protected,
             gating,
             message: "operation removed".to_string(),
             file: None,
@@ -335,6 +374,7 @@ mod tests {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
+                gate_operations: Vec::new(),
             },
             summary: ChangeSummary {
                 breaking: 2,
@@ -363,7 +403,7 @@ mod tests {
         };
         let rendered = render_human(&report);
         assert!(rendered.contains("BREAKING  DELETE /books/{id}  operation removed\n"));
-        assert!(rendered.contains("(exempt on base side; not gating)"));
+        assert!(rendered.contains("(exempt on base side; advisory)"));
         assert!(rendered.starts_with("changes: exempt tags: internal\n"));
     }
 
@@ -404,6 +444,7 @@ mod tests {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
+                gate_operations: Vec::new(),
             },
             summary: ChangeSummary {
                 breaking: 2,
@@ -419,7 +460,7 @@ mod tests {
             concat!(
                 "changes: exempt tags: internal\n",
                 "BREAKING  POST /books         request field `title` became required  handlers/books.go:42\n",
-                "BREAKING  DELETE /books/{id}  operation removed  (exempt on base side; not gating)  handlers/debug.go:12\n",
+                "BREAKING  DELETE /books/{id}  operation removed  (exempt on base side; advisory)  handlers/debug.go:12\n",
                 "BREAKING  POST /books         request field `title` became required  handlers/books.go\n",
                 "BREAKING  POST /books         request field `title` became required\n",
             )
@@ -436,6 +477,7 @@ mod tests {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
+                gate_operations: vec!["POST /events".to_string()],
             },
             summary: ChangeSummary {
                 breaking: 1,
@@ -458,7 +500,9 @@ mod tests {
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["base"]["ref"], "origin/main");
         assert_eq!(value["policy"]["exempt_tags"][0], "internal");
+        assert_eq!(value["policy"]["gate_operations"][0], "POST /events");
         assert_eq!(value["changes"][0]["exempt"]["base"], true);
+        assert_eq!(value["changes"][0]["protected"]["base"], true);
         // Machine consumers must handle omitted current locations, not just explicit nulls.
         for field in ["file", "line", "span"] {
             assert!(value["changes"][0].get(field).is_none());
@@ -468,6 +512,44 @@ mod tests {
             "deleteBook"
         );
         assert_eq!(value["summary"]["gating"], 0);
+    }
+
+    #[test]
+    fn added_report_scope_fields_default_when_reading_earlier_schema_one_json() {
+        let report = ChangeReport {
+            policy: ChangePolicy {
+                exempt_tags: Vec::new(),
+                gate_operations: vec!["GET /books".to_string()],
+            },
+            summary: ChangeSummary {
+                breaking: 1,
+                additive: 0,
+                doc_only: 0,
+                gating: 1,
+            },
+            changes: vec![finding(
+                ChangeKind::Breaking,
+                true,
+                Sides {
+                    base: Some(false),
+                    current: None,
+                },
+            )],
+        };
+        let mut value = serde_json::to_value(report).expect("serialize current report");
+        value["policy"]
+            .as_object_mut()
+            .expect("policy object")
+            .remove("gate_operations");
+        value["changes"][0]
+            .as_object_mut()
+            .expect("change object")
+            .remove("protected");
+
+        let earlier: ChangeReport =
+            serde_json::from_value(value).expect("read earlier schema-one fields");
+        assert!(earlier.policy.gate_operations.is_empty());
+        assert_eq!(earlier.changes[0].protected, Sides::default());
     }
 
     #[test]
@@ -519,6 +601,7 @@ mod tests {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
+                gate_operations: vec!["POST /events".to_string()],
             },
             summary: ChangeSummary {
                 breaking: 1,
@@ -537,11 +620,13 @@ mod tests {
                 "\n",
                 "Exempt tags: <code>internal</code>\n",
                 "\n",
-                "Summary: 1 breaking, 0 additive, 0 doc-only, 0 gating.\n",
+                "Protected operations: <code>POST /events</code>\n",
                 "\n",
-                "Breaking — not gating (1)\n\n",
+                "Summary: 1 breaking changes detected; 0 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.\n",
+                "\n",
+                "Breaking — advisory or exempt (1)\n\n",
                 "    BREAKING  DELETE /books/{id}  operation removed",
-                "  (exempt on base side; not gating)\n",
+                "  (exempt on base side; advisory)\n",
                 "        Code: operation.removed\n",
                 "        SDK operations: deleteBook (DELETE /books/{id}), listBooks (GET /books)\n",
                 "        Source: handlers/books.go:42\n\n",
@@ -572,6 +657,7 @@ mod tests {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: vec!["a & b".to_string()],
+                gate_operations: Vec::new(),
             },
             summary: ChangeSummary {
                 breaking: 1,
@@ -623,12 +709,17 @@ mod tests {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
+                gate_operations: Vec::new(),
             },
             summary: ChangeSummary::default(),
             changes: Vec::new(),
         };
         let rendered = render_markdown(&base, &report);
         assert!(rendered.contains("Exempt tags: none\n"), "{rendered}");
+        assert!(
+            rendered.contains("Protected operations: all non-exempt operations\n"),
+            "{rendered}"
+        );
         assert!(rendered.ends_with("    No API changes.\n"), "{rendered}");
         for heading in ["Breaking —", "Additive (", "Documentation-only ("] {
             assert!(!rendered.contains(heading));
@@ -665,6 +756,7 @@ mod tests {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
+                gate_operations: Vec::new(),
             },
             summary: ChangeSummary {
                 breaking: 3,
@@ -677,14 +769,14 @@ mod tests {
         let rendered = render_markdown(&base, &report);
         let headings: Vec<_> = rendered
             .lines()
-            .skip(6)
+            .skip(8)
             .filter(|line| !line.is_empty() && !line.starts_with("    "))
             .collect();
         assert_eq!(
             headings,
             [
-                "Breaking — gating (2)",
-                "Breaking — not gating (1)",
+                "Breaking — protected surface (2)",
+                "Breaking — advisory or exempt (1)",
                 "Additive (1)",
                 "Documentation-only (1)"
             ]
@@ -706,6 +798,7 @@ mod tests {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
+                gate_operations: Vec::new(),
             },
             summary: ChangeSummary::default(),
             changes: Vec::new(),

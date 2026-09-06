@@ -26,6 +26,10 @@ inputs:
     description: Run gnr8 changes, publish reports, and gate on checked breaking changes.
     required: false
     default: "false"
+  fail-on-breaking:
+    description: Fail the Action when protected-surface breaking changes are found.
+    required: false
+    default: "true"
   annotate-api-changes:
     description: Emit workflow annotations for findings that carry a current source location.
     required: false
@@ -36,6 +40,10 @@ inputs:
     default: "origin/main"
   exempt-tags:
     description: Newline-separated exact operation tags exempted from the API change gate.
+    required: false
+    default: ""
+  gate-operations:
+    description: Newline-separated exact METHOD /path operations included in the API change gate.
     required: false
     default: ""
   cache:
@@ -89,6 +97,24 @@ outputs:
   binary:
     description: Path to the gnr8 binary used by the action.
     value: ${{ steps.binary.outputs.path }}
+  breaking-changes:
+    description: Whether the completed API reports contain any breaking findings.
+    value: ${{ steps.api-changes.outputs.breaking-changes }}
+  breaking-count:
+    description: Number of breaking findings across completed API reports.
+    value: ${{ steps.api-changes.outputs.breaking-count }}
+  gating-count:
+    description: Number of protected-surface breaking findings across completed API reports.
+    value: ${{ steps.api-changes.outputs.gating-count }}
+  report-artifact:
+    description: Name of the uploaded API change report artifact.
+    value: ${{ steps.api-changes.outputs.artifact-name }}
+  report-path:
+    description: Runner-local path to the combined Markdown API change report.
+    value: ${{ steps.api-changes.outputs.combined-report }}
+  report-digest:
+    description: Git blob digest of the combined Markdown API change report.
+    value: ${{ steps.api-changes.outputs.report-digest }}
 
 runs:
   using: composite
@@ -101,6 +127,7 @@ runs:
         INSTALL_METHOD: ${{ inputs.install-method }}
         REQUESTED_VERSION: ${{ inputs.version }}
         REPORT_API_CHANGES: ${{ inputs.report-api-changes }}
+        FAIL_ON_BREAKING: ${{ inputs.fail-on-breaking }}
         ANNOTATE_API_CHANGES: ${{ inputs.annotate-api-changes }}
         BASE_REF: ${{ inputs.base-ref }}
         SETUP_GO: ${{ inputs.setup-go }}
@@ -121,6 +148,7 @@ runs:
 
         validate_boolean cache "$CACHE_ENABLED"
         validate_boolean report-api-changes "$REPORT_API_CHANGES"
+        validate_boolean fail-on-breaking "$FAIL_ON_BREAKING"
         validate_boolean annotate-api-changes "$ANNOTATE_API_CHANGES"
         validate_boolean setup-go "$SETUP_GO"
         validate_boolean setup-node "$SETUP_NODE"
@@ -312,7 +340,9 @@ runs:
       env:
         BASE_REF: ${{ inputs.base-ref }}
         ANNOTATE_API_CHANGES: ${{ inputs.annotate-api-changes }}
+        FAIL_ON_BREAKING: ${{ inputs.fail-on-breaking }}
         EXEMPT_TAGS: ${{ inputs.exempt-tags }}
+        GATE_OPERATIONS: ${{ inputs.gate-operations }}
         GNR8_BIN: ${{ steps.binary.outputs.path }}
         INPUT_BINARY: ${{ inputs.gnr8-binary }}
         INSTALL_METHOD: ${{ inputs.install-method }}
@@ -383,8 +413,8 @@ runs:
         done
 
     - name: Enforce API change gate
-      if: ${{ always() && inputs.report-api-changes == 'true' && steps.api-changes.outputs.gating == 'true' }}
+      if: ${{ always() && inputs.report-api-changes == 'true' && inputs.fail-on-breaking == 'true' && steps.api-changes.outputs.gating == 'true' }}
       shell: bash
       run: |
-        echo "gnr8 action: checked breaking API changes were found" >&2
+        echo "gnr8 action: protected-surface breaking API changes were found" >&2
         exit 1

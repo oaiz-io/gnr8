@@ -1915,7 +1915,7 @@ impl TransformExec for ApplySecurity {
     }
 }
 
-fn operation_selector_matches(
+pub(crate) fn operation_selector_matches(
     selector: &OperationSelector,
     op: &crate::graph::Operation,
     base_path: &str,
