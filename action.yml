@@ -43,7 +43,7 @@ inputs:
     required: false
     default: ""
   gate-operations:
-    description: Newline-separated exact METHOD /path operations included in the API change gate.
+    description: Newline-separated exact METHOD /effective-path operations included in the API change gate.
     required: false
     default: ""
   cache:

@@ -214,8 +214,8 @@ done
 
 {
   write_output gating "$gating"
-  write_output breaking-changes "$breaking_changes"
   if [[ "$metadata_complete" == true ]]; then
+    write_output breaking-changes "$breaking_changes"
     write_output breaking-count "$breaking_count"
     write_output gating-count "$gating_count"
   fi

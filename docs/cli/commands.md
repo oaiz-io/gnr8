@@ -138,9 +138,11 @@ Findings are classified as `BREAKING`, `ADDITIVE`, or `DOC-ONLY`. A breaking fin
 when it is in the checked scope. `--exempt-tag` removes operations carrying an exact,
 case-sensitive matching standard OpenAPI tag from that scope; it is repeatable, and untagged
 operations remain checked. `--gate-operation "METHOD /path"` is also repeatable. When present, these
-exact, normalized graph-route selectors form an include-only protected surface; without them, every
-operation remains protected as before. Each selector must match an operation in the base or current
-graph, so removing a selected operation is enforced and a stale selector is a configuration error.
+exact effective-route selectors form an include-only protected surface; without them, every
+operation remains protected as before. The path is the effective route printed in the report,
+including the graph's base path: a reported `POST /api/v1/events` is selected with that exact path,
+not the source-relative `/events`. Each selector must match an operation in the base or current graph,
+so removing a selected operation is enforced and a stale selector is a configuration error.
 The include filter is applied first and `--exempt-tag` subtracts from it. Findings are always
 reported, including unselected and exempt ones. Schema findings follow all transitive consumers on
 both graph sides, so a shared schema is enforced when any protected, non-exempt operation uses it.

@@ -95,7 +95,7 @@ pub(crate) enum Commands {
         #[arg(long, value_parser = non_empty_tag)]
         exempt_tag: Vec<String>,
 
-        /// Exact HTTP method and normalized route path to include in the breaking-change gate.
+        /// Exact HTTP method and effective route path shown by reports to include in the gate.
         #[arg(long, value_parser = parse_gate_operation)]
         gate_operation: Vec<GateOperation>,
 

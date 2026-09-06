@@ -290,7 +290,7 @@ Action inputs:
 | `fail-on-breaking` | `true` | fail on protected-surface breaking findings; `false` keeps reports but treats status 1 as advisory |
 | `annotate-api-changes` | `true` | emit current-source workflow annotations when change reporting is enabled; requires `python3` |
 | `base-ref` | `origin/main` | revision containing each project's committed graph artifact |
-| `gate-operations` | empty | newline-separated exact `METHOD /path` operations forming an include-only protected surface |
+| `gate-operations` | empty | newline-separated exact `METHOD /effective-path` operations forming an include-only protected surface |
 | `exempt-tags` | empty | newline-separated exact operation tags exempted from the change gate |
 | `cache` | `true` | cache `.gnr8/cache` and `.gnr8/target` |
 | `cache-key-prefix` | `gnr8` | cache-key prefix |
@@ -300,8 +300,10 @@ Action inputs:
 | `setup-node` / `node-version` | `false` / `lts/*` | NestJS source toolchain |
 
 Outputs are `binary`, `cache-hit`, `breaking-changes`, `breaking-count`, `gating-count`,
-`report-artifact`, `report-path`, and `report-digest`. Report outputs are empty when change reporting
-is disabled or did not complete. `report-digest` is Git's blob digest of the combined Markdown file.
+`report-artifact`, `report-path`, and `report-digest`. Finding metadata outputs (`breaking-changes`,
+`breaking-count`, and `gating-count`) are empty unless every completed report's summary can be read;
+they never represent an unknown result as zero or `false`. `report-digest` is Git's blob digest of the
+combined Markdown file. All report outputs are empty when change reporting is disabled.
 
 Change reporting requires checkout history, so use `actions/checkout` with `fetch-depth: 0`. Missing
 base history fails with an error that names this requirement. The action writes a combined Markdown
@@ -319,7 +321,8 @@ steps can use `gating-count` without parsing it themselves. The final Action ste
 only when `fail-on-breaking` is `true`, which remains the default.
 
 `gate-operations` maps each non-empty line to a repeated `--gate-operation` argument. The CLI matches
-the uppercase method and normalized graph route exactly on the union of the base and current graphs.
+the uppercase method and effective route printed in reports exactly on the union of the base and
+current graphs, including any graph base path (for example, `POST /api/v1/events`, not `/events`).
 Schema findings inherit all transitive operation consumers from both sides. Include selection happens
 before `exempt-tags`, so an exempt tag removes even an explicitly selected operation from enforcement.
 With no operation filter, all non-exempt breaking findings retain the existing gate behavior.

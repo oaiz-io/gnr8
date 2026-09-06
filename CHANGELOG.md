@@ -17,9 +17,10 @@ must move the minor version.
   and configuration failures still fail. Report paths, digests, finding counts, and the report artifact
   name are available as Action outputs.
 - **`gnr8 changes --gate-operation "METHOD /path"` limits enforcement to explicitly selected
-  operations without filtering the report.** Selectors match either graph side, protect transitive
-  schema changes, fail when unmatched, and compose deterministically with `--exempt-tag` by applying
-  tag exemptions after include selection. Omitting selectors preserves the all-operation gate.
+  operations without filtering the report.** Selectors use the effective route printed in reports,
+  match either graph side, protect transitive schema changes, fail when unmatched, and compose
+  deterministically with `--exempt-tag` by applying tag exemptions after include selection. Omitting
+  selectors preserves the all-operation gate.
 
 ### Changed
 

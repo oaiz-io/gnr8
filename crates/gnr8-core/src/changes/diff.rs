@@ -40,7 +40,7 @@ pub struct Sides<T> {
 pub struct ChangePolicy {
     /// Exact, case-sensitive operation tags exempted from gating.
     pub exempt_tags: Vec<String>,
-    /// Exact method/path operation selectors included in the gate, or empty for every operation.
+    /// Exact effective method/path selectors included in the gate, or empty for every operation.
     #[serde(default)]
     pub gate_operations: Vec<String>,
 }
@@ -175,13 +175,9 @@ impl<'a> GraphIndex<'a> {
                 let tags = resolver.resolve(operation);
                 let exempt = tags.iter().any(|tag| exempt_tags.contains(tag));
                 let protected = !include_only
-                    || gate_operations.iter().any(|selector| {
-                        crate::sdk::builtins::operation_selector_matches(
-                            selector,
-                            operation,
-                            &graph.base_path,
-                        )
-                    });
+                    || gate_operations
+                        .iter()
+                        .any(|selector| gate_operation_matches(selector, graph, operation));
                 (
                     operation.id.as_str(),
                     OperationGate {
@@ -340,7 +336,7 @@ pub fn diff_graphs(
     diff_graphs_inner(base, current, exempt_tags, &[], Vec::new())
 }
 
-/// Compare two projected graphs while limiting the gate to exact operation selectors.
+/// Compare two projected graphs while limiting the gate to exact effective-route selectors.
 ///
 /// An empty selector list preserves the default all-operation gate. Every configured selector must
 /// match an operation on the base or current side, so a stale selector cannot silently disable the
@@ -363,19 +359,18 @@ pub fn diff_graphs_with_gate_operations(
                 message: "change gates accept only exact route selectors".to_string(),
             });
         };
-        let matched = base.operations.iter().any(|operation| {
-            crate::sdk::builtins::operation_selector_matches(selector, operation, &base.base_path)
-        }) || current.operations.iter().any(|operation| {
-            crate::sdk::builtins::operation_selector_matches(
-                selector,
-                operation,
-                &current.base_path,
-            )
-        });
+        let matched = base
+            .operations
+            .iter()
+            .any(|operation| gate_operation_matches(selector, base, operation))
+            || current
+                .operations
+                .iter()
+                .any(|operation| gate_operation_matches(selector, current, operation));
         if !matched {
             return Err(CoreError::Config {
                 message: format!(
-                    "gate operation `{method} {path}` did not match any operation in the base or current graph; check the HTTP method and normalized route path"
+                    "gate operation `{method} {path}` did not match any operation in the base or current graph; check the HTTP method and effective route path shown in reports"
                 ),
             });
         }
@@ -2289,6 +2284,19 @@ fn operation_label(graph: &ApiGraph, operation: &Operation) -> String {
     )
 }
 
+fn gate_operation_matches(
+    selector: &OperationSelector,
+    graph: &ApiGraph,
+    operation: &Operation,
+) -> bool {
+    match selector {
+        OperationSelector::Route { method, path } => {
+            operation.method == *method && join_path(&graph.base_path, &operation.path) == *path
+        }
+        _ => false,
+    }
+}
+
 fn join_path(base: &str, path: &str) -> String {
     if base == "/" {
         return format!("/{}", path.trim_start_matches('/'));
@@ -2500,6 +2508,39 @@ mod tests {
             .expect("advisory finding");
         assert!(!advisory.gating);
         assert_eq!(advisory.protected.base, Some(false));
+    }
+
+    #[test]
+    fn operation_gate_uses_the_effective_route_printed_in_reports() {
+        let mut base = graph_with_tags(&[]);
+        base.base_path = "/api/v1".to_string();
+        base.operations[0].method = "POST".to_string();
+        base.operations[0].path = "/events".to_string();
+        base.operations[0].params.push(parameter(false));
+        let mut current = base.clone();
+        current.operations[0].params[0].required = true;
+
+        let report = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &BTreeSet::new(),
+            &[OperationSelector::post("/api/v1/events")],
+        )
+        .expect("report route matches the gate operation");
+        let finding = change(&report, "request.parameter.required.added");
+        assert_eq!(finding.operation.as_deref(), Some("POST /api/v1/events"));
+        assert!(finding.gating);
+
+        let error = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &BTreeSet::new(),
+            &[OperationSelector::post("/events")],
+        )
+        .expect_err("source-relative route is not the reported effective route");
+        assert!(error.to_string().contains(
+            "gate operation `POST /events` did not match any operation in the base or current graph"
+        ));
     }
 
     #[test]

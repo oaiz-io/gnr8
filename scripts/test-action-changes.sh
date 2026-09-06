@@ -292,6 +292,7 @@ grep -F 'could not publish the step summary' "$tmp/failures" >/dev/null
 grep -F 'could not publish API change annotations' "$tmp/failures" >/dev/null
 grep -Fx 'gating=true' "$output" >/dev/null
 grep -F 'combined-report=' "$output" >/dev/null
+assert_absent -E '^(breaking-changes|breaking-count|gating-count)=' "$output"
 
 # Multiline runner paths cannot inject extra GitHub outputs.
 multiline_temp="$tmp/line"$'\n'"gating=false"
