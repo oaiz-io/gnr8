@@ -9,7 +9,6 @@ use crate::graph::{
     ApiGraph, Field, OpenApiMetadataPolicy, Operation, Param, Response, Schema, SecurityScheme,
     SourceSpan, Type,
 };
-use crate::sdk::prelude::OperationSelector;
 use crate::CoreError;
 
 /// Classification of one observable API change.
@@ -33,6 +32,45 @@ pub struct Sides<T> {
     pub base: Option<T>,
     /// Value derived from the current graph when the subject exists there.
     pub current: Option<T>,
+}
+
+/// One exact HTTP method and effective route selected for API change enforcement.
+///
+/// The route is the base-path-joined spelling shown in change reports, not the source-relative
+/// graph path used by SDK transform selectors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateOperation {
+    method: String,
+    path: String,
+}
+
+impl GateOperation {
+    /// Select one exact effective route. The method is normalized to uppercase.
+    #[must_use]
+    pub fn new(method: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            method: method.into().to_ascii_uppercase(),
+            path: path.into(),
+        }
+    }
+
+    /// Uppercase HTTP method.
+    #[must_use]
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// Effective base-path-joined route shown in reports.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl std::fmt::Display for GateOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} {}", self.method, self.path)
+    }
 }
 
 /// Invocation policy recorded in the machine report.
@@ -164,7 +202,7 @@ impl<'a> GraphIndex<'a> {
     fn new(
         graph: &'a ApiGraph,
         exempt_tags: &'a BTreeSet<String>,
-        gate_operations: &[OperationSelector],
+        gate_operations: &[GateOperation],
     ) -> Self {
         let resolver = crate::graph::EffectiveOperationTags::new(graph);
         let include_only = !gate_operations.is_empty();
@@ -344,21 +382,15 @@ pub fn diff_graphs(
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::Config`] when a selector is not an exact route selector or matches neither
-/// graph side.
+/// Returns [`CoreError::Config`] when a selector matches neither graph side.
 pub fn diff_graphs_with_gate_operations(
     base: &ApiGraph,
     current: &ApiGraph,
     exempt_tags: &BTreeSet<String>,
-    gate_operations: &[OperationSelector],
+    gate_operations: &[GateOperation],
 ) -> Result<ChangeReport, CoreError> {
     let mut labels = Vec::with_capacity(gate_operations.len());
     for selector in gate_operations {
-        let OperationSelector::Route { method, path } = selector else {
-            return Err(CoreError::Config {
-                message: "change gates accept only exact route selectors".to_string(),
-            });
-        };
         let matched = base
             .operations
             .iter()
@@ -370,11 +402,11 @@ pub fn diff_graphs_with_gate_operations(
         if !matched {
             return Err(CoreError::Config {
                 message: format!(
-                    "gate operation `{method} {path}` did not match any operation in the base or current graph; check the HTTP method and effective route path shown in reports"
+                    "gate operation `{selector}` did not match any operation in the base or current graph; check the HTTP method and effective route path shown in reports"
                 ),
             });
         }
-        labels.push(format!("{method} {path}"));
+        labels.push(selector.to_string());
     }
     labels.sort();
     labels.dedup();
@@ -391,7 +423,7 @@ fn diff_graphs_inner(
     base: &ApiGraph,
     current: &ApiGraph,
     exempt_tags: &BTreeSet<String>,
-    gate_operations: &[OperationSelector],
+    gate_operations: &[GateOperation],
     gate_operation_labels: Vec<String>,
 ) -> ChangeReport {
     let base_index = GraphIndex::new(base, exempt_tags, gate_operations);
@@ -2285,16 +2317,12 @@ fn operation_label(graph: &ApiGraph, operation: &Operation) -> String {
 }
 
 fn gate_operation_matches(
-    selector: &OperationSelector,
+    selector: &GateOperation,
     graph: &ApiGraph,
     operation: &Operation,
 ) -> bool {
-    match selector {
-        OperationSelector::Route { method, path } => {
-            operation.method == *method && join_path(&graph.base_path, &operation.path) == *path
-        }
-        _ => false,
-    }
+    operation.method == selector.method
+        && join_path(&graph.base_path, &operation.path) == selector.path
 }
 
 fn join_path(base: &str, path: &str) -> String {
@@ -2314,14 +2342,13 @@ mod tests {
 
     use std::collections::BTreeSet;
 
-    use super::{diff_graphs, diff_graphs_with_gate_operations, ChangeKind};
+    use super::{diff_graphs, diff_graphs_with_gate_operations, ChangeKind, GateOperation};
     use crate::analyze::facts::{Constraints, FieldMeta};
     use crate::graph::{
         ApiGraph, Field, OpenApiMetadataPolicy, OpenApiServer, Operation, OperationDocsPolicy,
         OperationSecurityPolicy, Param, Prim, Response, Schema, SchemaRef, SchemaUse,
         SchemaUseRoot, SecurityRequirementGroup, SecurityScheme, SourceSpan, Type,
     };
-    use crate::sdk::prelude::OperationSelector;
 
     fn span(file: &str) -> SourceSpan {
         SourceSpan {
@@ -2487,7 +2514,7 @@ mod tests {
             &base,
             &current,
             &BTreeSet::new(),
-            &[OperationSelector::get("/books")],
+            &[GateOperation::new("GET", "/books")],
         )
         .expect("matched gate operation");
 
@@ -2524,7 +2551,7 @@ mod tests {
             &base,
             &current,
             &BTreeSet::new(),
-            &[OperationSelector::post("/api/v1/events")],
+            &[GateOperation::new("post", "/api/v1/events")],
         )
         .expect("report route matches the gate operation");
         let finding = change(&report, "request.parameter.required.added");
@@ -2535,7 +2562,7 @@ mod tests {
             &base,
             &current,
             &BTreeSet::new(),
-            &[OperationSelector::post("/events")],
+            &[GateOperation::new("POST", "/events")],
         )
         .expect_err("source-relative route is not the reported effective route");
         assert!(error.to_string().contains(
@@ -2550,7 +2577,7 @@ mod tests {
             &base,
             &current,
             &BTreeSet::new(),
-            &[OperationSelector::get("/books")],
+            &[GateOperation::new("GET", "/books")],
         )
         .expect("matched gate operation");
         assert!(mixed.is_gating());
@@ -2559,7 +2586,7 @@ mod tests {
             &graph_with_tags(&[]),
             &ApiGraph::default(),
             &BTreeSet::new(),
-            &[OperationSelector::get("/books")],
+            &[GateOperation::new("GET", "/books")],
         )
         .expect("selector matches the base side");
         assert!(change(&removed, "operation.removed").gating);
@@ -2578,7 +2605,7 @@ mod tests {
             &graph_with_tags(&[]),
             &graph_with_tags(&[]),
             &BTreeSet::new(),
-            &[OperationSelector::post("/missing")],
+            &[GateOperation::new("POST", "/missing")],
         )
         .expect_err("unmatched selector must fail");
         assert!(
@@ -2599,7 +2626,7 @@ mod tests {
             &base,
             &current,
             &exemptions(&["internal"]),
-            &[OperationSelector::get("/books")],
+            &[GateOperation::new("GET", "/books")],
         )
         .expect("matched gate operation");
         let finding = change(&report, "request.parameter.required.added");
@@ -3295,7 +3322,7 @@ mod tests {
             &base,
             &current,
             &BTreeSet::new(),
-            &[OperationSelector::post("/books")],
+            &[GateOperation::new("POST", "/books")],
         )
         .expect("base-side operation matches");
         let finding = change(&report, "request.property.removed");
@@ -3307,7 +3334,7 @@ mod tests {
             &base,
             &current,
             &BTreeSet::new(),
-            &[OperationSelector::post("/reports")],
+            &[GateOperation::new("POST", "/reports")],
         )
         .expect("current-side operation matches");
         assert!(!change(&unprotected, "operation.removed").gating);

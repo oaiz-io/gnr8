@@ -107,15 +107,11 @@ fn run_changes(
     }
 
     let exempt_tags: std::collections::BTreeSet<String> = exempt_tags.iter().cloned().collect();
-    let gate_operations = gate_operations
-        .iter()
-        .map(cli::GateOperation::selector)
-        .collect::<Vec<_>>();
     let report = gnr8_engine::changes::diff_graphs_with_gate_operations(
         &base.graph,
         &current.graph,
         &exempt_tags,
-        &gate_operations,
+        gate_operations,
     )?;
     print_diagnostics(output, &run.outcome.diagnostics);
     match format {

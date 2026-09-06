@@ -6,6 +6,8 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+pub(crate) use gnr8_engine::changes::GateOperation;
+
 // `doc_markdown` flags "OpenAPI" (a proper noun, not a code item); backticks would leak into clap
 // help text, so allow it locally on the doc comments that double as user-facing help (skill ch.2.4).
 /// Code-first API extraction to OpenAPI 3.1 and generated client SDKs.
@@ -115,25 +117,6 @@ pub(crate) enum Commands {
     Doctor,
 }
 
-/// One exact operation selected for API change enforcement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GateOperation {
-    method: String,
-    path: String,
-}
-
-impl GateOperation {
-    pub(crate) fn selector(&self) -> gnr8_engine::sdk::prelude::OperationSelector {
-        gnr8_engine::sdk::prelude::OperationSelector::route(&self.method, &self.path)
-    }
-}
-
-impl std::fmt::Display for GateOperation {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} {}", self.method, self.path)
-    }
-}
-
 /// Source frontend presets for `gnr8 init`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum SourcePreset {
@@ -226,10 +209,7 @@ fn parse_gate_operation(value: &str) -> Result<GateOperation, String> {
                 .to_string(),
         );
     }
-    Ok(GateOperation {
-        method,
-        path: path.to_string(),
-    })
+    Ok(GateOperation::new(method, path))
 }
 
 #[cfg(test)]
@@ -312,10 +292,7 @@ mod tests {
                 markdown: false
             } if base == "origin/main"
                 && exempt_tag == ["internal", "beta"]
-                && gate_operation == [GateOperation {
-                    method: "POST".to_string(),
-                    path: "/events".to_string(),
-                }]
+                && gate_operation == [GateOperation::new("POST", "/events")]
         ));
         assert!(Cli::try_parse_from(["gnr8", "changes"]).is_err());
         assert!(matches!(
