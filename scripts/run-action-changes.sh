@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one API change report per configured project while preserving exit 1 for the final gate step.
+# Run one API change report per project while preserving exit 1 for optional final enforcement.
 set -euo pipefail
 
 : "${GNR8_BIN:?GNR8_BIN is required}"
@@ -8,6 +8,8 @@ set -euo pipefail
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 : "${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is required}"
+
+fail_on_breaking="${FAIL_ON_BREAKING:-true}"
 
 # The per-project heading is the only report text this script writes; everything under it comes from
 # `gnr8 changes --markdown`, which is the one renderer for that format. The directory lands in a
@@ -101,6 +103,12 @@ while IFS= read -r tag || [[ -n "$tag" ]]; do
   [[ -z "$tag" ]] && continue
   change_args+=(--exempt-tag "$tag")
 done <<< "${EXEMPT_TAGS:-}"
+while IFS= read -r operation || [[ -n "$operation" ]]; do
+  # The CLI parses and validates the one canonical `METHOD /path` form. Keep every non-empty line
+  # byte-for-byte so malformed or unmatched selectors become actionable status-2 failures.
+  [[ -z "$operation" ]] && continue
+  change_args+=(--gate-operation "$operation")
+done <<< "${GATE_OPERATIONS:-}"
 
 annotate="${ANNOTATE_API_CHANGES:-true}"
 if [[ "$annotate" == true ]] && ! command -v python3 >/dev/null 2>&1; then
@@ -110,6 +118,10 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 gating=false
+breaking_changes=false
+breaking_count=0
+gating_count=0
+metadata_complete=true
 index=0
 for dir in "${dirs[@]}"; do
   if ! (cd "$dir" && git rev-parse --verify --quiet --end-of-options "${BASE_REF}^{commit}" >/dev/null); then
@@ -141,9 +153,27 @@ for dir in "${dirs[@]}"; do
     gating=true
   fi
 
+  project_breaking="$(sed -n 's/^[[:space:]]*"breaking": \([0-9][0-9]*\),$/\1/p' "$json")"
+  project_gating="$(sed -n 's/^[[:space:]]*"gating": \([0-9][0-9]*\)$/\1/p' "$json")"
+  if [[ "$project_breaking" =~ ^[0-9]+$ && "$project_gating" =~ ^[0-9]+$ ]]; then
+    breaking_count=$((breaking_count + project_breaking))
+    gating_count=$((gating_count + project_gating))
+    if [[ "$project_breaking" -gt 0 ]]; then
+      breaking_changes=true
+    fi
+  else
+    metadata_complete=false
+    echo "::warning::gnr8 action: could not read summary counts from '$dir/report.json'; reports are still published and the API change gate is unchanged."
+  fi
+
   {
     printf '%s\n' "$marker"
     printf '## API changes for %s\n\n' "$(escape_html "$dir")"
+    if [[ "$fail_on_breaking" == true ]]; then
+      printf 'Enforcement: protected-surface breaking changes fail this Action.\n\n'
+    else
+      printf 'Enforcement: advisory — breaking changes are reported without failing this Action.\n\n'
+    fi
     cat "$body"
   } > "$markdown"
 
@@ -167,7 +197,15 @@ for dir in "${dirs[@]}"; do
     fi
   fi
   if [[ "$annotate" == true ]]; then
-    if ! python3 "$script_dir/emit-action-annotations.py" "$json" "$dir" "$artifact_name"; then
+    annotation_status=0
+    if [[ "$fail_on_breaking" == true ]]; then
+      python3 "$script_dir/emit-action-annotations.py" "$json" "$dir" "$artifact_name" \
+        || annotation_status=$?
+    else
+      python3 "$script_dir/emit-action-annotations.py" --advisory \
+        "$json" "$dir" "$artifact_name" || annotation_status=$?
+    fi
+    if [[ "$annotation_status" -ne 0 ]]; then
       echo "::warning::gnr8 action: could not publish API change annotations; see the reports in the \"$artifact_name\" artifact. The API change gate is unchanged."
     fi
   fi
@@ -176,5 +214,11 @@ done
 
 {
   write_output gating "$gating"
+  if [[ "$metadata_complete" == true ]]; then
+    write_output breaking-changes "$breaking_changes"
+    write_output breaking-count "$breaking_count"
+    write_output gating-count "$gating_count"
+  fi
   write_output combined-report "$combined"
+  write_output report-digest "$(git hash-object "$combined")"
 } >> "$GITHUB_OUTPUT"

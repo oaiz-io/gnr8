@@ -16,9 +16,9 @@ def change(**updates):
     return value
 
 
-def render(changes, project='examples/bookstore', artifact='report'):
+def render(changes, project='examples/bookstore', artifact='report', advisory=False):
     output = io.StringIO()
-    annotations.emit(dict(schema_version=1, changes=changes), project, artifact, output)
+    annotations.emit(dict(schema_version=1, changes=changes), project, artifact, output, advisory)
     return output.getvalue()
 
 
@@ -36,6 +36,10 @@ class AnnotationTests(unittest.TestCase):
         lines = render([change(), change(gating=False), change(kind='additive'), change(kind='doc_only')]).splitlines()
         self.assertEqual([line.split(' ')[0] for line in lines], ['::error', '::warning', '::notice'])
         self.assertEqual(render([change(kind='doc_only')]), '')
+
+    def test_advisory_mode_uses_warnings_for_all_breaking_findings(self):
+        lines = render([change(), change(gating=False), change(kind='additive')], advisory=True).splitlines()
+        self.assertEqual([line.split(' ')[0] for line in lines], ['::warning', '::warning', '::notice'])
 
     def test_unanchorable_includes_removals_and_unknown_lines(self):
         text = render([change(file=None, line=None, span=None), change(line=None), change(line=0)])

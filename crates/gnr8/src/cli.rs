@@ -6,6 +6,8 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+pub(crate) use gnr8_engine::changes::GateOperation;
+
 // `doc_markdown` flags "OpenAPI" (a proper noun, not a code item); backticks would leak into clap
 // help text, so allow it locally on the doc comments that double as user-facing help (skill ch.2.4).
 /// Code-first API extraction to OpenAPI 3.1 and generated client SDKs.
@@ -95,6 +97,10 @@ pub(crate) enum Commands {
         #[arg(long, value_parser = non_empty_tag)]
         exempt_tag: Vec<String>,
 
+        /// Exact HTTP method and effective route path shown by reports to include in the gate.
+        #[arg(long, value_parser = parse_gate_operation)]
+        gate_operation: Vec<GateOperation>,
+
         /// Print the report as Markdown for a job summary or pull-request comment.
         ///
         /// Selects the report format, so it cannot be combined with the global --json.
@@ -173,13 +179,51 @@ fn non_empty_tag(value: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+const GATE_OPERATION_SHAPE: &str =
+    "expected `METHOD /path` using the effective route shown in reports";
+
+fn parse_gate_operation(value: &str) -> Result<GateOperation, String> {
+    if value.trim() != value || value.chars().any(char::is_control) {
+        return Err(format!(
+            "{GATE_OPERATION_SHAPE}, with no surrounding whitespace or control characters"
+        ));
+    }
+    let mut parts = value.split_ascii_whitespace();
+    let Some(method) = parts.next() else {
+        return Err(GATE_OPERATION_SHAPE.to_string());
+    };
+    let Some(path) = parts.next() else {
+        return Err(GATE_OPERATION_SHAPE.to_string());
+    };
+    if parts.next().is_some() {
+        return Err("expected exactly one HTTP method and one effective route path".to_string());
+    }
+    let method = method.to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "PUT" | "POST" | "DELETE" | "PATCH" | "OPTIONS" | "HEAD" | "TRACE"
+    ) {
+        return Err(format!("unsupported HTTP method `{method}`"));
+    }
+    if !path.starts_with('/') || path.contains(['?', '#']) {
+        return Err(
+            "effective route must be an absolute path beginning with `/`, without a query or fragment"
+                .to_string(),
+        );
+    }
+    Ok(GateOperation::new(method, path))
+}
+
 #[cfg(test)]
 mod tests {
     // Tests legitimately use unwrap/expect/panic (rust-best-practices skill ch.4); scope the allow to
     // the test module so the workspace-wide RUST-04 deny stays intact for production code.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{Cli, Commands, GuideTopic, InspectAction, SdkPreset, SourcePreset};
+    use super::{
+        parse_gate_operation, Cli, Commands, GateOperation, GuideTopic, InspectAction, SdkPreset,
+        SourcePreset, GATE_OPERATION_SHAPE,
+    };
     use clap::Parser;
 
     #[test]
@@ -240,6 +284,8 @@ mod tests {
             "internal",
             "--exempt-tag",
             "beta",
+            "--gate-operation",
+            "post /events",
         ])
         .unwrap();
         assert!(matches!(
@@ -247,8 +293,11 @@ mod tests {
             Commands::Changes {
                 base,
                 exempt_tag,
+                gate_operation,
                 markdown: false
-            } if base == "origin/main" && exempt_tag == ["internal", "beta"]
+            } if base == "origin/main"
+                && exempt_tag == ["internal", "beta"]
+                && gate_operation == [GateOperation::new("POST", "/events")]
         ));
         assert!(Cli::try_parse_from(["gnr8", "changes"]).is_err());
         assert!(matches!(
@@ -291,6 +340,64 @@ mod tests {
             "partner APIs",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn changes_gate_operations_require_an_exact_method_and_effective_route() {
+        assert_eq!(parse_gate_operation("").unwrap_err(), GATE_OPERATION_SHAPE);
+        assert_eq!(
+            parse_gate_operation("POST").unwrap_err(),
+            GATE_OPERATION_SHAPE
+        );
+        assert_eq!(
+            parse_gate_operation(" POST /events").unwrap_err(),
+            format!("{GATE_OPERATION_SHAPE}, with no surrounding whitespace or control characters")
+        );
+        assert_eq!(
+            parse_gate_operation("POST /events extra").unwrap_err(),
+            "expected exactly one HTTP method and one effective route path"
+        );
+        assert_eq!(
+            parse_gate_operation("POST events").unwrap_err(),
+            "effective route must be an absolute path beginning with `/`, without a query or fragment"
+        );
+
+        for invalid in [
+            "",
+            "POST",
+            "POST events",
+            "POST /events?limit=1",
+            "CONNECT /events",
+            "POST /events extra",
+            " POST /events",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "gnr8",
+                    "changes",
+                    "--base",
+                    "main",
+                    "--gate-operation",
+                    invalid,
+                ])
+                .is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        let cli = Cli::try_parse_from([
+            "gnr8",
+            "changes",
+            "--base",
+            "main",
+            "--gate-operation",
+            "post /events/{provider}",
+        ])
+        .expect("valid exact operation selector");
+        assert!(matches!(
+            cli.command,
+            Commands::Changes { gate_operation, .. }
+                if gate_operation[0].to_string() == "POST /events/{provider}"
+        ));
     }
 
     #[test]

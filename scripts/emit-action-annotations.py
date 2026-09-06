@@ -23,7 +23,7 @@ def encode_property(value):
     return encode_data(value).replace(':', '%3A').replace(',', '%2C')
 
 
-def emit(report, project_dir, artifact, stream):
+def emit(report, project_dir, artifact, stream, advisory=False):
     if type(report['schema_version']) is not int or report['schema_version'] != 1:
         raise ValueError('unsupported report schema_version')
     emitted = 0
@@ -34,7 +34,7 @@ def emit(report, project_dir, artifact, stream):
         if kind == 'doc_only':
             continue
         if kind == 'breaking':
-            level = 'error' if change['gating'] else 'warning'
+            level = 'error' if change['gating'] and not advisory else 'warning'
         elif kind == 'additive':
             level = 'notice'
         else:
@@ -70,6 +70,8 @@ def emit(report, project_dir, artifact, stream):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--advisory', action='store_true',
+                        help='emit every breaking finding as a warning')
     parser.add_argument('report')
     parser.add_argument('project_dir')
     parser.add_argument('artifact')
@@ -77,7 +79,7 @@ def main():
     try:
         with open(args.report, encoding='utf-8') as source:
             report = json.load(source)
-        emit(report, args.project_dir, args.artifact, sys.stdout)
+        emit(report, args.project_dir, args.artifact, sys.stdout, advisory=args.advisory)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         # Never print raw JSON or exception text containing analyzed source as a workflow command.
         print('gnr8 action: cannot emit API change annotations from report.json; '

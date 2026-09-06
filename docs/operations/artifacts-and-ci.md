@@ -257,7 +257,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: oaiz-io/gnr8@v0.12.0 # first release with API change reporting
+      - uses: oaiz-io/gnr8@v0.12.2 # first release with advisory reports and operation gates
         with:
           working-directories: |
             services/books
@@ -267,7 +267,11 @@ jobs:
           setup-python: "true"
           setup-node: "true"
           report-api-changes: "true"
+          fail-on-breaking: "false" # advisory report; status 2 still fails
           base-ref: origin/main
+          gate-operations: |
+            POST /events
+            POST /events/integration/{provider}
           exempt-tags: |
             internal
             beta
@@ -282,9 +286,11 @@ Action inputs:
 | `install-method` | `release` | `release`, `source`, or `path` |
 | `version` | `lock` | exact release or version resolved from every `.gnr8/Cargo.lock` |
 | `extra-args` | empty | shell-split arguments passed to `gnr8 check` |
-| `report-api-changes` | `false` | publish Markdown/JSON change reports and fail on gating breaking changes |
+| `report-api-changes` | `false` | publish Markdown/JSON change reports and, by default, fail on protected-surface breaking changes |
+| `fail-on-breaking` | `true` | fail on protected-surface breaking findings; `false` keeps reports but treats status 1 as advisory |
 | `annotate-api-changes` | `true` | emit current-source workflow annotations when change reporting is enabled; requires `python3` |
 | `base-ref` | `origin/main` | revision containing each project's committed graph artifact |
+| `gate-operations` | empty | newline-separated exact `METHOD /effective-path` operations forming an include-only protected surface |
 | `exempt-tags` | empty | newline-separated exact operation tags exempted from the change gate |
 | `cache` | `true` | cache `.gnr8/cache` and `.gnr8/target` |
 | `cache-key-prefix` | `gnr8` | cache-key prefix |
@@ -293,7 +299,11 @@ Action inputs:
 | `setup-python` / `python-version` | `false` / `3.x` | Python source toolchain |
 | `setup-node` / `node-version` | `false` / `lts/*` | NestJS source toolchain |
 
-Outputs are `binary` (resolved executable path) and `cache-hit`.
+Outputs are `binary`, `cache-hit`, `breaking-changes`, `breaking-count`, `gating-count`,
+`report-artifact`, `report-path`, and `report-digest`. Finding metadata outputs (`breaking-changes`,
+`breaking-count`, and `gating-count`) are empty unless every completed report's summary can be read;
+they never represent an unknown result as zero or `false`. `report-digest` is Git's blob digest of the
+combined Markdown file. All report outputs are empty when change reporting is disabled.
 
 Change reporting requires checkout history, so use `actions/checkout` with `fetch-depth: 0`. Missing
 base history fails with an error that names this requirement. The action writes a combined Markdown
@@ -302,6 +312,25 @@ Markdown and JSON reports, and creates or updates its marker-owned pull-request 
 workflow token permits comments. Without `pull-requests: write`, use the summary and artifact;
 fork PRs use those surfaces regardless of the permissions block. Comment API failures produce a
 warning naming the permission to check and the artifact. Publication does not hide or weaken the gate.
+
+`fail-on-breaking: "false"` is native advisory mode. The Action still accepts only statuses 0 and 1
+from `gnr8 changes`; status 1 publishes the complete reports and continues, while status 2 or any
+other analysis, configuration, or Action execution failure still fails. The combined
+Markdown names the advisory mode. The JSON retains the CLI's protected-surface result so downstream
+steps can use `gating-count` without parsing it themselves. The final Action step enforces that result
+only when `fail-on-breaking` is `true`, which remains the default.
+
+`gate-operations` maps each non-empty line to a repeated `--gate-operation` argument. The CLI matches
+the uppercase method and effective route printed in reports exactly on the union of the base and
+current graphs, including any graph base path (for example, `POST /api/v1/events`, not `/events`).
+Schema findings inherit all transitive operation consumers from both sides. Include selection happens
+before `exempt-tags`, so an exempt tag removes even an explicitly selected operation from enforcement.
+With no operation filter, all non-exempt breaking findings retain the existing gate behavior.
+
+A future exact-finding approval flow requires a trusted signed record rather than a pull-request label
+or branch-owned allow list. The issue-ready threat model, payload, and acceptance criteria are in
+[Protected-change attestations](protected-change-attestations.md); it is deliberately not implemented
+until the repository has an external authorization and signing boundary.
 
 Both reports are rendered by `gnr8 changes` itself — `--json` and `--markdown` — so the published
 Markdown is the CLI's own output rather than a second rendering of the JSON.
@@ -336,8 +365,9 @@ without changing the API gate.
 
 The Action reads each project's versioned `report.json` to emit
 [workflow annotations](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-error-message)
-associated with current source files. Gating breaking findings are errors, exempt breaking findings
-are warnings, and additive findings are notices. Documentation-only findings remain in the reports
+associated with current source files. Protected-surface breaking findings are errors when enforcement
+is enabled; all breaking findings are warnings in advisory mode. Other advisory or exempt breaking
+findings are warnings, and additive findings are notices. Documentation-only findings remain in the reports
 and emit no annotations. Titles carry the stable dotted change code. gnr8 caps located annotations
 at **50 per project**, retaining the JSON report's order, and reports how many further findings were
 omitted, including those with no current location. This is our cap, not a GitHub platform limit.

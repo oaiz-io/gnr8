@@ -32,6 +32,11 @@ test "$(grep -c '^::.* file=' "$tmp/commands")" -eq 50
 grep -Fx '::notice::gnr8: 14 further findings not annotated (1 unanchorable); see the job summary and the "test-artifact" artifact.' "$tmp/commands" >/dev/null
 test "$(wc -l < "$tmp/commands")" -eq 51
 assert_absent -F 'operation.removed' "$tmp/commands"
+python3 "$repo_root/scripts/emit-action-annotations.py" --advisory \
+  "$tmp/report.json" examples/bookstore test-artifact > "$tmp/advisory-commands"
+test "$(grep -c '^::warning file=' "$tmp/advisory-commands")" -eq 49
+test "$(grep -c '^::notice file=' "$tmp/advisory-commands")" -eq 1
+assert_absent -F '::error file=' "$tmp/advisory-commands"
 printf '{"schema_version":2,"changes":[]}' > "$tmp/report.json"
 if python3 "$repo_root/scripts/emit-action-annotations.py" "$tmp/report.json" . report > "$tmp/commands" 2> "$tmp/error"; then exit 1; fi
 grep -F 'gnr8 action: cannot emit API change annotations' "$tmp/error" >/dev/null
@@ -46,9 +51,12 @@ PYTHON
 export CACHE_ENABLED=false INPUT_BINARY=gnr8 INSTALL_METHOD=path REQUESTED_VERSION=lock
 export REPORT_API_CHANGES=false BASE_REF=HEAD SETUP_GO=false SETUP_NODE=false SETUP_PYTHON=false SETUP_RUST=false
 export WORKING_DIRECTORIES="$repo_root/examples/bookstore"
+export FAIL_ON_BREAKING=true
 ANNOTATE_API_CHANGES=false bash "$tmp/validate-step"
 ANNOTATE_API_CHANGES=true bash "$tmp/validate-step"
 if ANNOTATE_API_CHANGES=yes bash "$tmp/validate-step" 2> "$tmp/error"; then exit 1; fi
 grep -F 'annotate-api-changes must be "true" or "false"' "$tmp/error" >/dev/null
+if FAIL_ON_BREAKING=yes ANNOTATE_API_CHANGES=true bash "$tmp/validate-step" 2> "$tmp/error"; then exit 1; fi
+grep -F 'fail-on-breaking must be "true" or "false"' "$tmp/error" >/dev/null
 
-echo 'action annotation tests: OK (4 cases)'
+echo 'action annotation tests: OK (5 cases)'

@@ -9,6 +9,7 @@ use crate::graph::{
     ApiGraph, Field, OpenApiMetadataPolicy, Operation, Param, Response, Schema, SecurityScheme,
     SourceSpan, Type,
 };
+use crate::CoreError;
 
 /// Classification of one observable API change.
 #[derive(
@@ -25,7 +26,7 @@ pub enum ChangeKind {
 }
 
 /// Values for the base and current graph sides. An absent operation/schema side is `null`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Sides<T> {
     /// Value derived from the base graph when the subject exists there.
     pub base: Option<T>,
@@ -33,11 +34,53 @@ pub struct Sides<T> {
     pub current: Option<T>,
 }
 
+/// One exact HTTP method and effective route selected for API change enforcement.
+///
+/// The route is the base-path-joined spelling shown in change reports, not the source-relative
+/// graph path used by SDK transform selectors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateOperation {
+    method: String,
+    path: String,
+}
+
+impl GateOperation {
+    /// Select one exact effective route. The method is normalized to uppercase.
+    #[must_use]
+    pub fn new(method: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            method: method.into().to_ascii_uppercase(),
+            path: path.into(),
+        }
+    }
+
+    /// Uppercase HTTP method.
+    #[must_use]
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// Effective base-path-joined route shown in reports.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl std::fmt::Display for GateOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} {}", self.method, self.path)
+    }
+}
+
 /// Invocation policy recorded in the machine report.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChangePolicy {
     /// Exact, case-sensitive operation tags exempted from gating.
     pub exempt_tags: Vec<String>,
+    /// Exact effective method/path selectors included in the gate, or empty for every operation.
+    #[serde(default)]
+    pub gate_operations: Vec<String>,
 }
 
 /// Aggregate counts for a change report.
@@ -84,6 +127,9 @@ pub struct Change {
     pub tags: Sides<Vec<String>>,
     /// Whether every known consumer is exempt on each extant side.
     pub exempt: Sides<bool>,
+    /// Whether the operation or a transitive consumer is selected on each extant side.
+    #[serde(default)]
+    pub protected: Sides<bool>,
     /// Whether this breaking finding contributes to exit status 1.
     pub gating: bool,
     /// Human-readable explanation.
@@ -125,6 +171,7 @@ struct Scope {
     affected_operations: Sides<Vec<AffectedOperation>>,
     tags: Sides<Vec<String>>,
     exempt: Sides<bool>,
+    protected: Sides<bool>,
     checked: bool,
     current_span: Option<SourceSpan>,
 }
@@ -141,19 +188,42 @@ struct GraphIndex<'a> {
     graph: &'a ApiGraph,
     consumers: SchemaConsumers<'a>,
     directions: BTreeMap<&'a str, SchemaDirections>,
-    operation_gates: BTreeMap<&'a str, (&'a [String], bool)>,
+    operation_gates: BTreeMap<&'a str, OperationGate<'a>>,
+    include_only: bool,
+}
+
+struct OperationGate<'a> {
+    tags: &'a [String],
+    exempt: bool,
+    protected: bool,
 }
 
 impl<'a> GraphIndex<'a> {
-    fn new(graph: &'a ApiGraph, exempt_tags: &'a BTreeSet<String>) -> Self {
+    fn new(
+        graph: &'a ApiGraph,
+        exempt_tags: &'a BTreeSet<String>,
+        gate_operations: &[GateOperation],
+    ) -> Self {
         let resolver = crate::graph::EffectiveOperationTags::new(graph);
+        let include_only = !gate_operations.is_empty();
         let operation_gates = graph
             .operations
             .iter()
             .map(|operation| {
                 let tags = resolver.resolve(operation);
                 let exempt = tags.iter().any(|tag| exempt_tags.contains(tag));
-                (operation.id.as_str(), (tags, exempt))
+                let protected = !include_only
+                    || gate_operations
+                        .iter()
+                        .any(|selector| gate_operation_matches(selector, graph, operation));
+                (
+                    operation.id.as_str(),
+                    OperationGate {
+                        tags,
+                        exempt,
+                        protected,
+                    },
+                )
             })
             .collect();
         Self {
@@ -161,22 +231,35 @@ impl<'a> GraphIndex<'a> {
             consumers: schema_consumers(graph),
             directions: schema_directions(graph),
             operation_gates,
+            include_only,
         }
     }
 
     fn operation_tags(&self, operation: &Operation) -> &[String] {
         self.operation_gates
             .get(operation.id.as_str())
-            .map_or(&[], |(tags, _)| *tags)
+            .map_or(&[], |gate| gate.tags)
     }
 
     fn operation_exempt(&self, operation: &Operation) -> bool {
         self.operation_gates
             .get(operation.id.as_str())
-            .is_some_and(|(_, exempt)| *exempt)
+            .is_some_and(|gate| gate.exempt)
     }
 
-    fn schema_side(&self, schema_id: &str) -> (Vec<String>, bool, Vec<&Operation>) {
+    fn operation_protected(&self, operation: &Operation) -> bool {
+        self.operation_gates
+            .get(operation.id.as_str())
+            .is_some_and(|gate| gate.protected)
+    }
+
+    fn operation_checked(&self, operation: &Operation) -> bool {
+        self.operation_gates
+            .get(operation.id.as_str())
+            .is_some_and(|gate| gate.protected && !gate.exempt)
+    }
+
+    fn schema_side(&self, schema_id: &str) -> (Vec<String>, bool, bool, bool, Vec<&Operation>) {
         let operations: Vec<&Operation> = self
             .consumers
             .operations
@@ -190,22 +273,61 @@ impl<'a> GraphIndex<'a> {
             tags.extend(self.operation_tags(operation).iter().cloned());
         }
         let has_non_http = self.consumers.non_http.contains(schema_id);
-        let checked = has_non_http
-            || operations
+        let protected = if self.include_only {
+            operations
                 .iter()
-                .any(|operation| !self.operation_exempt(operation))
-            || operations.is_empty();
-        (tags.into_iter().collect(), !checked, operations)
+                .any(|operation| self.operation_protected(operation))
+        } else {
+            true
+        };
+        let checked = if self.include_only {
+            operations
+                .iter()
+                .any(|operation| self.operation_checked(operation))
+        } else {
+            has_non_http
+                || operations
+                    .iter()
+                    .any(|operation| !self.operation_exempt(operation))
+                || operations.is_empty()
+        };
+        let exempt = if self.include_only {
+            protected
+                && operations
+                    .iter()
+                    .filter(|operation| self.operation_protected(operation))
+                    .all(|operation| self.operation_exempt(operation))
+        } else {
+            !checked
+        };
+        (
+            tags.into_iter().collect(),
+            exempt,
+            protected,
+            checked,
+            operations,
+        )
     }
 
-    fn document_side(&self) -> (Vec<String>, bool) {
+    fn document_side(&self) -> (Vec<String>, bool, bool, bool) {
         let mut tags = BTreeSet::new();
+        let mut protected = false;
         let mut checked = false;
         for operation in &self.graph.operations {
             tags.extend(self.operation_tags(operation).iter().cloned());
-            checked |= !self.operation_exempt(operation);
+            protected |= self.operation_protected(operation);
+            checked |= self.operation_checked(operation);
         }
-        (tags.into_iter().collect(), !checked)
+        (
+            tags.into_iter().collect(),
+            protected,
+            if self.include_only {
+                protected && !checked
+            } else {
+                !checked
+            },
+            checked,
+        )
     }
 }
 
@@ -232,6 +354,7 @@ impl Collector {
             affected_operations: scope.affected_operations.clone(),
             tags: scope.tags.clone(),
             exempt: scope.exempt.clone(),
+            protected: scope.protected.clone(),
             gating: kind == ChangeKind::Breaking && scope.checked,
             message,
             file: span.as_ref().map(|span| span.file.clone()),
@@ -248,8 +371,63 @@ pub fn diff_graphs(
     current: &ApiGraph,
     exempt_tags: &BTreeSet<String>,
 ) -> ChangeReport {
-    let base_index = GraphIndex::new(base, exempt_tags);
-    let current_index = GraphIndex::new(current, exempt_tags);
+    diff_graphs_inner(base, current, exempt_tags, &[], Vec::new())
+}
+
+/// Compare two projected graphs while limiting the gate to exact effective-route selectors.
+///
+/// An empty selector list preserves the default all-operation gate. Every configured selector must
+/// match an operation on the base or current side, so a stale selector cannot silently disable the
+/// gate and an operation that exists only in the base graph can still be protected.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when a selector matches neither graph side.
+pub fn diff_graphs_with_gate_operations(
+    base: &ApiGraph,
+    current: &ApiGraph,
+    exempt_tags: &BTreeSet<String>,
+    gate_operations: &[GateOperation],
+) -> Result<ChangeReport, CoreError> {
+    let mut labels = Vec::with_capacity(gate_operations.len());
+    for selector in gate_operations {
+        let matched = base
+            .operations
+            .iter()
+            .any(|operation| gate_operation_matches(selector, base, operation))
+            || current
+                .operations
+                .iter()
+                .any(|operation| gate_operation_matches(selector, current, operation));
+        if !matched {
+            return Err(CoreError::Config {
+                message: format!(
+                    "gate operation `{selector}` did not match any operation in the base or current graph; check the HTTP method and effective route path shown in reports"
+                ),
+            });
+        }
+        labels.push(selector.to_string());
+    }
+    labels.sort();
+    labels.dedup();
+    Ok(diff_graphs_inner(
+        base,
+        current,
+        exempt_tags,
+        gate_operations,
+        labels,
+    ))
+}
+
+fn diff_graphs_inner(
+    base: &ApiGraph,
+    current: &ApiGraph,
+    exempt_tags: &BTreeSet<String>,
+    gate_operations: &[GateOperation],
+    gate_operation_labels: Vec<String>,
+) -> ChangeReport {
+    let base_index = GraphIndex::new(base, exempt_tags, gate_operations);
+    let current_index = GraphIndex::new(current, exempt_tags, gate_operations);
     let mut collector = Collector {
         changes: Vec::new(),
     };
@@ -280,6 +458,7 @@ pub fn diff_graphs(
     ChangeReport {
         policy: ChangePolicy {
             exempt_tags: exempt_tags.iter().cloned().collect(),
+            gate_operations: gate_operation_labels,
         },
         summary,
         changes: collector.changes,
@@ -1990,6 +2169,8 @@ fn operation_scope(
     let current_tags = current.map(|operation| current_index.operation_tags(operation).to_vec());
     let base_exempt = base.map(|operation| base_index.operation_exempt(operation));
     let current_exempt = current.map(|operation| current_index.operation_exempt(operation));
+    let base_protected = base.map(|operation| base_index.operation_protected(operation));
+    let current_protected = current.map(|operation| current_index.operation_protected(operation));
     Scope {
         operation: current
             .map(|operation| operation_label(current_index.graph, operation))
@@ -2009,8 +2190,12 @@ fn operation_scope(
             base: base_exempt,
             current: current_exempt,
         },
-        checked: base_exempt.is_some_and(|value| !value)
-            || current_exempt.is_some_and(|value| !value),
+        protected: Sides {
+            base: base_protected,
+            current: current_protected,
+        },
+        checked: base.is_some_and(|operation| base_index.operation_checked(operation))
+            || current.is_some_and(|operation| current_index.operation_checked(operation)),
         current_span: current.map(|operation| operation.provenance.clone()),
     }
 }
@@ -2023,12 +2208,22 @@ fn schema_scope(
 ) -> Scope {
     let base_side = base.map(|schema| base_index.schema_side(&schema.id));
     let current_side = current.map(|schema| current_index.schema_side(&schema.id));
-    let base_exempt = base_side.as_ref().map(|(_, exempt, _)| *exempt);
-    let current_exempt = current_side.as_ref().map(|(_, exempt, _)| *exempt);
-    let base_affected = base_side.as_ref().map(|(_, _, operations)| {
+    let base_exempt = base_side.as_ref().map(|(_, exempt, _, _, _)| *exempt);
+    let current_exempt = current_side.as_ref().map(|(_, exempt, _, _, _)| *exempt);
+    let base_protected = base_side.as_ref().map(|(_, _, protected, _, _)| *protected);
+    let current_protected = current_side
+        .as_ref()
+        .map(|(_, _, protected, _, _)| *protected);
+    let base_checked = base_side
+        .as_ref()
+        .is_some_and(|(_, _, _, checked, _)| *checked);
+    let current_checked = current_side
+        .as_ref()
+        .is_some_and(|(_, _, _, checked, _)| *checked);
+    let base_affected = base_side.as_ref().map(|(_, _, _, _, operations)| {
         affected_operations(base_index.graph, operations.iter().copied())
     });
-    let current_affected = current_side.as_ref().map(|(_, _, operations)| {
+    let current_affected = current_side.as_ref().map(|(_, _, _, _, operations)| {
         affected_operations(current_index.graph, operations.iter().copied())
     });
     let named_operations: BTreeSet<&AffectedOperation> = base_affected
@@ -2050,15 +2245,18 @@ fn schema_scope(
             current: current_affected,
         },
         tags: Sides {
-            base: base_side.as_ref().map(|(tags, _, _)| tags.clone()),
-            current: current_side.as_ref().map(|(tags, _, _)| tags.clone()),
+            base: base_side.as_ref().map(|(tags, _, _, _, _)| tags.clone()),
+            current: current_side.as_ref().map(|(tags, _, _, _, _)| tags.clone()),
         },
         exempt: Sides {
             base: base_exempt,
             current: current_exempt,
         },
-        checked: base_exempt.is_some_and(|value| !value)
-            || current_exempt.is_some_and(|value| !value),
+        protected: Sides {
+            base: base_protected,
+            current: current_protected,
+        },
+        checked: base_checked || current_checked,
         current_span: current.map(|schema| schema.provenance.clone()),
     }
 }
@@ -2080,8 +2278,9 @@ fn affected_operations<'a>(
 }
 
 fn document_scope(base: &GraphIndex<'_>, current: &GraphIndex<'_>) -> Scope {
-    let (base_tags, base_exempt) = base.document_side();
-    let (current_tags, current_exempt) = current.document_side();
+    let (base_tags, base_protected, base_exempt, base_checked) = base.document_side();
+    let (current_tags, current_protected, current_exempt, current_checked) =
+        current.document_side();
     Scope {
         operation: None,
         operation_id: None,
@@ -2100,7 +2299,11 @@ fn document_scope(base: &GraphIndex<'_>, current: &GraphIndex<'_>) -> Scope {
             base: Some(base_exempt),
             current: Some(current_exempt),
         },
-        checked: !base_exempt || !current_exempt,
+        protected: Sides {
+            base: Some(base_protected),
+            current: Some(current_protected),
+        },
+        checked: base_checked || current_checked,
         current_span: None,
     }
 }
@@ -2111,6 +2314,15 @@ fn operation_label(graph: &ApiGraph, operation: &Operation) -> String {
         operation.method,
         join_path(&graph.base_path, &operation.path)
     )
+}
+
+fn gate_operation_matches(
+    selector: &GateOperation,
+    graph: &ApiGraph,
+    operation: &Operation,
+) -> bool {
+    operation.method == selector.method
+        && join_path(&graph.base_path, &operation.path) == selector.path
 }
 
 fn join_path(base: &str, path: &str) -> String {
@@ -2130,7 +2342,7 @@ mod tests {
 
     use std::collections::BTreeSet;
 
-    use super::{diff_graphs, ChangeKind};
+    use super::{diff_graphs, diff_graphs_with_gate_operations, ChangeKind, GateOperation};
     use crate::analyze::facts::{Constraints, FieldMeta};
     use crate::graph::{
         ApiGraph, Field, OpenApiMetadataPolicy, OpenApiServer, Operation, OperationDocsPolicy,
@@ -2274,6 +2486,153 @@ mod tests {
                 "base={base:?} current={current:?}"
             );
         }
+    }
+
+    fn two_changed_operations() -> (ApiGraph, ApiGraph) {
+        let mut protected = operation();
+        protected.params.push(parameter(false));
+        let mut advisory = operation();
+        advisory.id = "listReports".to_string();
+        advisory.path = "/reports".to_string();
+        advisory.handler = "listReports".to_string();
+        advisory.params.push(parameter(false));
+        let base = ApiGraph {
+            operations: vec![protected, advisory],
+            ..ApiGraph::default()
+        };
+        let mut current = base.clone();
+        for operation in &mut current.operations {
+            operation.params[0].required = true;
+        }
+        (base, current)
+    }
+
+    #[test]
+    fn operation_gate_filters_report_every_break_but_enforce_only_selected_routes() {
+        let (base, current) = two_changed_operations();
+        let report = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &BTreeSet::new(),
+            &[GateOperation::new("GET", "/books")],
+        )
+        .expect("matched gate operation");
+
+        assert_eq!(report.summary.breaking, 2);
+        assert_eq!(report.summary.gating, 1);
+        assert_eq!(report.policy.gate_operations, ["GET /books"]);
+        let protected = report
+            .changes
+            .iter()
+            .find(|finding| finding.operation.as_deref() == Some("GET /books"))
+            .expect("protected finding");
+        assert!(protected.gating);
+        assert_eq!(protected.protected.base, Some(true));
+        let advisory = report
+            .changes
+            .iter()
+            .find(|finding| finding.operation.as_deref() == Some("GET /reports"))
+            .expect("advisory finding");
+        assert!(!advisory.gating);
+        assert_eq!(advisory.protected.base, Some(false));
+    }
+
+    #[test]
+    fn operation_gate_uses_the_effective_route_printed_in_reports() {
+        let mut base = graph_with_tags(&[]);
+        base.base_path = "/api/v1".to_string();
+        base.operations[0].method = "POST".to_string();
+        base.operations[0].path = "/events".to_string();
+        base.operations[0].params.push(parameter(false));
+        let mut current = base.clone();
+        current.operations[0].params[0].required = true;
+
+        let report = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &BTreeSet::new(),
+            &[GateOperation::new("post", "/api/v1/events")],
+        )
+        .expect("report route matches the gate operation");
+        let finding = change(&report, "request.parameter.required.added");
+        assert_eq!(finding.operation.as_deref(), Some("POST /api/v1/events"));
+        assert!(finding.gating);
+
+        let error = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &BTreeSet::new(),
+            &[GateOperation::new("POST", "/events")],
+        )
+        .expect_err("source-relative route is not the reported effective route");
+        assert!(error.to_string().contains(
+            "gate operation `POST /events` did not match any operation in the base or current graph"
+        ));
+    }
+
+    #[test]
+    fn mixed_selected_and_unselected_breaks_gate_and_base_only_selection_covers_removal() {
+        let (base, current) = two_changed_operations();
+        let mixed = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &BTreeSet::new(),
+            &[GateOperation::new("GET", "/books")],
+        )
+        .expect("matched gate operation");
+        assert!(mixed.is_gating());
+
+        let removed = diff_graphs_with_gate_operations(
+            &graph_with_tags(&[]),
+            &ApiGraph::default(),
+            &BTreeSet::new(),
+            &[GateOperation::new("GET", "/books")],
+        )
+        .expect("selector matches the base side");
+        assert!(change(&removed, "operation.removed").gating);
+        assert_eq!(
+            change(&removed, "operation.removed").protected,
+            super::Sides {
+                base: Some(true),
+                current: None,
+            }
+        );
+    }
+
+    #[test]
+    fn gate_operation_must_match_either_graph_side() {
+        let error = diff_graphs_with_gate_operations(
+            &graph_with_tags(&[]),
+            &graph_with_tags(&[]),
+            &BTreeSet::new(),
+            &[GateOperation::new("POST", "/missing")],
+        )
+        .expect_err("unmatched selector must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("gate operation `POST /missing` did not match any operation in the base or current graph"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn exempt_tags_subtract_from_the_selected_operation_set() {
+        let mut base = graph_with_tags(&["internal"]);
+        base.operations[0].params.push(parameter(false));
+        let mut current = base.clone();
+        current.operations[0].params[0].required = true;
+        let report = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &exemptions(&["internal"]),
+            &[GateOperation::new("GET", "/books")],
+        )
+        .expect("matched gate operation");
+        let finding = change(&report, "request.parameter.required.added");
+        assert!(!finding.gating);
+        assert_eq!(finding.protected.base, Some(true));
+        assert_eq!(finding.exempt.base, Some(true));
     }
 
     #[test]
@@ -2923,6 +3282,63 @@ mod tests {
             )
             .gating
         );
+    }
+
+    #[test]
+    fn operation_gate_reaches_transitive_schema_consumers_on_both_graph_sides() {
+        let leaf_base = schema("Leaf::input", vec![field("value")]);
+        let leaf_current = schema("Leaf::input", Vec::new());
+        let root = Schema {
+            id: "Root::input".to_string(),
+            name: "Root::input".to_string(),
+            body: Type::Named("Leaf::input".to_string()),
+            enum_source_order: Vec::new(),
+            provenance: span("models.rs"),
+        };
+        let mut protected = operation();
+        protected.method = "POST".to_string();
+        protected.path = "/books".to_string();
+        protected.request_body = Some(SchemaRef {
+            ref_id: "Root::input".to_string(),
+        });
+        let mut advisory = protected.clone();
+        advisory.id = "createReport".to_string();
+        advisory.path = "/reports".to_string();
+        advisory.handler = "createReport".to_string();
+        advisory.request_body = None;
+
+        let base = ApiGraph {
+            operations: vec![protected.clone(), advisory.clone()],
+            schemas: vec![root.clone(), leaf_base],
+            ..ApiGraph::default()
+        };
+        let current = ApiGraph {
+            // The protected consumer exists only in the base graph. Schema scope must still use it.
+            operations: vec![advisory],
+            schemas: vec![root, leaf_current],
+            ..ApiGraph::default()
+        };
+        let report = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &BTreeSet::new(),
+            &[GateOperation::new("POST", "/books")],
+        )
+        .expect("base-side operation matches");
+        let finding = change(&report, "request.property.removed");
+        assert!(finding.gating);
+        assert_eq!(finding.protected.base, Some(true));
+        assert_eq!(finding.protected.current, Some(false));
+
+        let unprotected = diff_graphs_with_gate_operations(
+            &base,
+            &current,
+            &BTreeSet::new(),
+            &[GateOperation::new("POST", "/reports")],
+        )
+        .expect("current-side operation matches");
+        assert!(!change(&unprotected, "operation.removed").gating);
+        assert!(!change(&unprotected, "request.property.removed").gating);
     }
 
     #[test]

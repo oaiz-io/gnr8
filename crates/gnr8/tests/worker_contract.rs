@@ -926,6 +926,44 @@ fn a_worker_run_by_hand_reports_that_it_is_not_a_standalone_program() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+fn assert_exact_change_gate_selector(root: &Path) {
+    let protected = gnr8(
+        root,
+        &[
+            "--json",
+            "changes",
+            "--base",
+            "HEAD",
+            "--gate-operation",
+            "GET /things",
+        ],
+        None,
+    );
+    assert_eq!(protected.status.code(), Some(1), "{}", combined(&protected));
+    let report: serde_json::Value =
+        serde_json::from_slice(&protected.stdout).expect("protected report is JSON");
+    assert_eq!(report["policy"]["gate_operations"][0], "GET /things");
+    assert_eq!(report["summary"]["gating"], 1);
+
+    let unmatched = gnr8(
+        root,
+        &[
+            "changes",
+            "--base",
+            "HEAD",
+            "--gate-operation",
+            "POST /missing",
+        ],
+        None,
+    );
+    assert_eq!(unmatched.status.code(), Some(2), "{}", combined(&unmatched));
+    assert!(
+        combined(&unmatched).contains("did not match any operation in the base or current graph"),
+        "{}",
+        combined(&unmatched)
+    );
+}
+
 #[test]
 fn changes_uses_exit_one_only_for_a_gating_break() {
     if !cargo_available() || !git_available() {
@@ -984,6 +1022,8 @@ fn changes_uses_exit_one_only_for_a_gating_break() {
     assert_eq!(report["summary"]["breaking"], 1);
     assert_eq!(report["summary"]["gating"], 1);
     assert_eq!(report["changes"][0]["code"], "operation.removed");
+
+    assert_exact_change_gate_selector(&root);
 
     let exempt = gnr8(
         &root,

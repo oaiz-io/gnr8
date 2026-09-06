@@ -123,6 +123,8 @@ gnr8 check      # CI: fail on uncommitted generated drift
 ```bash
 gnr8 changes --base origin/main
 gnr8 changes --base origin/main --exempt-tag internal --exempt-tag beta
+gnr8 changes --base origin/main --gate-operation "POST /events" \
+  --gate-operation "POST /events/integration/{provider}"
 gnr8 --json changes --base origin/main
 gnr8 changes --base origin/main --markdown
 ```
@@ -135,8 +137,15 @@ using it as a base.
 Findings are classified as `BREAKING`, `ADDITIVE`, or `DOC-ONLY`. A breaking finding exits `1` only
 when it is in the checked scope. `--exempt-tag` removes operations carrying an exact,
 case-sensitive matching standard OpenAPI tag from that scope; it is repeatable, and untagged
-operations remain checked. Findings are always reported, including exempt ones. Schema findings use
-their most checked transitive consumer on each graph side.
+operations remain checked. `--gate-operation "METHOD /path"` is also repeatable. When present, these
+exact effective-route selectors form an include-only protected surface; without them, every
+operation remains protected as before. The path is the effective route printed in the report,
+including the graph's base path: a reported `POST /api/v1/events` is selected with that exact path,
+not the source-relative `/events`. Each selector must match an operation in the base or current graph,
+so removing a selected operation is enforced and a stale selector is a configuration error.
+The include filter is applied first and `--exempt-tag` subtracts from it. Findings are always
+reported, including unselected and exempt ones. Schema findings follow all transitive consumers on
+both graph sides, so a shared schema is enforced when any protected, non-exempt operation uses it.
 
 `ConfigurePagination` and `ConfigureSdkRuntime` policy is not yet compared, so a change to
 pagination, retry, or timeout configuration alters generated SDK methods without producing a
@@ -144,27 +153,29 @@ finding. Response headers and the schemas of additional request-body variants ar
 this comparison; their media types still participate in `request.body.media_type.*`.
 
 `--markdown` prints the same report as a Markdown block for a job summary or a pull-request
-comment: the base revision, the exempt-tag policy, the summary counts, and the findings in an
+comment: the base revision, operation and tag policy, the summary counts, and the findings in an
 indented code block with a `Code:` line, their affected SDK operations, and source locations.
-Non-empty groups appear in this order: `Breaking — gating`, `Breaking — not gating`, `Additive`,
-and `Documentation-only`, each with its count. Empty groups are omitted. It selects the report
-format, so it cannot be combined with `--json`. The GitHub Action publishes this output rather than
-formatting one of its own.
+Non-empty groups appear in this order: `Breaking — protected surface`, `Breaking — advisory or
+exempt`, `Additive`, and `Documentation-only`, each with its count. Empty groups are omitted. It
+selects the report format, so it cannot be combined with `--json`. The GitHub Action publishes this
+output rather than formatting one of its own.
 
 JSON contains the requested and resolved base revision, sorted exempt-tag policy, summary counts,
-and deterministically sorted changes with stable dotted codes, effective tags and exemption state
-for both graph sides, the derived `gating` result, affected SDK operations on both extant sides, and
-current source locations where available. The JSON envelope starts with `schema_version: 1`;
+sorted exact operation policy, and deterministically sorted changes with stable dotted codes,
+effective tags, exemption state, and protected-selection state for both graph sides, the derived
+`gating` result, affected SDK operations on both extant sides, and current source locations where
+available. The JSON envelope starts with `schema_version: 1`;
 `report.json` is a documented, versioned artifact for machine consumers. Consumers should check
 that version before interpreting the payload.
 
-Human output keeps the three columns — kind, operation, message — and appends an exemption suffix
-when a breaking finding is not gating. When a current source location exists, it also appends
+Human output keeps the three columns — kind, operation, message — and appends an advisory/exemption
+suffix when a breaking finding is outside the enforced surface. When a current source location exists, it also appends
 `file:line` (or `file` when the line is unknown):
 
 ```text
 BREAKING  POST /books         request field `title` became required  handlers.go:42
-BREAKING  GET /tasks/_debug   response field `count` removed  (exempt on both sides; not gating)
+BREAKING  GET /tasks/_debug   response field `count` removed  (exempt on both sides; advisory)
+BREAKING  GET /reports        response field `count` removed  (outside protected surface; advisory)
 ADDITIVE  GET /books          optional response field `nextCursor` added  handlers.go:88
 ```
 

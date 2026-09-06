@@ -9,6 +9,25 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **The GitHub Action supports native advisory API reports.** `fail-on-breaking: "false"` preserves
+  Markdown and JSON reports, summaries, artifacts, pull-request comments, and annotations while
+  turning status-1 protected breaks into a successful Action result and warning annotations. Analysis
+  and configuration failures still fail. Report paths, digests, finding counts, and the report artifact
+  name are available as Action outputs.
+- **`gnr8 changes --gate-operation "METHOD /path"` limits enforcement to explicitly selected
+  operations without filtering the report.** Selectors use the effective route printed in reports,
+  match either graph side, protect transitive schema changes, fail when unmatched, and compose
+  deterministically with `--exempt-tag` by applying tag exemptions after include selection. Omitting
+  selectors preserves the all-operation gate.
+
+### Changed
+
+- **API change reports distinguish all breaking findings from protected-surface, advisory, exempt,
+  additive, and documentation-only findings.** JSON adds the sorted operation policy and per-side
+  protected-selection state without changing its versioned envelope.
+
 ## 0.12.1 — 2026-09-05
 
 ### Added
