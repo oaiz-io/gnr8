@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.12.2 — 2026-09-06
+
 ### Added
 
 - **The GitHub Action supports native advisory API reports.** `fail-on-breaking: "false"` preserves
