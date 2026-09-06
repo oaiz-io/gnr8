@@ -257,7 +257,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: oaiz-io/gnr8@v0.12.0 # first release with API change reporting
+      - uses: oaiz-io/gnr8@v0.12.2 # first release with advisory reports and operation gates
         with:
           working-directories: |
             services/books
