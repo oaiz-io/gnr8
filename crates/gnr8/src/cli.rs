@@ -179,22 +179,24 @@ fn non_empty_tag(value: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+const GATE_OPERATION_SHAPE: &str =
+    "expected `METHOD /path` using the effective route shown in reports";
+
 fn parse_gate_operation(value: &str) -> Result<GateOperation, String> {
     if value.trim() != value || value.chars().any(char::is_control) {
-        return Err(
-            "expected `METHOD /normalized/path` with no surrounding whitespace or control characters"
-                .to_string(),
-        );
+        return Err(format!(
+            "{GATE_OPERATION_SHAPE}, with no surrounding whitespace or control characters"
+        ));
     }
     let mut parts = value.split_ascii_whitespace();
     let Some(method) = parts.next() else {
-        return Err("expected `METHOD /normalized/path`".to_string());
+        return Err(GATE_OPERATION_SHAPE.to_string());
     };
     let Some(path) = parts.next() else {
-        return Err("expected `METHOD /normalized/path`".to_string());
+        return Err(GATE_OPERATION_SHAPE.to_string());
     };
     if parts.next().is_some() {
-        return Err("expected exactly one HTTP method and one route path".to_string());
+        return Err("expected exactly one HTTP method and one effective route path".to_string());
     }
     let method = method.to_ascii_uppercase();
     if !matches!(
@@ -205,7 +207,7 @@ fn parse_gate_operation(value: &str) -> Result<GateOperation, String> {
     }
     if !path.starts_with('/') || path.contains(['?', '#']) {
         return Err(
-            "route path must be a normalized absolute path beginning with `/`, without a query or fragment"
+            "effective route must be an absolute path beginning with `/`, without a query or fragment"
                 .to_string(),
         );
     }
@@ -218,7 +220,10 @@ mod tests {
     // the test module so the workspace-wide RUST-04 deny stays intact for production code.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{Cli, Commands, GateOperation, GuideTopic, InspectAction, SdkPreset, SourcePreset};
+    use super::{
+        parse_gate_operation, Cli, Commands, GateOperation, GuideTopic, InspectAction, SdkPreset,
+        SourcePreset, GATE_OPERATION_SHAPE,
+    };
     use clap::Parser;
 
     #[test]
@@ -338,7 +343,25 @@ mod tests {
     }
 
     #[test]
-    fn changes_gate_operations_require_an_exact_method_and_normalized_path() {
+    fn changes_gate_operations_require_an_exact_method_and_effective_route() {
+        assert_eq!(parse_gate_operation("").unwrap_err(), GATE_OPERATION_SHAPE);
+        assert_eq!(
+            parse_gate_operation("POST").unwrap_err(),
+            GATE_OPERATION_SHAPE
+        );
+        assert_eq!(
+            parse_gate_operation(" POST /events").unwrap_err(),
+            format!("{GATE_OPERATION_SHAPE}, with no surrounding whitespace or control characters")
+        );
+        assert_eq!(
+            parse_gate_operation("POST /events extra").unwrap_err(),
+            "expected exactly one HTTP method and one effective route path"
+        );
+        assert_eq!(
+            parse_gate_operation("POST events").unwrap_err(),
+            "effective route must be an absolute path beginning with `/`, without a query or fragment"
+        );
+
         for invalid in [
             "",
             "POST",
