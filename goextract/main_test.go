@@ -215,7 +215,7 @@ func TestGinContractRegressionFacts(t *testing.T) {
 	}
 
 	search := routeByHandler(t, doc, "searchItems")
-	assertQueryParam(t, search, "q", true, `{"type":"primitive","of":{"prim":"string"}}`, "")
+	assertQueryParam(t, search, "q", false, `{"type":"primitive","of":{"prim":"string"}}`, "")
 	assertQueryParam(t, search, "limit", false, `{"type":"primitive","of":{"prim":"int","bits":64,"signed":true}}`, "")
 	assertQueryParam(t, search, "trimmedLimit", false, `{"type":"primitive","of":{"prim":"int","bits":64,"signed":true}}`, "")
 	assertQueryParam(t, search, "wrappedLimit", false, `{"type":"primitive","of":{"prim":"int","bits":64,"signed":true}}`, "")
@@ -224,6 +224,11 @@ func TestGinContractRegressionFacts(t *testing.T) {
 	assertQueryParam(t, search, "token", false, `{"type":"primitive","of":{"prim":"string"}}`, "")
 	assertQueryParam(t, search, "offset", false, `{"type":"primitive","of":{"prim":"int","bits":64,"signed":false}}`, "")
 	assertQueryParam(t, search, "page", true, `{"type":"primitive","of":{"prim":"int","bits":64,"signed":false}}`, "")
+
+	queryRequired := routeByHandler(t, doc, "queryRequired")
+	assertQueryParam(t, queryRequired, "term", true, `{"type":"primitive","of":{"prim":"string"}}`, "")
+	queryOptional := routeByHandler(t, doc, "queryOptional")
+	assertQueryParam(t, queryOptional, "view", false, `{"type":"primitive","of":{"prim":"string"}}`, "")
 
 	observations := routeByHandler(t, doc, "requestObservations")
 	assertRequestParam(t, observations, "header", "X-Observed", false)

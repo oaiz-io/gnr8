@@ -117,8 +117,8 @@ def main() -> None:
         if not expected:
             assert "files" not in parts, parts
 
-    client.search_items(1, "")
-    client.search_items(1, "", offset=0)
+    client.search_items(1, q="")
+    client.search_items(1, q="", offset=0)
     search_urls = [
         request.full_url
         for request in requests

@@ -897,6 +897,399 @@ func requiredQueryUUID(c *gin.Context, key string) (uuid.UUID, error) {
 	}
 }
 
+func TestDirectQueryRequirednessFollowsProvenControlFlow(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/queryflow
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Query(string) string { return "" }
+func (c *Context) GetQuery(string) (string, bool) { return "", false }
+func (c *Context) GetHeader(string) string { return "" }
+func (c *Context) JSON(int, any) {}
+func (c *Context) String(int, string, ...any) {}
+func (c *Context) AbortWithError(int, error) error { return nil }
+func (c *Context) Abort() {}
+func (c *Context) ShouldBindQuery(any) error { return nil }
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package queryflow
+
+import (
+	"errors"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct{ R *gin.Engine }
+type Result struct { OK bool `+"`json:\"ok\"`"+` }
+type ListQuery struct { Limit int `+"`form:\"limit\"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/required", s.required)
+	s.R.GET("/inverted", s.inverted)
+	s.R.GET("/optional", s.optional)
+	s.R.GET("/present", s.present)
+	s.R.GET("/early-nested", s.earlyNested)
+	s.R.GET("/multiple", s.multiple)
+	s.R.GET("/bare", s.bare)
+	s.R.GET("/ambiguous-nested", s.ambiguousNested)
+	s.R.GET("/reassigned-alias", s.reassignedAlias)
+	s.R.GET("/helper-condition", s.helperCondition)
+	s.R.GET("/normalized-read", s.normalizedRead)
+	s.R.GET("/nonterminal-error", s.nonterminalError)
+	s.R.GET("/loop-guard", s.loopGuard)
+	s.R.GET("/string-rejected", s.stringRejected)
+	s.R.GET("/aborted-with-error", s.abortedWithError)
+	s.R.GET("/silent-abort", s.silentAbort)
+	s.R.GET("/parsed-guard", s.parsedGuard)
+	s.R.GET("/init-guard", s.initGuard)
+	s.R.GET("/escaping-default", s.escapingDefault)
+	s.R.GET("/closure-write", s.closureWrite)
+	s.R.GET("/bind-then-guard", s.bindThenGuard)
+	s.R.GET("/guard-then-bind", s.guardThenBind)
+	s.R.GET("/guard-then-helper", s.guardThenHelper)
+	s.R.GET("/helper-then-guard", s.helperThenGuard)
+}
+
+func (s Server) required(c *gin.Context) {
+	value := c.Query("name")
+	alias := value
+	if alias == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) inverted(c *gin.Context) {
+	if c.Query("name") != "" {
+		use("present")
+	} else {
+		c.JSON(422, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) optional(c *gin.Context) {
+	value := c.Query("name")
+	if value != "" {
+		use(value)
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) present(c *gin.Context) {
+	value, present := c.GetQuery("name")
+	_, _ = value, present
+	c.JSON(200, Result{})
+}
+
+func (s Server) earlyNested(c *gin.Context) {
+	value := c.Query("name")
+	if len(value) == 0 {
+		if c.GetHeader("X-Mode") == "strict" {
+			c.JSON(400, Result{})
+			return
+		}
+		c.JSON(422, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) multiple(c *gin.Context) {
+	first := c.Query("name")
+	if first == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	second := c.Query("name")
+	use(second)
+	c.JSON(200, Result{})
+}
+
+func (s Server) bare(c *gin.Context) {
+	use(c.Query("name"))
+	c.JSON(200, Result{})
+}
+
+func (s Server) ambiguousNested(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		if choose() {
+			c.JSON(400, Result{})
+			return
+		}
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) reassignedAlias(c *gin.Context) {
+	value := c.Query("name")
+	alias := value
+	alias = "fallback"
+	if alias == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) helperCondition(c *gin.Context) {
+	value := c.Query("name")
+	if helperRejects(value) {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) normalizedRead(c *gin.Context) {
+	value := strings.TrimSpace(c.Query("name"))
+	use(value)
+	c.JSON(200, Result{})
+}
+
+func (s Server) nonterminalError(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		c.JSON(400, Result{})
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) loopGuard(c *gin.Context) {
+	value := c.Query("name")
+	for choose() {
+		if value == "" {
+			c.JSON(400, Result{})
+			return
+		}
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) stringRejected(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		c.String(400, "name is required")
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) abortedWithError(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		_ = c.AbortWithError(422, errors.New("name is required"))
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) silentAbort(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		c.Abort()
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) parsedGuard(c *gin.Context) {
+	if c.Query("limit") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	limit, err := strconv.Atoi(c.Query("limit"))
+	if err != nil {
+		c.JSON(400, Result{})
+		return
+	}
+	use(strconv.Itoa(limit))
+	c.JSON(200, Result{})
+}
+
+func (s Server) initGuard(c *gin.Context) {
+	if value := c.Query("name"); value == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) escapingDefault(c *gin.Context) {
+	value := c.Query("name")
+	applyDefault(&value)
+	if value == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) closureWrite(c *gin.Context) {
+	value := c.Query("name")
+	fill := func() { value = "filled" }
+	fill()
+	if value == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) bindThenGuard(c *gin.Context) {
+	var bound ListQuery
+	_ = c.ShouldBindQuery(&bound)
+	if c.Query("limit") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{OK: bound.Limit > 0})
+}
+
+func (s Server) guardThenBind(c *gin.Context) {
+	if c.Query("limit") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	var bound ListQuery
+	_ = c.ShouldBindQuery(&bound)
+	c.JSON(200, Result{OK: bound.Limit > 0})
+}
+
+func (s Server) guardThenHelper(c *gin.Context) {
+	if c.Query("cursor") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{OK: parseCursor(c.Query("cursor")) > 0})
+}
+
+func (s Server) helperThenGuard(c *gin.Context) {
+	cursor := parseCursor(c.Query("cursor"))
+	if c.Query("cursor") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{OK: cursor > 0})
+}
+
+func parseCursor(raw string) int64 {
+	return int64(len(raw))
+}
+
+func applyDefault(value *string) {
+	if *value == "" {
+		*value = "fallback"
+	}
+}
+
+func use(string) {}
+func choose() bool { return false }
+func helperRejects(string) bool { return false }
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load direct query control flow: %v", err)
+	}
+	// load.Load reports per-package type errors instead of failing, so a fixture
+	// that does not compile would make every assertion below pass vacuously.
+	for _, loadErr := range res.Errors {
+		t.Fatalf("query control flow fixture must type-check: %+v", loadErr)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/queryflow", diagnostics)
+	byPath := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		byPath[route.Path] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for _, path := range []string{
+		"/required", "/inverted", "/early-nested", "/multiple",
+		"/string-rejected", "/aborted-with-error", "/init-guard",
+	} {
+		param, ok := paramByName(byPath[path].Params, "name")
+		if !ok || !param.Required {
+			t.Fatalf("%s should prove name required, got %+v", path, param)
+		}
+	}
+	for _, path := range []string{"/optional", "/present"} {
+		param, ok := paramByName(byPath[path].Params, "name")
+		if !ok || param.Required {
+			t.Fatalf("%s should prove name optional, got %+v", path, param)
+		}
+	}
+
+	unresolved := map[string]bool{}
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.parameter.unresolved" && item.Subject == "name" {
+			unresolved[item.Operation] = true
+		}
+	}
+	for _, path := range []string{"/bare", "/ambiguous-nested", "/reassigned-alias", "/helper-condition", "/normalized-read", "/nonterminal-error", "/loop-guard", "/silent-abort", "/escaping-default", "/closure-write"} {
+		operation := "GET " + path
+		if !unresolved[operation] {
+			t.Fatalf("%s should retain deterministic unresolved requiredness: %+v", operation, diagnostics.Items())
+		}
+	}
+	for _, path := range []string{
+		"/required", "/inverted", "/optional", "/present", "/early-nested", "/multiple",
+		"/string-rejected", "/aborted-with-error", "/init-guard",
+	} {
+		operation := "GET " + path
+		if unresolved[operation] {
+			t.Fatalf("%s has proven requiredness but emitted unresolved: %+v", operation, diagnostics.Items())
+		}
+	}
+
+	// A proven direct read settles requiredness; it must not overwrite the schema
+	// a parser around the same read already proved.
+	parsed, ok := paramByName(byPath["/parsed-guard"].Params, "limit")
+	if !ok || !parsed.Required || primName(parsed.Schema) != "int" {
+		t.Fatalf("/parsed-guard should keep the parsed int schema and prove required, got %+v", parsed)
+	}
+
+	// The typed binding states the schema and the proof states requiredness, in
+	// either source order: which read the walk reaches first is not a fact about
+	// the handler.
+	for _, path := range []string{"/bind-then-guard", "/guard-then-bind"} {
+		bound, ok := paramByName(byPath[path].Params, "limit")
+		if !ok || !bound.Required || primName(bound.Schema) != "int" {
+			t.Fatalf("%s should combine the bound int schema with the proven requiredness, got %+v", path, bound)
+		}
+	}
+
+	// Same for a module-owned parser beside the guard: the helper still states the
+	// schema after the raw read has settled requiredness.
+	for _, path := range []string{"/guard-then-helper", "/helper-then-guard"} {
+		cursor, ok := paramByName(byPath[path].Params, "cursor")
+		if !ok || !cursor.Required || primName(cursor.Schema) != "int" {
+			t.Fatalf("%s should combine the parsed int schema with the proven requiredness, got %+v", path, cursor)
+		}
+	}
+}
+
 func TestGenericJSONBodyHelperInfersRequestBody(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/genericbody

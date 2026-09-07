@@ -15,7 +15,7 @@
 //	c.PostForm("name")          -> form string field on a synthesized request body
 //	c.JSON(http.StatusXxx, y)   -> responses[status] = TypeOf(y); status via go/constant
 //	c.Param("name")             -> path param (string, required)
-//	c.Query("name")             -> query param (string) + untyped-query WARN diagnostic
+//	c.Query("name")             -> query param (string); control flow may prove required/optional
 //	c.DefaultQuery("n", "d")    -> optional query param (string) + default
 //	c.GetQuery("name")          -> optional query param (string)
 //
@@ -155,6 +155,61 @@ type parameterHint struct {
 	required      bool
 	requiredKnown bool
 	defaultValue  *facts.LiteralValue
+}
+
+type queryPresenceProof uint8
+
+const (
+	queryPresenceUnresolved queryPresenceProof = iota
+	queryPresenceOptional
+	queryPresenceRequired
+)
+
+type queryAccessValue uint8
+
+const (
+	queryAccessUnknown queryAccessValue = iota
+	queryAccessExact
+	queryAccessNormalized
+)
+
+type queryResponseState uint8
+
+const (
+	queryResponseNone queryResponseState = iota
+	queryResponseSuccess
+	queryResponseClientError
+	queryResponseUncertain
+)
+
+type queryPathState struct {
+	values   map[gotypes.Object]queryAccessValue
+	escaped  map[gotypes.Object]bool
+	response queryResponseState
+	checked  bool
+}
+
+// queryPathOutcome is how one explored path ended. queryPathOpen is the
+// deliberate fourth value: a path that wrote no response gnr8 recognizes has
+// stated nothing, which is weaker evidence than a path that answered 2xx and is
+// not interchangeable with it.
+type queryPathOutcome uint8
+
+const (
+	queryPathSuccess queryPathOutcome = iota
+	queryPathClientError
+	queryPathOpen
+	queryPathUncertain
+)
+
+type queryTerminal struct {
+	outcome queryPathOutcome
+	checked bool
+}
+
+type queryFlow struct {
+	next      []queryPathState
+	terminals []queryTerminal
 }
 
 type untypedQueryRead struct {
@@ -622,6 +677,16 @@ func (a *Analyzer) analyzeTraversedGinCall(
 			a.reportDynamicParameterName(frame, call, traversal, method)
 			return
 		}
+		if method == "Query" && !hint.requiredKnown {
+			switch queryRequiredness(frame, name) {
+			case queryPresenceOptional:
+				hint.requiredKnown = true
+				hint.required = false
+			case queryPresenceRequired:
+				hint.requiredKnown = true
+				hint.required = true
+			}
+		}
 		param := parameterFromGinAccess(frame.decl.info, method, name, frame.decl.fset, call, hint)
 		resolved := method != "Query" || hint.schemaKnown || hint.requiredKnown || hint.defaultValue != nil
 		a.addTraversedParameter(traversal, param, resolved)
@@ -970,6 +1035,603 @@ func multipartFormResultVars(h handlerDecl) map[gotypes.Object]bool {
 		return true
 	})
 	return vars
+}
+
+// queryRequiredness proves whether a direct Query read is required or optional
+// by following the function's native control flow twice: once with the value
+// absent and once with it present. Unknown conditions are explored on both
+// branches. A proof is retained only when every absent path agrees; mixed,
+// unsupported, or helper-controlled paths deliberately remain unresolved.
+//
+// Requiredness needs every absent path to answer 4xx. Optionality needs every
+// absent path to answer a status gnr8 read, not merely to reach the end of the
+// function: a path may answer through a writer this analysis does not follow
+// (c.Writer, a gin method gnr8 does not name), and silence there is not evidence
+// of success. Both proofs additionally need one present path that does not reject
+// the value, so a handler that fails either way proves nothing.
+func queryRequiredness(frame helperFrame, name string) queryPresenceProof {
+	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil ||
+		!frameReadsDirectQuery(frame, name) {
+		return queryPresenceUnresolved
+	}
+	escaped := escapedQueryValues(frame.decl)
+	absent := analyzeQueryStatements(frame, name, false, frame.decl.decl.Body.List, []queryPathState{newQueryPathState(escaped)})
+	present := analyzeQueryStatements(frame, name, true, frame.decl.decl.Body.List, []queryPathState{newQueryPathState(escaped)})
+	absent.terminals = append(absent.terminals, terminalQueryStates(absent.next)...)
+	present.terminals = append(present.terminals, terminalQueryStates(present.next)...)
+
+	if allQueryTerminals(absent.terminals, queryPathClientError, false) &&
+		hasQueryContinuation(present.terminals) {
+		return queryPresenceRequired
+	}
+	if allQueryTerminals(absent.terminals, queryPathSuccess, true) &&
+		hasQueryContinuation(present.terminals) {
+		return queryPresenceOptional
+	}
+	return queryPresenceUnresolved
+}
+
+func newQueryPathState(escaped map[gotypes.Object]bool) queryPathState {
+	return queryPathState{values: map[gotypes.Object]queryAccessValue{}, escaped: escaped}
+}
+
+// escapedQueryValues collects the locals whose value can change through a write
+// this analysis never sees: the address is taken, or a function literal captures
+// and assigns them. Their tracked access value would otherwise survive that write,
+// so a value a helper fills in still reads as the absent one — which turns an
+// unreachable rejection branch into a proof that the parameter is required.
+func escapedQueryValues(h handlerDecl) map[gotypes.Object]bool {
+	escaped := map[gotypes.Object]bool{}
+	ast.Inspect(h.decl.Body, func(node ast.Node) bool {
+		switch current := node.(type) {
+		case *ast.UnaryExpr:
+			if current.Op == token.AND {
+				markEscapedQueryValue(h.info, current.X, escaped)
+			}
+		case *ast.FuncLit:
+			if current.Body == nil {
+				return true
+			}
+			ast.Inspect(current.Body, func(inner ast.Node) bool {
+				switch assign := inner.(type) {
+				case *ast.AssignStmt:
+					for _, lhs := range assign.Lhs {
+						markEscapedQueryValue(h.info, lhs, escaped)
+					}
+				case *ast.IncDecStmt:
+					markEscapedQueryValue(h.info, assign.X, escaped)
+				}
+				return true
+			})
+		}
+		return true
+	})
+	return escaped
+}
+
+func markEscapedQueryValue(info *gotypes.Info, expr ast.Expr, escaped map[gotypes.Object]bool) {
+	ident, ok := expr.(*ast.Ident)
+	if !ok || info == nil {
+		return
+	}
+	if object := info.ObjectOf(ident); object != nil {
+		escaped[object] = true
+	}
+}
+
+func frameReadsDirectQuery(frame helperFrame, name string) bool {
+	found := false
+	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
+		if found {
+			return false
+		}
+		if _, ok := node.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		method, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
+		if ok && recvPkg == routes.GinPkgPath && method == "Query" {
+			queryName, resolved := frameCallStringArg(frame, call, 0)
+			found = resolved && queryName == name
+		}
+		return !found
+	})
+	return found
+}
+
+const maxQueryFlowPaths = 128
+
+func analyzeQueryStatements(
+	frame helperFrame,
+	name string,
+	present bool,
+	statements []ast.Stmt,
+	initial []queryPathState,
+) queryFlow {
+	flow := queryFlow{next: initial}
+	for _, statement := range statements {
+		if len(flow.next) == 0 {
+			break
+		}
+		next := make([]queryPathState, 0, len(flow.next))
+		for _, state := range flow.next {
+			step := analyzeQueryStatement(frame, name, present, statement, state)
+			next = append(next, step.next...)
+			flow.terminals = append(flow.terminals, step.terminals...)
+		}
+		if len(next) > maxQueryFlowPaths {
+			flow.terminals = append(flow.terminals, queryTerminal{outcome: queryPathUncertain})
+			next = next[:maxQueryFlowPaths]
+		}
+		flow.next = next
+	}
+	return flow
+}
+
+func analyzeQueryStatement(
+	frame helperFrame,
+	name string,
+	present bool,
+	statement ast.Stmt,
+	state queryPathState,
+) queryFlow {
+	switch node := statement.(type) {
+	case *ast.BlockStmt:
+		return analyzeQueryStatements(frame, name, present, node.List, []queryPathState{state})
+	case *ast.AssignStmt:
+		updateQueryResponse(frame, node, &state)
+		assignQueryValues(frame, name, node, &state)
+		return queryFlow{next: []queryPathState{state}}
+	case *ast.DeclStmt:
+		updateQueryResponse(frame, node, &state)
+		declareQueryValues(frame, name, node, &state)
+		return queryFlow{next: []queryPathState{state}}
+	case *ast.ExprStmt:
+		updateQueryResponse(frame, node.X, &state)
+		if call, ok := node.X.(*ast.CallExpr); ok && isBuiltinCall(frame.decl.info, call, "panic") {
+			return queryFlow{terminals: []queryTerminal{{outcome: queryPathUncertain, checked: state.checked}}}
+		}
+		return queryFlow{next: []queryPathState{state}}
+	case *ast.ReturnStmt:
+		updateQueryResponse(frame, node, &state)
+		return queryFlow{terminals: []queryTerminal{terminalQueryState(state)}}
+	case *ast.IfStmt:
+		if node.Init != nil {
+			initFlow := analyzeQueryStatement(frame, name, present, node.Init, state)
+			if len(initFlow.next) != 1 || len(initFlow.terminals) != 0 {
+				return queryFlow{terminals: []queryTerminal{{outcome: queryPathUncertain, checked: state.checked}}}
+			}
+			state = initFlow.next[0]
+		}
+		updateQueryResponse(frame, node.Cond, &state)
+		truth, checked := queryConditionValue(frame, name, present, node.Cond, state)
+		state.checked = state.checked || checked
+		flow := queryFlow{}
+		if truth != queryBoolFalse {
+			branch := analyzeQueryStatements(frame, name, present, node.Body.List, []queryPathState{cloneQueryPathState(state)})
+			flow.next = append(flow.next, branch.next...)
+			flow.terminals = append(flow.terminals, branch.terminals...)
+		}
+		if truth != queryBoolTrue {
+			branch := analyzeQueryElse(frame, name, present, node.Else, cloneQueryPathState(state))
+			flow.next = append(flow.next, branch.next...)
+			flow.terminals = append(flow.terminals, branch.terminals...)
+		}
+		return flow
+	case *ast.LabeledStmt:
+		return analyzeQueryStatement(frame, name, present, node.Stmt, state)
+	case *ast.EmptyStmt:
+		return queryFlow{next: []queryPathState{state}}
+	case *ast.IncDecStmt:
+		updateQueryResponse(frame, node, &state)
+		forgetQueryValue(frame.decl.info, node.X, &state)
+		return queryFlow{next: []queryPathState{state}}
+	case *ast.GoStmt, *ast.DeferStmt:
+		updateQueryResponse(frame, node, &state)
+		return queryFlow{next: []queryPathState{state}}
+	case *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt, *ast.BranchStmt:
+		// Loops, switches, selects, and jumps need a full inter-block fixed-point
+		// proof. Until one exists, keep both a possible continuation and an
+		// uncertain terminal so neither required nor optional can be fabricated.
+		return queryFlow{
+			next:      []queryPathState{state},
+			terminals: []queryTerminal{{outcome: queryPathUncertain, checked: state.checked}},
+		}
+	default:
+		updateQueryResponse(frame, node, &state)
+		return queryFlow{
+			next:      []queryPathState{state},
+			terminals: []queryTerminal{{outcome: queryPathUncertain, checked: state.checked}},
+		}
+	}
+}
+
+func analyzeQueryElse(
+	frame helperFrame,
+	name string,
+	present bool,
+	statement ast.Stmt,
+	state queryPathState,
+) queryFlow {
+	if statement == nil {
+		return queryFlow{next: []queryPathState{state}}
+	}
+	return analyzeQueryStatement(frame, name, present, statement, state)
+}
+
+func cloneQueryPathState(state queryPathState) queryPathState {
+	clone := state
+	clone.values = make(map[gotypes.Object]queryAccessValue, len(state.values))
+	for object, value := range state.values {
+		clone.values[object] = value
+	}
+	return clone
+}
+
+func terminalQueryStates(states []queryPathState) []queryTerminal {
+	terminals := make([]queryTerminal, 0, len(states))
+	for _, state := range states {
+		terminals = append(terminals, terminalQueryState(state))
+	}
+	return terminals
+}
+
+func terminalQueryState(state queryPathState) queryTerminal {
+	outcome := queryPathOpen
+	switch state.response {
+	case queryResponseSuccess:
+		outcome = queryPathSuccess
+	case queryResponseClientError:
+		outcome = queryPathClientError
+	case queryResponseUncertain:
+		outcome = queryPathUncertain
+	}
+	return queryTerminal{outcome: outcome, checked: state.checked}
+}
+
+func allQueryTerminals(terminals []queryTerminal, outcome queryPathOutcome, requireChecked bool) bool {
+	if len(terminals) == 0 {
+		return false
+	}
+	for _, terminal := range terminals {
+		if terminal.outcome != outcome || (requireChecked && !terminal.checked) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasQueryContinuation reports whether the value, once supplied, can still be
+// answered without a client error. A path that ended open qualifies: it did not
+// reject the request, which is all either proof asks of the present run.
+func hasQueryContinuation(terminals []queryTerminal) bool {
+	for _, terminal := range terminals {
+		if terminal.outcome == queryPathSuccess || terminal.outcome == queryPathOpen {
+			return true
+		}
+	}
+	return false
+}
+
+func assignQueryValues(frame helperFrame, name string, assign *ast.AssignStmt, state *queryPathState) {
+	if assign == nil || state == nil {
+		return
+	}
+	values := make([]queryAccessValue, len(assign.Lhs))
+	if len(assign.Rhs) == len(assign.Lhs) {
+		for index, expr := range assign.Rhs {
+			values[index] = queryAccessFromExpr(frame, name, expr, *state)
+		}
+	}
+	for index, lhs := range assign.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || ident.Name == "_" {
+			continue
+		}
+		object := frame.decl.info.ObjectOf(ident)
+		if object == nil {
+			continue
+		}
+		if (assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE) || state.escaped[object] {
+			state.values[object] = queryAccessUnknown
+			continue
+		}
+		state.values[object] = values[index]
+	}
+}
+
+func declareQueryValues(frame helperFrame, name string, decl *ast.DeclStmt, state *queryPathState) {
+	if decl == nil || state == nil {
+		return
+	}
+	gen, ok := decl.Decl.(*ast.GenDecl)
+	if !ok || gen.Tok != token.VAR {
+		return
+	}
+	for _, spec := range gen.Specs {
+		valueSpec, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		values := make([]queryAccessValue, len(valueSpec.Names))
+		if len(valueSpec.Values) == len(valueSpec.Names) {
+			for index, expr := range valueSpec.Values {
+				values[index] = queryAccessFromExpr(frame, name, expr, *state)
+			}
+		}
+		for index, ident := range valueSpec.Names {
+			if ident == nil || ident.Name == "_" {
+				continue
+			}
+			object := frame.decl.info.ObjectOf(ident)
+			if object == nil {
+				continue
+			}
+			if state.escaped[object] {
+				state.values[object] = queryAccessUnknown
+				continue
+			}
+			state.values[object] = values[index]
+		}
+	}
+}
+
+func forgetQueryValue(info *gotypes.Info, expr ast.Expr, state *queryPathState) {
+	ident, ok := expr.(*ast.Ident)
+	if !ok || info == nil || state == nil {
+		return
+	}
+	if object := info.ObjectOf(ident); object != nil {
+		state.values[object] = queryAccessUnknown
+	}
+}
+
+func queryAccessFromExpr(frame helperFrame, name string, expr ast.Expr, state queryPathState) queryAccessValue {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return queryAccessFromExpr(frame, name, node.X, state)
+	case *ast.Ident:
+		return state.values[frame.decl.info.ObjectOf(node)]
+	case *ast.CallExpr:
+		method, recvPkg, ok := routes.GinMethod(frame.decl.info, node)
+		if ok && recvPkg == routes.GinPkgPath && method == "Query" {
+			queryName, resolved := frameCallStringArg(frame, node, 0)
+			if resolved && queryName == name {
+				return queryAccessExact
+			}
+			return queryAccessUnknown
+		}
+		fn := calledFuncObject(frame.decl.info, node.Fun)
+		if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "strings" && fn.Name() == "TrimSpace" && len(node.Args) == 1 {
+			value := queryAccessFromExpr(frame, name, node.Args[0], state)
+			if value == queryAccessExact || value == queryAccessNormalized {
+				return queryAccessNormalized
+			}
+		}
+	}
+	return queryAccessUnknown
+}
+
+type queryBool uint8
+
+const (
+	queryBoolUnknown queryBool = iota
+	queryBoolFalse
+	queryBoolTrue
+)
+
+func queryConditionValue(
+	frame helperFrame,
+	name string,
+	present bool,
+	expr ast.Expr,
+	state queryPathState,
+) (queryBool, bool) {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return queryConditionValue(frame, name, present, node.X, state)
+	case *ast.UnaryExpr:
+		if node.Op != token.NOT {
+			return queryBoolUnknown, false
+		}
+		value, checked := queryConditionValue(frame, name, present, node.X, state)
+		return invertQueryBool(value), checked
+	case *ast.BinaryExpr:
+		switch node.Op {
+		case token.LAND, token.LOR:
+			left, leftChecked := queryConditionValue(frame, name, present, node.X, state)
+			right, rightChecked := queryConditionValue(frame, name, present, node.Y, state)
+			if node.Op == token.LAND {
+				return andQueryBool(left, right), leftChecked || rightChecked
+			}
+			return orQueryBool(left, right), leftChecked || rightChecked
+		case token.EQL, token.NEQ:
+			access := queryAccessFromExpr(frame, name, node.X, state)
+			if access != queryAccessUnknown && isEmptyStringLiteral(node.Y) {
+				return compareQueryAccess(access, present, node.Op), true
+			}
+			access = queryAccessFromExpr(frame, name, node.Y, state)
+			if access != queryAccessUnknown && isEmptyStringLiteral(node.X) {
+				return compareQueryAccess(access, present, node.Op), true
+			}
+			access = queryLengthAccess(frame, name, node.X, state)
+			if access != queryAccessUnknown && isZeroInteger(node.Y) {
+				return compareQueryAccess(access, present, node.Op), true
+			}
+			access = queryLengthAccess(frame, name, node.Y, state)
+			if access != queryAccessUnknown && isZeroInteger(node.X) {
+				return compareQueryAccess(access, present, node.Op), true
+			}
+		}
+	}
+	if value := frame.decl.info.Types[expr].Value; value != nil && value.Kind() == constant.Bool {
+		if constant.BoolVal(value) {
+			return queryBoolTrue, false
+		}
+		return queryBoolFalse, false
+	}
+	return queryBoolUnknown, false
+}
+
+func queryLengthAccess(frame helperFrame, name string, expr ast.Expr, state queryPathState) queryAccessValue {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 || !isBuiltinCall(frame.decl.info, call, "len") {
+		return queryAccessUnknown
+	}
+	return queryAccessFromExpr(frame, name, call.Args[0], state)
+}
+
+func isBuiltinCall(info *gotypes.Info, call *ast.CallExpr, name string) bool {
+	if info == nil || call == nil {
+		return false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok || ident.Name != name {
+		return false
+	}
+	object, ok := info.ObjectOf(ident).(*gotypes.Builtin)
+	return ok && object.Name() == name
+}
+
+func compareQueryAccess(access queryAccessValue, present bool, op token.Token) queryBool {
+	if present && access == queryAccessNormalized {
+		return queryBoolUnknown
+	}
+	empty := !present
+	if op == token.EQL {
+		if empty {
+			return queryBoolTrue
+		}
+		return queryBoolFalse
+	}
+	if empty {
+		return queryBoolFalse
+	}
+	return queryBoolTrue
+}
+
+func invertQueryBool(value queryBool) queryBool {
+	switch value {
+	case queryBoolFalse:
+		return queryBoolTrue
+	case queryBoolTrue:
+		return queryBoolFalse
+	default:
+		return queryBoolUnknown
+	}
+}
+
+func andQueryBool(left, right queryBool) queryBool {
+	if left == queryBoolFalse || right == queryBoolFalse {
+		return queryBoolFalse
+	}
+	if left == queryBoolTrue && right == queryBoolTrue {
+		return queryBoolTrue
+	}
+	return queryBoolUnknown
+}
+
+func orQueryBool(left, right queryBool) queryBool {
+	if left == queryBoolTrue || right == queryBoolTrue {
+		return queryBoolTrue
+	}
+	if left == queryBoolFalse && right == queryBoolFalse {
+		return queryBoolFalse
+	}
+	return queryBoolUnknown
+}
+
+func updateQueryResponse(frame helperFrame, node ast.Node, state *queryPathState) {
+	if node == nil || state == nil {
+		return
+	}
+	ast.Inspect(node, func(current ast.Node) bool {
+		if current == nil {
+			return false
+		}
+		if _, ok := current.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := current.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		method, recvPkg, ginCall := routes.GinMethod(frame.decl.info, call)
+		if ginCall && recvPkg == routes.GinPkgPath {
+			mergeQueryResponse(state, ginResponseOutcome(frame.decl.info, method, call))
+			return true
+		}
+		if frameCallPassesGinContext(frame, call) {
+			mergeQueryResponse(state, queryResponseUncertain)
+		}
+		return true
+	})
+}
+
+// ginResponseOutcome classifies what one gin.Context call contributes to a path's
+// response state. A method that does not answer the request contributes nothing;
+// one that answers with a status gnr8 cannot read as a constant is uncertain.
+// Naming the response surface completely matters: an answer gnr8 does not
+// recognize leaves the path open rather than looking like a success, so the cost
+// of an omission here is a lost proof, never a wrong one.
+func ginResponseOutcome(info *gotypes.Info, method string, call *ast.CallExpr) queryResponseState {
+	if ginFixedSuccessResponse(method) {
+		return queryResponseSuccess
+	}
+	if !ginStatusArgumentResponse(method) {
+		return queryResponseNone
+	}
+	if len(call.Args) == 0 {
+		return queryResponseUncertain
+	}
+	status, known := statusOf(info, call.Args[0])
+	switch {
+	case !known:
+		return queryResponseUncertain
+	case status >= 400 && status < 500:
+		return queryResponseClientError
+	case status >= 200 && status < 400:
+		return queryResponseSuccess
+	}
+	return queryResponseUncertain
+}
+
+// ginFixedSuccessResponse names the gin.Context methods that answer with a status
+// the method itself fixes at 200.
+func ginFixedSuccessResponse(method string) bool {
+	switch method {
+	case "File", "FileFromFS", "FileAttachment", "SSEvent", "Stream":
+		return true
+	}
+	return false
+}
+
+// ginStatusArgumentResponse names the gin.Context methods that answer with the
+// status passed as their first argument. Abort is deliberately absent: on its own
+// it states no status, so it leaves the path open instead of claiming success.
+func ginStatusArgumentResponse(method string) bool {
+	switch method {
+	case "JSON", "IndentedJSON", "SecureJSON", "PureJSON", "AsciiJSON", "JSONP",
+		"XML", "YAML", "TOML", "ProtoBuf", "String", "HTML", "Render", "Negotiate",
+		"Data", "DataFromReader", "Redirect", "Status",
+		"AbortWithStatus", "AbortWithStatusJSON", "AbortWithError":
+		return true
+	}
+	return false
+}
+
+func mergeQueryResponse(state *queryPathState, incoming queryResponseState) {
+	if incoming == queryResponseNone || state == nil {
+		return
+	}
+	if state.response == queryResponseNone || state.response == incoming {
+		state.response = incoming
+		return
+	}
+	state.response = queryResponseUncertain
 }
 
 // requestAccessRequired answers requiredness from the handler's behavior. A
@@ -1432,16 +2094,29 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			if pname, ok := a.callStringArg(h, call, 0); ok {
 				file, line := positionOf(h.fset, call.Pos())
 				resolved := name != "Query"
+				hint := parameterHint{}
+				if name == "Query" {
+					switch queryRequiredness(helperFrame{decl: h}, pname) {
+					case queryPresenceOptional:
+						resolved = true
+						hint.requiredKnown = true
+						hint.required = false
+					case queryPresenceRequired:
+						resolved = true
+						hint.requiredKnown = true
+						hint.required = true
+					}
+				}
 				a.addExtractedParameter(
 					&cf,
 					seenParam,
 					resolvedParam,
-					parameterFromGinAccess(h.info, name, pname, h.fset, call, parameterHint{}),
+					parameterFromGinAccess(h.info, name, pname, h.fset, call, hint),
 					resolved,
 					route,
 					diags,
 				)
-				if name == "Query" {
+				if name == "Query" && !resolved {
 					untypedQueryReads = append(untypedQueryReads, untypedQueryRead{name: pname, file: file, line: line})
 				}
 			} else {
@@ -1858,10 +2533,11 @@ func (a *Analyzer) analyzeQueryHelperCall(
 	resolvedParam map[string]bool,
 	diags *diag.Accumulator,
 ) {
+	// Both handoffs below go through addExtractedParameter rather than bailing when
+	// the parameter is already resolved: a helper read still states the schema the
+	// raw read cannot, and skipping it made the emitted type depend on whether the
+	// guard or the parser came first in the handler.
 	if param, ok := a.queryParamFromModuleHelper(h, call); ok {
-		if resolvedParam["query/"+param.Name] {
-			return
-		}
 		a.addExtractedParameter(cf, seenParam, resolvedParam, param, true, route, diags)
 		return
 	}
@@ -1876,14 +2552,11 @@ func (a *Analyzer) analyzeQueryHelperCall(
 	if nestedQueryHelperOutranks(h.info, call, query) {
 		return
 	}
-	param, ok := a.queryParamFromHelper(h, call, query, pname)
+	param, requiredKnown, ok := a.queryParamFromHelper(h, call, query, pname)
 	if !ok {
 		return
 	}
-	if resolvedParam["query/"+param.Name] {
-		return
-	}
-	a.addExtractedParameter(cf, seenParam, resolvedParam, param, true, route, diags)
+	a.addExtractedParameter(cf, seenParam, resolvedParam, param, requiredKnown, route, diags)
 }
 
 func (a *Analyzer) queryParamFromHelper(
@@ -1891,15 +2564,17 @@ func (a *Analyzer) queryParamFromHelper(
 	helper *ast.CallExpr,
 	query *ast.CallExpr,
 	name string,
-) (facts.ParamFact, bool) {
+) (facts.ParamFact, bool, bool) {
 	schema, ok := queryHelperSchema(h.info.TypeOf(helper), helper)
 	if !ok {
-		return facts.ParamFact{}, false
+		return facts.ParamFact{}, false, false
 	}
-	required := queryHelperRequired(h.info, helper, query)
+	required := false
+	requiredKnown := false
 	if fn := calledFuncObject(h.info, helper.Fun); fn != nil {
 		if callee, ok := a.moduleOwnedCallee(fn); ok {
 			required = queryHelperRequiredFromDirectCallee(h.info, helper, callee, query)
+			requiredKnown = true
 		}
 	}
 	return facts.ParamFact{
@@ -1909,7 +2584,7 @@ func (a *Analyzer) queryParamFromHelper(
 		Schema:   schema,
 		Default:  firstLiteral(queryDefaultValue(h.info, query), queryHelperDefault(h.info, helper, query)),
 		Span:     spanOf(h.fset, query.Pos()),
-	}, true
+	}, requiredKnown, true
 }
 
 func (a *Analyzer) queryParamFromModuleHelper(h handlerDecl, call *ast.CallExpr) (facts.ParamFact, bool) {
@@ -2464,31 +3139,6 @@ func queryHelperSchema(t gotypes.Type, helper *ast.CallExpr) (facts.Type, bool) 
 		return facts.PrimitiveType(facts.StringPrim()), true
 	}
 	return facts.Type{}, false
-}
-
-func queryHelperRequired(info *gotypes.Info, helper *ast.CallExpr, query *ast.CallExpr) bool {
-	name := selectorName(helper.Fun)
-	if strings.Contains(strings.ToLower(name), "optional") {
-		return false
-	}
-	if queryHelperDefault(info, helper, query) != nil {
-		return false
-	}
-	if queryDefaultValue(info, query) != nil {
-		return false
-	}
-	if name == "TrimSpace" || strings.Contains(strings.ToLower(name), "required") {
-		return true
-	}
-	t := info.TypeOf(helper)
-	if t == nil {
-		return false
-	}
-	if tuple, ok := gotypes.Unalias(t).(*gotypes.Tuple); ok && tuple.Len() > 1 {
-		last := tuple.At(tuple.Len() - 1)
-		return last != nil && isErrorType(last.Type())
-	}
-	return false
 }
 
 func queryHelperRequiredFromCallee(info *gotypes.Info, helper *ast.CallExpr, callee handlerDecl, query *ast.CallExpr) bool {
@@ -4549,8 +5199,8 @@ func pathParam(name string, fset *token.FileSet, pos token.Pos) facts.ParamFact 
 }
 
 // queryParam builds a query parameter from a c.Query("name") read. Type defaults
-// to string and required defaults to false; there is no annotation source to
-// refine these (CLAUDE.md rules 1 & 3).
+// to string and required starts false; queryRequiredness may replace that initial
+// value only when native control flow proves it (CLAUDE.md rules 1 & 3).
 func queryParam(name string, fset *token.FileSet, pos token.Pos) facts.ParamFact {
 	return facts.ParamFact{
 		Name:     name,
@@ -4632,11 +5282,36 @@ func (a *Analyzer) addExtractedParameter(
 		return
 	}
 	existing := &cf.Params[index]
+	// Resolution and schema specificity are independent facts about one parameter:
+	// the read that settles requiredness may still carry the bare `string` schema
+	// (a direct c.Query proved by control flow), while the read that leaves
+	// requiredness open may be the one that proved the type (strconv.Atoi around
+	// that same c.Query). Letting either fact overwrite the other loses one of them.
 	if !wasResolved && isResolved {
+		if parameterSchemaSpecificity(existing.Schema) > parameterSchemaSpecificity(param.Schema) {
+			param.Schema = existing.Schema
+			param.Span = existing.Span
+		}
+		param.Default = firstLiteral(param.Default, existing.Default)
+		if param.Style == "" {
+			param.Style = existing.Style
+			param.Explode = existing.Explode
+		}
 		*existing = param
 		return
 	}
 	if wasResolved && !isResolved {
+		if parameterSchemaSpecificity(param.Schema) > parameterSchemaSpecificity(existing.Schema) {
+			existing.Schema = param.Schema
+			existing.Span = param.Span
+		}
+		if existing.Default == nil {
+			existing.Default = param.Default
+		}
+		if existing.Style == "" {
+			existing.Style = param.Style
+			existing.Explode = param.Explode
+		}
 		return
 	}
 	if !reflect.DeepEqual(existing.Schema, param.Schema) {
@@ -4648,8 +5323,11 @@ func (a *Analyzer) addExtractedParameter(
 			existing.Span = param.Span
 		case incomingSpecificity < existingSpecificity:
 			// A raw string access is compatible evidence for a value that a
-			// surrounding parser or typed binder refines more precisely.
-			return
+			// surrounding parser or typed binder refines more precisely: the
+			// refined schema stays, and the merges below still take what the raw
+			// read proved about requiredness, defaults, and serialization. Return
+			// here instead and the answer depends on which read the walk reached
+			// first, which is not a property of the handler.
 		default:
 			if diags != nil {
 				diags.RequestParameterUnresolved(

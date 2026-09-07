@@ -126,6 +126,8 @@ func RegisterRoutes(r *gin.Engine, h *Handler) {
 	items.PATCH("/:itemId/unrelated-length-read", h.unrelatedLengthRead)
 	items.GET("/saved-views", h.listSavedViews)
 	items.GET("/search", h.searchItems)
+	items.GET("/query-required", h.queryRequired)
+	items.GET("/query-optional", h.queryOptional)
 	items.GET("/request-observations", h.requestObservations)
 	items.GET("/attendance", h.attendance)
 	items.GET("/events", h.itemEvents)
@@ -351,7 +353,8 @@ func (h *Handler) shared(c *gin.Context) {
 }
 
 func (h *Handler) searchItems(c *gin.Context) {
-	q := strings.TrimSpace(c.Query("q"))
+	q, _ := c.GetQuery("q")
+	q = strings.TrimSpace(q)
 	limit := parseOptionalPositiveInt(c.Query("limit"))
 	trimmedLimit := parseOptionalPositiveInt(strings.TrimSpace(c.Query("trimmedLimit")))
 	wrappedLimit := fmt.Sprint(parseOptionalPositiveInt(c.Query("wrappedLimit")))
@@ -367,6 +370,24 @@ func (h *Handler) searchItems(c *gin.Context) {
 	_ = wrappedLimit
 	_ = trimmedLimit
 	c.JSON(http.StatusOK, SearchResponse{Q: q, Limit: limit, Offset: offset, Page: page, Sort: sort, Cursor: cursor, Token: token})
+}
+
+func (h *Handler) queryRequired(c *gin.Context) {
+	value := c.Query("term")
+	alias := value
+	if alias == "" {
+		c.JSON(http.StatusBadRequest, MessageResponse{Message: "term is required"})
+		return
+	}
+	c.JSON(http.StatusOK, MessageResponse{Message: value})
+}
+
+func (h *Handler) queryOptional(c *gin.Context) {
+	value := c.Query("view")
+	if value != "" {
+		value = strings.TrimSpace(value)
+	}
+	c.JSON(http.StatusOK, MessageResponse{Message: value})
 }
 
 func (h *Handler) requestObservations(c *gin.Context) {

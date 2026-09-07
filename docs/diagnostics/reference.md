@@ -56,7 +56,7 @@ keys; message is explanatory text. Results are deterministically sorted.
 | `source.load.failed` | a package loader stage failed for one package (`ERROR`); the message names the stage — `list` is the go command failing to describe the package, `parse`/`type` are the package's own source | fix the named package; a `list` failure is usually the module graph or the build environment |
 | `source.handler.ambiguous` | route handler identity was not unique | register a statically resolvable handler |
 | `source.openapi.unrepresentable` | imported OpenAPI fact has no lossless graph representation | keep exact spec gate or add explicit graph policy |
-| `request.parameter.unresolved` | name/location/type/default/serialization was incomplete | add source typing or typed parameter override |
+| `request.parameter.unresolved` | name/location/type/default/serialization was incomplete, or a direct Gin query read had no conclusive required/optional control-flow proof | add source typing, use a simple explicit empty/presence branch, or add a typed parameter override |
 | `request.parameter.ambiguous` | the source stated one parameter fact twice (`ERROR`) | delete all but one — gnr8 picks no winner between them |
 | `request.body.unresolved` | request body schema/media/requiredness was incomplete | use typed request-body override |
 | `response.status.unresolved` | response status was dynamic/unknown | set an exact response override |

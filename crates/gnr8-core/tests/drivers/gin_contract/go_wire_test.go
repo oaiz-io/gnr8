@@ -145,7 +145,8 @@ func TestRequestBodyVariantsAndRedirectPolicy(t *testing.T) {
 		}
 	}
 
-	if _, err := client.SearchItems(context.Background(), SearchItemsParams{Page: 1, Q: ""}); err != nil {
+	empty := ""
+	if _, err := client.SearchItems(context.Background(), SearchItemsParams{Page: 1, Q: &empty}); err != nil {
 		t.Fatalf("search without optional offset: %v", err)
 	}
 	withoutOffset := transport.requests[len(transport.requests)-1]
@@ -153,7 +154,7 @@ func TestRequestBodyVariantsAndRedirectPolicy(t *testing.T) {
 		t.Fatalf("absent optional query values were emitted: %q", withoutOffset.rawQuery)
 	}
 	zero := int64(0)
-	if _, err := client.SearchItems(context.Background(), SearchItemsParams{Page: 1, Q: "", Offset: &zero}); err != nil {
+	if _, err := client.SearchItems(context.Background(), SearchItemsParams{Page: 1, Q: &empty, Offset: &zero}); err != nil {
 		t.Fatalf("search with explicit zero offset: %v", err)
 	}
 	if got := transport.requests[len(transport.requests)-1].rawQuery; !strings.Contains(got, "offset=0") {
