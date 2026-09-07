@@ -1089,6 +1089,9 @@ func escapedQueryValues(h handlerDecl) map[gotypes.Object]bool {
 				markEscapedQueryValue(h.info, current.X, escaped)
 			}
 		case *ast.FuncLit:
+			if current.Body == nil {
+				return true
+			}
 			ast.Inspect(current.Body, func(inner ast.Node) bool {
 				switch assign := inner.(type) {
 				case *ast.AssignStmt:
@@ -1332,7 +1335,7 @@ func assignQueryValues(frame helperFrame, name string, assign *ast.AssignStmt, s
 		if object == nil {
 			continue
 		}
-		if assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE || state.escaped[object] {
+		if (assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE) || state.escaped[object] {
 			state.values[object] = queryAccessUnknown
 			continue
 		}
