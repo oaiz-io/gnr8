@@ -110,6 +110,10 @@ func RegisterRoutes(r *gin.Engine, h *Handler) {
 	files.POST("/upload", h.uploadFile)
 	files.PATCH("/upload/:fileId", h.updateUploadFile)
 	files.POST("/dynamic-upload", h.dynamicUpload)
+	files.POST("/form-file/context", h.contextFormFile)
+	files.POST("/form-file/request", h.requestFormFile)
+	files.POST("/form-file/request-parts/:collectionId", h.requestFormFiles)
+	files.POST("/form-file/request-dynamic", h.dynamicRequestFormFile)
 
 	items := v1.Group("/items")
 	items.GET("/:itemId/children/:childId", h.getChild)
@@ -269,6 +273,40 @@ func (h *Handler) dynamicUpload(c *gin.Context) {
 	field := c.Query("field")
 	_ = form.File[field]
 	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) contextFormFile(c *gin.Context) {
+	_, _ = c.FormFile("asset")
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) requestFormFile(c *gin.Context) {
+	_, _, _ = c.Request.FormFile("asset")
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) requestFormFiles(c *gin.Context) {
+	_ = c.Param("collectionId")
+	_ = c.GetHeader("X-Upload-Trace")
+	_ = c.PostForm("caption")
+	_, _, _ = c.Request.FormFile("primaryImage")
+	_, _, _ = c.Request.FormFile("supportingDocument")
+	var unrelated http.Request
+	_, _, _ = unrelated.FormFile("ignored")
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) dynamicRequestFormFile(c *gin.Context) {
+	field := requestFileField()
+	_, _, _ = c.Request.FormFile(field)
+	c.Status(http.StatusNoContent)
+}
+
+func requestFileField() string {
+	if time.Now().Unix()%2 == 0 {
+		return "front"
+	}
+	return "back"
 }
 
 func (h *Handler) itemEvents(c *gin.Context) {

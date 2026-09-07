@@ -60,19 +60,19 @@ func TestGinContractRegressionFacts(t *testing.T) {
 	if err := json.NewDecoder(tmp).Decode(&doc); err != nil {
 		t.Fatalf("decode facts: %v", err)
 	}
-	wantDiagnostics := map[string]string{
-		"response.missing":             "GET /v1/items/raw-stream",
-		"response.header.unresolved":   "GET /v1/files/{fileId}/dynamic-header",
-		"request.parameter.unresolved": "POST /v1/files/dynamic-upload",
-		"request.body.unresolved":      "POST /v1/files/dynamic-upload",
-		"security.requirement.missing": "GET /v1/items/request-observations",
+	wantDiagnostics := map[string]bool{
+		"response.missing\x00GET /v1/items/raw-stream":                        true,
+		"response.header.unresolved\x00GET /v1/files/{fileId}/dynamic-header": true,
+		"request.parameter.unresolved\x00POST /v1/files/dynamic-upload":       true,
+		"request.body.unresolved\x00POST /v1/files/dynamic-upload":            true,
+		"request.body.unresolved\x00POST /v1/files/form-file/request-dynamic": true,
+		"security.requirement.missing\x00GET /v1/items/request-observations":  true,
 	}
 	if len(doc.Diagnostics) != len(wantDiagnostics) {
 		t.Fatalf("gin contract fixture diagnostics: got %+v", doc.Diagnostics)
 	}
 	for _, diagnostic := range doc.Diagnostics {
-		operation, ok := wantDiagnostics[diagnostic.Code]
-		if !ok || diagnostic.Operation != operation {
+		if !wantDiagnostics[diagnostic.Code+"\x00"+diagnostic.Operation] {
 			t.Fatalf("unexpected diagnostic: %+v", diagnostic)
 		}
 	}
@@ -177,6 +177,33 @@ func TestGinContractRegressionFacts(t *testing.T) {
 		len(updateUpload.RequestBodyVariants) != 1 ||
 		updateUpload.RequestBodyVariants[0].ContentType != "multipart/form-data" {
 		t.Fatalf("second generic upload instantiation mismatch: %+v", updateUpload)
+	}
+	contextFormFile := routeByHandler(t, doc, "contextFormFile")
+	requestFormFile := routeByHandler(t, doc, "requestFormFile")
+	contextFields := multipartRequestFields(t, doc, contextFormFile)
+	requestFields := multipartRequestFields(t, doc, requestFormFile)
+	if !reflect.DeepEqual(contextFields, requestFields) {
+		t.Fatalf("Gin and net/http FormFile access must produce the same fields: gin=%+v request=%+v", contextFields, requestFields)
+	}
+	if field := requestFields["asset"]; primName(field.Schema) != facts.PrimBytes || !field.ValidatorRequiresPresence {
+		t.Fatalf("Request.FormFile asset should be required bytes under its exact source name: %+v", field)
+	}
+	requestFiles := routeByHandler(t, doc, "requestFormFiles")
+	requestFileFields := multipartRequestFields(t, doc, requestFiles)
+	for _, name := range []string{"primaryImage", "supportingDocument"} {
+		field := requestFileFields[name]
+		if primName(field.Schema) != facts.PrimBytes || !field.ValidatorRequiresPresence {
+			t.Fatalf("Request.FormFile %s should be required bytes: %+v", name, field)
+		}
+	}
+	if field := requestFileFields["caption"]; primName(field.Schema) != facts.PrimString || field.ValidatorRequiresPresence {
+		t.Fatalf("manual form fields must compose with Request.FormFile: %+v", requestFileFields)
+	}
+	assertPathParam(t, requestFiles, "collectionId")
+	assertRequestParam(t, requestFiles, "header", "X-Upload-Trace", false)
+	dynamicRequestFile := routeByHandler(t, doc, "dynamicRequestFormFile")
+	if dynamicRequestFile.RequestBody != nil {
+		t.Fatalf("a dynamic Request.FormFile name must be diagnosed without inventing a body: %+v", dynamicRequestFile)
 	}
 	events := routeByHandler(t, doc, "itemEvents")
 	if events.Responses[0].BodyKind != "sse" || events.Responses[0].ContentType != "text/event-stream" {
@@ -349,6 +376,27 @@ func schemaByID(t *testing.T, doc facts.GoFacts, id string) facts.SchemaFact {
 	return facts.SchemaFact{}
 }
 
+func multipartRequestFields(t *testing.T, doc facts.GoFacts, route facts.RouteFact) map[string]facts.FieldFact {
+	t.Helper()
+	if route.RequestBody == nil || route.RequestBodyContentType != "multipart/form-data" || !route.RequestBodyRequired {
+		t.Fatalf("%s should have a required multipart request body, got %+v", route.Handler, route)
+	}
+	schema := schemaByID(t, doc, route.RequestBody.RefID)
+	encoded, err := json.Marshal(schema.Body.Of)
+	if err != nil {
+		t.Fatalf("encode %s multipart fields: %v", route.Handler, err)
+	}
+	var fields []facts.FieldFact
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("%s multipart schema should be an object: %+v", route.Handler, schema)
+	}
+	byName := make(map[string]facts.FieldFact, len(fields))
+	for _, field := range fields {
+		byName[field.JSONName] = field
+	}
+	return byName
+}
+
 func assertPathParam(t *testing.T, route facts.RouteFact, name string) {
 	t.Helper()
 	for _, param := range route.Params {
@@ -471,4 +519,19 @@ func jsonEqual(t *testing.T, left, right []byte) bool {
 		t.Fatalf("unmarshal right json: %v", err)
 	}
 	return reflect.DeepEqual(l, r)
+}
+
+func primName(ty facts.Type) string {
+	if ty.Type != facts.TypePrimitive {
+		return ""
+	}
+	switch primitive := ty.Of.(type) {
+	case *facts.Prim:
+		return primitive.Prim
+	case map[string]any:
+		name, _ := primitive["prim"].(string)
+		return name
+	default:
+		return ""
+	}
 }

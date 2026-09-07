@@ -41,6 +41,7 @@ func (c *Context) Data(int, string, []byte)                                     
 func (c *Context) DataFromReader(int, int64, string, io.Reader, map[string]string) {}
 func (c *Context) Redirect(int, string)                                            {}
 func (c *Context) PostForm(string) string                                          { return "" }
+func (c *Context) FormFile(string) (*multipart.FileHeader, error)                  { return nil, nil }
 func (c *Context) MultipartForm() (*multipart.Form, error)                         { return nil, nil }
 func (c *Context) SSEvent(string, any)                                             {}
 func (c *Context) Stream(func(io.Writer) bool)                                     {}

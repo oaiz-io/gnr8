@@ -11,6 +11,7 @@
 //	c.ShouldBindJSON(&x)        -> request body type = TypeOf(x)
 //	c.ShouldBind(&x)            -> form/multipart body when the bound DTO uses form tags
 //	c.FormFile("name")          -> multipart file field on a synthesized request body
+//	c.Request.FormFile("name")  -> the same multipart file field through net/http
 //	c.PostForm("name")          -> form string field on a synthesized request body
 //	c.JSON(http.StatusXxx, y)   -> responses[status] = TypeOf(y); status via go/constant
 //	c.Param("name")             -> path param (string, required)
@@ -436,6 +437,13 @@ func (a *Analyzer) analyzeContextHelperCall(
 				a.reportDynamicParameterName(next, nested, traversal, "Request.Header.Get")
 			}
 		}
+		if name, matched, resolved := requestFormFileInFrame(next, nested); matched {
+			if resolved {
+				addTraversedMultipartFileField(name, traversal)
+			} else {
+				a.reportDynamicBodyFieldName(next, nested, traversal, "Request.FormFile")
+			}
+		}
 		if frameCallPassesGinContext(next, nested) {
 			a.analyzeContextHelperCall(next, nested, hint, depth+1, traversal)
 		}
@@ -695,9 +703,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		a.setTraversedRequestBody(frame, call, contentType, optionalBindPositions, traversal)
 	case "FormFile":
 		if name, ok := frameCallStringArg(frame, call, 0); ok {
-			traversal.formFields[name] = formField(name, facts.PrimitiveType(facts.BytesPrim()), true)
-			traversal.manualFormFields[name] = true
-			*traversal.formHasFile = true
+			addTraversedMultipartFileField(name, traversal)
 		} else {
 			a.reportDynamicBodyFieldName(frame, call, traversal, method)
 		}
@@ -719,6 +725,18 @@ func (a *Analyzer) analyzeTraversedGinCall(
 			a.reportDynamicBodyFieldName(frame, call, traversal, method)
 		}
 	}
+}
+
+func addTraversedMultipartFileField(name string, traversal *contextTraversal) {
+	if traversal == nil {
+		return
+	}
+	addMultipartFileField(
+		traversal.formFields,
+		traversal.manualFormFields,
+		traversal.formHasFile,
+		name,
+	)
 }
 
 func (a *Analyzer) setTraversedRequestBody(
@@ -849,11 +867,15 @@ func (a *Analyzer) reportDynamicBodyFieldName(
 		return
 	}
 	file, line := positionOf(frame.decl.fset, call.Pos())
+	reason := "form field name is dynamic"
+	if method == "FormFile" || method == "Request.FormFile" {
+		reason = "multipart field name is dynamic"
+	}
 	traversal.diagnostics.RequestBodyUnresolved(
 		method,
 		traversal.route.Method,
 		untypedRouteLabel(traversal.route),
-		"form field name is dynamic",
+		reason,
 		file,
 		line,
 	)
@@ -1142,6 +1164,19 @@ func requestHeaderGet(info *gotypes.Info, call *ast.CallExpr) (string, bool, boo
 	return requestHeaderGetInFrame(helperFrame{decl: handlerDecl{info: info}}, call)
 }
 
+// requestFormFile matches the same call shape as requestFormFileInFrame but
+// resolves the field name with the handler-scoped resolver, so a name that
+// c.FormFile resolves in a handler body resolves identically through
+// c.Request.FormFile. A helper frame has its own resolver (bindings from the
+// call site), which is why the two entry points differ in that one step.
+func (a *Analyzer) requestFormFile(h handlerDecl, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestFormFileCall(helperFrame{decl: h}, call) {
+		return "", false, false
+	}
+	name, resolved := a.callStringArg(h, call, 0)
+	return name, true, resolved
+}
+
 func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
 	if call == nil || frame.decl.info == nil || len(call.Args) == 0 {
 		return "", false, false
@@ -1156,6 +1191,32 @@ func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, boo
 	}
 	request, ok := header.X.(*ast.SelectorExpr)
 	if !ok || request.Sel == nil || request.Sel.Name != "Request" || !isGinContextType(frameTypeOf(frame, request.X)) {
+		return "", false, false
+	}
+	name, resolved := frameCallStringArg(frame, call, 0)
+	return name, true, resolved
+}
+
+// isRequestFormFileCall recognizes net/http's Request.FormFile only when the
+// request is the first-class Request field of a typed Gin context. A local
+// *http.Request has the same method but is not evidence about the routed
+// request, so receiver provenance is part of the match.
+func isRequestFormFileCall(frame helperFrame, call *ast.CallExpr) bool {
+	if call == nil || frame.decl.info == nil || len(call.Args) == 0 {
+		return false
+	}
+	method, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || method.Sel == nil || method.Sel.Name != "FormFile" ||
+		!isNamedType(frame.decl.info.TypeOf(method.X), "net/http", "Request") {
+		return false
+	}
+	request, ok := method.X.(*ast.SelectorExpr)
+	return ok && request.Sel != nil && request.Sel.Name == "Request" &&
+		isGinContextType(frameTypeOf(frame, request.X))
+}
+
+func requestFormFileInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestFormFileCall(frame, call) {
 		return "", false, false
 	}
 	name, resolved := frameCallStringArg(frame, call, 0)
@@ -1248,6 +1309,13 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					)
 				} else {
 					reportDirectDynamicParameter(diags, h, route, call, "Request.Header.Get")
+				}
+			}
+			if fname, matched, resolved := a.requestFormFile(h, call); matched {
+				if resolved {
+					addMultipartFileField(formFields, manualFormFields, &formHasFile, fname)
+				} else {
+					reportDirectUnresolvedBody(diags, h, route, call, "Request.FormFile", "multipart field name is dynamic")
 				}
 			}
 			if ref, schema, ok := a.bodyFromGenericJSONHelper(h, call); ok {
@@ -1407,9 +1475,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			}
 		case "FormFile":
 			if fname, ok := a.callStringArg(h, call, 0); ok {
-				formFields[fname] = formField(fname, facts.PrimitiveType(facts.BytesPrim()), true)
-				manualFormFields[fname] = true
-				formHasFile = true
+				addMultipartFileField(formFields, manualFormFields, &formHasFile, fname)
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "multipart field name is dynamic")
 			}
@@ -2847,6 +2913,17 @@ func formField(name string, schema facts.Type, required bool) facts.FieldFact {
 		ValidatorRejectsNull:      false,
 		Schema:                    schema,
 	}
+}
+
+func addMultipartFileField(
+	formFields map[string]facts.FieldFact,
+	manualFormFields map[string]bool,
+	formHasFile *bool,
+	name string,
+) {
+	formFields[name] = formField(name, facts.PrimitiveType(facts.BytesPrim()), true)
+	manualFormFields[name] = true
+	*formHasFile = true
 }
 
 func isFormContentType(contentType string) bool {

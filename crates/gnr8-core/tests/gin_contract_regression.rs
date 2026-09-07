@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use gnr8_engine::graph::{ApiGraph, Prim, Type};
+use gnr8_engine::graph_artifact::GraphArtifact;
 use gnr8_engine::sdk::prelude::*;
 
 const FIXTURE_DIR: &str = concat!(
@@ -107,6 +109,118 @@ fn artifact<'a>(outcome: &'a gnr8_engine::pipeline::PipelineOutcome, path: &str)
         .unwrap_or_else(|| panic!("missing artifact {path}"))
         .text
         .as_str()
+}
+
+fn graph_artifact(outcome: &gnr8_engine::pipeline::PipelineOutcome) -> GraphArtifact {
+    serde_json::from_str(artifact(outcome, "generated/gnr8.graph.json"))
+        .expect("generated graph artifact must deserialize")
+}
+
+fn multipart_schema<'a>(graph: &'a ApiGraph, operation_id: &str) -> &'a gnr8_engine::graph::Schema {
+    let operation = graph
+        .operations
+        .iter()
+        .find(|operation| operation.id == operation_id)
+        .unwrap_or_else(|| panic!("missing graph operation {operation_id}"));
+    assert!(operation.request_body_required, "{operation:#?}");
+    assert_eq!(
+        operation.request_body_content_type.as_deref(),
+        Some("multipart/form-data"),
+        "{operation:#?}"
+    );
+    let schema_id = &operation
+        .request_body
+        .as_ref()
+        .unwrap_or_else(|| panic!("missing request body for {operation_id}"))
+        .ref_id;
+    graph
+        .schemas
+        .iter()
+        .find(|schema| schema.id == *schema_id)
+        .unwrap_or_else(|| panic!("missing request schema {schema_id}"))
+}
+
+fn assert_required_binary_field(graph: &ApiGraph, operation_id: &str, name: &str) {
+    let schema = multipart_schema(graph, operation_id);
+    let Type::Object(fields) = &schema.body else {
+        panic!("multipart schema must be an object: {schema:#?}");
+    };
+    let field = fields
+        .iter()
+        .find(|field| field.json_name == name)
+        .unwrap_or_else(|| panic!("missing multipart field {name}: {schema:#?}"));
+    assert!(field.validator_requires_presence, "{field:#?}");
+    assert!(!field.deserializer_accepts_absent, "{field:#?}");
+    assert_eq!(field.schema, Type::Primitive(Prim::Bytes), "{field:#?}");
+}
+
+fn assert_graph_request_contracts(graph: &ApiGraph) {
+    assert_required_binary_field(graph, "contextFormFile", "asset");
+    assert_required_binary_field(graph, "requestFormFile", "asset");
+    assert_eq!(
+        multipart_schema(graph, "contextFormFile").body,
+        multipart_schema(graph, "requestFormFile").body,
+        "both native access paths must produce one downstream multipart shape"
+    );
+
+    assert_required_binary_field(graph, "requestFormFiles", "primaryImage");
+    assert_required_binary_field(graph, "requestFormFiles", "supportingDocument");
+    let request_files = multipart_schema(graph, "requestFormFiles");
+    let Type::Object(fields) = &request_files.body else {
+        panic!("multipart schema must be an object: {request_files:#?}");
+    };
+    let caption = fields
+        .iter()
+        .find(|field| field.json_name == "caption")
+        .unwrap_or_else(|| panic!("missing composed form field: {request_files:#?}"));
+    assert_eq!(caption.schema, Type::Primitive(Prim::String));
+    assert!(
+        fields.iter().all(|field| field.json_name != "ignored"),
+        "an unrelated net/http request must not contribute multipart fields: {request_files:#?}"
+    );
+    assert!(
+        graph
+            .operations
+            .iter()
+            .find(|operation| operation.id == "requestFormFiles")
+            .is_some_and(|operation| {
+                operation
+                    .params
+                    .iter()
+                    .any(|param| param.name == "collectionId" && param.required)
+                    && operation.params.iter().any(|param| {
+                        param.name == "X-Upload-Trace"
+                            && param.location == "header"
+                            && !param.required
+                    })
+            }),
+        "multipart extraction must compose with existing request facts: {graph:#?}"
+    );
+
+    for operation_id in ["dynamicRequestFormFile", "redirectFile"] {
+        let operation = graph
+            .operations
+            .iter()
+            .find(|operation| operation.id == operation_id)
+            .unwrap_or_else(|| panic!("missing graph operation {operation_id}"));
+        assert!(
+            operation.request_body.is_none(),
+            "unrepresentable or unrelated Request access must not invent a body: {operation:#?}"
+        );
+    }
+    assert!(
+        graph.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "request.body.unresolved"
+                && diagnostic.operation.as_deref()
+                    == Some("POST /v1/files/form-file/request-dynamic")
+                && diagnostic.subject.as_deref() == Some("Request.FormFile")
+                && diagnostic
+                    .message
+                    .contains("multipart field name is dynamic")
+        }),
+        "missing targeted Request.FormFile diagnostic: {:#?}",
+        graph.diagnostics
+    );
 }
 
 fn assert_typescript_client(ts_client: &str) {
@@ -211,6 +325,14 @@ fn assert_python_models(py_models: &str) {
         py_models.contains("raw: Optional[dict[str, Any]]"),
         "{py_models}"
     );
+    assert_eq!(
+        py_models.matches("    asset: bytes").count(),
+        2,
+        "both FormFile access paths must expose the same Python bytes field:\n{py_models}"
+    );
+    for field in ["    primary_image: bytes", "    supporting_document: bytes"] {
+        assert!(py_models.contains(field), "missing {field}:\n{py_models}");
+    }
 }
 
 fn assert_openapi(openapi: &str) {
@@ -289,6 +411,59 @@ fn assert_openapi_request_contracts(openapi: &str) {
             && update_upload.contains("required: true"),
         "{update_upload}"
     );
+
+    for (path, schema_name) in [
+        ("/v1/files/form-file/context", "ContextFormFileFormRequest"),
+        ("/v1/files/form-file/request", "RequestFormFileFormRequest"),
+    ] {
+        let operation = path_section(openapi, path);
+        assert!(
+            operation.contains("requestBody:")
+                && operation.contains("required: true")
+                && operation.contains("multipart/form-data:")
+                && operation.contains(&format!("#/components/schemas/{schema_name}")),
+            "{operation}"
+        );
+        let schema = component_section(openapi, schema_name);
+        assert!(
+            schema.contains("asset:")
+                && schema.contains("format: binary")
+                && schema.contains("required: [asset]"),
+            "{schema}"
+        );
+    }
+
+    let request_files = path_section(openapi, "/v1/files/form-file/request-parts/{collectionId}");
+    assert!(
+        request_files.contains("multipart/form-data:")
+            && request_files.contains("name: collectionId")
+            && request_files.contains("name: X-Upload-Trace"),
+        "{request_files}"
+    );
+    let request_files_schema = component_section(openapi, "RequestFormFilesFormRequest");
+    for field in ["caption:", "primaryImage:", "supportingDocument:"] {
+        assert!(
+            request_files_schema.contains(field),
+            "missing {field} in {request_files_schema}"
+        );
+    }
+    assert_eq!(
+        request_files_schema.matches("format: binary").count(),
+        2,
+        "{request_files_schema}"
+    );
+    assert!(
+        request_files_schema.contains("required: [primaryImage, supportingDocument]"),
+        "{request_files_schema}"
+    );
+
+    for path in [
+        "/v1/files/form-file/request-dynamic",
+        "/v1/files/{fileId}/redirect",
+    ] {
+        let operation = path_section(openapi, path);
+        assert!(!operation.contains("requestBody:"), "{operation}");
+    }
 }
 
 fn assert_openapi_response_contracts(openapi: &str) {
@@ -367,6 +542,25 @@ fn path_section<'a>(openapi: &'a str, path: &str) -> &'a str {
     section.split("\n  '").next().unwrap_or(section)
 }
 
+fn component_section<'a>(openapi: &'a str, name: &str) -> &'a str {
+    let marker = format!("    {name}:\n");
+    let section = openapi
+        .split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing OpenAPI component {name}"));
+    let end = section
+        .match_indices("\n    ")
+        .find_map(|(index, marker)| {
+            section
+                .as_bytes()
+                .get(index + marker.len())
+                .is_some_and(|next| *next != b' ')
+                .then_some(index)
+        })
+        .unwrap_or(section.len());
+    &section[..end]
+}
+
 fn assert_go_operations(go_ops: &str) {
     assert!(go_ops.contains("\"PATCH\""), "{go_ops}");
     assert!(go_ops.contains("[]byte"), "{go_ops}");
@@ -393,17 +587,75 @@ fn assert_go_operations(go_ops: &str) {
     );
 }
 
+fn assert_multipart_sdk_surfaces(ts_client: &str, go_models: &str, go_ops: &str) {
+    assert_eq!(
+        ts_client
+            .matches("body: { asset: Blob | ArrayBuffer | Uint8Array }")
+            .count(),
+        2,
+        "both FormFile access paths must expose the same TypeScript body:\n{ts_client}"
+    );
+    for field in [
+        "primaryImage: Blob | ArrayBuffer | Uint8Array",
+        "supportingDocument: Blob | ArrayBuffer | Uint8Array",
+    ] {
+        assert!(ts_client.contains(field), "missing {field}:\n{ts_client}");
+    }
+    assert!(
+        ts_client.contains("form.append(key, value);")
+            && !ts_client.contains("form.append(key, value, key);"),
+        "Blob/File values must retain their supplied filename:\n{ts_client}"
+    );
+
+    assert_eq!(
+        go_models
+            .lines()
+            .filter(|line| {
+                line.contains("Asset")
+                    && line.contains("MultipartFile")
+                    && line.contains("`json:\"asset\"`")
+            })
+            .count(),
+        2,
+        "both FormFile access paths must expose the same filename-carrying Go field:\n{go_models}"
+    );
+    for field in [
+        ("PrimaryImage", "`json:\"primaryImage\"`"),
+        ("SupportingDocument", "`json:\"supportingDocument\"`"),
+    ] {
+        assert!(
+            go_models.lines().any(|line| {
+                line.contains(field.0) && line.contains("MultipartFile") && line.contains(field.1)
+            }),
+            "missing {}: {go_models}",
+            field.0
+        );
+    }
+    assert!(
+        go_ops.contains("type MultipartFile struct {")
+            && go_ops.contains("Filename string")
+            && go_ops
+                .contains("func NewMultipartFile(filename string, content []byte) MultipartFile"),
+        "Go multipart files must carry caller-supplied filenames:\n{go_ops}"
+    );
+}
+
 #[test]
 fn go_gin_contract_pipeline_generates_expected_sdk_surfaces() {
     let Some(outcome) = run_pipeline() else {
         return;
     };
 
-    assert_typescript_client(artifact(&outcome, "generated/ts/client.ts"));
+    assert_graph_request_contracts(&graph_artifact(&outcome).graph);
+    let ts_client = artifact(&outcome, "generated/ts/client.ts");
+    let go_models = artifact(&outcome, "generated/go/models.go");
+    let go_ops = artifact(&outcome, "generated/go/operations.go");
+    assert_typescript_client(ts_client);
     assert_typescript_models(artifact(&outcome, "generated/ts/models.ts"));
     assert_python_models(artifact(&outcome, "generated/py/models.py"));
     assert_openapi(artifact(&outcome, "generated/openapi.yaml"));
-    assert_go_operations(artifact(&outcome, "generated/go/operations.go"));
+    assert_go_operations(go_ops);
+    assert_multipart_sdk_surfaces(ts_client, go_models, go_ops);
 
     assert!(
         outcome.diagnostics.iter().any(|diagnostic| {

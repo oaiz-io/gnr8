@@ -9,6 +9,14 @@ must move the minor version.
 
 ## Unreleased
 
+### Fixed
+
+- **Go/Gin extraction recognizes a multipart file read through `c.Request.FormFile`.** A file part
+  reached through the context's `net/http` request now contributes the same required binary field as
+  `c.FormFile`, composes with `PostForm` parts and typed bindings, and resolves its field name by the
+  same rules on both access paths. A `FormFile` call on an unrelated `http.Request` still contributes
+  nothing, and a dynamic field name is reported as `request.body.unresolved` rather than guessed.
+
 ## 0.12.2 — 2026-09-06
 
 ### Added

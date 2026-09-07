@@ -110,6 +110,41 @@ func TestRequestBodyVariantsAndRedirectPolicy(t *testing.T) {
 		}
 	}
 
+	for _, test := range []struct {
+		name     string
+		filename string
+		call     func() error
+	}{
+		{
+			name:     "Gin Context.FormFile",
+			filename: "context-asset.txt",
+			call: func() error {
+				_, err := client.ContextFormFile(context.Background(), ContextFormFileFormRequest{
+					Asset: NewMultipartFile("context-asset.txt", []byte("context")),
+				})
+				return err
+			},
+		},
+		{
+			name:     "net/http Request.FormFile",
+			filename: "request-asset.txt",
+			call: func() error {
+				_, err := client.RequestFormFile(context.Background(), RequestFormFileFormRequest{
+					Asset: NewMultipartFile("request-asset.txt", []byte("request")),
+				})
+				return err
+			},
+		},
+	} {
+		if err := test.call(); err != nil {
+			t.Fatalf("%s upload: %v", test.name, err)
+		}
+		got := transport.requests[len(transport.requests)-1]
+		if filename := multipartFilename(t, got, "asset"); filename != test.filename {
+			t.Fatalf("%s filename = %q, want %q", test.name, filename, test.filename)
+		}
+	}
+
 	if _, err := client.SearchItems(context.Background(), SearchItemsParams{Page: 1, Q: ""}); err != nil {
 		t.Fatalf("search without optional offset: %v", err)
 	}
@@ -173,4 +208,27 @@ func multipartParts(t *testing.T, request capturedRequest) map[string][][]byte {
 		parts[part.FormName()] = append(parts[part.FormName()], value)
 	}
 	return parts
+}
+
+func multipartFilename(t *testing.T, request capturedRequest, field string) string {
+	t.Helper()
+	mediaType, params, err := mime.ParseMediaType(request.contentType)
+	if err != nil || mediaType != "multipart/form-data" {
+		t.Fatalf("multipart Content-Type %q: %v", request.contentType, err)
+	}
+	reader := multipart.NewReader(strings.NewReader(string(request.body)), params["boundary"])
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read multipart body: %v", err)
+		}
+		if part.FormName() == field {
+			return part.FileName()
+		}
+	}
+	t.Fatalf("missing multipart field %q", field)
+	return ""
 }

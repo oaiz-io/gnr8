@@ -44,8 +44,10 @@ Recognized route facts include:
 - `Query`, `DefaultQuery`, `GetQuery`, array/map query accessors.
 - `GetHeader` and `Request.Header.Get` headers, `Cookie` cookies. A read is optional unless the
   handler or a bounded helper rejects an absent value.
-- `PostForm`, `DefaultPostForm`, `GetPostForm`, and `FormFile` form values. A string part becomes
-  required when an empty value is explicitly rejected; real defaults remain optional.
+- `PostForm`, `DefaultPostForm`, `GetPostForm`, and file reads through either `FormFile` or
+  `Request.FormFile` form values. A string part becomes required when an empty value is explicitly
+  rejected; a file part is required and retains its exact literal field name; real defaults remain
+  optional.
 - `ShouldBindJSON`/`BindJSON`; generic bind variants for typed form, multipart, query, and header
   structs.
 - JSON responses, response status/media facts, constant redirects, response headers, Go structs,
@@ -90,9 +92,11 @@ Recognized route facts include:
 Dynamic route strings are skipped with a diagnostic. A dynamic group prefix is omitted and reported.
 A multipart form's literal file-map access, such as `form.File["files"]`, is a repeated binary part,
 including when it is reached through nested module-owned or generic helpers. It may coexist with a
-JSON body when the handler selects between media types. A computed file-map key has no bounded
-request shape and is reported rather than guessed. Dynamic parameter names, untraversable helpers,
-and ambiguous handlers are diagnosed for the same reason. An
+JSON body when the handler selects between media types. A computed file-map key or a dynamic
+`Request.FormFile` name has no bounded request shape and is reported as `request.body.unresolved`
+rather than guessed. Other `Request` reads and a `FormFile` call on an unrelated `http.Request` do
+not imply a multipart body. Dynamic parameter names, untraversable helpers, and ambiguous handlers
+are diagnosed for the same reason. An
 `Authorization` read is represented by security configured in the `.gnr8/` crate, never by an
 ordinary header parameter; an unresolved read produces `security.requirement.missing` until a
 matching bearer, basic, or Authorization-header scheme covers the operation.

@@ -197,9 +197,11 @@ replace github.com/gin-gonic/gin => ./ginstub
 	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
 	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
 
+import "net/http"
+
 type HandlerFunc func(*Context)
 type Engine struct{}
-type Context struct{}
+type Context struct{ Request *http.Request }
 
 func (e *Engine) POST(string, HandlerFunc) {}
 func (c *Context) ShouldBind(any) error { return nil }
@@ -229,7 +231,12 @@ type UploadResult struct {
 func (s Server) Register() {
 	s.R.POST("/upload", s.uploadTyped)
 	s.R.POST("/loose", s.uploadLoose)
+	s.R.POST("/request", s.uploadRequest)
+	s.R.POST("/named-gin", s.uploadNamedGin)
+	s.R.POST("/named-request", s.uploadNamedRequest)
 }
+
+func fileFieldName() string { return "named" }
 
 func (s Server) uploadTyped(c *gin.Context) {
 	var in UploadForm
@@ -240,6 +247,22 @@ func (s Server) uploadTyped(c *gin.Context) {
 func (s Server) uploadLoose(c *gin.Context) {
 	_, _ = c.FormFile("file")
 	_ = c.PostForm("name")
+	c.JSON(200, UploadResult{})
+}
+
+func (s Server) uploadRequest(c *gin.Context) {
+	_, _, _ = c.Request.FormFile("file")
+	_ = c.PostForm("name")
+	c.JSON(200, UploadResult{})
+}
+
+func (s Server) uploadNamedGin(c *gin.Context) {
+	_, _ = c.FormFile(fileFieldName())
+	c.JSON(200, UploadResult{})
+}
+
+func (s Server) uploadNamedRequest(c *gin.Context) {
+	_, _, _ = c.Request.FormFile(fileFieldName())
 	c.JSON(200, UploadResult{})
 }
 `)
@@ -286,6 +309,49 @@ func (s Server) uploadLoose(c *gin.Context) {
 	}
 	if primName(seen["name"].Schema) != facts.PrimString || seen["name"].ValidatorRequiresPresence {
 		t.Fatalf("synthetic name field should be optional string, got %+v", seen["name"])
+	}
+
+	request := got["uploadRequest"]
+	if request.RequestBody == nil || request.RequestBody.RefID != "__synthetic.UploadRequestFormRequest" || request.RequestBodyContentType != "multipart/form-data" {
+		t.Fatalf("net/http Request.FormFile should synthesize a multipart request schema, got %+v", request)
+	}
+	if len(request.Schemas) != 1 {
+		t.Fatalf("net/http Request.FormFile synthetic schemas: %+v", request.Schemas)
+	}
+	requestFields, ok := request.Schemas[0].Body.Of.([]facts.FieldFact)
+	if !ok {
+		t.Fatalf("net/http Request.FormFile schema should be object fields, got %+v", request.Schemas[0].Body)
+	}
+	requestSeen := map[string]facts.FieldFact{}
+	for _, field := range requestFields {
+		requestSeen[field.JSONName] = field
+	}
+	if primName(requestSeen["file"].Schema) != facts.PrimBytes || !requestSeen["file"].ValidatorRequiresPresence || primName(requestSeen["name"].Schema) != facts.PrimString {
+		t.Fatalf("net/http Request.FormFile should share Gin's multipart field representation: %+v", requestSeen)
+	}
+
+	// A field name the handler-scoped resolver can reach must resolve the same way
+	// through both access paths; otherwise Request.FormFile silently drops the body.
+	for _, handler := range []string{"uploadNamedGin", "uploadNamedRequest"} {
+		named := got[handler]
+		if named.RequestBody == nil || named.RequestBodyContentType != "multipart/form-data" {
+			t.Fatalf("%s should synthesize a multipart request body, got %+v", handler, named)
+		}
+		if len(named.Schemas) != 1 {
+			t.Fatalf("%s synthetic schemas: %+v", handler, named.Schemas)
+		}
+		namedFields, ok := named.Schemas[0].Body.Of.([]facts.FieldFact)
+		if !ok || len(namedFields) != 1 {
+			t.Fatalf("%s schema should hold one object field, got %+v", handler, named.Schemas[0].Body)
+		}
+		if namedFields[0].JSONName != "named" || primName(namedFields[0].Schema) != facts.PrimBytes || !namedFields[0].ValidatorRequiresPresence {
+			t.Fatalf("%s should resolve the constant-returning helper name: %+v", handler, namedFields[0])
+		}
+	}
+	for _, diagnostic := range diags.Items() {
+		if diagnostic.Code == "request.body.unresolved" {
+			t.Fatalf("no upload handler has a dynamic field name: %+v", diagnostic)
+		}
 	}
 }
 
@@ -1505,6 +1571,7 @@ func queryValue(c *gin.Context, name string) string {
 
 func MultipartParts(c *gin.Context, fileName, titleName string) {
 	_, _ = c.FormFile(fileName)
+	_, _, _ = c.Request.FormFile("requestAttachment")
 	_ = c.PostForm(titleName)
 }
 `)
@@ -1665,7 +1732,7 @@ func (s Server) search(c *gin.Context) {
 	for _, field := range fields {
 		byName[field.JSONName] = field
 	}
-	if primName(byName["attachment"].Schema) != facts.PrimBytes || !byName["attachment"].ValidatorRequiresPresence || primName(byName["title"].Schema) != facts.PrimString || primName(byName["note"].Schema) != facts.PrimString {
+	if primName(byName["attachment"].Schema) != facts.PrimBytes || !byName["attachment"].ValidatorRequiresPresence || primName(byName["requestAttachment"].Schema) != facts.PrimBytes || !byName["requestAttachment"].ValidatorRequiresPresence || primName(byName["title"].Schema) != facts.PrimString || primName(byName["note"].Schema) != facts.PrimString {
 		t.Fatalf("multipart fields mismatch: %+v", byName)
 	}
 	if primName(byName["boundFile"].Schema) != facts.PrimBytes || !byName["boundFile"].ValidatorRequiresPresence {
