@@ -232,7 +232,11 @@ func (s Server) Register() {
 	s.R.POST("/upload", s.uploadTyped)
 	s.R.POST("/loose", s.uploadLoose)
 	s.R.POST("/request", s.uploadRequest)
+	s.R.POST("/named-gin", s.uploadNamedGin)
+	s.R.POST("/named-request", s.uploadNamedRequest)
 }
+
+func fileFieldName() string { return "named" }
 
 func (s Server) uploadTyped(c *gin.Context) {
 	var in UploadForm
@@ -249,6 +253,16 @@ func (s Server) uploadLoose(c *gin.Context) {
 func (s Server) uploadRequest(c *gin.Context) {
 	_, _, _ = c.Request.FormFile("file")
 	_ = c.PostForm("name")
+	c.JSON(200, UploadResult{})
+}
+
+func (s Server) uploadNamedGin(c *gin.Context) {
+	_, _ = c.FormFile(fileFieldName())
+	c.JSON(200, UploadResult{})
+}
+
+func (s Server) uploadNamedRequest(c *gin.Context) {
+	_, _, _ = c.Request.FormFile(fileFieldName())
 	c.JSON(200, UploadResult{})
 }
 `)
@@ -314,6 +328,30 @@ func (s Server) uploadRequest(c *gin.Context) {
 	}
 	if primName(requestSeen["file"].Schema) != facts.PrimBytes || !requestSeen["file"].ValidatorRequiresPresence || primName(requestSeen["name"].Schema) != facts.PrimString {
 		t.Fatalf("net/http Request.FormFile should share Gin's multipart field representation: %+v", requestSeen)
+	}
+
+	// A field name the handler-scoped resolver can reach must resolve the same way
+	// through both access paths; otherwise Request.FormFile silently drops the body.
+	for _, handler := range []string{"uploadNamedGin", "uploadNamedRequest"} {
+		named := got[handler]
+		if named.RequestBody == nil || named.RequestBodyContentType != "multipart/form-data" {
+			t.Fatalf("%s should synthesize a multipart request body, got %+v", handler, named)
+		}
+		if len(named.Schemas) != 1 {
+			t.Fatalf("%s synthetic schemas: %+v", handler, named.Schemas)
+		}
+		namedFields, ok := named.Schemas[0].Body.Of.([]facts.FieldFact)
+		if !ok || len(namedFields) != 1 {
+			t.Fatalf("%s schema should hold one object field, got %+v", handler, named.Schemas[0].Body)
+		}
+		if namedFields[0].JSONName != "named" || primName(namedFields[0].Schema) != facts.PrimBytes || !namedFields[0].ValidatorRequiresPresence {
+			t.Fatalf("%s should resolve the constant-returning helper name: %+v", handler, namedFields[0])
+		}
+	}
+	for _, diagnostic := range diags.Items() {
+		if diagnostic.Code == "request.body.unresolved" {
+			t.Fatalf("no upload handler has a dynamic field name: %+v", diagnostic)
+		}
 	}
 }
 

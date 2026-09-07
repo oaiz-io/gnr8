@@ -1164,8 +1164,17 @@ func requestHeaderGet(info *gotypes.Info, call *ast.CallExpr) (string, bool, boo
 	return requestHeaderGetInFrame(helperFrame{decl: handlerDecl{info: info}}, call)
 }
 
-func requestFormFile(info *gotypes.Info, call *ast.CallExpr) (string, bool, bool) {
-	return requestFormFileInFrame(helperFrame{decl: handlerDecl{info: info}}, call)
+// requestFormFile matches the same call shape as requestFormFileInFrame but
+// resolves the field name with the handler-scoped resolver, so a name that
+// c.FormFile resolves in a handler body resolves identically through
+// c.Request.FormFile. A helper frame has its own resolver (bindings from the
+// call site), which is why the two entry points differ in that one step.
+func (a *Analyzer) requestFormFile(h handlerDecl, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestFormFileCall(helperFrame{decl: h}, call) {
+		return "", false, false
+	}
+	name, resolved := a.callStringArg(h, call, 0)
+	return name, true, resolved
 }
 
 func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
@@ -1188,22 +1197,26 @@ func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, boo
 	return name, true, resolved
 }
 
-// requestFormFileInFrame recognizes net/http's Request.FormFile only when the
+// isRequestFormFileCall recognizes net/http's Request.FormFile only when the
 // request is the first-class Request field of a typed Gin context. A local
 // *http.Request has the same method but is not evidence about the routed
 // request, so receiver provenance is part of the match.
-func requestFormFileInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
+func isRequestFormFileCall(frame helperFrame, call *ast.CallExpr) bool {
 	if call == nil || frame.decl.info == nil || len(call.Args) == 0 {
-		return "", false, false
+		return false
 	}
 	method, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || method.Sel == nil || method.Sel.Name != "FormFile" ||
 		!isNamedType(frame.decl.info.TypeOf(method.X), "net/http", "Request") {
-		return "", false, false
+		return false
 	}
 	request, ok := method.X.(*ast.SelectorExpr)
-	if !ok || request.Sel == nil || request.Sel.Name != "Request" ||
-		!isGinContextType(frameTypeOf(frame, request.X)) {
+	return ok && request.Sel != nil && request.Sel.Name == "Request" &&
+		isGinContextType(frameTypeOf(frame, request.X))
+}
+
+func requestFormFileInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestFormFileCall(frame, call) {
 		return "", false, false
 	}
 	name, resolved := frameCallStringArg(frame, call, 0)
@@ -1298,7 +1311,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					reportDirectDynamicParameter(diags, h, route, call, "Request.Header.Get")
 				}
 			}
-			if fname, matched, resolved := requestFormFile(h.info, call); matched {
+			if fname, matched, resolved := a.requestFormFile(h, call); matched {
 				if resolved {
 					addMultipartFileField(formFields, manualFormFields, &formHasFile, fname)
 				} else {
