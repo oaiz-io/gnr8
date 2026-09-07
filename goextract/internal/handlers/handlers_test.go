@@ -964,6 +964,8 @@ func (s Server) Register() {
 	s.R.GET("/closure-write", s.closureWrite)
 	s.R.GET("/bind-then-guard", s.bindThenGuard)
 	s.R.GET("/guard-then-bind", s.guardThenBind)
+	s.R.GET("/guard-then-helper", s.guardThenHelper)
+	s.R.GET("/helper-then-guard", s.helperThenGuard)
 }
 
 func (s Server) required(c *gin.Context) {
@@ -1175,6 +1177,27 @@ func (s Server) guardThenBind(c *gin.Context) {
 	c.JSON(200, Result{OK: bound.Limit > 0})
 }
 
+func (s Server) guardThenHelper(c *gin.Context) {
+	if c.Query("cursor") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{OK: parseCursor(c.Query("cursor")) > 0})
+}
+
+func (s Server) helperThenGuard(c *gin.Context) {
+	cursor := parseCursor(c.Query("cursor"))
+	if c.Query("cursor") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{OK: cursor > 0})
+}
+
+func parseCursor(raw string) int64 {
+	return int64(len(raw))
+}
+
 func applyDefault(value *string) {
 	if *value == "" {
 		*value = "fallback"
@@ -1254,6 +1277,15 @@ func helperRejects(string) bool { return false }
 		bound, ok := paramByName(byPath[path].Params, "limit")
 		if !ok || !bound.Required || primName(bound.Schema) != "int" {
 			t.Fatalf("%s should combine the bound int schema with the proven requiredness, got %+v", path, bound)
+		}
+	}
+
+	// Same for a module-owned parser beside the guard: the helper still states the
+	// schema after the raw read has settled requiredness.
+	for _, path := range []string{"/guard-then-helper", "/helper-then-guard"} {
+		cursor, ok := paramByName(byPath[path].Params, "cursor")
+		if !ok || !cursor.Required || primName(cursor.Schema) != "int" {
+			t.Fatalf("%s should combine the parsed int schema with the proven requiredness, got %+v", path, cursor)
 		}
 	}
 }

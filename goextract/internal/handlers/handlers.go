@@ -2533,10 +2533,11 @@ func (a *Analyzer) analyzeQueryHelperCall(
 	resolvedParam map[string]bool,
 	diags *diag.Accumulator,
 ) {
+	// Both handoffs below go through addExtractedParameter rather than bailing when
+	// the parameter is already resolved: a helper read still states the schema the
+	// raw read cannot, and skipping it made the emitted type depend on whether the
+	// guard or the parser came first in the handler.
 	if param, ok := a.queryParamFromModuleHelper(h, call); ok {
-		if resolvedParam["query/"+param.Name] {
-			return
-		}
 		a.addExtractedParameter(cf, seenParam, resolvedParam, param, true, route, diags)
 		return
 	}
@@ -2553,9 +2554,6 @@ func (a *Analyzer) analyzeQueryHelperCall(
 	}
 	param, requiredKnown, ok := a.queryParamFromHelper(h, call, query, pname)
 	if !ok {
-		return
-	}
-	if requiredKnown && resolvedParam["query/"+param.Name] {
 		return
 	}
 	a.addExtractedParameter(cf, seenParam, resolvedParam, param, requiredKnown, route, diags)
