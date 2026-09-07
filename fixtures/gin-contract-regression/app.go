@@ -136,7 +136,23 @@ func RegisterRoutes(r *gin.Engine, h *Handler) {
 	items.GET("/directional", h.directional)
 	items.POST("/validated", h.validated)
 	items.POST("/shared", h.shared)
+	items.POST("/queueable", h.queueable)
 	items.DELETE("/:itemId", h.deleteItem)
+}
+
+// queueable answers a typed body on one success and plain text on another, the shape a
+// single-return-type SDK method cannot carry whole.
+func (h *Handler) queueable(c *gin.Context) {
+	var body LoginRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, MessageResponse{Message: err.Error()})
+		return
+	}
+	if body.Email == "" {
+		c.String(http.StatusAccepted, "queued")
+		return
+	}
+	c.JSON(http.StatusOK, MessageResponse{Message: "done"})
 }
 
 func (h *Handler) login(c *gin.Context) {

@@ -521,6 +521,17 @@ fn assert_openapi_request_contracts(openapi: &str) {
 }
 
 fn assert_openapi_response_contracts(openapi: &str) {
+    // The document states both of `queueable`'s successes in full. Only the SDK's single return
+    // type has to narrow, and it says so on the method rather than by rewriting the response.
+    let queueable = path_section(openapi, "/v1/items/queueable");
+    assert!(
+        queueable.contains("'200':")
+            && queueable.contains("$ref: '#/components/schemas/MessageResponse'")
+            && queueable.contains("'202':")
+            && queueable.contains("text/plain:"),
+        "{queueable}"
+    );
+
     let redirect = path_section(openapi, "/v1/files/{fileId}/redirect");
     assert!(
         redirect.contains("'307':")
@@ -627,6 +638,18 @@ fn component_section<'a>(openapi: &'a str, name: &str) -> &'a str {
 
 fn assert_go_operations(go_ops: &str) {
     assert!(go_ops.contains("\"PATCH\""), "{go_ops}");
+    // `queueable` answers MessageResponse on 200 and plain text on 202. The declared model is
+    // the return type, the opaque status is named on the method, and neither is an error.
+    assert!(
+        go_ops.contains(
+            "// Status 202 answers with a body this method does not return.\n// Read it from a response hook.\nfunc (c *Client) Queueable("
+        ),
+        "{go_ops}"
+    );
+    assert!(
+        go_ops.contains("opts ...RequestOption) (MessageResponse, error)"),
+        "{go_ops}"
+    );
     assert!(go_ops.contains("[]byte"), "{go_ops}");
     assert!(go_ops.contains("io.ReadAll(resp.Body)"), "{go_ops}");
     assert!(go_ops.contains("type AuthAPI struct"), "{go_ops}");

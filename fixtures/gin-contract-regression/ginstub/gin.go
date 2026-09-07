@@ -32,6 +32,7 @@ func (c *Context) GetHeader(string) string                                      
 func (c *Context) Cookie(string) (string, error)                                   { return "", nil }
 func (c *Context) ShouldBindJSON(any) error                                        { return nil }
 func (c *Context) JSON(int, any)                                                   {}
+func (c *Context) String(int, string, ...any)                                      {}
 func (c *Context) Status(int)                                                      {}
 func (c *Context) AbortWithStatus(int)                                             {}
 func (c *Context) Header(string, string)                                           {}
