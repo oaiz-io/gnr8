@@ -376,7 +376,7 @@ Resolution is via `go/types` (alias/import-robust), not string matching.
 |---|---|---|
 | route | `group := r.Group(...)` then `group.GET/POST/PUT/DELETE(path, handler)` | Static nested groups compose into the route path. `path` is group-relative; final path = `base_path` + grouped path. |
 | path param | `:name` segment + `c.Param("name")` | → OpenAPI `{name}`. |
-| query param | `c.Query("name")` | type=`string`; required only when every continuing path excludes the empty value, optional when an explicit empty/non-empty branch proves omission can continue, otherwise diagnosed as unresolved. |
+| query param | `c.Query("name")` | type=`string`; required when every path taken for an absent value answers a known 4xx, optional when every such path answers a known 2xx/3xx after an explicit empty/non-empty branch, otherwise diagnosed as unresolved. |
 | optional query presence | `value, present := c.GetQuery("name")` | type=`string`, `required:false`. |
 | request body | `c.ShouldBindJSON(&x)` where `x: T` | T → request schema. |
 | response | `c.JSON(http.StatusXxx, v)` where `v: T` | status→T. Unresolved/dynamic → diagnostic. |
