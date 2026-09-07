@@ -2515,6 +2515,7 @@ type Context struct{}
 
 func (e *Engine) GET(string, HandlerFunc) {}
 func (c *Context) String(int, string, ...any) {}
+func (c *Context) HTML(int, string, any) {}
 func (c *Context) IndentedJSON(int, any) {}
 func (c *Context) PureJSON(int, any) {}
 func (c *Context) AsciiJSON(int, any) {}
@@ -2534,6 +2535,7 @@ type Response struct { Message string `+"`"+`json:"message"`+"`"+` }
 
 func (s Server) Register() {
 	s.R.GET("/string", s.stringResponse)
+	s.R.GET("/html", s.html)
 	s.R.GET("/indented", s.indentedJSON)
 	s.R.GET("/pure", s.pureJSON)
 	s.R.GET("/ascii", s.asciiJSON)
@@ -2548,6 +2550,7 @@ func (s Server) Register() {
 func renderXML(c *gin.Context) { c.XML(203, Response{Message: "xml"}) }
 
 func (s Server) stringResponse(c *gin.Context) { c.String(200, "pong %s", "now") }
+func (s Server) html(c *gin.Context) { c.HTML(200, "index.tmpl", Response{Message: "html"}) }
 func (s Server) indentedJSON(c *gin.Context) { c.IndentedJSON(200, Response{Message: "indented"}) }
 func (s Server) pureJSON(c *gin.Context) { c.PureJSON(200, Response{Message: "pure"}) }
 func (s Server) asciiJSON(c *gin.Context) { c.AsciiJSON(200, Response{Message: "ascii"}) }
@@ -2582,6 +2585,7 @@ func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "pr
 		contentType string
 	}{
 		"stringResponse": {status: 200, contentType: "text/plain"},
+		"html":           {status: 200, contentType: "text/html"},
 		"secureJSON":     {status: 201, contentType: "application/json"},
 		"jsonp":          {status: 202, contentType: "application/javascript"},
 		"xml":            {status: 203, contentType: "application/xml"},
@@ -2598,6 +2602,92 @@ func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "pr
 	for _, diagnostic := range diagnostics.Items() {
 		if diagnostic.Code == "response.missing" || diagnostic.Code == "response.dynamic" {
 			t.Fatalf("recognized Gin renderer should not lose its response: %+v", diagnostic)
+		}
+	}
+}
+
+func TestRecognizedRejectionsMakeHeaderReadsRequired(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/rejections
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+type Error struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) GetHeader(string) string { return "" }
+func (c *Context) AbortWithError(int, error) *Error { return nil }
+func (c *Context) Data(int, string, []byte) {}
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package rejections
+
+import (
+	"errors"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct{ R *gin.Engine }
+type Response struct { OK bool `+"`"+`json:"ok"`+"`"+` }
+
+var errMissing = errors.New("missing")
+
+func (s Server) Register() {
+	s.R.GET("/aborted", s.aborted)
+	s.R.GET("/data", s.data)
+}
+
+func (s Server) aborted(c *gin.Context) {
+	token := c.GetHeader("X-Token")
+	if token == "" {
+		c.AbortWithError(400, errMissing)
+		return
+	}
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) data(c *gin.Context) {
+	trace := c.GetHeader("X-Trace")
+	if trace == "" {
+		c.Data(400, "text/plain", nil)
+		return
+	}
+	c.JSON(200, Response{OK: true})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load rejection fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/rejections", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	// Requiredness reads the same response surface the query proof reads, so a
+	// rejection written with AbortWithError or Data counts exactly as one written
+	// with JSON.
+	for handler, header := range map[string]string{"aborted": "X-Token", "data": "X-Trace"} {
+		param, ok := paramByName(got[handler].Params, header)
+		if !ok || param.Location != "header" || !param.Required {
+			t.Fatalf("%s should reject an absent %s: %+v", handler, header, param)
 		}
 	}
 }
@@ -2642,6 +2732,7 @@ func (s Server) Register() { s.R.POST("/collections", s.collections) }
 func readCollections(c *gin.Context) {
 	_, _ = c.GetQueryMap("helperFilters")
 	_ = c.PostFormArray("helperTags")
+	_ = c.PostFormMap("helperAttributes")
 }
 
 func (s Server) collections(c *gin.Context) {
@@ -2689,16 +2780,29 @@ func (s Server) collections(c *gin.Context) {
 			t.Fatalf("form array field %s mismatch: %+v", name, field)
 		}
 	}
-	for _, name := range []string{"attributes", "optionalAttributes"} {
-		field, exists := byName[name]
-		if !exists || field.Schema.Type != facts.TypeMap || field.ValidatorRequiresPresence {
-			t.Fatalf("form map field %s mismatch: %+v", name, field)
+	// A form map accessor reads `field[key]` parts, which a form body field cannot
+	// state, so it contributes no field and is reported instead of published under a
+	// shape the artifacts would encode differently.
+	for _, name := range []string{"attributes", "optionalAttributes", "helperAttributes"} {
+		if field, exists := byName[name]; exists {
+			t.Fatalf("form map accessor %s must not state a field: %+v", name, field)
 		}
 	}
+	mapReports := 0
 	for _, diagnostic := range diagnostics.Items() {
-		if diagnostic.Code == "request.parameter.unresolved" || diagnostic.Code == "request.body.unresolved" {
+		if diagnostic.Code == "request.parameter.unresolved" {
 			t.Fatalf("constant collection access should resolve completely: %+v", diagnostic)
 		}
+		if diagnostic.Code != "request.body.unresolved" {
+			continue
+		}
+		if !strings.Contains(diagnostic.Message, "field[key]") {
+			t.Fatalf("unexpected form body diagnostic: %+v", diagnostic)
+		}
+		mapReports++
+	}
+	if mapReports != 3 {
+		t.Fatalf("each direct and helper form map accessor should be reported once: got %d", mapReports)
 	}
 }
 

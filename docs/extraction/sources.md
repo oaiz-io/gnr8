@@ -44,12 +44,15 @@ Recognized route facts include:
 - `Query`, `DefaultQuery`, `GetQuery`, and all array/map query accessors, including `GetQueryMap`.
 - `GetHeader` and `Request.Header.Get` headers, `Cookie` cookies. Both header access paths resolve
   constant arguments through the same handler-scoped rules. A read is optional unless the handler
-  or a bounded helper rejects an absent value.
-- `PostForm`, `DefaultPostForm`, `GetPostForm`, `PostFormArray`, `GetPostFormArray`, `PostFormMap`,
-  `GetPostFormMap`, and file reads through either `FormFile` or `Request.FormFile` form values.
-  Collection accessors preserve array/map field shapes. A string part becomes required when an empty
-  value is explicitly rejected; a file part is required and retains its exact literal field name;
-  real defaults remain optional.
+  or a bounded helper rejects an absent value, and a rejection is any known 4xx written through the
+  same `gin.Context` response surface the query proof below reads.
+- `PostForm`, `DefaultPostForm`, `GetPostForm`, `PostFormArray`, `GetPostFormArray`, and file reads
+  through either `FormFile` or `Request.FormFile` form values. `PostFormArray`/`GetPostFormArray`
+  state a repeated string part. A string part becomes required when an empty value is explicitly
+  rejected; a file part is required and retains its exact literal field name; real defaults remain
+  optional. `PostFormMap`/`GetPostFormMap` collect the parts named `field[key]`, a wire shape a form
+  body field cannot state, so they are reported as `request.body.unresolved` rather than published
+  under the flat expansion an object property would mean.
 - `ShouldBindJSON`/`BindJSON`; `ShouldBindQuery`/`BindQuery` and
   `ShouldBindHeader`/`BindHeader`; generic bind variants for typed form, multipart, query, and
   header structs.
@@ -97,12 +100,15 @@ Recognized route facts include:
   OpenAPI object key is always an unconstrained string. Two rules landing on the same value raise
   `request.parameter.ambiguous` and neither is applied.
 
-`String` responses are recorded as opaque `text/plain` bytes. Renderers whose serializer changes or
-wraps the source value are also recorded as opaque bytes with their actual media type:
-`SecureJSON` (`application/json`), `JSONP` (`application/javascript`), `XML`
+`String` (`text/plain`) and `HTML` (`text/html`) responses are recorded as opaque bytes. Renderers
+whose serializer changes or wraps the source value are recorded the same way with their actual media
+type: `SecureJSON` (`application/json`), `JSONP` (`application/javascript`), `XML`
 (`application/xml`), `YAML` (`application/yaml`), `TOML` (`application/toml`), and `ProtoBuf`
 (`application/x-protobuf`). This preserves a truthful transport contract for every built-in SDK
 without inferring a JSON schema for non-JSON bytes or for JSON that Gin may prefix or wrap.
+`Render` and `Negotiate` choose their serializer from a value or from the request's `Accept` header,
+so no media type is stated in the source and the operation keeps `response.missing` rather than a
+guessed one.
 
 ### Direct Gin query requiredness
 

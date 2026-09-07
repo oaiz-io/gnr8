@@ -774,7 +774,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicBodyFieldName(frame, call, traversal, method)
 		}
-	case "PostForm", "DefaultPostForm", "GetPostForm", "PostFormArray", "GetPostFormArray", "PostFormMap", "GetPostFormMap":
+	case "PostForm", "DefaultPostForm", "GetPostForm", "PostFormArray", "GetPostFormArray":
 		if name, ok := frameCallStringArg(frame, call, 0); ok {
 			traversal.manualFormFields[name] = true
 			if _, exists := traversal.formFields[name]; !exists {
@@ -791,6 +791,8 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicBodyFieldName(frame, call, traversal, method)
 		}
+	case "PostFormMap", "GetPostFormMap":
+		a.reportTraversedUnresolvedBody(frame, call, traversal, method, formMapUnrepresentable)
 	}
 }
 
@@ -930,16 +932,26 @@ func (a *Analyzer) reportDynamicBodyFieldName(
 	traversal *contextTraversal,
 	method string,
 ) {
-	if traversal.diagnostics == nil {
-		return
-	}
-	file, line := positionOf(frame.decl.fset, call.Pos())
 	reason := "form field name is dynamic"
 	if method == "FormFile" || method == "Request.FormFile" {
 		reason = "multipart field name is dynamic"
 	}
+	a.reportTraversedUnresolvedBody(frame, call, traversal, method, reason)
+}
+
+func (a *Analyzer) reportTraversedUnresolvedBody(
+	frame helperFrame,
+	call *ast.CallExpr,
+	traversal *contextTraversal,
+	subject string,
+	reason string,
+) {
+	if traversal.diagnostics == nil {
+		return
+	}
+	file, line := positionOf(frame.decl.fset, call.Pos())
 	traversal.diagnostics.RequestBodyUnresolved(
-		method,
+		subject,
 		traversal.route.Method,
 		untypedRouteLabel(traversal.route),
 		reason,
@@ -1797,6 +1809,13 @@ func exprIsObject(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object]b
 	return ok && values[info.ObjectOf(ident)]
 }
 
+// blockRejectsRequest reports whether a block answers the request with a known 4xx,
+// which is what makes a header/cookie/form read required.
+//
+// The classification is ginResponseOutcome's, the same one the query-requiredness
+// proof reads, so one rejection cannot count for a query parameter and not for a
+// header read beside it: naming the response surface twice is how those two answers
+// drift apart.
 func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
 	if block == nil {
 		return false
@@ -1814,13 +1833,7 @@ func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
 		if !ok || recvPkg != routes.GinPkgPath {
 			return true
 		}
-		switch name {
-		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON",
-			"String", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf",
-			"Status", "AbortWithStatus":
-			status, known := statusOf(h.info, call.Args[0])
-			rejects = known && status >= 400 && status < 500
-		}
+		rejects = ginResponseOutcome(h.info, name, call) == queryResponseClientError
 		return !rejects
 	})
 	return rejects
@@ -2080,20 +2093,8 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			}
 		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(h, call, route, &cf, seenStatus, provisionalStatus, diags)
-		case "String":
-			a.analyzeOpaqueResponse(h, call, "text/plain", route, &cf, seenStatus, provisionalStatus, diags)
-		case "SecureJSON":
-			a.analyzeOpaqueResponse(h, call, "application/json", route, &cf, seenStatus, provisionalStatus, diags)
-		case "JSONP":
-			a.analyzeOpaqueResponse(h, call, "application/javascript", route, &cf, seenStatus, provisionalStatus, diags)
-		case "XML":
-			a.analyzeOpaqueResponse(h, call, "application/xml", route, &cf, seenStatus, provisionalStatus, diags)
-		case "YAML":
-			a.analyzeOpaqueResponse(h, call, "application/yaml", route, &cf, seenStatus, provisionalStatus, diags)
-		case "TOML":
-			a.analyzeOpaqueResponse(h, call, "application/toml", route, &cf, seenStatus, provisionalStatus, diags)
-		case "ProtoBuf":
-			a.analyzeOpaqueResponse(h, call, "application/x-protobuf", route, &cf, seenStatus, provisionalStatus, diags)
+		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf":
+			a.analyzeOpaqueResponse(h, call, ginOpaqueRendererMediaType(name), route, &cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(h, call, route, &cf, seenStatus, provisionalStatus, true, diags)
 		case "AbortWithStatus":
@@ -2188,7 +2189,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "multipart field name is dynamic")
 			}
-		case "PostForm", "DefaultPostForm", "GetPostForm", "PostFormArray", "GetPostFormArray", "PostFormMap", "GetPostFormMap":
+		case "PostForm", "DefaultPostForm", "GetPostForm", "PostFormArray", "GetPostFormArray":
 			if fname, ok := a.callStringArg(h, call, 0); ok {
 				manualFormFields[fname] = true
 				if _, seen := formFields[fname]; !seen {
@@ -2205,6 +2206,8 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "form field name is dynamic")
 			}
+		case "PostFormMap", "GetPostFormMap":
+			reportDirectUnresolvedBody(diags, h, route, call, name, formMapUnrepresentable)
 		case "MultipartForm":
 			// Literal accesses through the returned multipart.Form are collected in one
 			// typed pre-pass. The call alone does not state a field name.
@@ -2805,20 +2808,8 @@ func (a *Analyzer) analyzeDelegatedResponses(
 		switch name {
 		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(callee, nested, route, cf, seenStatus, provisionalStatus, diags)
-		case "String":
-			a.analyzeOpaqueResponse(callee, nested, "text/plain", route, cf, seenStatus, provisionalStatus, diags)
-		case "SecureJSON":
-			a.analyzeOpaqueResponse(callee, nested, "application/json", route, cf, seenStatus, provisionalStatus, diags)
-		case "JSONP":
-			a.analyzeOpaqueResponse(callee, nested, "application/javascript", route, cf, seenStatus, provisionalStatus, diags)
-		case "XML":
-			a.analyzeOpaqueResponse(callee, nested, "application/xml", route, cf, seenStatus, provisionalStatus, diags)
-		case "YAML":
-			a.analyzeOpaqueResponse(callee, nested, "application/yaml", route, cf, seenStatus, provisionalStatus, diags)
-		case "TOML":
-			a.analyzeOpaqueResponse(callee, nested, "application/toml", route, cf, seenStatus, provisionalStatus, diags)
-		case "ProtoBuf":
-			a.analyzeOpaqueResponse(callee, nested, "application/x-protobuf", route, cf, seenStatus, provisionalStatus, diags)
+		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf":
+			a.analyzeOpaqueResponse(callee, nested, ginOpaqueRendererMediaType(name), route, cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(callee, nested, route, cf, seenStatus, provisionalStatus, true, diags)
 		case "AbortWithStatus":
@@ -3624,16 +3615,22 @@ func addMultipartFileField(
 	*formHasFile = true
 }
 
+// formMapUnrepresentable is why a `PostFormMap`/`GetPostFormMap` read states no field.
+//
+// Those accessors collect the parts whose names are spelled `field[key]`, and a form
+// body field carries a schema and nothing else — there is no serialization fact beside
+// it, and the document emits no `encoding` object — so a map-typed field would publish
+// OpenAPI's default form/explode expansion, which drops the `field[` prefix the server
+// reads by. A read whose wire shape the artifacts cannot state is reported, never
+// published under a shape that contradicts it.
+const formMapUnrepresentable = "form map accessor reads `field[key]` parts, which a form body field cannot state"
+
 func formAccessSchema(method string) facts.Type {
 	stringType := facts.PrimitiveType(facts.StringPrim())
-	switch method {
-	case "PostFormArray", "GetPostFormArray":
+	if method == "PostFormArray" || method == "GetPostFormArray" {
 		return facts.ArrayType(stringType)
-	case "PostFormMap", "GetPostFormMap":
-		return facts.MapTypeOf(stringType, stringType)
-	default:
-		return stringType
 	}
+	return stringType
 }
 
 func isFormContentType(contentType string) bool {
@@ -3856,6 +3853,38 @@ func (a *Analyzer) analyzeStatus(
 		return
 	}
 	a.addResponse(cf, seenStatus, provisionalStatus, facts.ResponseFact{Status: status}, provisional)
+}
+
+// ginOpaqueRendererMediaType names the media type each opaque renderer writes.
+//
+// One table serves the handler body and the bounded-helper traversal, so a renderer
+// cannot answer one media type through a direct call and another through a helper.
+// Its callers switch on exactly these names, which is why the closing line is an
+// unreachable total-function answer rather than a fallback for a missing fact.
+//
+// Render and Negotiate are deliberately absent: they choose their serializer from a
+// value or from the request's Accept header, so no media type is stated in the source
+// and the operation keeps `response.missing` rather than being given a guessed one.
+func ginOpaqueRendererMediaType(method string) string {
+	switch method {
+	case "String":
+		return "text/plain"
+	case "HTML":
+		return "text/html"
+	case "SecureJSON":
+		return "application/json"
+	case "JSONP":
+		return "application/javascript"
+	case "XML":
+		return "application/xml"
+	case "YAML":
+		return "application/yaml"
+	case "TOML":
+		return "application/toml"
+	case "ProtoBuf":
+		return "application/x-protobuf"
+	}
+	return "application/octet-stream"
 }
 
 // analyzeOpaqueResponse records renderers whose exact wire bytes cannot be
@@ -4408,7 +4437,7 @@ func (c *responseHeaderCollector) recordGinResponse(
 	ok := false
 	switch name {
 	case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON",
-		"String", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf",
+		"String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf",
 		"Status", "AbortWithStatus", "Data", "DataFromReader", "Redirect":
 		status, ok = responseStatusInFrame(frame, call, 0)
 	case "File", "FileAttachment", "SSEvent":

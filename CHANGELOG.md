@@ -34,6 +34,12 @@ must move the minor version.
   binding remains the source for non-string types, defaults, enums, and serialization, and it composes
   with the proof: the binding states the schema, the control flow states requiredness.
 
+- **A header, cookie, or form read is required by the same rejections a query read is.** Requiredness
+  reads the one shared `gin.Context` response classification instead of its own shorter list, so an
+  absent value rejected with `c.AbortWithError(400, …)`, `c.Data(400, …)`, `c.String(400, …)`, or any
+  other recognized renderer now makes the read required exactly as `c.JSON(400, …)` already did. Like
+  the query change above, this moves a generated parameter between optional and required.
+
 ### Fixed
 
 - **Go/Gin extraction recognizes a multipart file read through `c.Request.FormFile`.** A file part
@@ -41,14 +47,18 @@ must move the minor version.
   `c.FormFile`, composes with `PostForm` parts and typed bindings, and resolves its field name by the
   same rules on both access paths. A `FormFile` call on an unrelated `http.Request` still contributes
   nothing, and a dynamic field name is reported as `request.body.unresolved` rather than guessed.
-- **Go/Gin extraction preserves form collections and optional query maps.** `PostFormArray`,
-  `GetPostFormArray`, `PostFormMap`, and `GetPostFormMap` now contribute typed fields to synthesized
-  form bodies, while `GetQueryMap` contributes the same deep-object query parameter as `QueryMap`.
-  Direct and bounded helper calls follow the same rules.
-- **Go/Gin renderers no longer leave operations without responses.** `String` records an opaque
-  `text/plain` response; `IndentedJSON`, `PureJSON`, and `AsciiJSON` retain typed JSON schemas; and
-  `SecureJSON`, `JSONP`, `XML`, `YAML`, `TOML`, and `ProtoBuf` record honest opaque responses with
-  their Gin media types. Direct and bounded helper calls follow the same rules.
+- **Go/Gin extraction preserves form collections and optional query maps.** `PostFormArray` and
+  `GetPostFormArray` now contribute repeated string fields to synthesized form bodies, while
+  `GetQueryMap` contributes the same deep-object query parameter as `QueryMap`. `PostFormMap` and
+  `GetPostFormMap` collect the parts named `field[key]`, which a form body field cannot state, so
+  they are reported as `request.body.unresolved` instead. Direct and bounded helper calls follow the
+  same rules.
+- **Go/Gin renderers no longer leave operations without responses.** `String` and `HTML` record
+  opaque `text/plain` and `text/html` responses; `IndentedJSON`, `PureJSON`, and `AsciiJSON` retain
+  typed JSON schemas; and `SecureJSON`, `JSONP`, `XML`, `YAML`, `TOML`, and `ProtoBuf` record honest
+  opaque responses with their Gin media types. `Render` and `Negotiate` pick a serializer at runtime,
+  so they still report `response.missing` rather than a guessed media type. Direct and bounded helper
+  calls follow the same rules.
 - **Go/Gin extraction preserves `AbortWithStatusJSON` error responses.** Direct and bounded
   helper calls now contribute their status, typed JSON body, media type, and response headers
   instead of leaving the operation with a missing response.
