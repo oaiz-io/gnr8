@@ -4291,6 +4291,41 @@ mod tests {
             );
         }
 
+        // Go extraction records c.String/c.HTML and friends as opaque-byte successes, so an
+        // operation answering JSON on one 2xx and bytes on another is reachable from ordinary
+        // source. One SDK method has one return type, so that is rejected by name rather than
+        // emitted as a client that reports an error on its own typed success.
+        #[test]
+        fn mixed_json_and_binary_success_is_rejected_by_status() {
+            let mut graph = sample_graph();
+            let op = graph
+                .operations
+                .iter_mut()
+                .find(|op| op.handler == "listGoals")
+                .unwrap();
+            let mut opaque = op.responses[0].clone();
+            opaque.status = 202;
+            opaque.body = None;
+            opaque.body_kind = "binary".to_string();
+            opaque.content_type = Some("text/plain".to_string());
+            opaque.content_types = vec!["text/plain".to_string()];
+            op.responses.push(opaque);
+
+            let ops: Vec<&crate::graph::Operation> = graph
+                .operations
+                .iter()
+                .filter(|op| op.handler == "listGoals")
+                .collect();
+            let err = emit_operations(&graph, "goalservice", "/goal", &ops).unwrap_err();
+            let message = err.to_string();
+            for expected in ["listGoals", "(200)", "(202)", "ResponseOverride"] {
+                assert!(
+                    message.contains(expected),
+                    "mixed success error should name {expected}: {message}"
+                );
+            }
+        }
+
         #[test]
         fn ops_file_imports_the_request_plumbing_set() {
             let graph = sample_graph();

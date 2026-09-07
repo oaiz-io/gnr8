@@ -59,6 +59,12 @@ must move the minor version.
   opaque responses with their Gin media types. `Render` and `Negotiate` pick a serializer at runtime,
   so they still report `response.missing` rather than a guessed media type. Direct and bounded helper
   calls follow the same rules.
+
+  A handler that answers JSON on one 2xx and bytes on another — `c.JSON(200, …)` beside
+  `c.String(202, …)` — now states both, so SDK generation reports that operation instead of
+  silently dropping the response it could not see before. One SDK method has one return type; answer
+  one shape from the handler, or restate one status with `ResponseOverride`. That error now names the
+  statuses on each side and the remedy.
 - **Go/Gin extraction preserves `AbortWithStatusJSON` error responses.** Direct and bounded
   helper calls now contribute their status, typed JSON body, media type, and response headers
   instead of leaving the operation with a missing response.

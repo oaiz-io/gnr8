@@ -798,6 +798,16 @@ pub(crate) fn error_response_bodies_of(
 ///
 /// Silently dropping the body here while the `OpenAPI` lowering kept it would make one graph
 /// describe two different contracts, so the contradiction is surfaced instead (CLAUDE.md rule 3).
+/// Render a status list for a diagnostic, so a message names the responses to act on
+/// rather than only the operation that carries them.
+fn join_statuses(statuses: &[u16]) -> String {
+    statuses
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn reject_impossible_body(op: &Operation, resp: &crate::graph::Response) -> Result<(), CoreError> {
     if !resp.declares_impossible_body() {
         return Ok(());
@@ -905,8 +915,12 @@ pub(crate) fn success_responses_of(
     if body_model.is_some() && !binary_statuses.is_empty() {
         return Err(CoreError::SdkGen {
             message: format!(
-                "operation '{}' mixes JSON and binary success responses; SDK targets require one success body kind",
-                op.id
+                "operation '{}' mixes JSON success responses ({}) with opaque-byte ones ({}); \
+                 SDK targets require one success body kind — answer one shape from the handler, \
+                 or restate one of those statuses with ResponseOverride",
+                op.id,
+                join_statuses(&body_statuses),
+                join_statuses(&binary_statuses),
             ),
         });
     }
