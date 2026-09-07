@@ -925,6 +925,7 @@ func (c *Context) JSON(int, any) {}
 func (c *Context) String(int, string, ...any) {}
 func (c *Context) AbortWithError(int, error) error { return nil }
 func (c *Context) Abort() {}
+func (c *Context) ShouldBindQuery(any) error { return nil }
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package queryflow
 
@@ -938,6 +939,7 @@ import (
 
 type Server struct{ R *gin.Engine }
 type Result struct { OK bool `+"`json:\"ok\"`"+` }
+type ListQuery struct { Limit int `+"`form:\"limit\"`"+` }
 
 func (s Server) Register() {
 	s.R.GET("/required", s.required)
@@ -960,6 +962,8 @@ func (s Server) Register() {
 	s.R.GET("/init-guard", s.initGuard)
 	s.R.GET("/escaping-default", s.escapingDefault)
 	s.R.GET("/closure-write", s.closureWrite)
+	s.R.GET("/bind-then-guard", s.bindThenGuard)
+	s.R.GET("/guard-then-bind", s.guardThenBind)
 }
 
 func (s Server) required(c *gin.Context) {
@@ -1151,6 +1155,26 @@ func (s Server) closureWrite(c *gin.Context) {
 	c.JSON(200, Result{})
 }
 
+func (s Server) bindThenGuard(c *gin.Context) {
+	var bound ListQuery
+	_ = c.ShouldBindQuery(&bound)
+	if c.Query("limit") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{OK: bound.Limit > 0})
+}
+
+func (s Server) guardThenBind(c *gin.Context) {
+	if c.Query("limit") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	var bound ListQuery
+	_ = c.ShouldBindQuery(&bound)
+	c.JSON(200, Result{OK: bound.Limit > 0})
+}
+
 func applyDefault(value *string) {
 	if *value == "" {
 		*value = "fallback"
@@ -1221,6 +1245,16 @@ func helperRejects(string) bool { return false }
 	parsed, ok := paramByName(byPath["/parsed-guard"].Params, "limit")
 	if !ok || !parsed.Required || primName(parsed.Schema) != "int" {
 		t.Fatalf("/parsed-guard should keep the parsed int schema and prove required, got %+v", parsed)
+	}
+
+	// The typed binding states the schema and the proof states requiredness, in
+	// either source order: which read the walk reaches first is not a fact about
+	// the handler.
+	for _, path := range []string{"/bind-then-guard", "/guard-then-bind"} {
+		bound, ok := paramByName(byPath[path].Params, "limit")
+		if !ok || !bound.Required || primName(bound.Schema) != "int" {
+			t.Fatalf("%s should combine the bound int schema with the proven requiredness, got %+v", path, bound)
+		}
 	}
 }
 

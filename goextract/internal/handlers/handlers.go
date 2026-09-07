@@ -5322,8 +5322,11 @@ func (a *Analyzer) addExtractedParameter(
 			existing.Span = param.Span
 		case incomingSpecificity < existingSpecificity:
 			// A raw string access is compatible evidence for a value that a
-			// surrounding parser or typed binder refines more precisely.
-			return
+			// surrounding parser or typed binder refines more precisely: the
+			// refined schema stays, and the merges below still take what the raw
+			// read proved about requiredness, defaults, and serialization. Return
+			// here instead and the answer depends on which read the walk reached
+			// first, which is not a property of the handler.
 		default:
 			if diags != nil {
 				diags.RequestParameterUnresolved(
