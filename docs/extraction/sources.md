@@ -49,8 +49,9 @@ Recognized route facts include:
   `Request.FormFile` form values. A string part becomes required when an empty value is explicitly
   rejected; a file part is required and retains its exact literal field name; real defaults remain
   optional.
-- `ShouldBindJSON`/`BindJSON`; generic bind variants for typed form, multipart, query, and header
-  structs.
+- `ShouldBindJSON`/`BindJSON`; `ShouldBindQuery`/`BindQuery` and
+  `ShouldBindHeader`/`BindHeader`; generic bind variants for typed form, multipart, query, and
+  header structs.
 - JSON responses, response status/media facts, constant redirects, response headers, Go structs,
   nested types, and string enums. Redirect status values passed through bounded helpers are resolved
   at each call site, and response headers are associated only with statuses reached on paths where

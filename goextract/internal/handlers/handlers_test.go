@@ -2226,6 +2226,97 @@ func (s Server) requestHeader(c *gin.Context) {
 	}
 }
 
+func TestAbortingQueryAndHeaderBindingsAreExtracted(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/abortingbindings
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) BindQuery(any) error { return nil }
+func (c *Context) BindHeader(any) error { return nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package abortingbindings
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type DirectQuery struct { Limit int `+"`"+`form:"limit" binding:"required"`+"`"+` }
+type DirectHeader struct { RequestID string `+"`"+`header:"X-Request-ID"`+"`"+` }
+type HelperQuery struct { Page int `+"`"+`form:"page"`+"`"+` }
+type HelperHeader struct { TraceID string `+"`"+`header:"X-Trace-ID" binding:"required"`+"`"+` }
+type Response struct { OK bool `+"`"+`json:"ok"`+"`"+` }
+
+func (s Server) Register() { s.R.GET("/search", s.search) }
+
+func bindHelper(c *gin.Context) {
+	var query HelperQuery
+	var headers HelperHeader
+	_ = c.BindQuery(&query)
+	_ = c.BindHeader(&headers)
+}
+
+func (s Server) search(c *gin.Context) {
+	var query DirectQuery
+	var headers DirectHeader
+	_ = c.BindQuery(&query)
+	_ = c.BindHeader(&headers)
+	bindHelper(c)
+	c.JSON(200, Response{OK: true})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load aborting bindings fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/abortingbindings", diagnostics)
+	var code handlers.CodeFacts
+	for _, route := range routes.Recognize(res) {
+		code = analyzer.Analyze(route, diagnostics)
+	}
+
+	want := map[string]struct {
+		location string
+		required bool
+	}{
+		"limit":        {location: "query", required: true},
+		"X-Request-ID": {location: "header", required: false},
+		"page":         {location: "query", required: false},
+		"X-Trace-ID":   {location: "header", required: true},
+	}
+	if len(code.Params) != len(want) {
+		t.Fatalf("BindQuery/BindHeader should extract direct and helper parameters: %+v", code.Params)
+	}
+	for name, expected := range want {
+		param, ok := paramByName(code.Params, name)
+		if !ok || param.Location != expected.location || param.Required != expected.required {
+			t.Fatalf("aborting binding parameter %s mismatch: %+v", name, param)
+		}
+	}
+	for _, diagnostic := range diagnostics.Items() {
+		if diagnostic.Code == "request.parameter.unresolved" {
+			t.Fatalf("typed aborting bindings should resolve without parameter diagnostics: %+v", diagnostic)
+		}
+	}
+}
+
 func TestContextHelperCyclesAndExternalBoundariesAreDiagnosed(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/helperdiagnostics

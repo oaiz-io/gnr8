@@ -722,9 +722,9 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicParameterName(frame, call, traversal, method)
 		}
-	case "ShouldBindQuery":
+	case "ShouldBindQuery", "BindQuery":
 		a.addBoundParameters(frame, call, "query", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
-	case "ShouldBindHeader":
+	case "ShouldBindHeader", "BindHeader":
 		a.addBoundParameters(frame, call, "header", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
 	case "ShouldBindJSON", "BindJSON":
 		a.setTraversedRequestBody(frame, call, "application/json", optionalBindPositions, traversal)
@@ -2038,9 +2038,9 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a named schema")
 			}
-		case "ShouldBindQuery":
+		case "ShouldBindQuery", "BindQuery":
 			a.addBoundParameters(helperFrame{decl: h}, call, "query", &cf, seenParam, resolvedParam, route, diags)
-		case "ShouldBindHeader":
+		case "ShouldBindHeader", "BindHeader":
 			a.addBoundParameters(helperFrame{decl: h}, call, "header", &cf, seenParam, resolvedParam, route, diags)
 		case "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
 			frame := helperFrame{decl: h}
