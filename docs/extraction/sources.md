@@ -56,9 +56,9 @@ Recognized route facts include:
   supply schemas, and enforced `uuid`/`uri` validation rules refine string formats. URI-bound
   parameters enrich matching route or `Param` evidence rather than creating duplicates; conflicting
   typed schemas are diagnosed.
-- JSON responses, including aborting `AbortWithStatusJSON` errors; response status/media facts;
-  constant redirects; response headers; Go structs; nested types; and string enums. Redirect status
-  values passed through bounded helpers are resolved
+- JSON responses from `JSON`, `AbortWithStatusJSON`, `IndentedJSON`, `PureJSON`, and `AsciiJSON`;
+  response status/media facts; constant redirects; response headers; Go structs; nested types; and
+  string enums. Redirect status values passed through bounded helpers are resolved
   at each call site, and response headers are associated only with statuses reached on paths where
   those headers were written. A response header is read from the response writer's own map —
   `c.Header`, `c.Writer.Header()`, or a bounded `http.ResponseWriter` helper — so mutating
@@ -95,6 +95,13 @@ Recognized route facts include:
   array's element or a map's values after `dive`. A `keys`…`endkeys` enum is discarded, because an
   OpenAPI object key is always an unconstrained string. Two rules landing on the same value raise
   `request.parameter.ambiguous` and neither is applied.
+
+`String` responses are recorded as opaque `text/plain` bytes. Renderers whose serializer changes or
+wraps the source value are also recorded as opaque bytes with their actual media type:
+`SecureJSON` (`application/json`), `JSONP` (`application/javascript`), `XML`
+(`application/xml`), `YAML` (`application/yaml`), `TOML` (`application/toml`), and `ProtoBuf`
+(`application/x-protobuf`). This preserves a truthful transport contract for every built-in SDK
+without inferring a JSON schema for non-JSON bytes or for JSON that Gin may prefix or wrap.
 
 ### Direct Gin query requiredness
 

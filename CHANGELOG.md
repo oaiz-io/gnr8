@@ -41,6 +41,10 @@ must move the minor version.
   `c.FormFile`, composes with `PostForm` parts and typed bindings, and resolves its field name by the
   same rules on both access paths. A `FormFile` call on an unrelated `http.Request` still contributes
   nothing, and a dynamic field name is reported as `request.body.unresolved` rather than guessed.
+- **Go/Gin renderers no longer leave operations without responses.** `String` records an opaque
+  `text/plain` response; `IndentedJSON`, `PureJSON`, and `AsciiJSON` retain typed JSON schemas; and
+  `SecureJSON`, `JSONP`, `XML`, `YAML`, `TOML`, and `ProtoBuf` record honest opaque responses with
+  their Gin media types. Direct and bounded helper calls follow the same rules.
 - **Go/Gin extraction preserves `AbortWithStatusJSON` error responses.** Direct and bounded
   helper calls now contribute their status, typed JSON body, media type, and response headers
   instead of leaving the operation with a missing response.

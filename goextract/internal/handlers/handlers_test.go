@@ -2493,6 +2493,115 @@ func (s Server) helper(c *gin.Context) {
 	}
 }
 
+func TestGinRenderersProduceTypedOrOpaqueResponses(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/renderers
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) String(int, string, ...any) {}
+func (c *Context) IndentedJSON(int, any) {}
+func (c *Context) PureJSON(int, any) {}
+func (c *Context) AsciiJSON(int, any) {}
+func (c *Context) SecureJSON(int, any) {}
+func (c *Context) JSONP(int, any) {}
+func (c *Context) XML(int, any) {}
+func (c *Context) YAML(int, any) {}
+func (c *Context) TOML(int, any) {}
+func (c *Context) ProtoBuf(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package renderers
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type Response struct { Message string `+"`"+`json:"message"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/string", s.stringResponse)
+	s.R.GET("/indented", s.indentedJSON)
+	s.R.GET("/pure", s.pureJSON)
+	s.R.GET("/ascii", s.asciiJSON)
+	s.R.GET("/secure", s.secureJSON)
+	s.R.GET("/jsonp", s.jsonp)
+	s.R.GET("/xml", s.xml)
+	s.R.GET("/yaml", s.yaml)
+	s.R.GET("/toml", s.toml)
+	s.R.GET("/protobuf", s.protobuf)
+}
+
+func renderXML(c *gin.Context) { c.XML(203, Response{Message: "xml"}) }
+
+func (s Server) stringResponse(c *gin.Context) { c.String(200, "pong %s", "now") }
+func (s Server) indentedJSON(c *gin.Context) { c.IndentedJSON(200, Response{Message: "indented"}) }
+func (s Server) pureJSON(c *gin.Context) { c.PureJSON(200, Response{Message: "pure"}) }
+func (s Server) asciiJSON(c *gin.Context) { c.AsciiJSON(200, Response{Message: "ascii"}) }
+func (s Server) secureJSON(c *gin.Context) { c.SecureJSON(201, []Response{{Message: "secure"}}) }
+func (s Server) jsonp(c *gin.Context) { c.JSONP(202, Response{Message: "jsonp"}) }
+func (s Server) xml(c *gin.Context) { renderXML(c) }
+func (s Server) yaml(c *gin.Context) { c.YAML(205, Response{Message: "yaml"}) }
+func (s Server) toml(c *gin.Context) { c.TOML(206, Response{Message: "toml"}) }
+func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "protobuf"}) }
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load renderer fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/renderers", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for _, handler := range []string{"indentedJSON", "pureJSON", "asciiJSON"} {
+		assertResponseSuffix(t, got[handler].Responses, 200, "Response")
+		response := got[handler].Responses[0]
+		if len(response.ContentTypes) != 1 || response.ContentTypes[0] != "application/json" {
+			t.Fatalf("%s JSON media type mismatch: %+v", handler, response)
+		}
+	}
+	opaque := map[string]struct {
+		status      uint16
+		contentType string
+	}{
+		"stringResponse": {status: 200, contentType: "text/plain"},
+		"secureJSON":     {status: 201, contentType: "application/json"},
+		"jsonp":          {status: 202, contentType: "application/javascript"},
+		"xml":            {status: 203, contentType: "application/xml"},
+		"yaml":           {status: 205, contentType: "application/yaml"},
+		"toml":           {status: 206, contentType: "application/toml"},
+		"protobuf":       {status: 207, contentType: "application/x-protobuf"},
+	}
+	for handler, expected := range opaque {
+		responses := got[handler].Responses
+		if len(responses) != 1 || responses[0].Status != expected.status || responses[0].BodyKind != "binary" || responses[0].Body != nil || len(responses[0].ContentTypes) != 1 || responses[0].ContentTypes[0] != expected.contentType {
+			t.Fatalf("%s opaque response mismatch: %+v", handler, responses)
+		}
+	}
+	for _, diagnostic := range diagnostics.Items() {
+		if diagnostic.Code == "response.missing" || diagnostic.Code == "response.dynamic" {
+			t.Fatalf("recognized Gin renderer should not lose its response: %+v", diagnostic)
+		}
+	}
+}
+
 func TestContextHelperCyclesAndExternalBoundariesAreDiagnosed(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/helperdiagnostics

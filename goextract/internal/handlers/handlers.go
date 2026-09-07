@@ -1815,7 +1815,9 @@ func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
 			return true
 		}
 		switch name {
-		case "JSON", "AbortWithStatusJSON", "Status", "AbortWithStatus":
+		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON",
+			"String", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf",
+			"Status", "AbortWithStatus":
 			status, known := statusOf(h.info, call.Args[0])
 			rejects = known && status >= 400 && status < 500
 		}
@@ -2076,8 +2078,22 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a named schema")
 			}
-		case "JSON", "AbortWithStatusJSON":
+		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(h, call, route, &cf, seenStatus, provisionalStatus, diags)
+		case "String":
+			a.analyzeOpaqueResponse(h, call, "text/plain", route, &cf, seenStatus, provisionalStatus, diags)
+		case "SecureJSON":
+			a.analyzeOpaqueResponse(h, call, "application/json", route, &cf, seenStatus, provisionalStatus, diags)
+		case "JSONP":
+			a.analyzeOpaqueResponse(h, call, "application/javascript", route, &cf, seenStatus, provisionalStatus, diags)
+		case "XML":
+			a.analyzeOpaqueResponse(h, call, "application/xml", route, &cf, seenStatus, provisionalStatus, diags)
+		case "YAML":
+			a.analyzeOpaqueResponse(h, call, "application/yaml", route, &cf, seenStatus, provisionalStatus, diags)
+		case "TOML":
+			a.analyzeOpaqueResponse(h, call, "application/toml", route, &cf, seenStatus, provisionalStatus, diags)
+		case "ProtoBuf":
+			a.analyzeOpaqueResponse(h, call, "application/x-protobuf", route, &cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(h, call, route, &cf, seenStatus, provisionalStatus, true, diags)
 		case "AbortWithStatus":
@@ -2787,8 +2803,22 @@ func (a *Analyzer) analyzeDelegatedResponses(
 			return true
 		}
 		switch name {
-		case "JSON", "AbortWithStatusJSON":
+		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(callee, nested, route, cf, seenStatus, provisionalStatus, diags)
+		case "String":
+			a.analyzeOpaqueResponse(callee, nested, "text/plain", route, cf, seenStatus, provisionalStatus, diags)
+		case "SecureJSON":
+			a.analyzeOpaqueResponse(callee, nested, "application/json", route, cf, seenStatus, provisionalStatus, diags)
+		case "JSONP":
+			a.analyzeOpaqueResponse(callee, nested, "application/javascript", route, cf, seenStatus, provisionalStatus, diags)
+		case "XML":
+			a.analyzeOpaqueResponse(callee, nested, "application/xml", route, cf, seenStatus, provisionalStatus, diags)
+		case "YAML":
+			a.analyzeOpaqueResponse(callee, nested, "application/yaml", route, cf, seenStatus, provisionalStatus, diags)
+		case "TOML":
+			a.analyzeOpaqueResponse(callee, nested, "application/toml", route, cf, seenStatus, provisionalStatus, diags)
+		case "ProtoBuf":
+			a.analyzeOpaqueResponse(callee, nested, "application/x-protobuf", route, cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(callee, nested, route, cf, seenStatus, provisionalStatus, true, diags)
 		case "AbortWithStatus":
@@ -3753,9 +3783,10 @@ func typeHasFormTagSeen(t gotypes.Type, seen map[string]bool) bool {
 	return false
 }
 
-// analyzeJSON resolves c.JSON(http.StatusXxx, y): status from go/constant, body
-// from the named type of y. A dynamic/unresolvable body emits a WARN (D-05) and
-// records the status with a nil body so the response is never silently dropped.
+// analyzeJSON resolves a Gin JSON renderer's (status, body) arguments: status
+// from go/constant, body from the named type of y. A dynamic/unresolvable body
+// emits a WARN (D-05) and records the status with a nil body so the response is
+// never silently dropped.
 func (a *Analyzer) analyzeJSON(
 	h handlerDecl,
 	call *ast.CallExpr,
@@ -3813,6 +3844,32 @@ func (a *Analyzer) analyzeStatus(
 		return
 	}
 	a.addResponse(cf, seenStatus, provisionalStatus, facts.ResponseFact{Status: status}, provisional)
+}
+
+// analyzeOpaqueResponse records renderers whose exact wire bytes cannot be
+// represented by gnr8's typed JSON response model. Keeping the body opaque
+// preserves the status and media type without pretending another serializer's
+// output follows the source type's JSON shape.
+func (a *Analyzer) analyzeOpaqueResponse(
+	h handlerDecl,
+	call *ast.CallExpr,
+	contentType string,
+	route routes.Route,
+	cf *CodeFacts,
+	seenStatus map[uint16]bool,
+	provisionalStatus map[uint16]bool,
+	diags *diag.Accumulator,
+) {
+	if len(call.Args) < 1 {
+		return
+	}
+	status, ok := statusOf(h.info, call.Args[0])
+	if !ok {
+		file, line := positionOf(h.fset, call.Pos())
+		diags.DynamicResponse(route.Method, untypedRouteLabel(route), route.Handler, "non-constant HTTP status", file, line)
+		return
+	}
+	a.analyzeBinaryStatus(cf, seenStatus, provisionalStatus, status, contentType)
 }
 
 func (a *Analyzer) analyzeBinaryStatus(
@@ -4338,7 +4395,9 @@ func (c *responseHeaderCollector) recordGinResponse(
 	status := uint16(0)
 	ok := false
 	switch name {
-	case "JSON", "AbortWithStatusJSON", "Status", "AbortWithStatus", "Data", "DataFromReader", "Redirect":
+	case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON",
+		"String", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf",
+		"Status", "AbortWithStatus", "Data", "DataFromReader", "Redirect":
 		status, ok = responseStatusInFrame(frame, call, 0)
 	case "File", "FileAttachment", "SSEvent":
 		status, ok = 200, true
