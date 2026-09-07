@@ -42,8 +42,9 @@ Recognized route facts include:
 - Constant arguments propagated through helper calls.
 - `Param` path parameters.
 - `Query`, `DefaultQuery`, `GetQuery`, array/map query accessors.
-- `GetHeader` and `Request.Header.Get` headers, `Cookie` cookies. A read is optional unless the
-  handler or a bounded helper rejects an absent value.
+- `GetHeader` and `Request.Header.Get` headers, `Cookie` cookies. Both header access paths resolve
+  constant arguments through the same handler-scoped rules. A read is optional unless the handler
+  or a bounded helper rejects an absent value.
 - `PostForm`, `DefaultPostForm`, `GetPostForm`, and file reads through either `FormFile` or
   `Request.FormFile` form values. A string part becomes required when an empty value is explicitly
   rejected; a file part is required and retains its exact literal field name; real defaults remain

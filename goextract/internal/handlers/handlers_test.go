@@ -2151,6 +2151,81 @@ func (s Server) search(c *gin.Context) {
 	}
 }
 
+func TestRequestHeaderGetResolvesNamesLikeGinGetHeader(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/headernames
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+import "net/http"
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct { Request *http.Request }
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) GetHeader(string) string { return "" }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package headernames
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type Response struct { OK bool `+"`"+`json:"ok"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/gin", s.ginHeader)
+	s.R.GET("/request", s.requestHeader)
+}
+
+func headerName() string { return "X-Helper-Named" }
+
+func (s Server) ginHeader(c *gin.Context) {
+	_ = c.GetHeader(headerName())
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) requestHeader(c *gin.Context) {
+	_ = c.Request.Header.Get(headerName())
+	c.JSON(200, Response{OK: true})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load header name fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/headernames", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for _, handler := range []string{"ginHeader", "requestHeader"} {
+		params := got[handler].Params
+		if len(params) != 1 || params[0].Name != "X-Helper-Named" || params[0].Location != "header" || params[0].Required {
+			t.Fatalf("%s should resolve the constant-returning header helper identically: %+v", handler, params)
+		}
+	}
+	for _, diagnostic := range diagnostics.Items() {
+		if diagnostic.Code == "request.parameter.unresolved" {
+			t.Fatalf("constant-returning header helper should not be unresolved: %+v", diagnostic)
+		}
+	}
+}
+
 func TestContextHelperCyclesAndExternalBoundariesAreDiagnosed(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/helperdiagnostics

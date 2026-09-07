@@ -41,6 +41,9 @@ must move the minor version.
   `c.FormFile`, composes with `PostForm` parts and typed bindings, and resolves its field name by the
   same rules on both access paths. A `FormFile` call on an unrelated `http.Request` still contributes
   nothing, and a dynamic field name is reported as `request.body.unresolved` rather than guessed.
+- **Go/Gin extraction resolves `c.Request.Header.Get` names like `c.GetHeader`.** A header name
+  returned by a zero-argument module-owned constant helper now contributes the same parameter
+  through either access path instead of being dropped with `request.parameter.unresolved`.
 
 ## 0.12.2 — 2026-09-06
 

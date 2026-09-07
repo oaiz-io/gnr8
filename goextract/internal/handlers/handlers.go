@@ -1822,8 +1822,17 @@ func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
 	return rejects
 }
 
-func requestHeaderGet(info *gotypes.Info, call *ast.CallExpr) (string, bool, bool) {
-	return requestHeaderGetInFrame(helperFrame{decl: handlerDecl{info: info}}, call)
+// requestHeaderGet matches the same call shape as requestHeaderGetInFrame but
+// resolves the header name with the handler-scoped resolver, so a name that
+// c.GetHeader resolves in a handler body resolves identically through
+// c.Request.Header.Get. A helper frame has its own resolver (bindings from the
+// call site), which is why the two entry points differ in that one step.
+func (a *Analyzer) requestHeaderGet(h handlerDecl, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestHeaderGetCall(helperFrame{decl: h}, call) {
+		return "", false, false
+	}
+	name, resolved := a.callStringArg(h, call, 0)
+	return name, true, resolved
 }
 
 // requestFormFile matches the same call shape as requestFormFileInFrame but
@@ -1839,20 +1848,25 @@ func (a *Analyzer) requestFormFile(h handlerDecl, call *ast.CallExpr) (string, b
 	return name, true, resolved
 }
 
-func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
+func isRequestHeaderGetCall(frame helperFrame, call *ast.CallExpr) bool {
 	if call == nil || frame.decl.info == nil || len(call.Args) == 0 {
-		return "", false, false
+		return false
 	}
 	method, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || method.Sel == nil || method.Sel.Name != "Get" || !isNamedType(frame.decl.info.TypeOf(method.X), "net/http", "Header") {
-		return "", false, false
+		return false
 	}
 	header, ok := method.X.(*ast.SelectorExpr)
 	if !ok || header.Sel == nil || header.Sel.Name != "Header" {
-		return "", false, false
+		return false
 	}
 	request, ok := header.X.(*ast.SelectorExpr)
-	if !ok || request.Sel == nil || request.Sel.Name != "Request" || !isGinContextType(frameTypeOf(frame, request.X)) {
+	return ok && request.Sel != nil && request.Sel.Name == "Request" &&
+		isGinContextType(frameTypeOf(frame, request.X))
+}
+
+func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestHeaderGetCall(frame, call) {
 		return "", false, false
 	}
 	name, resolved := frameCallStringArg(frame, call, 0)
@@ -1958,7 +1972,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			if isHTTPRedirectCall(h.info, call) {
 				a.analyzeRedirect(h, call, 3, route, &cf, seenStatus, provisionalStatus, diags)
 			}
-			if pname, matched, resolved := requestHeaderGet(h.info, call); matched {
+			if pname, matched, resolved := a.requestHeaderGet(h, call); matched {
 				if resolved {
 					a.addExtractedParameter(
 						&cf,
