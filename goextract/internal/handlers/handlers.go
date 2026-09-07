@@ -671,7 +671,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicParameterName(frame, call, traversal, method)
 		}
-	case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap":
+	case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap", "GetQueryMap":
 		name, ok := frameCallStringArg(frame, call, 0)
 		if !ok {
 			a.reportDynamicParameterName(frame, call, traversal, method)
@@ -774,13 +774,13 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicBodyFieldName(frame, call, traversal, method)
 		}
-	case "PostForm", "DefaultPostForm", "GetPostForm":
+	case "PostForm", "DefaultPostForm", "GetPostForm", "PostFormArray", "GetPostFormArray", "PostFormMap", "GetPostFormMap":
 		if name, ok := frameCallStringArg(frame, call, 0); ok {
 			traversal.manualFormFields[name] = true
 			if _, exists := traversal.formFields[name]; !exists {
 				field := formField(
 					name,
-					facts.PrimitiveType(facts.StringPrim()),
+					formAccessSchema(method),
 					requestAccessRequired(frame.decl, call, method),
 				)
 				if method == "DefaultPostForm" && len(call.Args) > 1 {
@@ -2124,7 +2124,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectDynamicParameter(diags, h, route, call, name)
 			}
-		case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap":
+		case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap", "GetQueryMap":
 			if pname, ok := a.callStringArg(h, call, 0); ok {
 				file, line := positionOf(h.fset, call.Pos())
 				resolved := name != "Query"
@@ -2188,13 +2188,13 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "multipart field name is dynamic")
 			}
-		case "PostForm", "DefaultPostForm", "GetPostForm":
+		case "PostForm", "DefaultPostForm", "GetPostForm", "PostFormArray", "GetPostFormArray", "PostFormMap", "GetPostFormMap":
 			if fname, ok := a.callStringArg(h, call, 0); ok {
 				manualFormFields[fname] = true
 				if _, seen := formFields[fname]; !seen {
 					field := formField(
 						fname,
-						facts.PrimitiveType(facts.StringPrim()),
+						formAccessSchema(name),
 						requestAccessRequired(h, call, name),
 					)
 					if name == "DefaultPostForm" && len(call.Args) > 1 {
@@ -3107,7 +3107,7 @@ func firstQueryCall(info *gotypes.Info, root ast.Expr) (*ast.CallExpr, bool) {
 
 func isGinQueryMethod(name string) bool {
 	switch name {
-	case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap":
+	case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap", "GetQueryMap":
 		return true
 	default:
 		return false
@@ -3622,6 +3622,18 @@ func addMultipartFileField(
 	formFields[name] = formField(name, facts.PrimitiveType(facts.BytesPrim()), true)
 	manualFormFields[name] = true
 	*formHasFile = true
+}
+
+func formAccessSchema(method string) facts.Type {
+	stringType := facts.PrimitiveType(facts.StringPrim())
+	switch method {
+	case "PostFormArray", "GetPostFormArray":
+		return facts.ArrayType(stringType)
+	case "PostFormMap", "GetPostFormMap":
+		return facts.MapTypeOf(stringType, stringType)
+	default:
+		return stringType
+	}
 }
 
 func isFormContentType(contentType string) bool {
@@ -5494,7 +5506,7 @@ func parameterFromGinAccess(
 		param.Schema = facts.ArrayType(facts.PrimitiveType(facts.StringPrim()))
 		param.Style = "form"
 		param.Explode = boolPointer(true)
-	case "QueryMap":
+	case "QueryMap", "GetQueryMap":
 		param.Schema = facts.MapTypeOf(
 			facts.PrimitiveType(facts.StringPrim()),
 			facts.PrimitiveType(facts.StringPrim()),

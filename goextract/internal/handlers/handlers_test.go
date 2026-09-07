@@ -2602,6 +2602,106 @@ func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "pr
 	}
 }
 
+func TestFormCollectionsAndGetQueryMapAreExtracted(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/formcollections
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) POST(string, HandlerFunc) {}
+func (c *Context) GetQueryMap(string) (map[string]string, bool) { return nil, false }
+func (c *Context) PostFormArray(string) []string { return nil }
+func (c *Context) GetPostFormArray(string) ([]string, bool) { return nil, false }
+func (c *Context) PostFormMap(string) map[string]string { return nil }
+func (c *Context) GetPostFormMap(string) (map[string]string, bool) { return nil, false }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package formcollections
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type Response struct { OK bool `+"`"+`json:"ok"`+"`"+` }
+
+func (s Server) Register() { s.R.POST("/collections", s.collections) }
+
+func readCollections(c *gin.Context) {
+	_, _ = c.GetQueryMap("helperFilters")
+	_ = c.PostFormArray("helperTags")
+}
+
+func (s Server) collections(c *gin.Context) {
+	_, _ = c.GetQueryMap("filters")
+	_ = c.PostFormArray("tags")
+	_, _ = c.GetPostFormArray("optionalTags")
+	_ = c.PostFormMap("attributes")
+	_, _ = c.GetPostFormMap("optionalAttributes")
+	readCollections(c)
+	c.JSON(200, Response{OK: true})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load form collection fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/formcollections", diagnostics)
+	var code handlers.CodeFacts
+	for _, route := range routes.Recognize(res) {
+		code = analyzer.Analyze(route, diagnostics)
+	}
+
+	for _, name := range []string{"filters", "helperFilters"} {
+		param, ok := paramByName(code.Params, name)
+		if !ok || param.Location != "query" || param.Required || param.Schema.Type != facts.TypeMap || param.Style != "deepObject" || param.Explode == nil || !*param.Explode {
+			t.Fatalf("GetQueryMap parameter %s mismatch: %+v", name, param)
+		}
+	}
+	if code.RequestBody == nil || code.RequestBodyContentType != "application/x-www-form-urlencoded" || len(code.Schemas) != 1 {
+		t.Fatalf("form collection body mismatch: body=%+v type=%q schemas=%+v", code.RequestBody, code.RequestBodyContentType, code.Schemas)
+	}
+	fields, ok := code.Schemas[0].Body.Of.([]facts.FieldFact)
+	if !ok {
+		t.Fatalf("form collection schema must be an object: %+v", code.Schemas[0].Body)
+	}
+	byName := map[string]facts.FieldFact{}
+	for _, field := range fields {
+		byName[field.JSONName] = field
+	}
+	for _, name := range []string{"tags", "optionalTags", "helperTags"} {
+		field, exists := byName[name]
+		if !exists || field.Schema.Type != facts.TypeArray || field.ValidatorRequiresPresence {
+			t.Fatalf("form array field %s mismatch: %+v", name, field)
+		}
+	}
+	for _, name := range []string{"attributes", "optionalAttributes"} {
+		field, exists := byName[name]
+		if !exists || field.Schema.Type != facts.TypeMap || field.ValidatorRequiresPresence {
+			t.Fatalf("form map field %s mismatch: %+v", name, field)
+		}
+	}
+	for _, diagnostic := range diagnostics.Items() {
+		if diagnostic.Code == "request.parameter.unresolved" || diagnostic.Code == "request.body.unresolved" {
+			t.Fatalf("constant collection access should resolve completely: %+v", diagnostic)
+		}
+	}
+}
+
 func TestContextHelperCyclesAndExternalBoundariesAreDiagnosed(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/helperdiagnostics

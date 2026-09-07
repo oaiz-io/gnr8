@@ -41,6 +41,10 @@ must move the minor version.
   `c.FormFile`, composes with `PostForm` parts and typed bindings, and resolves its field name by the
   same rules on both access paths. A `FormFile` call on an unrelated `http.Request` still contributes
   nothing, and a dynamic field name is reported as `request.body.unresolved` rather than guessed.
+- **Go/Gin extraction preserves form collections and optional query maps.** `PostFormArray`,
+  `GetPostFormArray`, `PostFormMap`, and `GetPostFormMap` now contribute typed fields to synthesized
+  form bodies, while `GetQueryMap` contributes the same deep-object query parameter as `QueryMap`.
+  Direct and bounded helper calls follow the same rules.
 - **Go/Gin renderers no longer leave operations without responses.** `String` records an opaque
   `text/plain` response; `IndentedJSON`, `PureJSON`, and `AsciiJSON` retain typed JSON schemas; and
   `SecureJSON`, `JSONP`, `XML`, `YAML`, `TOML`, and `ProtoBuf` record honest opaque responses with
