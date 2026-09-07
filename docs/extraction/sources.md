@@ -89,6 +89,24 @@ Recognized route facts include:
   OpenAPI object key is always an unconstrained string. Two rules landing on the same value raise
   `request.parameter.ambiguous` and neither is applied.
 
+### Direct Gin query requiredness
+
+A direct `c.Query("name")` read states a string value, but the read alone does not state whether the
+caller must send it. gnr8 resolves requiredness only when the handler's control flow proves it:
+
+- an empty-value branch that always ends in a known 4xx response makes the parameter required;
+- the inverted form, where the non-empty branch continues and the `else` branch returns a known 4xx,
+  is also required;
+- a non-empty-only use branch whose empty path continues makes the parameter optional; and
+- `c.GetQuery("name")` remains an explicit optional presence read.
+
+The proof follows simple aliases, repeated reads of the same name, nested `if`/`else` branches,
+parenthesized conditions, `len(value) == 0`, and early returns. It does not guess across arbitrary
+helper predicates or response-writing helpers, reassigned aliases, loops, switches, selects, jumps,
+dynamic response statuses, or paths on which an absent value may both continue and return a client
+error. Those forms intentionally keep `request.parameter.unresolved`. A typed query binding remains
+the source for non-string types, defaults, enums, and serialization.
+
 Dynamic route strings are skipped with a diagnostic. A dynamic group prefix is omitted and reported.
 A multipart form's literal file-map access, such as `form.File["files"]`, is a repeated binary part,
 including when it is reached through nested module-owned or generic helpers. It may coexist with a

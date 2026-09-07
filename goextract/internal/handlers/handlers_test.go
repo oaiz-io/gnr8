@@ -676,7 +676,11 @@ func (c *Context) Data(int, string, []byte) {}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package rawjson
 
-import "github.com/gin-gonic/gin"
+import (
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
 
 type Server struct{ R *gin.Engine }
 
@@ -894,6 +898,223 @@ func requiredQueryUUID(c *gin.Context, key string) (uuid.UUID, error) {
 	org, ok := paramByName(cf.Params, "orgId")
 	if !ok || !org.Required || org.Schema.Type != facts.TypeWellKnown || org.Schema.Of != facts.WellKnownUUID {
 		t.Fatalf("orgId should be required uuid query param, got %+v", org)
+	}
+}
+
+func TestDirectQueryRequirednessFollowsProvenControlFlow(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/queryflow
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Query(string) string { return "" }
+func (c *Context) GetQuery(string) (string, bool) { return "", false }
+func (c *Context) GetHeader(string) string { return "" }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package queryflow
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type Result struct { OK bool `+"`json:\"ok\"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/required", s.required)
+	s.R.GET("/inverted", s.inverted)
+	s.R.GET("/optional", s.optional)
+	s.R.GET("/present", s.present)
+	s.R.GET("/early-nested", s.earlyNested)
+	s.R.GET("/multiple", s.multiple)
+	s.R.GET("/bare", s.bare)
+	s.R.GET("/ambiguous-nested", s.ambiguousNested)
+	s.R.GET("/reassigned-alias", s.reassignedAlias)
+	s.R.GET("/helper-condition", s.helperCondition)
+	s.R.GET("/normalized-read", s.normalizedRead)
+	s.R.GET("/nonterminal-error", s.nonterminalError)
+	s.R.GET("/loop-guard", s.loopGuard)
+}
+
+func (s Server) required(c *gin.Context) {
+	value := c.Query("name")
+	alias := value
+	if alias == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) inverted(c *gin.Context) {
+	if c.Query("name") != "" {
+		use("present")
+	} else {
+		c.JSON(422, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) optional(c *gin.Context) {
+	value := c.Query("name")
+	if value != "" {
+		use(value)
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) present(c *gin.Context) {
+	value, present := c.GetQuery("name")
+	_, _ = value, present
+	c.JSON(200, Result{})
+}
+
+func (s Server) earlyNested(c *gin.Context) {
+	value := c.Query("name")
+	if len(value) == 0 {
+		if c.GetHeader("X-Mode") == "strict" {
+			c.JSON(400, Result{})
+			return
+		}
+		c.JSON(422, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) multiple(c *gin.Context) {
+	first := c.Query("name")
+	if first == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	second := c.Query("name")
+	use(second)
+	c.JSON(200, Result{})
+}
+
+func (s Server) bare(c *gin.Context) {
+	use(c.Query("name"))
+	c.JSON(200, Result{})
+}
+
+func (s Server) ambiguousNested(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		if choose() {
+			c.JSON(400, Result{})
+			return
+		}
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) reassignedAlias(c *gin.Context) {
+	value := c.Query("name")
+	alias := value
+	alias = "fallback"
+	if alias == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) helperCondition(c *gin.Context) {
+	value := c.Query("name")
+	if helperRejects(value) {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) normalizedRead(c *gin.Context) {
+	value := strings.TrimSpace(c.Query("name"))
+	use(value)
+	c.JSON(200, Result{})
+}
+
+func (s Server) nonterminalError(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		c.JSON(400, Result{})
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) loopGuard(c *gin.Context) {
+	value := c.Query("name")
+	for choose() {
+		if value == "" {
+			c.JSON(400, Result{})
+			return
+		}
+	}
+	c.JSON(200, Result{})
+}
+
+func use(string) {}
+func choose() bool { return false }
+func helperRejects(string) bool { return false }
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load direct query control flow: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/queryflow", diagnostics)
+	byPath := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		byPath[route.Path] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for _, path := range []string{"/required", "/inverted", "/early-nested", "/multiple"} {
+		param, ok := paramByName(byPath[path].Params, "name")
+		if !ok || !param.Required {
+			t.Fatalf("%s should prove name required, got %+v", path, param)
+		}
+	}
+	for _, path := range []string{"/optional", "/present"} {
+		param, ok := paramByName(byPath[path].Params, "name")
+		if !ok || param.Required {
+			t.Fatalf("%s should prove name optional, got %+v", path, param)
+		}
+	}
+
+	unresolved := map[string]bool{}
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.parameter.unresolved" && item.Subject == "name" {
+			unresolved[item.Operation] = true
+		}
+	}
+	for _, path := range []string{"/bare", "/ambiguous-nested", "/reassigned-alias", "/helper-condition", "/normalized-read", "/nonterminal-error", "/loop-guard"} {
+		operation := "GET " + path
+		if !unresolved[operation] {
+			t.Fatalf("%s should retain deterministic unresolved requiredness: %+v", operation, diagnostics.Items())
+		}
+	}
+	for _, path := range []string{"/required", "/inverted", "/optional", "/present", "/early-nested", "/multiple"} {
+		operation := "GET " + path
+		if unresolved[operation] {
+			t.Fatalf("%s has proven requiredness but emitted unresolved: %+v", operation, diagnostics.Items())
+		}
 	}
 }
 

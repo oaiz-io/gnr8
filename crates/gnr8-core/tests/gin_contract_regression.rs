@@ -261,6 +261,14 @@ fn assert_typescript_client(ts_client: &str) {
                 .contains("redirect: options.followRedirects === true ? \"follow\" : \"manual\""),
         "{ts_client}"
     );
+    assert!(
+        ts_client.contains("export type QueryRequiredParams = {\n  term: string;\n};"),
+        "required direct-query proof did not reach the TypeScript SDK:\n{ts_client}"
+    );
+    assert!(
+        ts_client.contains("export type QueryOptionalParams = {\n  view?: string;\n};"),
+        "optional direct-query proof did not reach the TypeScript SDK:\n{ts_client}"
+    );
 }
 
 fn assert_typescript_models(ts_models: &str) {
@@ -332,6 +340,52 @@ fn assert_python_models(py_models: &str) {
     );
     for field in ["    primary_image: bytes", "    supporting_document: bytes"] {
         assert!(py_models.contains(field), "missing {field}:\n{py_models}");
+    }
+}
+
+fn assert_python_client(py_client: &str) {
+    let required = py_client
+        .split("    def query_required(")
+        .nth(1)
+        .expect("query_required Python SDK method");
+    let required = required.split("        path = ").next().unwrap_or(required);
+    assert!(
+        required.contains("term: str,") && !required.contains("term: Optional[str] = None"),
+        "required direct-query proof did not reach the Python SDK:\n{required}"
+    );
+
+    let optional = py_client
+        .split("    def query_optional(")
+        .nth(1)
+        .expect("query_optional Python SDK method");
+    let optional = optional.split("        path = ").next().unwrap_or(optional);
+    assert!(
+        optional.contains("view: Optional[str] = None,"),
+        "optional direct-query proof did not reach the Python SDK:\n{optional}"
+    );
+}
+
+fn assert_graph(graph_json: &str) {
+    let artifact: GraphArtifact = serde_json::from_str(graph_json).expect("decode graph artifact");
+    for (operation_id, parameter_name, required) in [
+        ("queryRequired", "term", true),
+        ("queryOptional", "view", false),
+    ] {
+        let operation = artifact
+            .graph
+            .operations
+            .iter()
+            .find(|operation| operation.id == operation_id)
+            .unwrap_or_else(|| panic!("missing graph operation {operation_id}"));
+        let parameter = operation
+            .params
+            .iter()
+            .find(|parameter| parameter.name == parameter_name)
+            .unwrap_or_else(|| panic!("missing graph parameter {parameter_name}"));
+        assert_eq!(
+            parameter.required, required,
+            "graph requiredness for {operation_id}.{parameter_name}"
+        );
     }
 }
 
@@ -531,6 +585,16 @@ fn assert_openapi_parameter_contracts(openapi: &str) {
             && search.contains("default: asc"),
         "{search}"
     );
+    let required = path_section(openapi, "/v1/items/query-required");
+    assert!(
+        required.contains("name: term\n        in: query\n        required: true"),
+        "required direct-query proof did not reach OpenAPI:\n{required}"
+    );
+    let optional = path_section(openapi, "/v1/items/query-optional");
+    assert!(
+        optional.contains("name: view\n        in: query\n        required: false"),
+        "optional direct-query proof did not reach OpenAPI:\n{optional}"
+    );
 }
 
 fn path_section<'a>(openapi: &'a str, path: &str) -> &'a str {
@@ -584,6 +648,14 @@ fn assert_go_operations(go_ops: &str) {
     assert!(
         go_ops.contains("SuccessStatuses: map[int]bool{") && go_ops.contains("307: true,"),
         "{go_ops}"
+    );
+    assert!(
+        go_ops.contains("type QueryRequiredParams struct {\n\tTerm string\n}"),
+        "required direct-query proof did not reach the Go SDK:\n{go_ops}"
+    );
+    assert!(
+        go_ops.contains("type QueryOptionalParams struct {\n\tView *string\n}"),
+        "optional direct-query proof did not reach the Go SDK:\n{go_ops}"
     );
 }
 
@@ -653,6 +725,8 @@ fn go_gin_contract_pipeline_generates_expected_sdk_surfaces() {
     assert_typescript_client(ts_client);
     assert_typescript_models(artifact(&outcome, "generated/ts/models.ts"));
     assert_python_models(artifact(&outcome, "generated/py/models.py"));
+    assert_python_client(artifact(&outcome, "generated/py/client.py"));
+    assert_graph(artifact(&outcome, "generated/gnr8.graph.json"));
     assert_openapi(artifact(&outcome, "generated/openapi.yaml"));
     assert_go_operations(go_ops);
     assert_multipart_sdk_surfaces(ts_client, go_models, go_ops);
