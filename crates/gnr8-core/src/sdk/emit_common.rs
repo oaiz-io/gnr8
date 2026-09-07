@@ -802,10 +802,13 @@ impl SuccessResponses {
 
 /// Column budget for a generated documentation line, before any comment prefix.
 ///
-/// Python is the binding constraint: `ruff check --select E` rejects a docstring line past 88
-/// columns, and the docstring body sits at an 8-space indent. Go's `// ` and TypeScript's
-/// `   * ` prefixes are shorter, so a line that fits Python fits all three.
-const NOTE_WIDTH: usize = 80 - 8;
+/// Only one target enforces a limit: `ruff check --select E` rejects a generated Python docstring
+/// line past 88 columns, and that body sits at an 8-space indent, leaving 80. The value is smaller
+/// than 80 so the TypeScript form — a 5-column `   * ` prefix — also lands inside Prettier's
+/// 80-column `printWidth`. Prettier does not reflow comments and would not reject a longer one, but
+/// a generated line that reads like the rest of the file costs nothing here. Go wraps nothing and
+/// has room to spare.
+const NOTE_WIDTH: usize = 72;
 
 /// Greedily wrap a generated sentence to `width` columns, never splitting a word.
 ///
@@ -1419,6 +1422,10 @@ mod tests {
             assert!(
                 line.chars().count() + 8 <= 88,
                 "a docstring line must fit ruff's column limit: {line:?}"
+            );
+            assert!(
+                line.chars().count() + 5 <= 80,
+                "a JSDoc line must fit Prettier's printWidth: {line:?}"
             );
         }
     }
