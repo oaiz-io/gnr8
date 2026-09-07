@@ -676,11 +676,7 @@ func (c *Context) Data(int, string, []byte) {}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package rawjson
 
-import (
-	"strings"
-
-	"github.com/gin-gonic/gin"
-)
+import "github.com/gin-gonic/gin"
 
 type Server struct{ R *gin.Engine }
 
@@ -926,10 +922,19 @@ func (c *Context) Query(string) string { return "" }
 func (c *Context) GetQuery(string) (string, bool) { return "", false }
 func (c *Context) GetHeader(string) string { return "" }
 func (c *Context) JSON(int, any) {}
+func (c *Context) String(int, string, ...any) {}
+func (c *Context) AbortWithError(int, error) error { return nil }
+func (c *Context) Abort() {}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package queryflow
 
-import "github.com/gin-gonic/gin"
+import (
+	"errors"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
 
 type Server struct{ R *gin.Engine }
 type Result struct { OK bool `+"`json:\"ok\"`"+` }
@@ -948,6 +953,10 @@ func (s Server) Register() {
 	s.R.GET("/normalized-read", s.normalizedRead)
 	s.R.GET("/nonterminal-error", s.nonterminalError)
 	s.R.GET("/loop-guard", s.loopGuard)
+	s.R.GET("/string-rejected", s.stringRejected)
+	s.R.GET("/aborted-with-error", s.abortedWithError)
+	s.R.GET("/silent-abort", s.silentAbort)
+	s.R.GET("/parsed-guard", s.parsedGuard)
 }
 
 func (s Server) required(c *gin.Context) {
@@ -1069,6 +1078,47 @@ func (s Server) loopGuard(c *gin.Context) {
 	c.JSON(200, Result{})
 }
 
+func (s Server) stringRejected(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		c.String(400, "name is required")
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) abortedWithError(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		_ = c.AbortWithError(422, errors.New("name is required"))
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) silentAbort(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		c.Abort()
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) parsedGuard(c *gin.Context) {
+	if c.Query("limit") == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	limit, err := strconv.Atoi(c.Query("limit"))
+	if err != nil {
+		c.JSON(400, Result{})
+		return
+	}
+	use(strconv.Itoa(limit))
+	c.JSON(200, Result{})
+}
+
 func use(string) {}
 func choose() bool { return false }
 func helperRejects(string) bool { return false }
@@ -1078,6 +1128,11 @@ func helperRejects(string) bool { return false }
 	if err != nil {
 		t.Fatalf("load direct query control flow: %v", err)
 	}
+	// load.Load reports per-package type errors instead of failing, so a fixture
+	// that does not compile would make every assertion below pass vacuously.
+	for _, loadErr := range res.Errors {
+		t.Fatalf("query control flow fixture must type-check: %+v", loadErr)
+	}
 	diagnostics := diag.New()
 	analyzer := handlers.NewAnalyzer(res, "example.com/queryflow", diagnostics)
 	byPath := map[string]handlers.CodeFacts{}
@@ -1085,7 +1140,10 @@ func helperRejects(string) bool { return false }
 		byPath[route.Path] = analyzer.Analyze(route, diagnostics)
 	}
 
-	for _, path := range []string{"/required", "/inverted", "/early-nested", "/multiple"} {
+	for _, path := range []string{
+		"/required", "/inverted", "/early-nested", "/multiple",
+		"/string-rejected", "/aborted-with-error",
+	} {
 		param, ok := paramByName(byPath[path].Params, "name")
 		if !ok || !param.Required {
 			t.Fatalf("%s should prove name required, got %+v", path, param)
@@ -1104,17 +1162,27 @@ func helperRejects(string) bool { return false }
 			unresolved[item.Operation] = true
 		}
 	}
-	for _, path := range []string{"/bare", "/ambiguous-nested", "/reassigned-alias", "/helper-condition", "/normalized-read", "/nonterminal-error", "/loop-guard"} {
+	for _, path := range []string{"/bare", "/ambiguous-nested", "/reassigned-alias", "/helper-condition", "/normalized-read", "/nonterminal-error", "/loop-guard", "/silent-abort"} {
 		operation := "GET " + path
 		if !unresolved[operation] {
 			t.Fatalf("%s should retain deterministic unresolved requiredness: %+v", operation, diagnostics.Items())
 		}
 	}
-	for _, path := range []string{"/required", "/inverted", "/optional", "/present", "/early-nested", "/multiple"} {
+	for _, path := range []string{
+		"/required", "/inverted", "/optional", "/present", "/early-nested", "/multiple",
+		"/string-rejected", "/aborted-with-error",
+	} {
 		operation := "GET " + path
 		if unresolved[operation] {
 			t.Fatalf("%s has proven requiredness but emitted unresolved: %+v", operation, diagnostics.Items())
 		}
+	}
+
+	// A proven direct read settles requiredness; it must not overwrite the schema
+	// a parser around the same read already proved.
+	parsed, ok := paramByName(byPath["/parsed-guard"].Params, "limit")
+	if !ok || !parsed.Required || primName(parsed.Schema) != "int" {
+		t.Fatalf("/parsed-guard should keep the parsed int schema and prove required, got %+v", parsed)
 	}
 }
 

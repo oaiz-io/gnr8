@@ -188,11 +188,16 @@ type queryPathState struct {
 	checked  bool
 }
 
+// queryPathOutcome is how one explored path ended. queryPathOpen is the
+// deliberate fourth value: a path that wrote no response gnr8 recognizes has
+// stated nothing, which is weaker evidence than a path that answered 2xx and is
+// not interchangeable with it.
 type queryPathOutcome uint8
 
 const (
 	queryPathSuccess queryPathOutcome = iota
 	queryPathClientError
+	queryPathOpen
 	queryPathUncertain
 )
 
@@ -1036,6 +1041,13 @@ func multipartFormResultVars(h handlerDecl) map[gotypes.Object]bool {
 // absent and once with it present. Unknown conditions are explored on both
 // branches. A proof is retained only when every absent path agrees; mixed,
 // unsupported, or helper-controlled paths deliberately remain unresolved.
+//
+// Requiredness needs every absent path to answer 4xx. Optionality needs every
+// absent path to answer a status gnr8 read, not merely to reach the end of the
+// function: a path may answer through a writer this analysis does not follow
+// (c.Writer, a gin method gnr8 does not name), and silence there is not evidence
+// of success. Both proofs additionally need one present path that does not reject
+// the value, so a handler that fails either way proves nothing.
 func queryRequiredness(frame helperFrame, name string) queryPresenceProof {
 	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil ||
 		!frameReadsDirectQuery(frame, name) {
@@ -1047,11 +1059,11 @@ func queryRequiredness(frame helperFrame, name string) queryPresenceProof {
 	present.terminals = append(present.terminals, terminalQueryStates(present.next)...)
 
 	if allQueryTerminals(absent.terminals, queryPathClientError, false) &&
-		hasQueryTerminal(present.terminals, queryPathSuccess) {
+		hasQueryContinuation(present.terminals) {
 		return queryPresenceRequired
 	}
 	if allQueryTerminals(absent.terminals, queryPathSuccess, true) &&
-		hasQueryTerminal(present.terminals, queryPathSuccess) {
+		hasQueryContinuation(present.terminals) {
 		return queryPresenceOptional
 	}
 	return queryPresenceUnresolved
@@ -1222,8 +1234,10 @@ func terminalQueryStates(states []queryPathState) []queryTerminal {
 }
 
 func terminalQueryState(state queryPathState) queryTerminal {
-	outcome := queryPathSuccess
+	outcome := queryPathOpen
 	switch state.response {
+	case queryResponseSuccess:
+		outcome = queryPathSuccess
 	case queryResponseClientError:
 		outcome = queryPathClientError
 	case queryResponseUncertain:
@@ -1244,9 +1258,12 @@ func allQueryTerminals(terminals []queryTerminal, outcome queryPathOutcome, requ
 	return true
 }
 
-func hasQueryTerminal(terminals []queryTerminal, outcome queryPathOutcome) bool {
+// hasQueryContinuation reports whether the value, once supplied, can still be
+// answered without a client error. A path that ended open qualifies: it did not
+// reject the request, which is all either proof asks of the present run.
+func hasQueryContinuation(terminals []queryTerminal) bool {
 	for _, terminal := range terminals {
-		if terminal.outcome == outcome {
+		if terminal.outcome == queryPathSuccess || terminal.outcome == queryPathOpen {
 			return true
 		}
 	}
@@ -1492,24 +1509,7 @@ func updateQueryResponse(frame helperFrame, node ast.Node, state *queryPathState
 		}
 		method, recvPkg, ginCall := routes.GinMethod(frame.decl.info, call)
 		if ginCall && recvPkg == routes.GinPkgPath {
-			switch method {
-			case "JSON", "Status", "AbortWithStatus", "AbortWithStatusJSON":
-				if len(call.Args) == 0 {
-					mergeQueryResponse(state, queryResponseUncertain)
-					return true
-				}
-				status, known := statusOf(frame.decl.info, call.Args[0])
-				switch {
-				case !known:
-					mergeQueryResponse(state, queryResponseUncertain)
-				case status >= 400 && status < 500:
-					mergeQueryResponse(state, queryResponseClientError)
-				case status >= 200 && status < 400:
-					mergeQueryResponse(state, queryResponseSuccess)
-				default:
-					mergeQueryResponse(state, queryResponseUncertain)
-				}
-			}
+			mergeQueryResponse(state, ginResponseOutcome(frame.decl.info, method, call))
 			return true
 		}
 		if frameCallPassesGinContext(frame, call) {
@@ -1517,6 +1517,58 @@ func updateQueryResponse(frame helperFrame, node ast.Node, state *queryPathState
 		}
 		return true
 	})
+}
+
+// ginResponseOutcome classifies what one gin.Context call contributes to a path's
+// response state. A method that does not answer the request contributes nothing;
+// one that answers with a status gnr8 cannot read as a constant is uncertain.
+// Naming the response surface completely matters: an answer gnr8 does not
+// recognize leaves the path open rather than looking like a success, so the cost
+// of an omission here is a lost proof, never a wrong one.
+func ginResponseOutcome(info *gotypes.Info, method string, call *ast.CallExpr) queryResponseState {
+	if ginFixedSuccessResponse(method) {
+		return queryResponseSuccess
+	}
+	if !ginStatusArgumentResponse(method) {
+		return queryResponseNone
+	}
+	if len(call.Args) == 0 {
+		return queryResponseUncertain
+	}
+	status, known := statusOf(info, call.Args[0])
+	switch {
+	case !known:
+		return queryResponseUncertain
+	case status >= 400 && status < 500:
+		return queryResponseClientError
+	case status >= 200 && status < 400:
+		return queryResponseSuccess
+	}
+	return queryResponseUncertain
+}
+
+// ginFixedSuccessResponse names the gin.Context methods that answer with a status
+// the method itself fixes at 200.
+func ginFixedSuccessResponse(method string) bool {
+	switch method {
+	case "File", "FileFromFS", "FileAttachment", "SSEvent", "Stream":
+		return true
+	}
+	return false
+}
+
+// ginStatusArgumentResponse names the gin.Context methods that answer with the
+// status passed as their first argument. Abort is deliberately absent: on its own
+// it states no status, so it leaves the path open instead of claiming success.
+func ginStatusArgumentResponse(method string) bool {
+	switch method {
+	case "JSON", "IndentedJSON", "SecureJSON", "PureJSON", "AsciiJSON", "JSONP",
+		"XML", "YAML", "TOML", "ProtoBuf", "String", "HTML", "Render", "Negotiate",
+		"Data", "DataFromReader", "Redirect", "Status",
+		"AbortWithStatus", "AbortWithStatusJSON", "AbortWithError":
+		return true
+	}
+	return false
 }
 
 func mergeQueryResponse(state *queryPathState, incoming queryResponseState) {
@@ -2451,7 +2503,7 @@ func (a *Analyzer) analyzeQueryHelperCall(
 	if !ok {
 		return
 	}
-	if resolvedParam["query/"+param.Name] {
+	if requiredKnown && resolvedParam["query/"+param.Name] {
 		return
 	}
 	a.addExtractedParameter(cf, seenParam, resolvedParam, param, requiredKnown, route, diags)
@@ -5180,11 +5232,36 @@ func (a *Analyzer) addExtractedParameter(
 		return
 	}
 	existing := &cf.Params[index]
+	// Resolution and schema specificity are independent facts about one parameter:
+	// the read that settles requiredness may still carry the bare `string` schema
+	// (a direct c.Query proved by control flow), while the read that leaves
+	// requiredness open may be the one that proved the type (strconv.Atoi around
+	// that same c.Query). Letting either fact overwrite the other loses one of them.
 	if !wasResolved && isResolved {
+		if parameterSchemaSpecificity(existing.Schema) > parameterSchemaSpecificity(param.Schema) {
+			param.Schema = existing.Schema
+			param.Span = existing.Span
+		}
+		param.Default = firstLiteral(param.Default, existing.Default)
+		if param.Style == "" {
+			param.Style = existing.Style
+			param.Explode = existing.Explode
+		}
 		*existing = param
 		return
 	}
 	if wasResolved && !isResolved {
+		if parameterSchemaSpecificity(param.Schema) > parameterSchemaSpecificity(existing.Schema) {
+			existing.Schema = param.Schema
+			existing.Span = param.Span
+		}
+		if existing.Default == nil {
+			existing.Default = param.Default
+		}
+		if existing.Style == "" {
+			existing.Style = param.Style
+			existing.Explode = param.Explode
+		}
 		return
 	}
 	if !reflect.DeepEqual(existing.Schema, param.Schema) {
