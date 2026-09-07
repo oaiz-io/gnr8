@@ -9,6 +9,31 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **A direct `c.Query("name")` read now states requiredness from the handler's own control flow, and
+  the helper-name heuristics that used to answer it are gone.** The parameter is required when every
+  path taken for an absent value answers a known 4xx, and optional when every such path answers a
+  known 2xx/3xx after an explicit empty/non-empty check. The proof reads the whole `gin.Context`
+  response surface, so `c.String(400, …)`, `c.XML(400, …)` and `c.AbortWithError(400, …)` reject as
+  plainly as `c.JSON`, and it follows simple aliases, repeated reads of one name, nested `if`/`else`,
+  `if value := c.Query("name"); value == ""` initializers, and `len(value) == 0`.
+
+  `required` decides the generated parameter's shape, so this moves existing surfaces in both
+  directions: a Go field between `string` and `*string`, a Python argument between positional and
+  keyword-with-default, a TypeScript property between `name: string` and `name?: string`. Wrapping a
+  read in `strings.TrimSpace(…)`, or handing it to a helper that returns `(T, error)`, no longer
+  implies required on its own — that was a guess about identifier spelling and return shape rather
+  than a fact the source stated (rule 3). Write the rejection you mean and the proof reads it; use
+  `value, ok := c.GetQuery("name")` to state an optional presence read outright.
+
+  What the proof cannot establish is diagnosed rather than assumed. Helper predicates, response-writing
+  helpers, reassigned aliases, values whose address is taken or that a function literal assigns, loops,
+  switches, selects, jumps, dynamic response statuses, a bare `c.Abort()` that states no status, and a
+  rejection written straight to `c.Writer` all keep `request.parameter.unresolved`. A typed query
+  binding remains the source for non-string types, defaults, enums, and serialization, and it composes
+  with the proof: the binding states the schema, the control flow states requiredness.
+
 ### Fixed
 
 - **Go/Gin extraction recognizes a multipart file read through `c.Request.FormFile`.** A file part
