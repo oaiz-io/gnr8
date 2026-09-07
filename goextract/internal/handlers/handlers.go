@@ -726,6 +726,8 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		a.addBoundParameters(frame, call, "query", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
 	case "ShouldBindHeader", "BindHeader":
 		a.addBoundParameters(frame, call, "header", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
+	case "ShouldBindUri", "BindUri":
+		a.addBoundParameters(frame, call, "path", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
 	case "ShouldBindJSON", "BindJSON":
 		a.setTraversedRequestBody(frame, call, "application/json", optionalBindPositions, traversal)
 	case "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
@@ -2042,6 +2044,8 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			a.addBoundParameters(helperFrame{decl: h}, call, "query", &cf, seenParam, resolvedParam, route, diags)
 		case "ShouldBindHeader", "BindHeader":
 			a.addBoundParameters(helperFrame{decl: h}, call, "header", &cf, seenParam, resolvedParam, route, diags)
+		case "ShouldBindUri", "BindUri":
+			a.addBoundParameters(helperFrame{decl: h}, call, "path", &cf, seenParam, resolvedParam, route, diags)
 		case "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
 			frame := helperFrame{decl: h}
 			bound := boundTypeFromCall(frame, call)
@@ -5557,13 +5561,14 @@ func (a *Analyzer) parametersFromBoundType(
 			}
 			continue
 		}
-		schema = schemaWithParameterEnums(schema, tag, name, route, diags, file, line)
+		schema = schemaWithParameterConstraints(schema, tag, name, route, diags, file, line)
 		param := requestParameter(
 			name,
 			location,
 			// Field scope only: a `required` behind `dive`/`keys` constrains the values
 			// inside a repeated parameter, not whether the parameter must be sent.
-			tags.HasFieldToken(tag.Get("binding"), "required") ||
+			location == "path" ||
+				tags.HasFieldToken(tag.Get("binding"), "required") ||
 				tags.HasFieldToken(tag.Get("validate"), "required"),
 			schema,
 			fset,
@@ -5613,8 +5618,11 @@ func (a *Analyzer) parametersFromBoundType(
 
 func parameterWireName(tag reflect.StructTag, fallback, location string) (string, []string, bool) {
 	key := "form"
-	if location == "header" {
+	switch location {
+	case "header":
 		key = "header"
+	case "path":
+		key = "uri"
 	}
 	raw, ok := tag.Lookup(key)
 	if !ok || raw == "" {
@@ -5732,34 +5740,33 @@ func namedStringEnumMembers(named *gotypes.Named) []string {
 	return out
 }
 
-// enumTarget names the one schema an enum replaces. A bound parameter carries its
-// facts in `facts.ParamFact.Schema` and nowhere else — unlike a schema field there
-// is no constraint object standing beside it — so stating an enum means replacing a
-// schema, and a rule that cannot name which schema it replaces cannot be applied.
-type enumTarget int
+// parameterRuleTarget names the one schema an enum or string format refines. A
+// bound parameter carries its facts in `facts.ParamFact.Schema` and nowhere else,
+// so a rule that cannot name which schema it refines cannot be applied.
+type parameterRuleTarget int
 
 const (
-	// enumTargetNone is a rule that reaches no schema on this parameter.
-	enumTargetNone enumTarget = iota
-	// enumTargetSelf is the parameter's own schema.
-	enumTargetSelf
-	// enumTargetElement is an array's element or a map's value.
-	enumTargetElement
+	// parameterRuleTargetNone is a rule that reaches no schema on this parameter.
+	parameterRuleTargetNone parameterRuleTarget = iota
+	// parameterRuleTargetSelf is the parameter's own schema.
+	parameterRuleTargetSelf
+	// parameterRuleTargetElement is an array's element or a map's value.
+	parameterRuleTargetElement
 )
 
-// enumTargets is iterated instead of the grouping map, whose order Go randomizes.
+// parameterRuleTargets is iterated instead of the grouping map, whose order Go randomizes.
 //
-// Only one of these can hold rules for any given parameter: enumTargetOf answers
+// Only one of these can hold rules for any given parameter: parameterRuleTargetOf answers
 // Self only for a scalar and Element only for a container, and the schema is one or
 // the other. The loop does not lean on that, so a future target — a constrained map
 // key, once a document can carry one — needs a line here and nothing else.
-var enumTargets = [...]enumTarget{enumTargetSelf, enumTargetElement}
+var parameterRuleTargets = [...]parameterRuleTarget{parameterRuleTargetSelf, parameterRuleTargetElement}
 
-func (t enumTarget) label() string {
+func (t parameterRuleTarget) label() string {
 	switch t {
-	case enumTargetSelf:
+	case parameterRuleTargetSelf:
 		return "the parameter itself"
-	case enumTargetElement:
+	case parameterRuleTargetElement:
 		return "the values inside the parameter"
 	}
 	return "nothing"
@@ -5775,7 +5782,7 @@ type parameterEnumRule struct {
 	text   string
 }
 
-// enumTargetOf resolves the one schema a rule written at the given scope replaces.
+// parameterRuleTargetOf resolves the one schema a rule written at the given scope replaces.
 // Every scope has a single destination: nothing is attempted twice and nothing is
 // recovered on failure, so the tag's own shape decides where its members land.
 //
@@ -5792,27 +5799,27 @@ type parameterEnumRule struct {
 // rather than a rescue: `facts.Type` has no room for an enum beside an array or a
 // map, so the members can only be describing the values, and reading them that way
 // is one deterministic answer, not a choice between two.
-func enumTargetOf(schema facts.Type, scope tags.Scope) enumTarget {
+func parameterRuleTargetOf(schema facts.Type, scope tags.Scope) parameterRuleTarget {
 	container := schema.Type == facts.TypeArray || schema.Type == facts.TypeMap
 	switch scope {
 	case tags.ScopeField:
 		if container {
-			return enumTargetElement
+			return parameterRuleTargetElement
 		}
-		return enumTargetSelf
+		return parameterRuleTargetSelf
 	case tags.ScopeElement:
 		if container {
-			return enumTargetElement
+			return parameterRuleTargetElement
 		}
 	}
-	return enumTargetNone
+	return parameterRuleTargetNone
 }
 
-func schemaWithEnum(schema facts.Type, values []string, target enumTarget) facts.Type {
+func schemaWithEnum(schema facts.Type, values []string, target parameterRuleTarget) facts.Type {
 	switch target {
-	case enumTargetSelf:
+	case parameterRuleTargetSelf:
 		return facts.EnumType(values)
-	case enumTargetElement:
+	case parameterRuleTargetElement:
 		if schema.Type == facts.TypeArray {
 			return facts.ArrayType(facts.EnumType(values))
 		}
@@ -5823,14 +5830,14 @@ func schemaWithEnum(schema facts.Type, values []string, target enumTarget) facts
 	return schema
 }
 
-// schemaWithParameterEnums places each enum a bound parameter's tag states onto the
-// value that tag says it constrains.
+// schemaWithParameterConstraints places each enum or well-known string format a
+// bound parameter's enforced validation tags state onto the value that tag names.
 //
 // Two rules that land on the same value are a contradiction the extractor refuses to
 // settle. Choosing between them would be a precedence rule, and a fact stated twice
 // has no winner even when both spellings agree, so both are dropped and the
 // parameter is reported rather than published with a guess.
-func schemaWithParameterEnums(
+func schemaWithParameterConstraints(
 	schema facts.Type,
 	tag reflect.StructTag,
 	name string,
@@ -5839,35 +5846,142 @@ func schemaWithParameterEnums(
 	file string,
 	line uint32,
 ) facts.Type {
-	stated := map[enumTarget][]parameterEnumRule{}
+	statedEnums := map[parameterRuleTarget][]parameterEnumRule{}
 	for _, rule := range parameterEnumRules(tag) {
-		target := enumTargetOf(schema, rule.scope)
-		if target == enumTargetNone {
+		target := parameterRuleTargetOf(schema, rule.scope)
+		if target == parameterRuleTargetNone {
 			continue
 		}
-		stated[target] = append(stated[target], rule)
+		statedEnums[target] = append(statedEnums[target], rule)
 	}
-	for _, target := range enumTargets {
-		rules := stated[target]
-		switch {
-		case len(rules) == 0:
+	statedFormats := map[parameterRuleTarget][]parameterFormatRule{}
+	for _, rule := range parameterFormatRules(tag) {
+		target := parameterRuleTargetOf(schema, rule.scope)
+		if target == parameterRuleTargetNone {
 			continue
-		case len(rules) > 1:
+		}
+		statedFormats[target] = append(statedFormats[target], rule)
+	}
+	for _, target := range parameterRuleTargets {
+		enumRules := statedEnums[target]
+		formatRules := statedFormats[target]
+		if len(enumRules) > 0 && len(formatRules) > 0 {
 			if diags != nil {
 				diags.RequestParameterAmbiguous(
 					name,
 					route.Method,
 					untypedRouteLabel(route),
-					"enum stated more than once for "+target.label()+" ("+renderEnumRules(rules)+")",
+					"enum and format both constrain "+target.label()+" ("+renderEnumRules(enumRules)+", "+renderFormatRules(formatRules)+")",
 					file,
 					line,
 				)
 			}
-		default:
-			schema = schemaWithEnum(schema, rules[0].values, target)
+			continue
+		}
+		switch {
+		case len(enumRules) > 1:
+			if diags != nil {
+				diags.RequestParameterAmbiguous(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"enum stated more than once for "+target.label()+" ("+renderEnumRules(enumRules)+")",
+					file,
+					line,
+				)
+			}
+		case len(enumRules) == 1:
+			schema = schemaWithEnum(schema, enumRules[0].values, target)
+		}
+		switch {
+		case len(formatRules) > 1:
+			if diags != nil {
+				diags.RequestParameterAmbiguous(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"format stated more than once for "+target.label()+" ("+renderFormatRules(formatRules)+")",
+					file,
+					line,
+				)
+			}
+		case len(formatRules) == 1:
+			var applied bool
+			schema, applied = schemaWithWellKnownFormat(schema, formatRules[0].format, target)
+			if !applied && diags != nil {
+				diags.RequestParameterUnresolved(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"format "+strconv.Quote(formatRules[0].format)+" requires a string parameter at "+target.label(),
+					file,
+					line,
+				)
+			}
 		}
 	}
 	return schema
+}
+
+type parameterFormatRule struct {
+	scope  tags.Scope
+	format string
+	text   string
+}
+
+func parameterFormatRules(tag reflect.StructTag) []parameterFormatRule {
+	rules := []parameterFormatRule{}
+	for _, key := range []string{"binding", "validate"} {
+		for _, token := range tags.Scoped(tag.Get(key)) {
+			format := ""
+			switch token.Text {
+			case "uuid":
+				format = facts.WellKnownUUID
+			case "uri":
+				format = facts.WellKnownURI
+			}
+			if format != "" {
+				rules = append(rules, parameterFormatRule{scope: token.Scope, format: format, text: quoteTagRule(key, token.Text)})
+			}
+		}
+	}
+	return rules
+}
+
+func schemaWithWellKnownFormat(schema facts.Type, format string, target parameterRuleTarget) (facts.Type, bool) {
+	formatted := facts.WellKnownType(format)
+	switch target {
+	case parameterRuleTargetSelf:
+		if isPrimitiveStringType(schema) {
+			return formatted, true
+		}
+		return schema, schema.Type == facts.TypeWellKnown && schema.Of == format
+	case parameterRuleTargetElement:
+		if schema.Type == facts.TypeArray {
+			element, ok := schema.Of.(*facts.Type)
+			if ok && element != nil {
+				updated, applied := schemaWithWellKnownFormat(*element, format, parameterRuleTargetSelf)
+				if applied {
+					return facts.ArrayType(updated), true
+				}
+			}
+		}
+		if mapped, ok := schema.Of.(*facts.MapType); ok && mapped != nil {
+			updated, applied := schemaWithWellKnownFormat(mapped.Value, format, parameterRuleTargetSelf)
+			if applied {
+				return facts.MapTypeOf(mapped.Key, updated), true
+			}
+		}
+	}
+	return schema, false
+}
+
+func renderFormatRules(rules []parameterFormatRule) string {
+	spellings := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		spellings = append(spellings, rule.text)
+	}
+	return strings.Join(spellings, ", ")
 }
 
 // parameterEnumRules reads every enum a bound parameter's tag states. `binding` and

@@ -41,6 +41,10 @@ must move the minor version.
   `c.FormFile`, composes with `PostForm` parts and typed bindings, and resolves its field name by the
   same rules on both access paths. A `FormFile` call on an unrelated `http.Request` still contributes
   nothing, and a dynamic field name is reported as `request.body.unresolved` rather than guessed.
+- **Go/Gin URI bindings preserve typed path parameters.** `ShouldBindUri` and `BindUri`, including
+  calls in bounded module-owned helpers, now read runtime `uri` names and Go field types, preserve
+  required path semantics, and lower enforced `uuid` and `uri` string formats. Matching `Param`
+  evidence is enriched instead of duplicated, while conflicting typed schemas remain diagnostic.
 - **Go/Gin extraction recognizes the aborting `BindQuery` and `BindHeader` methods.** Their typed
   query and header structs now contribute the same parameters as the corresponding `ShouldBind*`
   methods, including through bounded module-owned helpers.

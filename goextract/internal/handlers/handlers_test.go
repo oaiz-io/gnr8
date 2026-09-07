@@ -2317,6 +2317,109 @@ func (s Server) search(c *gin.Context) {
 	}
 }
 
+func TestURIBindingsEnrichPathParameters(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/uribindings
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Param(string) string { return "" }
+func (c *Context) ShouldBindUri(any) error { return nil }
+func (c *Context) BindUri(any) error { return nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package uribindings
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type DirectURI struct {
+	ID     string `+"`"+`uri:"id" binding:"required,uuid"`+"`"+`
+	Shard  int    `+"`"+`uri:"shard"`+"`"+`
+	Target string `+"`"+`uri:"target" validate:"uri"`+"`"+`
+}
+type HelperURI struct { Revision int `+"`"+`uri:"revision"`+"`"+` }
+type Response struct { OK bool `+"`"+`json:"ok"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/things/:id/:shard/:target", s.direct)
+	s.R.GET("/revisions/:revision", s.helper)
+}
+
+func bindURI(c *gin.Context) {
+	var input HelperURI
+	_ = c.BindUri(&input)
+}
+
+func (s Server) direct(c *gin.Context) {
+	_ = c.Param("id")
+	_ = c.Param("shard")
+	_ = c.Param("target")
+	var input DirectURI
+	_ = c.ShouldBindUri(&input)
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) helper(c *gin.Context) {
+	_ = c.Param("revision")
+	bindURI(c)
+	c.JSON(200, Response{OK: true})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load URI bindings fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/uribindings", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	direct := got["direct"].Params
+	if len(direct) != 3 {
+		t.Fatalf("ShouldBindUri should enrich rather than duplicate path params: %+v", direct)
+	}
+	id, ok := paramByName(direct, "id")
+	if !ok || id.Location != "path" || !id.Required || id.Schema.Type != facts.TypeWellKnown || id.Schema.Of != facts.WellKnownUUID {
+		t.Fatalf("URI-bound UUID path parameter mismatch: %+v", id)
+	}
+	shard, ok := paramByName(direct, "shard")
+	if !ok || shard.Location != "path" || !shard.Required || primName(shard.Schema) != facts.PrimInt {
+		t.Fatalf("URI-bound integer path parameter mismatch: %+v", shard)
+	}
+	target, ok := paramByName(direct, "target")
+	if !ok || target.Location != "path" || !target.Required || target.Schema.Type != facts.TypeWellKnown || target.Schema.Of != facts.WellKnownURI {
+		t.Fatalf("URI-bound URI path parameter mismatch: %+v", target)
+	}
+	revision, ok := paramByName(got["helper"].Params, "revision")
+	if !ok || revision.Location != "path" || !revision.Required || primName(revision.Schema) != facts.PrimInt {
+		t.Fatalf("helper BindUri path parameter mismatch: %+v", revision)
+	}
+	for _, diagnostic := range diagnostics.Items() {
+		if diagnostic.Code == "request.parameter.unresolved" || diagnostic.Code == "request.parameter.ambiguous" {
+			t.Fatalf("consistent URI binding evidence should not be diagnosed: %+v", diagnostic)
+		}
+	}
+}
+
 func TestContextHelperCyclesAndExternalBoundariesAreDiagnosed(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/helperdiagnostics

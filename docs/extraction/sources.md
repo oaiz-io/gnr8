@@ -52,6 +52,10 @@ Recognized route facts include:
 - `ShouldBindJSON`/`BindJSON`; `ShouldBindQuery`/`BindQuery` and
   `ShouldBindHeader`/`BindHeader`; generic bind variants for typed form, multipart, query, and
   header structs.
+- `ShouldBindUri`/`BindUri` path structs. Runtime `uri` tags supply parameter names, Go field types
+  supply schemas, and enforced `uuid`/`uri` validation rules refine string formats. URI-bound
+  parameters enrich matching route or `Param` evidence rather than creating duplicates; conflicting
+  typed schemas are diagnosed.
 - JSON responses, response status/media facts, constant redirects, response headers, Go structs,
   nested types, and string enums. Redirect status values passed through bounded helpers are resolved
   at each call site, and response headers are associated only with statuses reached on paths where
