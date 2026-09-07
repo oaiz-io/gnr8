@@ -184,6 +184,7 @@ const (
 
 type queryPathState struct {
 	values   map[gotypes.Object]queryAccessValue
+	escaped  map[gotypes.Object]bool
 	response queryResponseState
 	checked  bool
 }
@@ -1053,8 +1054,9 @@ func queryRequiredness(frame helperFrame, name string) queryPresenceProof {
 		!frameReadsDirectQuery(frame, name) {
 		return queryPresenceUnresolved
 	}
-	absent := analyzeQueryStatements(frame, name, false, frame.decl.decl.Body.List, []queryPathState{newQueryPathState()})
-	present := analyzeQueryStatements(frame, name, true, frame.decl.decl.Body.List, []queryPathState{newQueryPathState()})
+	escaped := escapedQueryValues(frame.decl)
+	absent := analyzeQueryStatements(frame, name, false, frame.decl.decl.Body.List, []queryPathState{newQueryPathState(escaped)})
+	present := analyzeQueryStatements(frame, name, true, frame.decl.decl.Body.List, []queryPathState{newQueryPathState(escaped)})
 	absent.terminals = append(absent.terminals, terminalQueryStates(absent.next)...)
 	present.terminals = append(present.terminals, terminalQueryStates(present.next)...)
 
@@ -1069,8 +1071,49 @@ func queryRequiredness(frame helperFrame, name string) queryPresenceProof {
 	return queryPresenceUnresolved
 }
 
-func newQueryPathState() queryPathState {
-	return queryPathState{values: map[gotypes.Object]queryAccessValue{}}
+func newQueryPathState(escaped map[gotypes.Object]bool) queryPathState {
+	return queryPathState{values: map[gotypes.Object]queryAccessValue{}, escaped: escaped}
+}
+
+// escapedQueryValues collects the locals whose value can change through a write
+// this analysis never sees: the address is taken, or a function literal captures
+// and assigns them. Their tracked access value would otherwise survive that write,
+// so a value a helper fills in still reads as the absent one — which turns an
+// unreachable rejection branch into a proof that the parameter is required.
+func escapedQueryValues(h handlerDecl) map[gotypes.Object]bool {
+	escaped := map[gotypes.Object]bool{}
+	ast.Inspect(h.decl.Body, func(node ast.Node) bool {
+		switch current := node.(type) {
+		case *ast.UnaryExpr:
+			if current.Op == token.AND {
+				markEscapedQueryValue(h.info, current.X, escaped)
+			}
+		case *ast.FuncLit:
+			ast.Inspect(current.Body, func(inner ast.Node) bool {
+				switch assign := inner.(type) {
+				case *ast.AssignStmt:
+					for _, lhs := range assign.Lhs {
+						markEscapedQueryValue(h.info, lhs, escaped)
+					}
+				case *ast.IncDecStmt:
+					markEscapedQueryValue(h.info, assign.X, escaped)
+				}
+				return true
+			})
+		}
+		return true
+	})
+	return escaped
+}
+
+func markEscapedQueryValue(info *gotypes.Info, expr ast.Expr, escaped map[gotypes.Object]bool) {
+	ident, ok := expr.(*ast.Ident)
+	if !ok || info == nil {
+		return
+	}
+	if object := info.ObjectOf(ident); object != nil {
+		escaped[object] = true
+	}
 }
 
 func frameReadsDirectQuery(frame helperFrame, name string) bool {
@@ -1289,7 +1332,7 @@ func assignQueryValues(frame helperFrame, name string, assign *ast.AssignStmt, s
 		if object == nil {
 			continue
 		}
-		if assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE {
+		if assign.Tok != token.ASSIGN && assign.Tok != token.DEFINE || state.escaped[object] {
 			state.values[object] = queryAccessUnknown
 			continue
 		}
@@ -1320,9 +1363,15 @@ func declareQueryValues(frame helperFrame, name string, decl *ast.DeclStmt, stat
 			if ident == nil || ident.Name == "_" {
 				continue
 			}
-			if object := frame.decl.info.ObjectOf(ident); object != nil {
-				state.values[object] = values[index]
+			object := frame.decl.info.ObjectOf(ident)
+			if object == nil {
+				continue
 			}
+			if state.escaped[object] {
+				state.values[object] = queryAccessUnknown
+				continue
+			}
+			state.values[object] = values[index]
 		}
 	}
 }

@@ -957,6 +957,9 @@ func (s Server) Register() {
 	s.R.GET("/aborted-with-error", s.abortedWithError)
 	s.R.GET("/silent-abort", s.silentAbort)
 	s.R.GET("/parsed-guard", s.parsedGuard)
+	s.R.GET("/init-guard", s.initGuard)
+	s.R.GET("/escaping-default", s.escapingDefault)
+	s.R.GET("/closure-write", s.closureWrite)
 }
 
 func (s Server) required(c *gin.Context) {
@@ -1119,6 +1122,41 @@ func (s Server) parsedGuard(c *gin.Context) {
 	c.JSON(200, Result{})
 }
 
+func (s Server) initGuard(c *gin.Context) {
+	if value := c.Query("name"); value == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) escapingDefault(c *gin.Context) {
+	value := c.Query("name")
+	applyDefault(&value)
+	if value == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func (s Server) closureWrite(c *gin.Context) {
+	value := c.Query("name")
+	fill := func() { value = "filled" }
+	fill()
+	if value == "" {
+		c.JSON(400, Result{})
+		return
+	}
+	c.JSON(200, Result{})
+}
+
+func applyDefault(value *string) {
+	if *value == "" {
+		*value = "fallback"
+	}
+}
+
 func use(string) {}
 func choose() bool { return false }
 func helperRejects(string) bool { return false }
@@ -1142,7 +1180,7 @@ func helperRejects(string) bool { return false }
 
 	for _, path := range []string{
 		"/required", "/inverted", "/early-nested", "/multiple",
-		"/string-rejected", "/aborted-with-error",
+		"/string-rejected", "/aborted-with-error", "/init-guard",
 	} {
 		param, ok := paramByName(byPath[path].Params, "name")
 		if !ok || !param.Required {
@@ -1162,7 +1200,7 @@ func helperRejects(string) bool { return false }
 			unresolved[item.Operation] = true
 		}
 	}
-	for _, path := range []string{"/bare", "/ambiguous-nested", "/reassigned-alias", "/helper-condition", "/normalized-read", "/nonterminal-error", "/loop-guard", "/silent-abort"} {
+	for _, path := range []string{"/bare", "/ambiguous-nested", "/reassigned-alias", "/helper-condition", "/normalized-read", "/nonterminal-error", "/loop-guard", "/silent-abort", "/escaping-default", "/closure-write"} {
 		operation := "GET " + path
 		if !unresolved[operation] {
 			t.Fatalf("%s should retain deterministic unresolved requiredness: %+v", operation, diagnostics.Items())
@@ -1170,7 +1208,7 @@ func helperRejects(string) bool { return false }
 	}
 	for _, path := range []string{
 		"/required", "/inverted", "/optional", "/present", "/early-nested", "/multiple",
-		"/string-rejected", "/aborted-with-error",
+		"/string-rejected", "/aborted-with-error", "/init-guard",
 	} {
 		operation := "GET " + path
 		if unresolved[operation] {
