@@ -762,27 +762,68 @@ impl SuccessResponses {
         !self.binary_statuses.is_empty()
     }
 
-    /// One generated documentation sentence naming the successes whose body the method's
-    /// return type does not carry, or `None` when it carries every declared one.
+    /// The generated documentation lines naming the successes whose body the method's return
+    /// type does not carry. Empty when it carries every declared one.
     ///
     /// Every target emits the same sentence, because the shape it describes is the same in
     /// every language: the method returns the declared JSON model, and these statuses answer
     /// with something else that the caller reads from the response hook. Saying it on the
     /// method is what keeps the narrowing visible where somebody calling it will look.
-    pub(crate) fn unreturned_note(&self) -> Option<String> {
+    ///
+    /// This text is gnr8's, not an author's, so unlike the prose in [`operation_prose`] it is
+    /// wrapped here rather than emitted at whatever length the status list happens to produce.
+    /// A generated Python docstring line is linted at 88 columns from an 8-space indent, the
+    /// tightest of the three, and [`NOTE_WIDTH`] is what fits inside it.
+    pub(crate) fn unreturned_note(&self) -> Vec<String> {
         if self.unreturned_statuses.is_empty() {
-            return None;
+            return Vec::new();
         }
         let (subject, verb, pronoun) = if self.unreturned_statuses.len() == 1 {
             ("Status", "answers", "it")
         } else {
             ("Statuses", "answer", "them")
         };
-        Some(format!(
-            "{subject} {} {verb} with a body this method does not return; read {pronoun} from a response hook.",
-            join_statuses(&self.unreturned_statuses)
-        ))
+        // Two sentences rather than one, so the wrap falls on the sentence boundary for every
+        // status list short enough not to need a second line of its own.
+        let mut lines = wrap_words(
+            &format!(
+                "{subject} {} {verb} with a body this method does not return.",
+                join_statuses(&self.unreturned_statuses)
+            ),
+            NOTE_WIDTH,
+        );
+        lines.extend(wrap_words(
+            &format!("Read {pronoun} from a response hook."),
+            NOTE_WIDTH,
+        ));
+        lines
     }
+}
+
+/// Column budget for a generated documentation line, before any comment prefix.
+///
+/// Python is the binding constraint: `ruff check --select E` rejects a docstring line past 88
+/// columns, and the docstring body sits at an 8-space indent. Go's `// ` and TypeScript's
+/// `   * ` prefixes are shorter, so a line that fits Python fits all three.
+const NOTE_WIDTH: usize = 80 - 8;
+
+/// Greedily wrap a generated sentence to `width` columns, never splitting a word.
+///
+/// A single word longer than `width` occupies its own line rather than being broken: the words
+/// here are status numbers and ordinary English, so that case cannot arise from real input, and
+/// silently splitting one would be worse than a long line if it ever did.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.chars().count() + 1 + word.chars().count() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
 }
 
 /// Resolve declared non-success JSON error body models for one operation.
@@ -1172,6 +1213,7 @@ mod tests {
     use super::{
         check_unique_model_file_names, file_stem, http_auth_features, operation_auth_alternatives,
         split_words, success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
+        SuccessResponses,
     };
     use crate::graph::{
         ApiGraph, Operation, OperationSecurityPolicy, Response, SecurityRequirementGroup,
@@ -1333,6 +1375,52 @@ mod tests {
         assert!(success.has_binary_body());
         assert!(!success.has_bodyless_alternative());
         Ok(())
+    }
+
+    /// The note is generated text emitted into a linted Python docstring at an 8-space indent,
+    /// so it has to fit 88 columns however many statuses it names.
+    #[test]
+    fn unreturned_note_names_every_status_and_fits_the_narrowest_comment_budget() {
+        let note_for = |statuses: Vec<u16>| {
+            SuccessResponses {
+                statuses: statuses.clone(),
+                body_model: Some("Widget".to_string()),
+                body_statuses: vec![200],
+                binary_statuses: Vec::new(),
+                binary_content_type: None,
+                unreturned_statuses: statuses,
+            }
+            .unreturned_note()
+        };
+
+        assert!(
+            note_for(Vec::new()).is_empty(),
+            "an operation whose return type carries every success says nothing"
+        );
+        assert_eq!(
+            note_for(vec![202]),
+            vec![
+                "Status 202 answers with a body this method does not return.",
+                "Read it from a response hook.",
+            ],
+            "one status is singular and breaks on the sentence"
+        );
+
+        let many = note_for(vec![201, 202, 203, 205, 206, 207, 208]);
+        let joined = many.join(" ");
+        for status in ["201", "202", "203", "205", "206", "207", "208"] {
+            assert!(joined.contains(status), "every status is named: {joined}");
+        }
+        assert!(
+            joined.starts_with("Statuses ") && joined.contains(" answer with "),
+            "several statuses are plural: {joined}"
+        );
+        for line in &many {
+            assert!(
+                line.chars().count() + 8 <= 88,
+                "a docstring line must fit ruff's column limit: {line:?}"
+            );
+        }
     }
 
     #[test]

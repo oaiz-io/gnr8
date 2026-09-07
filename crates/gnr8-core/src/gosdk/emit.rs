@@ -1546,9 +1546,12 @@ fn emit_operation_doc(
         writeln!(body, "//").map_err(sink)?;
         writeln!(body, "// {route}").map_err(sink)?;
     }
-    if let Some(note) = success.unreturned_note() {
+    let note = success.unreturned_note();
+    if !note.is_empty() {
         writeln!(body, "//").map_err(sink)?;
-        writeln!(body, "// {note}").map_err(sink)?;
+        for line in &note {
+            writeln!(body, "// {line}").map_err(sink)?;
+        }
     }
     Ok(())
 }
@@ -4327,9 +4330,8 @@ mod tests {
                 "the declared model stays the return type:\n{out}"
             );
             assert!(
-                out.contains(
-                    "// Status 202 answers with a body this method does not return; read it from a response hook."
-                ),
+                out.contains("// Status 202 answers with a body this method does not return.\n")
+                    && out.contains("// Read it from a response hook.\n"),
                 "the narrowing is documented on the method:\n{out}"
             );
             assert!(

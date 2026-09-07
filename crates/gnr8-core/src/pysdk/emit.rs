@@ -2262,14 +2262,14 @@ fn emit_operation_docstring(
 ) -> Result<(), CoreError> {
     let prose = operation_prose(op, &["\"\"\""], "\\\"\\\"\\\"");
     let note = success.unreturned_note();
-    if prose.is_empty() && note.is_none() {
+    if prose.is_empty() && note.is_empty() {
         return Ok(());
     }
     let indent = "        ";
     let closes_safely = |text: &str| !text.ends_with('"') && !text.ends_with('\\');
     match (
         &prose.summary,
-        prose.description.is_empty() && note.is_none(),
+        prose.description.is_empty() && note.is_empty(),
     ) {
         // Summary only, and it can sit against the closing quotes — the PEP 257 one-liner.
         (Some(summary), true) if closes_safely(summary) => {
@@ -2280,8 +2280,14 @@ fn emit_operation_docstring(
                 Some(summary) => writeln!(out, "{indent}\"\"\"{summary}").map_err(sink)?,
                 None => writeln!(out, "{indent}\"\"\"").map_err(sink)?,
             }
+            // A blank line SEPARATES blocks, so it is written before one only when something
+            // already stands above it. Opening the docstring with one — the shape an operation
+            // with no summary would otherwise get, which is most of them — is not a separation.
+            let mut wrote = prose.summary.is_some();
             if !prose.description.is_empty() {
-                writeln!(out).map_err(sink)?;
+                if wrote {
+                    writeln!(out).map_err(sink)?;
+                }
                 for line in &prose.description {
                     if line.is_empty() {
                         writeln!(out).map_err(sink)?;
@@ -2289,10 +2295,15 @@ fn emit_operation_docstring(
                         writeln!(out, "{indent}{line}").map_err(sink)?;
                     }
                 }
+                wrote = true;
             }
-            if let Some(note) = &note {
-                writeln!(out).map_err(sink)?;
-                writeln!(out, "{indent}{note}").map_err(sink)?;
+            if !note.is_empty() {
+                if wrote {
+                    writeln!(out).map_err(sink)?;
+                }
+                for line in &note {
+                    writeln!(out, "{indent}{line}").map_err(sink)?;
+                }
             }
             writeln!(out, "{indent}\"\"\"").map_err(sink)?;
         }
@@ -4117,7 +4128,7 @@ mod tests {
             );
             assert!(
                 out.contains(
-                    "Status 202 answers with a body this method does not return; read it from a response hook."
+                    "        \"\"\"\n        Status 202 answers with a body this method does not return.\n        Read it from a response hook.\n        \"\"\"\n"
                 ),
                 "the narrowing is documented on the method:\n{out}"
             );

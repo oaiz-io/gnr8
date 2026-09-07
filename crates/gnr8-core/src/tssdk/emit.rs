@@ -1752,7 +1752,7 @@ fn emit_operation_jsdoc(
 ) -> Result<(), CoreError> {
     let prose = operation_prose(op, &["*/"], "*\\/");
     let note = success.unreturned_note();
-    if prose.is_empty() && note.is_none() {
+    if prose.is_empty() && note.is_empty() {
         return Ok(());
     }
     writeln!(out, "{indent}/**").map_err(sink)?;
@@ -1771,11 +1771,13 @@ fn emit_operation_jsdoc(
             }
         }
     }
-    if let Some(note) = note {
+    if !note.is_empty() {
         if !prose.is_empty() {
             writeln!(out, "{indent} *").map_err(sink)?;
         }
-        writeln!(out, "{indent} * {note}").map_err(sink)?;
+        for line in &note {
+            writeln!(out, "{indent} * {line}").map_err(sink)?;
+        }
     }
     writeln!(out, "{indent} */").map_err(sink)?;
     Ok(())
@@ -4201,9 +4203,8 @@ mod tests {
                 "the declared model stays the return type:\n{out}"
             );
             assert!(
-                out.contains(
-                    "   * Status 202 answers with a body this method does not return; read it from a response hook."
-                ),
+                out.contains("   * Status 202 answers with a body this method does not return.\n")
+                    && out.contains("   * Read it from a response hook.\n"),
                 "the narrowing is documented on the method:\n{out}"
             );
             assert!(
