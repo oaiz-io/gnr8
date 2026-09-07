@@ -41,6 +41,9 @@ must move the minor version.
   `c.FormFile`, composes with `PostForm` parts and typed bindings, and resolves its field name by the
   same rules on both access paths. A `FormFile` call on an unrelated `http.Request` still contributes
   nothing, and a dynamic field name is reported as `request.body.unresolved` rather than guessed.
+- **Go/Gin extraction preserves `AbortWithStatusJSON` error responses.** Direct and bounded
+  helper calls now contribute their status, typed JSON body, media type, and response headers
+  instead of leaving the operation with a missing response.
 - **Go/Gin URI bindings preserve typed path parameters.** `ShouldBindUri` and `BindUri`, including
   calls in bounded module-owned helpers, now read runtime `uri` names and Go field types, preserve
   required path semantics, and lower enforced `uuid` and `uri` string formats. Matching `Param`

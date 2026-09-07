@@ -2420,6 +2420,79 @@ func (s Server) helper(c *gin.Context) {
 	}
 }
 
+func TestAbortWithStatusJSONProducesTypedResponses(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/abortjson
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Header(string, string) {}
+func (c *Context) AbortWithStatusJSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package abortjson
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type ErrorResponse struct { Message string `+"`"+`json:"message"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/direct", s.direct)
+	s.R.GET("/helper", s.helper)
+}
+
+func reject(c *gin.Context) {
+	c.AbortWithStatusJSON(422, ErrorResponse{Message: "invalid"})
+}
+
+func (s Server) direct(c *gin.Context) {
+	c.Header("X-Error-ID", "direct")
+	c.AbortWithStatusJSON(400, ErrorResponse{Message: "bad request"})
+}
+
+func (s Server) helper(c *gin.Context) {
+	reject(c)
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load AbortWithStatusJSON fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/abortjson", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	assertResponseSuffix(t, got["direct"].Responses, 400, "ErrorResponse")
+	if response := got["direct"].Responses[0]; len(response.ContentTypes) != 1 || response.ContentTypes[0] != "application/json" || len(response.Headers) != 1 || response.Headers[0].Name != "X-Error-ID" {
+		t.Fatalf("direct AbortWithStatusJSON response metadata mismatch: %+v", response)
+	}
+	assertResponseSuffix(t, got["helper"].Responses, 422, "ErrorResponse")
+	for _, diagnostic := range diagnostics.Items() {
+		if diagnostic.Code == "response.missing" || diagnostic.Code == "response.dynamic" {
+			t.Fatalf("AbortWithStatusJSON response should resolve completely: %+v", diagnostic)
+		}
+	}
+}
+
 func TestContextHelperCyclesAndExternalBoundariesAreDiagnosed(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/helperdiagnostics

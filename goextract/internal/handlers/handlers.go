@@ -1815,7 +1815,7 @@ func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
 			return true
 		}
 		switch name {
-		case "JSON", "Status", "AbortWithStatus":
+		case "JSON", "AbortWithStatusJSON", "Status", "AbortWithStatus":
 			status, known := statusOf(h.info, call.Args[0])
 			rejects = known && status >= 400 && status < 500
 		}
@@ -2076,7 +2076,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a named schema")
 			}
-		case "JSON":
+		case "JSON", "AbortWithStatusJSON":
 			a.analyzeJSON(h, call, route, &cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(h, call, route, &cf, seenStatus, provisionalStatus, true, diags)
@@ -2787,7 +2787,7 @@ func (a *Analyzer) analyzeDelegatedResponses(
 			return true
 		}
 		switch name {
-		case "JSON":
+		case "JSON", "AbortWithStatusJSON":
 			a.analyzeJSON(callee, nested, route, cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(callee, nested, route, cf, seenStatus, provisionalStatus, true, diags)
@@ -4338,7 +4338,7 @@ func (c *responseHeaderCollector) recordGinResponse(
 	status := uint16(0)
 	ok := false
 	switch name {
-	case "JSON", "Status", "AbortWithStatus", "Data", "DataFromReader", "Redirect":
+	case "JSON", "AbortWithStatusJSON", "Status", "AbortWithStatus", "Data", "DataFromReader", "Redirect":
 		status, ok = responseStatusInFrame(frame, call, 0)
 	case "File", "FileAttachment", "SSEvent":
 		status, ok = 200, true

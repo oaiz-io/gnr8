@@ -56,8 +56,9 @@ Recognized route facts include:
   supply schemas, and enforced `uuid`/`uri` validation rules refine string formats. URI-bound
   parameters enrich matching route or `Param` evidence rather than creating duplicates; conflicting
   typed schemas are diagnosed.
-- JSON responses, response status/media facts, constant redirects, response headers, Go structs,
-  nested types, and string enums. Redirect status values passed through bounded helpers are resolved
+- JSON responses, including aborting `AbortWithStatusJSON` errors; response status/media facts;
+  constant redirects; response headers; Go structs; nested types; and string enums. Redirect status
+  values passed through bounded helpers are resolved
   at each call site, and response headers are associated only with statuses reached on paths where
   those headers were written. A response header is read from the response writer's own map —
   `c.Header`, `c.Writer.Header()`, or a bounded `http.ResponseWriter` helper — so mutating
