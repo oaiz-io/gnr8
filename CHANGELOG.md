@@ -40,6 +40,20 @@ must move the minor version.
   other recognized renderer now makes the read required exactly as `c.JSON(400, …)` already did. Like
   the query change above, this moves a generated parameter between optional and required.
 
+- **A generated SDK method returns the operation's declared JSON model, and every other success
+  status answers the empty value.** One rule now decides a method's return type across Go, Python,
+  and TypeScript: an operation declaring a JSON success model returns that model, and a bodyless
+  2xx, a declared redirect, or a success answering opaque bytes beside the typed one returns
+  `nil`/`None`/`undefined` and is read through the client's response hook. The statuses that narrowing
+  applies to are named in the generated method's own doc comment.
+
+  This replaces a hard generation error. An operation mixing a typed and an opaque success used to
+  abort the whole run — including the OpenAPI document, which represents both responses perfectly
+  well — and the only remedy was a `ResponseOverride` that rewrote the graph, so the document had to
+  misstate the response for the SDK to build. Operations that already generated are unaffected except
+  that an opaque success beside a typed one no longer changes the return type to raw bytes. Two
+  body-bearing successes pointing at different JSON models remain an error.
+
 ### Fixed
 
 - **Go/Gin extraction recognizes a multipart file read through `c.Request.FormFile`.** A file part
@@ -61,10 +75,8 @@ must move the minor version.
   calls follow the same rules.
 
   A handler that answers JSON on one 2xx and bytes on another — `c.JSON(200, …)` beside
-  `c.String(202, …)` — now states both, so SDK generation reports that operation instead of
-  silently dropping the response it could not see before. One SDK method has one return type; answer
-  one shape from the handler, or restate one status with `ResponseOverride`. That error now names the
-  statuses on each side and the remedy.
+  `c.String(202, …)` — now states both, which the OpenAPI document represents in full. See the SDK
+  entry below for what the generated clients do with it.
 - **Go/Gin extraction preserves `AbortWithStatusJSON` error responses.** Direct and bounded
   helper calls now contribute their status, typed JSON body, media type, and response headers
   instead of leaving the operation with a missing response.

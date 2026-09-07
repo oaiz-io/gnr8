@@ -35,7 +35,8 @@ use crate::sdk::emit_common::{
     error_response_bodies_of, is_json_object_key, join_path, operation_auth_alternatives,
     operation_prose, path_tokens, path_tokens_match, quoted_string_literal, request_body_models_of,
     split_words, success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationApiKeyScheme,
-    OperationAuthScheme, RequestBodyEncoding, RequestBodyModel, UniqueSchemaNames,
+    OperationAuthScheme, RequestBodyEncoding, RequestBodyModel, SuccessResponses,
+    UniqueSchemaNames,
 };
 use crate::sdk::model_style::PyModelStyle;
 use crate::CoreError;
@@ -2254,14 +2255,22 @@ fn resolve_op_args<'op>(
 /// in `\` would escape the first quote of the terminator; either way the generated module
 /// does not compile. Those cases take the multi-line form, where the terminator is on its
 /// own line and both are harmless.
-fn emit_operation_docstring(out: &mut String, op: &Operation) -> Result<(), CoreError> {
+fn emit_operation_docstring(
+    out: &mut String,
+    op: &Operation,
+    success: &SuccessResponses,
+) -> Result<(), CoreError> {
     let prose = operation_prose(op, &["\"\"\""], "\\\"\\\"\\\"");
-    if prose.is_empty() {
+    let note = success.unreturned_note();
+    if prose.is_empty() && note.is_none() {
         return Ok(());
     }
     let indent = "        ";
     let closes_safely = |text: &str| !text.ends_with('"') && !text.ends_with('\\');
-    match (&prose.summary, prose.description.is_empty()) {
+    match (
+        &prose.summary,
+        prose.description.is_empty() && note.is_none(),
+    ) {
         // Summary only, and it can sit against the closing quotes — the PEP 257 one-liner.
         (Some(summary), true) if closes_safely(summary) => {
             writeln!(out, "{indent}\"\"\"{summary}\"\"\"").map_err(sink)?;
@@ -2280,6 +2289,10 @@ fn emit_operation_docstring(out: &mut String, op: &Operation) -> Result<(), Core
                         writeln!(out, "{indent}{line}").map_err(sink)?;
                     }
                 }
+            }
+            if let Some(note) = &note {
+                writeln!(out).map_err(sink)?;
+                writeln!(out, "{indent}{note}").map_err(sink)?;
             }
             writeln!(out, "{indent}\"\"\"").map_err(sink)?;
         }
@@ -2497,7 +2510,7 @@ fn emit_operation(
     args.push("request_options: Optional[RequestOptions] = None".to_string());
 
     writeln!(out, "{}", method_def(&method_name, &args, &return_hint)).map_err(sink)?;
-    emit_operation_docstring(out, op)?;
+    emit_operation_docstring(out, op, &success)?;
 
     // Build the path: f-string interpolation with each path param percent-escaped (V5). The token order
     // matches path_params order (set-equality was already asserted), so path_idents aligns by position.
@@ -4077,6 +4090,50 @@ mod tests {
         }
 
         use super::ApiGraph;
+
+        // The same operation shape reaches every target, so each states the same narrowing in its
+        // own idiom: the declared model is the return type, and the opaque success is named.
+        #[test]
+        fn typed_success_beside_an_opaque_one_returns_the_model_and_names_the_rest() {
+            let mut graph = ops_graph();
+            let op = graph
+                .operations
+                .iter_mut()
+                .find(|op| op.handler == "getBook")
+                .unwrap();
+            let mut opaque = op.responses[0].clone();
+            opaque.status = 202;
+            opaque.body = None;
+            opaque.body_kind = "binary".to_string();
+            opaque.content_type = Some("text/plain".to_string());
+            opaque.content_types = vec!["text/plain".to_string()];
+            op.responses.push(opaque);
+
+            let ops = ops_for(&graph, "getBook");
+            let out = emit_operations(&graph, "bookstore", "/", &ops).unwrap();
+            assert!(
+                out.contains("-> Optional[Book]"),
+                "the declared model stays the return type:\n{out}"
+            );
+            assert!(
+                out.contains(
+                    "Status 202 answers with a body this method does not return; read it from a response hook."
+                ),
+                "the narrowing is documented on the method:\n{out}"
+            );
+            assert!(
+                out.contains("if _status in (200,):"),
+                "the typed status still decodes:\n{out}"
+            );
+            assert!(
+                out.contains("        return None"),
+                "the opaque status answers the empty value:\n{out}"
+            );
+            assert!(
+                !out.contains("            return _raw"),
+                "the opaque status must not become the return value:\n{out}"
+            );
+        }
 
         #[test]
         fn operation_method_name_uses_the_canonical_id() {

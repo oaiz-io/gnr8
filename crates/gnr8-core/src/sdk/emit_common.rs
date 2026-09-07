@@ -702,6 +702,13 @@ pub(crate) struct SuccessResponses {
     pub(crate) binary_statuses: Vec<u16>,
     /// The media type for binary/file success content.
     pub(crate) binary_content_type: Option<String>,
+    /// Statuses that answer with a body this method's return type does not carry, sorted.
+    ///
+    /// An operation that answers a typed JSON body on one success and opaque bytes on another
+    /// states two shapes, and a method has one return type, so the opaque ones land here. They
+    /// are documented on the generated method and reachable through the client's response hook,
+    /// exactly as a declared redirect's body already is.
+    pub(crate) unreturned_statuses: Vec<u16>,
 }
 
 /// One declared non-success JSON error response body.
@@ -754,6 +761,28 @@ impl SuccessResponses {
     pub(crate) fn has_binary_body(&self) -> bool {
         !self.binary_statuses.is_empty()
     }
+
+    /// One generated documentation sentence naming the successes whose body the method's
+    /// return type does not carry, or `None` when it carries every declared one.
+    ///
+    /// Every target emits the same sentence, because the shape it describes is the same in
+    /// every language: the method returns the declared JSON model, and these statuses answer
+    /// with something else that the caller reads from the response hook. Saying it on the
+    /// method is what keeps the narrowing visible where somebody calling it will look.
+    pub(crate) fn unreturned_note(&self) -> Option<String> {
+        if self.unreturned_statuses.is_empty() {
+            return None;
+        }
+        let (subject, verb, pronoun) = if self.unreturned_statuses.len() == 1 {
+            ("Status", "answers", "it")
+        } else {
+            ("Statuses", "answer", "them")
+        };
+        Some(format!(
+            "{subject} {} {verb} with a body this method does not return; read {pronoun} from a response hook.",
+            join_statuses(&self.unreturned_statuses)
+        ))
+    }
 }
 
 /// Resolve declared non-success JSON error body models for one operation.
@@ -798,8 +827,8 @@ pub(crate) fn error_response_bodies_of(
 ///
 /// Silently dropping the body here while the `OpenAPI` lowering kept it would make one graph
 /// describe two different contracts, so the contradiction is surfaced instead (CLAUDE.md rule 3).
-/// Render a status list for a diagnostic, so a message names the responses to act on
-/// rather than only the operation that carries them.
+/// Render a status list for a message, so it names the responses to act on rather than
+/// only the operation that carries them.
 fn join_statuses(statuses: &[u16]) -> String {
     statuses
         .iter()
@@ -822,11 +851,20 @@ fn reject_impossible_body(op: &Operation, resp: &crate::graph::Response) -> Resu
 
 /// Resolve every declared successful response for one operation.
 ///
-/// SDK methods have one return type, so multiple body-bearing success responses are accepted only when
-/// they point to the same model. Body-less alternate 2xx responses are represented by returning the
-/// language's empty/default success value rather than surfacing an API error. Declared redirects are
-/// successes too: clients expose the 3xx status and headers through their response hooks and do not
-/// follow them unless the caller opts in.
+/// SDK methods have one return type, so one rule decides it: **an operation that declares a JSON
+/// success model returns that model; every other success status returns the language's empty value
+/// and is read through the client's response hook.** Body-less alternates, declared redirects, and a
+/// success answering opaque bytes beside a typed one are the same case under that rule, not three,
+/// and the statuses it applies to are named on the generated method so the shape is stated where the
+/// caller reads it. Only when no JSON model is declared do opaque successes become the return type.
+///
+/// Two body-bearing successes pointing at *different* JSON models stay an error: there the rule has
+/// no answer to give, because neither model is the operation's.
+///
+/// The alternative — refusing to emit the operation at all — takes an SDK target's modeling limit and
+/// spends it on the whole run, including the OpenAPI document, which represents both responses fine.
+/// The only remedy it leaves is a `ResponseOverride` that rewrites the graph, so the document would
+/// have to misstate the response to let the SDK build.
 pub(crate) fn success_responses_of(
     op: &Operation,
     graph: &ApiGraph,
@@ -912,17 +950,13 @@ pub(crate) fn success_responses_of(
             }
         }
     }
+    // The declared JSON model is the return type. Opaque successes beside it therefore carry no
+    // return value, which puts them in the same bucket a declared redirect is already in: named on
+    // the method, answered with the empty value, and read through the response hook.
+    let mut unreturned_statuses = Vec::new();
     if body_model.is_some() && !binary_statuses.is_empty() {
-        return Err(CoreError::SdkGen {
-            message: format!(
-                "operation '{}' mixes JSON success responses ({}) with opaque-byte ones ({}); \
-                 SDK targets require one success body kind — answer one shape from the handler, \
-                 or restate one of those statuses with ResponseOverride",
-                op.id,
-                join_statuses(&body_statuses),
-                join_statuses(&binary_statuses),
-            ),
-        });
+        unreturned_statuses = std::mem::take(&mut binary_statuses);
+        binary_content_type = None;
     }
     Ok(SuccessResponses {
         statuses,
@@ -930,6 +964,7 @@ pub(crate) fn success_responses_of(
         body_statuses,
         binary_statuses,
         binary_content_type,
+        unreturned_statuses,
     })
 }
 
