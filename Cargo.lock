@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "gnr8"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "serde",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "gnr8-cli"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "atomicwrites",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "gnr8-engine"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "atomicwrites",
  "blake3",
