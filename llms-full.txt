@@ -23,6 +23,7 @@ gnr8 init --source go-gin --sdk go
 gnr8 generate
 gnr8 doctor
 gnr8 check
+gnr8 verify
 ```
 
 Use explicit presets:
@@ -84,6 +85,8 @@ SDK outputs include `README.md` and `reference.md` with operation/schema summari
 - `gnr8 init`: scaffolds `.gnr8`.
 - `gnr8 generate`: writes outputs and updates ownership manifest.
 - `gnr8 check`: exits 1 if outputs are stale or user-edited.
+- `gnr8 verify`: runs each generated SDK's contract test with that language's own test tool
+  (`go test`, `unittest`, `tsc` + `node --test`) against a fake transport; exits 1 if any suite fails.
 - `gnr8 changes --base <ref>`: compares the current projected graph with the committed
   `generated/gnr8.graph.json` at that revision; exits 1 only for checked breaking findings. Repeat
   `--exempt-tag <name>` to exempt exact standard operation tags on every extant side. `--markdown`

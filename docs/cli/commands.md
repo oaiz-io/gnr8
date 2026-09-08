@@ -15,7 +15,7 @@ Run commands from the application repository root. Global options are:
 -V, --version   print the CLI version
 ```
 
-`generate`, `check`, `changes`, `watch`, `doctor`, and `inspect` without a path all build and run the project's
+`generate`, `check`, `verify`, `changes`, `watch`, `doctor`, and `inspect` without a path all build and run the project's
 `.gnr8` worker. That compiles and executes Rust from the repository — build scripts, proc macros, and
 the pipeline itself — with your privileges, and is not sandboxed. `--no-build` withholds the compile
 step; `--no-execute` withholds both. `gnr8 inspect routes <path>` analyzes a source tree without
@@ -33,6 +33,7 @@ diagnostics.
 | `generate` | Run the pipeline and reconcile generated files | yes |
 | `watch` | Regenerate after source changes | yes |
 | `check` | Detect generated drift without writing | no |
+| `verify` | Run the generated SDK contract tests with each language's own test tool | no |
 | `changes` | Classify API changes against a committed graph artifact | no |
 | `inspect` | Explain extracted routes, schemas, or graph | no |
 | `doctor` | Diagnose workspace, output, and pipeline health | no |
@@ -117,6 +118,49 @@ Developer and CI sequence:
 gnr8 generate   # developer: inspect and commit the result
 gnr8 check      # CI: fail on uncommitted generated drift
 ```
+
+## `verify`
+
+```bash
+gnr8 verify
+gnr8 --json verify
+```
+
+Runs the pipeline, then runs every generated SDK contract test with that language's own test tool:
+
+```text
+Go SDK          passed
+Python SDK      passed
+TypeScript SDK  passed
+```
+
+Each SDK target emits a contract test beside its sources — `contract_test.go`, `contract_test.py`,
+`contract.test.ts` — derived from the same API graph the SDK was generated from. The cases drive the
+client through a fake transport (a Go `http.RoundTripper`, a Python `urllib` opener, a TypeScript
+`fetch` closure) and assert the request method, path, query encoding and headers, the serialized
+request body, response decoding, typed errors, authentication, and that a redirect is surfaced rather
+than followed. Nothing opens a socket, so a suite runs in milliseconds.
+
+Cases are sampled per wire-shape class rather than per operation — one representative per distinct
+request shape, success model, error status and security scheme, capped at 24 cases per target — so a
+large API still emits a suite that runs quickly. `.without_contract_tests()` on a target stops the
+file being emitted.
+
+`verify` runs the artifacts the pipeline produces right now, materialized into a temporary tree, so a
+stale or hand-edited working tree cannot make a suite pass. Exit status is `1` when any suite fails
+and `2` when the run could not start (no `.gnr8/`, a pipeline failure, or no SDK target configured).
+
+The tools it runs, and the toolchains they need:
+
+| Target | Tool | Requires |
+|---|---|---|
+| Go SDK | `go test ./...` with `GOPROXY=off` | `go` |
+| Python SDK | `unittest` through the standard library | `python3` |
+| TypeScript SDK | the project's own `typescript`, then `node --test` | `node` + a resolvable `typescript` |
+
+JSON reports a `verified` verdict plus one entry per suite (language, output path, test file, case
+count, tool, status, duration, and the failure reason when there is one), alongside the same
+`counts`, `timings_ms`, `diagnostics` and `worker` keys the other commands emit.
 
 ## `changes`
 

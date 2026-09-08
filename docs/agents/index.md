@@ -30,13 +30,15 @@ gnr8 init --source fastapi --sdk python
 gnr8 generate
 gnr8 doctor
 gnr8 check
+gnr8 verify
 ```
 
 1. Inspect the service and choose one source stage.
 2. Put explicit corrections and policy in `.gnr8/src/main.rs`.
 3. Generate and inspect diagnostics before accepting output.
 4. Commit `.gnr8/Cargo.toml`, `.gnr8/Cargo.lock`, pipeline source, and generated artifacts.
-5. Gate pull requests with `gnr8 check` or the gnr8 GitHub Action.
+5. Gate pull requests with `gnr8 check` or the gnr8 GitHub Action, and `gnr8 verify` when the
+   generated SDK's wire behaviour matters.
 6. On API-shape PRs, add `gnr8 changes --base <ref>` (repeat `--exempt-tag <name>` for
    non-contract operations carrying that standard OpenAPI tag). Exit `1` means a checked breaking
    change; see [CLI command reference](../cli/commands.md).
@@ -77,4 +79,6 @@ Important invariants:
 - Prefer exact operation routes, schema IDs, diagnostic codes, and diagnostic subject keys.
 - Treat `--force` as an explicit overwrite decision for protected emitted paths.
 - Change source or `.gnr8/src/main.rs`, never hand-edit generated output as the durable fix.
-- Verify with `gnr8 check`; use `--json` when another agent or program consumes the result.
+- Verify with `gnr8 check` that outputs are current, and with `gnr8 verify` that the generated
+  clients put the graph's contract on the wire; use `--json` when another agent or program consumes
+  the result.

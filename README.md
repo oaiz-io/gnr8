@@ -111,6 +111,7 @@ Generate and check the artifacts:
 gnr8 generate
 gnr8 doctor
 gnr8 check
+gnr8 verify
 ```
 
 Use `gnr8 init --source fastapi --sdk python`, `--source flask --sdk python`, or
@@ -123,6 +124,7 @@ Use `gnr8 init --source fastapi --sdk python`, `--source flask --sdk python`, or
 | `gnr8 init` | Create the required `.gnr8/` pipeline crate. |
 | `gnr8 generate` | Generate all configured artifacts. |
 | `gnr8 check` | Fail when generated artifacts are stale or changed by hand. |
+| `gnr8 verify` | Run the generated SDK contract tests with each language's own test tool. |
 | `gnr8 changes --base <ref>` | Classify API changes and gate checked breaking findings. |
 | `gnr8 watch` | Regenerate after source or pipeline changes. |
 | `gnr8 doctor` | Report toolchain, extraction, and output problems. |

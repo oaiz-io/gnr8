@@ -9,6 +9,41 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **`gnr8 verify` runs generated SDK contract tests.** Every configured Go, Python and TypeScript SDK
+  target now emits a contract test beside its sources — `contract_test.go`, `contract_test.py`,
+  `contract.test.ts` — derived from the same API graph the SDK was generated from, and one command
+  generates the artifacts and runs each with that language's own test tool:
+
+  ```text
+  $ gnr8 verify
+  Go SDK          passed
+  Python SDK      passed
+  TypeScript SDK  passed
+  ```
+
+  The cases drive the client through a fake transport installed on the seam it already exposes (a Go
+  `http.RoundTripper`, a Python `urllib` opener, a TypeScript `fetch` closure) and assert the request
+  method, path, query encoding and headers, the serialized request body and its media type, response
+  decoding including an omitted optional field, typed errors, authentication, and that a redirect is
+  surfaced rather than followed. Nothing opens a socket, so a suite runs in milliseconds.
+
+  Cases are sampled per wire-shape class rather than per operation — one representative per distinct
+  request shape, success model, error status and security scheme, capped at 24 per target — so a
+  large API still emits a suite that runs quickly. The file is a generated artifact like any other:
+  the ownership manifest records it, `gnr8 check` reports it when it drifts, and it is removed when
+  the operations it covered disappear. `without_contract_tests()` on a target stops it being
+  emitted. `--json` reports a `verified` verdict and one entry per suite.
+
+### Fixed
+
+- **A Python SDK operation whose success response is a named union, array, map or scalar can be
+  called again.** Those schemas are emitted as type aliases, which have no `model_validate` or
+  `from_dict`, so decoding one raised `AttributeError` at runtime: the SDK compiled and the operation
+  was unusable. The decoded JSON is now the value, which is what the TypeScript target already
+  answers for the same graph. Found by the generated contract tests above.
+
 ## 0.13.0 — 2026-09-08
 
 ### Breaking

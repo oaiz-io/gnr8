@@ -592,7 +592,7 @@ class Client:
             raise self._error(_status, _headers, _raw)
         if _status in (200,):
             _data = json.loads(_raw) if _raw else {}
-            return BookOrError.model_validate(_data)
+            return _data
         raise self._error(_status, _headers, _raw)
 
     def update_book(

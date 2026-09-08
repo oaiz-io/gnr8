@@ -692,7 +692,8 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
     let root = project_root()?;
     let total_start = Instant::now();
 
-    output.progress("verify: running pipeline");
+    // `verify`'s output IS the report, like `changes`: progress lines would bury the verdict.
+    output.verbose("verify: running pipeline");
     let pipeline_start = Instant::now();
     let run = gnr8_engine::worker::run_pipeline(&root, policy, cache_store().as_ref())?;
     let pipeline_elapsed = pipeline_start.elapsed();
@@ -706,7 +707,7 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
         );
     }
 
-    output.progress("verify: running contract tests");
+    output.verbose("verify: running contract tests");
     let run_start = Instant::now();
     let suites = verify::run_suites(
         &root,
