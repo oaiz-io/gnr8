@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.13.1 — 2026-09-08
+
 ### Fixed
 
 - **Go/Gin route extraction covers the framework's exact single-operation registration forms.**
