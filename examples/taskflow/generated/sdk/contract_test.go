@@ -125,7 +125,7 @@ func assertContractStatus(t *testing.T, err error, status int) {
 func TestRequestShapeListTasks(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr("gnr8")})
+	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr[string]("gnr8")})
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestRequestShapeUpdateTask(t *testing.T) {
 func TestResponseDecodeListTasksPresent(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr("gnr8")})
+	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr[string]("gnr8")})
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestResponseDecodeGetTaskPresent(t *testing.T) {
 func TestTypedErrorListTasks400(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(400, map[string]string{"content-type": "application/json"}, "{\"message\":\"contract test error\",\"slug\":\"contract_test_error\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr("gnr8")})
+	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr[string]("gnr8")})
 	_ = out
 	assertContractStatus(t, err, 400)
 	request := contractSingleRequest(t, transport)
@@ -284,7 +284,7 @@ func TestTypedErrorGetTask404(t *testing.T) {
 func TestAuthListTasks(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr("gnr8")})
+	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr[string]("gnr8")})
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestAuthListTasks(t *testing.T) {
 func TestRedirectPolicyListTasks(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(302, map[string]string{"location": "http://gnr8.test/moved"}, "")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr("gnr8")})
+	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr[string]("gnr8")})
 	_ = out
 	assertContractStatus(t, err, 302)
 	// The 0.11 contract: a redirect is surfaced, never followed, unless the

@@ -548,7 +548,7 @@ fn params_literal(
         let value = if param.required {
             literal
         } else {
-            format!("Ptr({literal})")
+            go_pointer_wrap(literal, 1, &go_type(&sample.schema, false, graph)?)
         };
         fields.push(format!("{}: {value}", exported(&param.name)));
     }
@@ -590,6 +590,23 @@ fn body_literal(
     } else {
         Ok(format!("&{literal}"))
     }
+}
+
+/// Wrap a literal in `depth` layers of the generated `Ptr` helper.
+///
+/// The innermost call names its type argument. `Ptr(7)` infers `*int` from the untyped constant,
+/// which does not assign to the `*int64` a generated field declares; `Ptr[int64](7)` does. Outer
+/// layers infer from the pointer the inner call already returned.
+fn go_pointer_wrap(literal: String, depth: usize, value_type: &str) -> String {
+    let mut out = literal;
+    for level in 0..depth {
+        out = if level == 0 {
+            format!("Ptr[{value_type}]({out})")
+        } else {
+            format!("Ptr({out})")
+        };
+    }
+    out
 }
 
 /// Render one sampled value as a Go literal of its neutral type.
@@ -669,12 +686,13 @@ fn go_literal(
                             false,
                             directions,
                         )?);
-                        let mut literal =
-                            go_literal(&emission.field.schema, entry, graph, needs_time)?;
-                        for _ in 0..depth {
-                            literal = format!("Ptr({literal})");
-                        }
-                        rendered.push(format!("{}: {literal}", emission.go_name));
+                        let literal = go_literal(&emission.field.schema, entry, graph, needs_time)?;
+                        let value_type = go_type(&emission.field.schema, false, graph)?;
+                        rendered.push(format!(
+                            "{}: {}",
+                            emission.go_name,
+                            go_pointer_wrap(literal, depth, &value_type)
+                        ));
                     }
                     Ok(format!("{}{{{}}}", schema.name, rendered.join(", ")))
                 }

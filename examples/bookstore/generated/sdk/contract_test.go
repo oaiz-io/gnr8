@@ -125,7 +125,7 @@ func assertContractStatus(t *testing.T, err error, status int) {
 func TestRequestShapeListBooks(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr("gnr8")})
+	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr[string]("gnr8")})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestRequestShapeUpdateBook(t *testing.T) {
 func TestResponseDecodeListBooksPresent(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr("gnr8")})
+	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr[string]("gnr8")})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestResponseDecodeGetBookPresent(t *testing.T) {
 func TestTypedErrorListBooks400(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(400, map[string]string{"content-type": "application/json"}, "{\"message\":\"contract test error\",\"slug\":\"contract_test_error\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr("gnr8")})
+	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr[string]("gnr8")})
 	_ = out
 	assertContractStatus(t, err, 400)
 	request := contractSingleRequest(t, transport)
@@ -272,7 +272,7 @@ func TestTypedErrorGetBook404(t *testing.T) {
 func TestAuthListBooks(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr("gnr8")})
+	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr[string]("gnr8")})
 	if err != nil {
 		t.Fatalf("ListBooks: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestAuthListBooks(t *testing.T) {
 func TestRedirectPolicyListBooks(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(302, map[string]string{"location": "http://gnr8.test/moved"}, "")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
-	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr("gnr8")})
+	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr[string]("gnr8")})
 	_ = out
 	assertContractStatus(t, err, 302)
 	// The 0.11 contract: a redirect is surfaced, never followed, unless the
