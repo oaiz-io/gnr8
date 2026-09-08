@@ -150,6 +150,10 @@ fn run_gnr8(root: &Path, args: &[&str]) -> (bool, String, String) {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end story: scaffold, generate, run, break, gate, opt out — splitting it would hide the order the steps depend on"
+)]
 fn verify_emits_runs_and_gates_the_generated_contract_test() {
     if !toolchains_available() {
         eprintln!("skipping verify_e2e: go/gofmt/cargo toolchain unavailable");
@@ -167,7 +171,10 @@ fn verify_emits_runs_and_gates_the_generated_contract_test() {
     std::fs::write(root.join("openapi.yaml"), SPEC).expect("write the spec");
 
     let (ok, out, err) = run_gnr8(&root, &["init"]);
-    assert!(ok, "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}");
+    assert!(
+        ok,
+        "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
     std::fs::write(root.join(".gnr8/src/main.rs"), PIPELINE).expect("write the pipeline");
 
     // 1. A generated contract test lands beside the SDK, owned like every other generated file.
@@ -189,10 +196,7 @@ fn verify_emits_runs_and_gates_the_generated_contract_test() {
 
     // 2. `gnr8 verify` runs it with Go's own test tool and reports one passing suite.
     let (ok, out, err) = run_gnr8(&root, &["--json", "verify"]);
-    assert!(
-        ok,
-        "gnr8 verify must pass.\nstdout:\n{out}\nstderr:\n{err}"
-    );
+    assert!(ok, "gnr8 verify must pass.\nstdout:\n{out}\nstderr:\n{err}");
     let report: serde_json::Value = serde_json::from_str(&out).expect("verify --json is JSON");
     assert_eq!(report["verified"], serde_json::json!(true), "{out}");
     assert_eq!(report["counts"]["passed"], serde_json::json!(1), "{out}");

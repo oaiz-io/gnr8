@@ -365,30 +365,47 @@ fn ts_property_read(base: &str, key: &str) -> String {
     }
 }
 
+/// An object literal whose keys are wire names: a plain identifier is emitted bare, anything else
+/// (a header name with a dash, say) is quoted — the same rule the model emitter uses.
+fn ts_object(entries: &[String]) -> String {
+    if entries.is_empty() {
+        return "{}".to_string();
+    }
+    format!("{{ {} }}", entries.join(", "))
+}
+
+fn ts_key(name: &str) -> String {
+    if is_ident(name) {
+        name.to_string()
+    } else {
+        ts_string_literal(name)
+    }
+}
+
 fn ts_record(entries: &[(String, String)]) -> String {
-    let rendered = entries
-        .iter()
-        .map(|(name, value)| format!("{}: {}", ts_string_literal(name), ts_string_literal(value)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{{ {rendered} }}")
+    ts_object(
+        &entries
+            .iter()
+            .map(|(name, value)| format!("{}: {}", ts_key(name), ts_string_literal(value)))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn ts_query_record(case: &ContractCase) -> String {
-    let rendered = case
-        .expected_query
-        .iter()
-        .map(|(name, values)| {
-            let items = values
-                .iter()
-                .map(|value| ts_string_literal(value))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{}: [{items}]", ts_string_literal(name))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{{ {rendered} }}")
+    ts_object(
+        &case
+            .expected_query
+            .iter()
+            .map(|(name, values)| {
+                let items = values
+                    .iter()
+                    .map(|value| ts_string_literal(value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}: [{items}]", ts_key(name))
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn client_credentials(case: &ContractCase) -> String {
@@ -520,16 +537,14 @@ fn params_object(shape: &TsOperationShape<'_>, case: &ContractCase) -> String {
                 .params
                 .iter()
                 .find(|sample| sample.name == param.name && sample.location != "path")?;
-            let literal = ts_json_literal(&sample.value);
-            Some(if is_ident(key) {
-                format!("{key}: {literal}")
-            } else {
-                format!("{}: {literal}", ts_string_literal(key))
-            })
+            Some(format!(
+                "{}: {}",
+                ts_key(key),
+                ts_json_literal(&sample.value)
+            ))
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{{ {entries} }}")
+        .collect::<Vec<_>>();
+    ts_object(&entries)
 }
 
 fn body_expression(
@@ -581,12 +596,12 @@ fn ts_literal(ty: &Type, value: &Value, graph: &ApiGraph) -> Result<String, Core
                 .map(|(name, entry)| {
                     Ok(format!(
                         "{}: {}",
-                        ts_string_literal(name),
+                        ts_key(name),
                         ts_literal(item, entry, graph)?
                     ))
                 })
                 .collect::<Result<Vec<_>, CoreError>>()?;
-            Ok(format!("{{ {} }}", entries.join(", ")))
+            Ok(ts_object(&entries))
         }
         Type::Any {} => Ok("{}".to_string()),
         Type::Union(variants) => {
@@ -600,11 +615,7 @@ fn ts_literal(ty: &Type, value: &Value, graph: &ApiGraph) -> Result<String, Core
                 let Some(entry) = object.get(&field.json_name) else {
                     continue;
                 };
-                let key = if is_ident(&field.json_name) {
-                    field.json_name.clone()
-                } else {
-                    ts_string_literal(&field.json_name)
-                };
+                let key = ts_key(&field.json_name);
                 rendered.push(format!(
                     "{key}: {}",
                     ts_literal(&field.schema, entry, graph)?

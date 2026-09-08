@@ -133,7 +133,7 @@ export const contractTests: ContractCase[] = [
       const result = await client.listBooks({ cursor: "gnr8", genre: "gnr8", sort: "gnr8" });
       void result;
       const request = singleRequest(transport);
-      assertWire(request, "GET", "/books/", { "cursor": ["gnr8"], "genre": ["gnr8"], "sort": ["gnr8"] }, {  });
+      assertWire(request, "GET", "/books/", { cursor: ["gnr8"], genre: ["gnr8"], sort: ["gnr8"] }, {});
       assertEqual(result.nextCursor, "gnr8", "nextCursor");
     },
   },
@@ -146,7 +146,7 @@ export const contractTests: ContractCase[] = [
       const result = await client.createBook({ author: { bio: "gnr8", name: "gnr8" }, format: "hardcover", id: 1.5, title: "gnr8" });
       void result;
       const request = singleRequest(transport);
-      assertWire(request, "POST", "/books/", {  }, { "content-type": "application/json" });
+      assertWire(request, "POST", "/books/", {}, { "content-type": "application/json" });
       assertBody(request, "{\"author\":{\"bio\":\"gnr8\",\"name\":\"gnr8\"},\"format\":\"hardcover\",\"id\":1.5,\"title\":\"gnr8\"}");
       assertEqual(result.id, 1.5, "id");
     },
@@ -160,7 +160,7 @@ export const contractTests: ContractCase[] = [
       const result = await client.getBook(1.5, { fmt: "hardcover" });
       void result;
       const request = singleRequest(transport);
-      assertWire(request, "GET", "/books/1.5", { "fmt": ["hardcover"] }, {  });
+      assertWire(request, "GET", "/books/1.5", { fmt: ["hardcover"] }, {});
     },
   },
   {
@@ -172,7 +172,7 @@ export const contractTests: ContractCase[] = [
       const result = await client.updateBook(1.5, { genre: "gnr8", published: 1.5 });
       void result;
       const request = singleRequest(transport);
-      assertWire(request, "PUT", "/books/1.5", {  }, { "content-type": "application/json" });
+      assertWire(request, "PUT", "/books/1.5", {}, { "content-type": "application/json" });
       assertBody(request, "{\"genre\":\"gnr8\",\"published\":1.5}");
       assertEqual(result.id, 1.5, "id");
     },
@@ -186,7 +186,7 @@ export const contractTests: ContractCase[] = [
       const result = await client.listBooks({ cursor: "gnr8", genre: "gnr8", sort: "gnr8" });
       void result;
       const request = singleRequest(transport);
-      assertWire(request, "GET", "/books/", { "cursor": ["gnr8"], "genre": ["gnr8"], "sort": ["gnr8"] }, {  });
+      assertWire(request, "GET", "/books/", { cursor: ["gnr8"], genre: ["gnr8"], sort: ["gnr8"] }, {});
       assertEqual(result.nextCursor, "gnr8", "nextCursor");
     },
   },
@@ -199,7 +199,7 @@ export const contractTests: ContractCase[] = [
       const result = await client.createBook({ author: { bio: "gnr8", name: "gnr8" }, format: "hardcover", id: 1.5, title: "gnr8" });
       void result;
       const request = singleRequest(transport);
-      assertWire(request, "POST", "/books/", {  }, { "content-type": "application/json" });
+      assertWire(request, "POST", "/books/", {}, { "content-type": "application/json" });
       assertBody(request, "{\"author\":{\"bio\":\"gnr8\",\"name\":\"gnr8\"},\"format\":\"hardcover\",\"id\":1.5,\"title\":\"gnr8\"}");
       assertEqual(result.id, 1.5, "id");
     },
@@ -213,7 +213,7 @@ export const contractTests: ContractCase[] = [
       const result = await client.getBook(1.5, { fmt: "hardcover" });
       void result;
       const request = singleRequest(transport);
-      assertWire(request, "GET", "/books/1.5", { "fmt": ["hardcover"] }, {  });
+      assertWire(request, "GET", "/books/1.5", { fmt: ["hardcover"] }, {});
     },
   },
   {
@@ -225,7 +225,7 @@ export const contractTests: ContractCase[] = [
       const result = await client.updateBook(1.5, { genre: "gnr8", published: 1.5 });
       void result;
       const request = singleRequest(transport);
-      assertWire(request, "PUT", "/books/1.5", {  }, { "content-type": "application/json" });
+      assertWire(request, "PUT", "/books/1.5", {}, { "content-type": "application/json" });
       assertBody(request, "{\"genre\":\"gnr8\",\"published\":1.5}");
       assertEqual(result.id, 1.5, "id");
     },
@@ -244,14 +244,14 @@ export const contractTests: ContractCase[] = [
       }
       assertApiError(caught, 400);
       const request = singleRequest(transport);
-      assertWire(request, "GET", "/books/", { "cursor": ["gnr8"], "genre": ["gnr8"], "sort": ["gnr8"] }, {  });
+      assertWire(request, "GET", "/books/", { cursor: ["gnr8"], genre: ["gnr8"], sort: ["gnr8"] }, {});
     },
   },
   {
     name: "redirect_policy_list_books",
     run: async () => {
       const transport = new ContractTransport();
-      transport.queue(302, { "location": "http://gnr8.test/moved" }, "");
+      transport.queue(302, { location: "http://gnr8.test/moved" }, "");
       const client = new Client({ baseUrl: BASE_URL, fetch: transport.fetch });
       let caught: unknown = undefined;
       try {
@@ -263,7 +263,7 @@ export const contractTests: ContractCase[] = [
       // caller opts in with followRedirects.
       assertApiError(caught, 302);
       const request = singleRequest(transport);
-      assertWire(request, "GET", "/books/", { "cursor": ["gnr8"], "genre": ["gnr8"], "sort": ["gnr8"] }, {  });
+      assertWire(request, "GET", "/books/", { cursor: ["gnr8"], genre: ["gnr8"], sort: ["gnr8"] }, {});
     },
   },
 ];
