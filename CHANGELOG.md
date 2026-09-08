@@ -34,6 +34,30 @@ must move the minor version.
   binding remains the source for non-string types, defaults, enums, and serialization, and it composes
   with the proof: the binding states the schema, the control flow states requiredness.
 
+- **A header, cookie, or form read is required by the same rejections a query read is.** Requiredness
+  reads the one shared `gin.Context` response classification instead of its own shorter list, so an
+  absent value rejected with `c.AbortWithError(400, …)`, `c.Data(400, …)`, `c.String(400, …)`, or any
+  other recognized renderer now makes the read required exactly as `c.JSON(400, …)` already did. Like
+  the query change above, this moves a generated parameter between optional and required.
+
+- **A generated SDK method returns the operation's declared JSON model, and every other success
+  status answers the empty value.** One rule now decides a method's return type across Go, Python,
+  and TypeScript: an operation declaring a JSON success model returns that model, and a bodyless
+  2xx, a declared redirect, or a success answering opaque bytes beside the typed one returns
+  `nil`/`None`/`undefined` and is read through the client's response hook. The statuses that narrowing
+  applies to are named in the generated method's own doc comment.
+
+  This replaces a hard generation error. An operation mixing a typed and an opaque success used to
+  abort the whole run — including the OpenAPI document, which represents both responses perfectly
+  well — and the only remedy was a `ResponseOverride` that rewrote the graph, so the document had to
+  misstate the response for the SDK to build. Operations that already generated are unaffected except
+  that an opaque success beside a typed one no longer changes the return type to raw bytes. Two
+  body-bearing successes pointing at different JSON models remain an error.
+
+  Python response hooks expose the buffered bytes as `HookContext.response_body`, so an opaque
+  success named by this rule remains readable just as it is through the native response object in
+  the Go and TypeScript hooks.
+
 ### Fixed
 
 - **Go/Gin extraction recognizes a multipart file read through `c.Request.FormFile`.** A file part
@@ -41,6 +65,36 @@ must move the minor version.
   `c.FormFile`, composes with `PostForm` parts and typed bindings, and resolves its field name by the
   same rules on both access paths. A `FormFile` call on an unrelated `http.Request` still contributes
   nothing, and a dynamic field name is reported as `request.body.unresolved` rather than guessed.
+- **Go/Gin extraction preserves form collections and optional query maps.** `PostFormArray` and
+  `GetPostFormArray` now contribute repeated string fields to synthesized form bodies, while
+  `GetQueryMap` contributes the same deep-object query parameter as `QueryMap`. `PostFormMap` and
+  `GetPostFormMap` collect the parts named `field[key]`, which a form body field cannot state, so
+  they are reported as `request.body.unresolved` instead. Direct and bounded helper calls follow the
+  same rules.
+- **Go/Gin renderers no longer leave operations without responses.** `String` and `HTML` record
+  opaque `text/plain` and `text/html` responses; `IndentedJSON`, `PureJSON`, and `AsciiJSON` retain
+  typed JSON schemas; and `SecureJSON`, `JSONP`, `XML`, `YAML`, `TOML`, and `ProtoBuf` record honest
+  opaque responses with their Gin media types. YAML follows the selected module version:
+  `application/x-yaml` through Gin v1.9 and `application/yaml` from v1.10. An unrecognized version,
+  like `Render` or `Negotiate` selecting a serializer at runtime, remains unresolved instead of
+  receiving a guessed media type. Direct and bounded helper calls follow the same rules.
+
+  A handler that answers JSON on one 2xx and bytes on another — `c.JSON(200, …)` beside
+  `c.String(202, …)` — now states both, which the OpenAPI document represents in full. See the SDK
+  entry below for what the generated clients do with it.
+- **Go/Gin extraction preserves `AbortWithStatusJSON` error responses.** Direct and bounded
+  helper calls now contribute their status, typed JSON body, media type, and response headers
+  instead of leaving the operation with a missing response.
+- **Go/Gin URI bindings preserve typed path parameters.** `ShouldBindUri` and `BindUri`, including
+  calls in bounded module-owned helpers, now read runtime `uri` names and Go field types, preserve
+  required path semantics, and lower enforced `uuid` and `uri` string formats. Matching `Param`
+  evidence is enriched instead of duplicated, while conflicting typed schemas remain diagnostic.
+- **Go/Gin extraction recognizes the aborting `BindQuery` and `BindHeader` methods.** Their typed
+  query and header structs now contribute the same parameters as the corresponding `ShouldBind*`
+  methods, including through bounded module-owned helpers.
+- **Go/Gin extraction resolves `c.Request.Header.Get` names like `c.GetHeader`.** A header name
+  returned by a zero-argument module-owned constant helper now contributes the same parameter
+  through either access path instead of being dropped with `request.parameter.unresolved`.
 
 ## 0.12.2 — 2026-09-06
 

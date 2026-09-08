@@ -694,7 +694,7 @@ pub(crate) fn path_tokens_match(tokens: &[String], params: &[&str]) -> bool {
 pub(crate) struct SuccessResponses {
     /// Declared successful or redirect statuses, sorted by status code.
     pub(crate) statuses: Vec<u16>,
-    /// The single success body model, when all body-bearing 2xx/3xx responses share one model.
+    /// The single typed JSON success model, when all JSON successes share one model.
     pub(crate) body_model: Option<String>,
     /// The statuses that carry [`Self::body_model`].
     pub(crate) body_statuses: Vec<u16>,
@@ -702,6 +702,13 @@ pub(crate) struct SuccessResponses {
     pub(crate) binary_statuses: Vec<u16>,
     /// The media type for binary/file success content.
     pub(crate) binary_content_type: Option<String>,
+    /// Statuses that answer with a body this method's return type does not carry, sorted.
+    ///
+    /// An operation that answers a typed JSON body on one success and opaque bytes on another
+    /// states two shapes, and a method has one return type, so the opaque ones land here. They
+    /// are documented on the generated method and reachable through the client's response hook,
+    /// exactly as a declared redirect's body already is.
+    pub(crate) unreturned_statuses: Vec<u16>,
 }
 
 /// One declared non-success JSON error response body.
@@ -754,6 +761,72 @@ impl SuccessResponses {
     pub(crate) fn has_binary_body(&self) -> bool {
         !self.binary_statuses.is_empty()
     }
+
+    /// The generated documentation lines naming the successes whose body the method's return
+    /// type does not carry. Empty when it carries every declared one.
+    ///
+    /// Every target emits the same sentence, because the shape it describes is the same in
+    /// every language: the method returns the declared JSON model, and these statuses answer
+    /// with something else that the caller reads from the response hook. Saying it on the
+    /// method is what keeps the narrowing visible where somebody calling it will look.
+    ///
+    /// This text is gnr8's, not an author's, so unlike the prose in [`operation_prose`] it is
+    /// wrapped here rather than emitted at whatever length the status list happens to produce.
+    /// A generated Python docstring line is linted at 88 columns from an 8-space indent, the
+    /// tightest of the three, and [`NOTE_WIDTH`] is what fits inside it.
+    pub(crate) fn unreturned_note(&self) -> Vec<String> {
+        if self.unreturned_statuses.is_empty() {
+            return Vec::new();
+        }
+        let (subject, verb, pronoun) = if self.unreturned_statuses.len() == 1 {
+            ("Status", "answers", "it")
+        } else {
+            ("Statuses", "answer", "them")
+        };
+        // Two sentences rather than one, so the wrap falls on the sentence boundary for every
+        // status list short enough not to need a second line of its own.
+        let mut lines = wrap_words(
+            &format!(
+                "{subject} {} {verb} with a body this method does not return.",
+                join_statuses(&self.unreturned_statuses)
+            ),
+            NOTE_WIDTH,
+        );
+        lines.extend(wrap_words(
+            &format!("Read {pronoun} from a response hook."),
+            NOTE_WIDTH,
+        ));
+        lines
+    }
+}
+
+/// Column budget for a generated documentation line, before any comment prefix.
+///
+/// Only one target enforces a limit: `ruff check --select E` rejects a generated Python docstring
+/// line past 88 columns, and that body sits at an 8-space indent, leaving 80. The value is smaller
+/// than 80 so the TypeScript form — a 5-column `   * ` prefix — also lands inside Prettier's
+/// 80-column `printWidth`. Prettier does not reflow comments and would not reject a longer one, but
+/// a generated line that reads like the rest of the file costs nothing here. Go wraps nothing and
+/// has room to spare.
+const NOTE_WIDTH: usize = 72;
+
+/// Greedily wrap a generated sentence to `width` columns, never splitting a word.
+///
+/// A single word longer than `width` occupies its own line rather than being broken: the words
+/// here are status numbers and ordinary English, so that case cannot arise from real input, and
+/// silently splitting one would be worse than a long line if it ever did.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.chars().count() + 1 + word.chars().count() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
 }
 
 /// Resolve declared non-success JSON error body models for one operation.
@@ -794,6 +867,16 @@ pub(crate) fn error_response_bodies_of(
     Ok(out)
 }
 
+/// Render a status list for a message, so it names the responses to act on rather than
+/// only the operation that carries them.
+fn join_statuses(statuses: &[u16]) -> String {
+    statuses
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Reject a response that declares a body on a status that cannot carry one.
 ///
 /// Silently dropping the body here while the `OpenAPI` lowering kept it would make one graph
@@ -812,11 +895,20 @@ fn reject_impossible_body(op: &Operation, resp: &crate::graph::Response) -> Resu
 
 /// Resolve every declared successful response for one operation.
 ///
-/// SDK methods have one return type, so multiple body-bearing success responses are accepted only when
-/// they point to the same model. Body-less alternate 2xx responses are represented by returning the
-/// language's empty/default success value rather than surfacing an API error. Declared redirects are
-/// successes too: clients expose the 3xx status and headers through their response hooks and do not
-/// follow them unless the caller opts in.
+/// SDK methods have one return type, so one rule decides it: **an operation that declares a JSON
+/// success model returns that model; every other success status returns the language's empty value
+/// and is read through the client's response hook.** Body-less alternates, declared redirects, and a
+/// success answering opaque bytes beside a typed one are the same case under that rule, not three,
+/// and the statuses it applies to are named on the generated method so the shape is stated where the
+/// caller reads it. Only when no JSON model is declared do opaque successes become the return type.
+///
+/// Two body-bearing successes pointing at *different* JSON models stay an error: there the rule has
+/// no answer to give, because neither model is the operation's.
+///
+/// The alternative — refusing to emit the operation at all — takes an SDK target's modeling limit and
+/// spends it on the whole run, including the OpenAPI document, which represents both responses fine.
+/// The only remedy it leaves is a `ResponseOverride` that rewrites the graph, so the document would
+/// have to misstate the response to let the SDK build.
 pub(crate) fn success_responses_of(
     op: &Operation,
     graph: &ApiGraph,
@@ -902,13 +994,13 @@ pub(crate) fn success_responses_of(
             }
         }
     }
+    // The declared JSON model is the return type. Opaque successes beside it therefore carry no
+    // return value, which puts them in the same bucket a declared redirect is already in: named on
+    // the method, answered with the empty value, and read through the response hook.
+    let mut unreturned_statuses = Vec::new();
     if body_model.is_some() && !binary_statuses.is_empty() {
-        return Err(CoreError::SdkGen {
-            message: format!(
-                "operation '{}' mixes JSON and binary success responses; SDK targets require one success body kind",
-                op.id
-            ),
-        });
+        unreturned_statuses = std::mem::take(&mut binary_statuses);
+        binary_content_type = None;
     }
     Ok(SuccessResponses {
         statuses,
@@ -916,6 +1008,7 @@ pub(crate) fn success_responses_of(
         body_statuses,
         binary_statuses,
         binary_content_type,
+        unreturned_statuses,
     })
 }
 
@@ -1123,6 +1216,7 @@ mod tests {
     use super::{
         check_unique_model_file_names, file_stem, http_auth_features, operation_auth_alternatives,
         split_words, success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
+        SuccessResponses,
     };
     use crate::graph::{
         ApiGraph, Operation, OperationSecurityPolicy, Response, SecurityRequirementGroup,
@@ -1284,6 +1378,56 @@ mod tests {
         assert!(success.has_binary_body());
         assert!(!success.has_bodyless_alternative());
         Ok(())
+    }
+
+    /// The note is generated text emitted into a linted Python docstring at an 8-space indent,
+    /// so it has to fit 88 columns however many statuses it names.
+    #[test]
+    fn unreturned_note_names_every_status_and_fits_the_narrowest_comment_budget() {
+        let note_for = |statuses: Vec<u16>| {
+            SuccessResponses {
+                statuses: statuses.clone(),
+                body_model: Some("Widget".to_string()),
+                body_statuses: vec![200],
+                binary_statuses: Vec::new(),
+                binary_content_type: None,
+                unreturned_statuses: statuses,
+            }
+            .unreturned_note()
+        };
+
+        assert!(
+            note_for(Vec::new()).is_empty(),
+            "an operation whose return type carries every success says nothing"
+        );
+        assert_eq!(
+            note_for(vec![202]),
+            vec![
+                "Status 202 answers with a body this method does not return.",
+                "Read it from a response hook.",
+            ],
+            "one status is singular and breaks on the sentence"
+        );
+
+        let many = note_for(vec![201, 202, 203, 205, 206, 207, 208]);
+        let joined = many.join(" ");
+        for status in ["201", "202", "203", "205", "206", "207", "208"] {
+            assert!(joined.contains(status), "every status is named: {joined}");
+        }
+        assert!(
+            joined.starts_with("Statuses ") && joined.contains(" answer with "),
+            "several statuses are plural: {joined}"
+        );
+        for line in &many {
+            assert!(
+                line.chars().count() + 8 <= 88,
+                "a docstring line must fit ruff's column limit: {line:?}"
+            );
+            assert!(
+                line.chars().count() + 5 <= 80,
+                "a JSDoc line must fit Prettier's printWidth: {line:?}"
+            );
+        }
     }
 
     #[test]

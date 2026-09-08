@@ -1514,6 +1514,7 @@ fn emit_operation_doc(
     op: &Operation,
     method_name: &str,
     base_path: &str,
+    success: &SuccessResponses,
 ) -> Result<(), CoreError> {
     let route = format!("{} {}", op.method, join_path(base_path, &op.path));
     let prose = operation_prose(op, &[], "");
@@ -1544,6 +1545,13 @@ fn emit_operation_doc(
     if prose.summary.is_some() {
         writeln!(body, "//").map_err(sink)?;
         writeln!(body, "// {route}").map_err(sink)?;
+    }
+    let note = success.unreturned_note();
+    if !note.is_empty() {
+        writeln!(body, "//").map_err(sink)?;
+        for line in &note {
+            writeln!(body, "// {line}").map_err(sink)?;
+        }
     }
     Ok(())
 }
@@ -1714,7 +1722,7 @@ fn emit_operation(
     }
     args.push("opts ...RequestOption".to_string());
 
-    emit_operation_doc(body, op, method_name.as_str(), base_path)?;
+    emit_operation_doc(body, op, method_name.as_str(), base_path, &success)?;
     writeln!(
         body,
         "func (c *Client) {method_name}({}) ({return_model}, error) {{",
@@ -4288,6 +4296,56 @@ mod tests {
             assert!(
                 !out.contains("json.NewDecoder(resp.Body).Decode(&out)"),
                 "binary success must not decode JSON into out:\n{out}"
+            );
+        }
+
+        // Go extraction records c.String/c.HTML and friends as opaque-byte successes, so an
+        // operation answering JSON on one 2xx and bytes on another is reachable from ordinary
+        // source. The declared model is the return type; the opaque status answers the zero
+        // value, is named on the method, and stays readable through a response hook.
+        #[test]
+        fn typed_success_beside_an_opaque_one_returns_the_model_and_names_the_rest() {
+            let mut graph = sample_graph();
+            let op = graph
+                .operations
+                .iter_mut()
+                .find(|op| op.handler == "listGoals")
+                .unwrap();
+            let mut opaque = op.responses[0].clone();
+            opaque.status = 202;
+            opaque.body = None;
+            opaque.body_kind = "binary".to_string();
+            opaque.content_type = Some("text/plain".to_string());
+            opaque.content_types = vec!["text/plain".to_string()];
+            op.responses.push(opaque);
+
+            let ops: Vec<&crate::graph::Operation> = graph
+                .operations
+                .iter()
+                .filter(|op| op.handler == "listGoals")
+                .collect();
+            let out = emit_operations(&graph, "goalservice", "/goal", &ops).unwrap();
+            assert!(
+                out.contains("func (c *Client) ListGoals(ctx context.Context, params ListGoalsParams, opts ...RequestOption) (GoalResponse, error)"),
+                "the declared model stays the return type:\n{out}"
+            );
+            assert!(
+                out.contains("// Status 202 answers with a body this method does not return.\n")
+                    && out.contains("// Read it from a response hook.\n"),
+                "the narrowing is documented on the method:\n{out}"
+            );
+            assert!(
+                out.contains("if resp.StatusCode == 200 {")
+                    && out.contains("json.NewDecoder(resp.Body).Decode(&out)"),
+                "the typed status still decodes:\n{out}"
+            );
+            assert!(
+                !out.contains("return data, nil"),
+                "the opaque status must not become the return value:\n{out}"
+            );
+            assert!(
+                !out.contains("return out, &APIError{StatusCode: resp.StatusCode}"),
+                "a declared success must not be reported as an error:\n{out}"
             );
         }
 

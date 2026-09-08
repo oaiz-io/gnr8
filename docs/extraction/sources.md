@@ -41,17 +41,28 @@ Recognized route facts include:
 - Handler functions and bounded, cycle-safe helper traversal across packages.
 - Constant arguments propagated through helper calls.
 - `Param` path parameters.
-- `Query`, `DefaultQuery`, `GetQuery`, array/map query accessors.
-- `GetHeader` and `Request.Header.Get` headers, `Cookie` cookies. A read is optional unless the
-  handler or a bounded helper rejects an absent value.
-- `PostForm`, `DefaultPostForm`, `GetPostForm`, and file reads through either `FormFile` or
-  `Request.FormFile` form values. A string part becomes required when an empty value is explicitly
+- `Query`, `DefaultQuery`, `GetQuery`, and all array/map query accessors, including `GetQueryMap`.
+- `GetHeader` and `Request.Header.Get` headers, `Cookie` cookies. Both header access paths resolve
+  constant arguments through the same handler-scoped rules. A read is optional unless the handler
+  or a bounded helper rejects an absent value, and a rejection is any known 4xx written through the
+  same `gin.Context` response surface the query proof below reads.
+- `PostForm`, `DefaultPostForm`, `GetPostForm`, `PostFormArray`, `GetPostFormArray`, and file reads
+  through either `FormFile` or `Request.FormFile` form values. `PostFormArray`/`GetPostFormArray`
+  state a repeated string part. A string part becomes required when an empty value is explicitly
   rejected; a file part is required and retains its exact literal field name; real defaults remain
-  optional.
-- `ShouldBindJSON`/`BindJSON`; generic bind variants for typed form, multipart, query, and header
-  structs.
-- JSON responses, response status/media facts, constant redirects, response headers, Go structs,
-  nested types, and string enums. Redirect status values passed through bounded helpers are resolved
+  optional. `PostFormMap`/`GetPostFormMap` collect the parts named `field[key]`, a wire shape a form
+  body field cannot state, so they are reported as `request.body.unresolved` rather than published
+  under the flat expansion an object property would mean.
+- `ShouldBindJSON`/`BindJSON`; `ShouldBindQuery`/`BindQuery` and
+  `ShouldBindHeader`/`BindHeader`; generic bind variants for typed form, multipart, query, and
+  header structs.
+- `ShouldBindUri`/`BindUri` path structs. Runtime `uri` tags supply parameter names, Go field types
+  supply schemas, and enforced `uuid`/`uri` validation rules refine string formats. URI-bound
+  parameters enrich matching route or `Param` evidence rather than creating duplicates; conflicting
+  typed schemas are diagnosed.
+- JSON responses from `JSON`, `AbortWithStatusJSON`, `IndentedJSON`, `PureJSON`, and `AsciiJSON`;
+  response status/media facts; constant redirects; response headers; Go structs; nested types; and
+  string enums. Redirect status values passed through bounded helpers are resolved
   at each call site, and response headers are associated only with statuses reached on paths where
   those headers were written. A response header is read from the response writer's own map —
   `c.Header`, `c.Writer.Header()`, or a bounded `http.ResponseWriter` helper — so mutating
@@ -88,6 +99,18 @@ Recognized route facts include:
   array's element or a map's values after `dive`. A `keys`…`endkeys` enum is discarded, because an
   OpenAPI object key is always an unconstrained string. Two rules landing on the same value raise
   `request.parameter.ambiguous` and neither is applied.
+
+`String` (`text/plain`) and `HTML` (`text/html`) responses are recorded as opaque bytes. Renderers
+whose serializer changes or wraps the source value are recorded the same way with their actual media
+type: `SecureJSON` (`application/json`), `JSONP` (`application/javascript`), `XML`
+(`application/xml`), `TOML` (`application/toml`), and `ProtoBuf` (`application/x-protobuf`). YAML
+follows the selected Gin module: releases through v1.9 write `application/x-yaml`, and v1.10 onward
+write `application/yaml`. If the loaded module version does not identify either behavior, the YAML
+response is unresolved rather than guessed. This preserves a truthful transport contract for every
+built-in SDK without inferring a JSON schema for non-JSON bytes or for JSON that Gin may prefix or wrap.
+`Render` and `Negotiate` choose their serializer from a value or from the request's `Accept` header,
+so no media type is stated in the source and the operation keeps `response.missing` rather than a
+guessed one.
 
 ### Direct Gin query requiredness
 

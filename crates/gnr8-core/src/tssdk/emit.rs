@@ -1744,9 +1744,15 @@ fn emit_operation_params_types(
 /// re-wrapped: reflowing it would make the SDK comment disagree with the source comment
 /// it came from, and Prettier does not reflow comment bodies either, so the output stays
 /// format-stable.
-fn emit_operation_jsdoc(out: &mut String, op: &Operation, indent: &str) -> Result<(), CoreError> {
+fn emit_operation_jsdoc(
+    out: &mut String,
+    op: &Operation,
+    indent: &str,
+    success: &SuccessResponses,
+) -> Result<(), CoreError> {
     let prose = operation_prose(op, &["*/"], "*\\/");
-    if prose.is_empty() {
+    let note = success.unreturned_note();
+    if prose.is_empty() && note.is_empty() {
         return Ok(());
     }
     writeln!(out, "{indent}/**").map_err(sink)?;
@@ -1763,6 +1769,14 @@ fn emit_operation_jsdoc(out: &mut String, op: &Operation, indent: &str) -> Resul
             } else {
                 writeln!(out, "{indent} * {line}").map_err(sink)?;
             }
+        }
+    }
+    if !note.is_empty() {
+        if !prose.is_empty() {
+            writeln!(out, "{indent} *").map_err(sink)?;
+        }
+        for line in &note {
+            writeln!(out, "{indent} * {line}").map_err(sink)?;
         }
     }
     writeln!(out, "{indent} */").map_err(sink)?;
@@ -2026,7 +2040,7 @@ fn emit_operation(
         OperationEmitStyle::ClassMethod => "  ",
         OperationEmitStyle::PrototypeFunction => "",
     };
-    emit_operation_jsdoc(out, op, doc_indent)?;
+    emit_operation_jsdoc(out, op, doc_indent, &success)?;
     match style {
         OperationEmitStyle::ClassMethod => {
             writeln!(
@@ -4162,6 +4176,45 @@ mod tests {
                 .iter()
                 .filter(|o| o.handler == handler)
                 .collect()
+        }
+
+        // The same operation shape reaches every target, so each states the same narrowing in its
+        // own idiom: the declared model is the return type, and the opaque success is named.
+        #[test]
+        fn typed_success_beside_an_opaque_one_returns_the_model_and_names_the_rest() {
+            let mut graph = ops_graph();
+            let op = graph
+                .operations
+                .iter_mut()
+                .find(|op| op.handler == "getBook")
+                .unwrap();
+            let mut opaque = op.responses[0].clone();
+            opaque.status = 202;
+            opaque.body = None;
+            opaque.body_kind = "binary".to_string();
+            opaque.content_type = Some("text/plain".to_string());
+            opaque.content_types = vec!["text/plain".to_string()];
+            op.responses.push(opaque);
+
+            let ops = ops_for(&graph, "getBook");
+            let out = emit_operations(&graph, "bookstore", "/", &ops).unwrap();
+            assert!(
+                out.contains("Promise<models.Book | undefined>"),
+                "the declared model stays the return type:\n{out}"
+            );
+            assert!(
+                out.contains("   * Status 202 answers with a body this method does not return.\n")
+                    && out.contains("   * Read it from a response hook.\n"),
+                "the narrowing is documented on the method:\n{out}"
+            );
+            assert!(
+                out.contains("this._decodeJson<models.Book>(res)"),
+                "the typed status still decodes:\n{out}"
+            );
+            assert!(
+                !out.contains("res.blob()") && !out.contains("throw new ApiError(res.status)"),
+                "a declared success must be neither raw bytes nor an error:\n{out}"
+            );
         }
 
         #[test]

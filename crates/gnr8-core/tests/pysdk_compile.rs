@@ -512,9 +512,50 @@ fn runtime_graph() -> gnr8_engine::graph::ApiGraph {
               "request_body_required": true,
               "responses": [ { "status": 204, "body": null } ],
               "provenance": { "file": "main.py", "start_line": 3, "end_line": 3 }
+            },
+            {
+              "id": "queueable",
+              "method": "GET",
+              "path": "/queueable",
+              "handler": "queueable",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [
+                { "status": 200, "body": { "ref_id": "dto.Message" } },
+                {
+                  "status": 202,
+                  "body": null,
+                  "body_kind": "binary",
+                  "content_type": "text/plain",
+                  "content_types": ["text/plain"]
+                }
+              ],
+              "provenance": { "file": "main.py", "start_line": 4, "end_line": 4 }
             }
           ],
-          "schemas": [],
+          "schemas": [
+            {
+              "id": "dto.Message",
+              "name": "Message",
+              "body": { "type": "object", "of": [
+                {
+                  "json_name": "message",
+                  "serializer_may_omit": false,
+                  "deserializer_accepts_absent": false,
+                  "deserializer_accepts_null": false,
+                  "serializer_may_emit_null": false,
+                  "validator_requires_presence": true,
+                  "validator_rejects_null": false,
+                  "schema": { "type": "primitive", "of": { "prim": "string" } },
+                  "description": null,
+                  "example": null
+                }
+              ] },
+              "enum_source_order": [],
+              "provenance": { "file": "models.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
           "diagnostics": [],
           "base_path": "/api",
           "title": "API",
@@ -1186,7 +1227,12 @@ events = []
 
 
 class _Handler(BaseHTTPRequestHandler):
-    counts = {"GET /api/items": 0, "POST /api/unsafe": 0, "POST /api/idempotent": 0}
+    counts = {
+        "GET /api/items": 0,
+        "GET /api/queueable": 0,
+        "POST /api/unsafe": 0,
+        "POST /api/idempotent": 0,
+    }
     idempotency_keys = []
 
     def log_message(self, *args):
@@ -1197,9 +1243,19 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _send_bytes(self, code, content_type, body):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         key = f"{self.command} {self.path}"
         _Handler.counts[key] += 1
+        if self.path == "/api/queueable":
+            self._send_bytes(202, "text/plain", b"queued")
+            return
         self._send_empty(429 if _Handler.counts[key] == 1 else 204)
 
     def do_POST(self):
@@ -1222,7 +1278,14 @@ def main():
             events.append(("request", context.operation_id, context.method, context.path_template, context.request_metadata.get("trace")))
 
         def response_hook(context):
-            events.append(("response", context.operation_id, context.status))
+            events.append(
+                (
+                    "response",
+                    context.operation_id,
+                    context.status,
+                    context.response_body,
+                )
+            )
 
         def error_hook(context, error):
             events.append(("error", context.operation_id, context.status, type(error).__name__))
@@ -1256,9 +1319,13 @@ def main():
         assert _Handler.counts["POST /api/idempotent"] == 2, _Handler.counts
         assert _Handler.idempotency_keys == ["idem-1", "idem-1"], _Handler.idempotency_keys
 
+        assert client.queueable() is None
+        assert _Handler.counts["GET /api/queueable"] == 1, _Handler.counts
+
         assert ("request", "listItems", "GET", "/items", "runtime") in events, events
-        assert ("response", "listItems", 429) in events, events
-        assert ("response", "listItems", 204) in events, events
+        assert ("response", "listItems", 429, b"") in events, events
+        assert ("response", "listItems", 204, b"") in events, events
+        assert ("response", "queueable", 202, b"queued") in events, events
         assert any(event[:3] == ("error", "createUnsafe", 500) for event in events), events
     finally:
         server.shutdown()

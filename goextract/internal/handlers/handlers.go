@@ -127,6 +127,7 @@ type Analyzer struct {
 	idx           Index
 	declsByObject map[string]handlerDecl
 	modulePrefix  string
+	ginVersion    string
 	collisions    []handlerCollision
 }
 
@@ -245,8 +246,32 @@ func NewAnalyzer(res *load.Result, module string, diags *diag.Accumulator) *Anal
 		idx:           idx,
 		declsByObject: buildDeclObjectIndex(res, module),
 		modulePrefix:  module,
+		ginVersion:    loadedPackageModuleVersion(res, routes.GinPkgPath),
 		collisions:    collisions,
 	}
+}
+
+// loadedPackageModuleVersion returns the one selected module version that owns a
+// loaded package. go/packages gets this from the target module's own resolved
+// build list, so renderer behavior follows the code being analyzed rather than
+// whichever Gin release gnr8 happened to be developed against.
+func loadedPackageModuleVersion(res *load.Result, pkgPath string) string {
+	if res == nil {
+		return ""
+	}
+	versions := map[string]bool{}
+	packages.Visit(res.Packages, nil, func(pkg *packages.Package) {
+		if pkg != nil && pkg.PkgPath == pkgPath && pkg.Module != nil && pkg.Module.Version != "" {
+			versions[pkg.Module.Version] = true
+		}
+	})
+	if len(versions) != 1 {
+		return ""
+	}
+	for version := range versions {
+		return version
+	}
+	return ""
 }
 
 // Index exposes the underlying handler index (for callers that look up docs or
@@ -671,7 +696,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicParameterName(frame, call, traversal, method)
 		}
-	case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap":
+	case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap", "GetQueryMap":
 		name, ok := frameCallStringArg(frame, call, 0)
 		if !ok {
 			a.reportDynamicParameterName(frame, call, traversal, method)
@@ -722,10 +747,12 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicParameterName(frame, call, traversal, method)
 		}
-	case "ShouldBindQuery":
+	case "ShouldBindQuery", "BindQuery":
 		a.addBoundParameters(frame, call, "query", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
-	case "ShouldBindHeader":
+	case "ShouldBindHeader", "BindHeader":
 		a.addBoundParameters(frame, call, "header", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
+	case "ShouldBindUri", "BindUri":
+		a.addBoundParameters(frame, call, "path", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
 	case "ShouldBindJSON", "BindJSON":
 		a.setTraversedRequestBody(frame, call, "application/json", optionalBindPositions, traversal)
 	case "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
@@ -772,13 +799,13 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicBodyFieldName(frame, call, traversal, method)
 		}
-	case "PostForm", "DefaultPostForm", "GetPostForm":
+	case "PostForm", "DefaultPostForm", "GetPostForm", "PostFormArray", "GetPostFormArray":
 		if name, ok := frameCallStringArg(frame, call, 0); ok {
 			traversal.manualFormFields[name] = true
 			if _, exists := traversal.formFields[name]; !exists {
 				field := formField(
 					name,
-					facts.PrimitiveType(facts.StringPrim()),
+					formAccessSchema(method),
 					requestAccessRequired(frame.decl, call, method),
 				)
 				if method == "DefaultPostForm" && len(call.Args) > 1 {
@@ -789,6 +816,8 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicBodyFieldName(frame, call, traversal, method)
 		}
+	case "PostFormMap", "GetPostFormMap":
+		a.reportTraversedUnresolvedBody(frame, call, traversal, method, formMapUnrepresentable)
 	}
 }
 
@@ -928,16 +957,26 @@ func (a *Analyzer) reportDynamicBodyFieldName(
 	traversal *contextTraversal,
 	method string,
 ) {
-	if traversal.diagnostics == nil {
-		return
-	}
-	file, line := positionOf(frame.decl.fset, call.Pos())
 	reason := "form field name is dynamic"
 	if method == "FormFile" || method == "Request.FormFile" {
 		reason = "multipart field name is dynamic"
 	}
+	a.reportTraversedUnresolvedBody(frame, call, traversal, method, reason)
+}
+
+func (a *Analyzer) reportTraversedUnresolvedBody(
+	frame helperFrame,
+	call *ast.CallExpr,
+	traversal *contextTraversal,
+	subject string,
+	reason string,
+) {
+	if traversal.diagnostics == nil {
+		return
+	}
+	file, line := positionOf(frame.decl.fset, call.Pos())
 	traversal.diagnostics.RequestBodyUnresolved(
-		method,
+		subject,
 		traversal.route.Method,
 		untypedRouteLabel(traversal.route),
 		reason,
@@ -1795,6 +1834,13 @@ func exprIsObject(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object]b
 	return ok && values[info.ObjectOf(ident)]
 }
 
+// blockRejectsRequest reports whether a block answers the request with a known 4xx,
+// which is what makes a header/cookie/form read required.
+//
+// The classification is ginResponseOutcome's, the same one the query-requiredness
+// proof reads, so one rejection cannot count for a query parameter and not for a
+// header read beside it: naming the response surface twice is how those two answers
+// drift apart.
 func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
 	if block == nil {
 		return false
@@ -1812,18 +1858,23 @@ func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
 		if !ok || recvPkg != routes.GinPkgPath {
 			return true
 		}
-		switch name {
-		case "JSON", "Status", "AbortWithStatus":
-			status, known := statusOf(h.info, call.Args[0])
-			rejects = known && status >= 400 && status < 500
-		}
+		rejects = ginResponseOutcome(h.info, name, call) == queryResponseClientError
 		return !rejects
 	})
 	return rejects
 }
 
-func requestHeaderGet(info *gotypes.Info, call *ast.CallExpr) (string, bool, bool) {
-	return requestHeaderGetInFrame(helperFrame{decl: handlerDecl{info: info}}, call)
+// requestHeaderGet matches the same call shape as requestHeaderGetInFrame but
+// resolves the header name with the handler-scoped resolver, so a name that
+// c.GetHeader resolves in a handler body resolves identically through
+// c.Request.Header.Get. A helper frame has its own resolver (bindings from the
+// call site), which is why the two entry points differ in that one step.
+func (a *Analyzer) requestHeaderGet(h handlerDecl, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestHeaderGetCall(helperFrame{decl: h}, call) {
+		return "", false, false
+	}
+	name, resolved := a.callStringArg(h, call, 0)
+	return name, true, resolved
 }
 
 // requestFormFile matches the same call shape as requestFormFileInFrame but
@@ -1839,20 +1890,25 @@ func (a *Analyzer) requestFormFile(h handlerDecl, call *ast.CallExpr) (string, b
 	return name, true, resolved
 }
 
-func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
+func isRequestHeaderGetCall(frame helperFrame, call *ast.CallExpr) bool {
 	if call == nil || frame.decl.info == nil || len(call.Args) == 0 {
-		return "", false, false
+		return false
 	}
 	method, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || method.Sel == nil || method.Sel.Name != "Get" || !isNamedType(frame.decl.info.TypeOf(method.X), "net/http", "Header") {
-		return "", false, false
+		return false
 	}
 	header, ok := method.X.(*ast.SelectorExpr)
 	if !ok || header.Sel == nil || header.Sel.Name != "Header" {
-		return "", false, false
+		return false
 	}
 	request, ok := header.X.(*ast.SelectorExpr)
-	if !ok || request.Sel == nil || request.Sel.Name != "Request" || !isGinContextType(frameTypeOf(frame, request.X)) {
+	return ok && request.Sel != nil && request.Sel.Name == "Request" &&
+		isGinContextType(frameTypeOf(frame, request.X))
+}
+
+func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestHeaderGetCall(frame, call) {
 		return "", false, false
 	}
 	name, resolved := frameCallStringArg(frame, call, 0)
@@ -1958,7 +2014,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			if isHTTPRedirectCall(h.info, call) {
 				a.analyzeRedirect(h, call, 3, route, &cf, seenStatus, provisionalStatus, diags)
 			}
-			if pname, matched, resolved := requestHeaderGet(h.info, call); matched {
+			if pname, matched, resolved := a.requestHeaderGet(h, call); matched {
 				if resolved {
 					a.addExtractedParameter(
 						&cf,
@@ -2024,10 +2080,12 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a named schema")
 			}
-		case "ShouldBindQuery":
+		case "ShouldBindQuery", "BindQuery":
 			a.addBoundParameters(helperFrame{decl: h}, call, "query", &cf, seenParam, resolvedParam, route, diags)
-		case "ShouldBindHeader":
+		case "ShouldBindHeader", "BindHeader":
 			a.addBoundParameters(helperFrame{decl: h}, call, "header", &cf, seenParam, resolvedParam, route, diags)
+		case "ShouldBindUri", "BindUri":
+			a.addBoundParameters(helperFrame{decl: h}, call, "path", &cf, seenParam, resolvedParam, route, diags)
 		case "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
 			frame := helperFrame{decl: h}
 			bound := boundTypeFromCall(frame, call)
@@ -2058,8 +2116,10 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a named schema")
 			}
-		case "JSON":
+		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(h, call, route, &cf, seenStatus, provisionalStatus, diags)
+		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf":
+			a.analyzeOpaqueResponse(h, call, name, route, &cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(h, call, route, &cf, seenStatus, provisionalStatus, true, diags)
 		case "AbortWithStatus":
@@ -2090,7 +2150,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectDynamicParameter(diags, h, route, call, name)
 			}
-		case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap":
+		case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap", "GetQueryMap":
 			if pname, ok := a.callStringArg(h, call, 0); ok {
 				file, line := positionOf(h.fset, call.Pos())
 				resolved := name != "Query"
@@ -2154,13 +2214,13 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "multipart field name is dynamic")
 			}
-		case "PostForm", "DefaultPostForm", "GetPostForm":
+		case "PostForm", "DefaultPostForm", "GetPostForm", "PostFormArray", "GetPostFormArray":
 			if fname, ok := a.callStringArg(h, call, 0); ok {
 				manualFormFields[fname] = true
 				if _, seen := formFields[fname]; !seen {
 					field := formField(
 						fname,
-						facts.PrimitiveType(facts.StringPrim()),
+						formAccessSchema(name),
 						requestAccessRequired(h, call, name),
 					)
 					if name == "DefaultPostForm" && len(call.Args) > 1 {
@@ -2171,6 +2231,8 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			} else {
 				reportDirectUnresolvedBody(diags, h, route, call, name, "form field name is dynamic")
 			}
+		case "PostFormMap", "GetPostFormMap":
+			reportDirectUnresolvedBody(diags, h, route, call, name, formMapUnrepresentable)
 		case "MultipartForm":
 			// Literal accesses through the returned multipart.Form are collected in one
 			// typed pre-pass. The call alone does not state a field name.
@@ -2769,8 +2831,10 @@ func (a *Analyzer) analyzeDelegatedResponses(
 			return true
 		}
 		switch name {
-		case "JSON":
+		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(callee, nested, route, cf, seenStatus, provisionalStatus, diags)
+		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf":
+			a.analyzeOpaqueResponse(callee, nested, name, route, cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(callee, nested, route, cf, seenStatus, provisionalStatus, true, diags)
 		case "AbortWithStatus":
@@ -3059,7 +3123,7 @@ func firstQueryCall(info *gotypes.Info, root ast.Expr) (*ast.CallExpr, bool) {
 
 func isGinQueryMethod(name string) bool {
 	switch name {
-	case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap":
+	case "Query", "DefaultQuery", "GetQuery", "QueryArray", "GetQueryArray", "QueryMap", "GetQueryMap":
 		return true
 	default:
 		return false
@@ -3576,6 +3640,24 @@ func addMultipartFileField(
 	*formHasFile = true
 }
 
+// formMapUnrepresentable is why a `PostFormMap`/`GetPostFormMap` read states no field.
+//
+// Those accessors collect the parts whose names are spelled `field[key]`, and a form
+// body field carries a schema and nothing else — there is no serialization fact beside
+// it, and the document emits no `encoding` object — so a map-typed field would publish
+// OpenAPI's default form/explode expansion, which drops the `field[` prefix the server
+// reads by. A read whose wire shape the artifacts cannot state is reported, never
+// published under a shape that contradicts it.
+const formMapUnrepresentable = "form map accessor reads `field[key]` parts, which a form body field cannot state"
+
+func formAccessSchema(method string) facts.Type {
+	stringType := facts.PrimitiveType(facts.StringPrim())
+	if method == "PostFormArray" || method == "GetPostFormArray" {
+		return facts.ArrayType(stringType)
+	}
+	return stringType
+}
+
 func isFormContentType(contentType string) bool {
 	return contentType == "multipart/form-data" || contentType == "application/x-www-form-urlencoded"
 }
@@ -3735,9 +3817,10 @@ func typeHasFormTagSeen(t gotypes.Type, seen map[string]bool) bool {
 	return false
 }
 
-// analyzeJSON resolves c.JSON(http.StatusXxx, y): status from go/constant, body
-// from the named type of y. A dynamic/unresolvable body emits a WARN (D-05) and
-// records the status with a nil body so the response is never silently dropped.
+// analyzeJSON resolves a Gin JSON renderer's (status, body) arguments: status
+// from go/constant, body from the named type of y. A dynamic/unresolvable body
+// emits a WARN (D-05) and records the status with a nil body so the response is
+// never silently dropped.
 func (a *Analyzer) analyzeJSON(
 	h handlerDecl,
 	call *ast.CallExpr,
@@ -3795,6 +3878,104 @@ func (a *Analyzer) analyzeStatus(
 		return
 	}
 	a.addResponse(cf, seenStatus, provisionalStatus, facts.ResponseFact{Status: status}, provisional)
+}
+
+// ginOpaqueRendererMediaType names the media type each opaque renderer writes
+// in the selected Gin release.
+//
+// One table serves the handler body and the bounded-helper traversal, so a renderer
+// cannot answer one media type through a direct call and another through a helper.
+// Its callers switch on exactly these names; the bool distinguishes a media type
+// the selected Gin release states from one gnr8 cannot determine.
+//
+// Render and Negotiate are deliberately absent: they choose their serializer from a
+// value or from the request's Accept header, so no media type is stated in the source
+// and the operation keeps `response.missing` rather than being given a guessed one.
+func ginOpaqueRendererMediaType(method, ginVersion string) (string, bool) {
+	switch method {
+	case "String":
+		return "text/plain", true
+	case "HTML":
+		return "text/html", true
+	case "SecureJSON":
+		return "application/json", true
+	case "JSONP":
+		return "application/javascript", true
+	case "XML":
+		return "application/xml", true
+	case "YAML":
+		return ginYAMLRendererMediaType(ginVersion)
+	case "TOML":
+		return "application/toml", true
+	case "ProtoBuf":
+		return "application/x-protobuf", true
+	}
+	return "", false
+}
+
+// ginYAMLRendererMediaType follows the selected Gin module's one versioned
+// behavior change: releases through v1.9 write application/x-yaml, while v1.10
+// and later v1 releases write application/yaml. A version outside the v1 module
+// line states no known answer and is diagnosed by the caller rather than guessed.
+func ginYAMLRendererMediaType(version string) (string, bool) {
+	const prefix = "v1."
+	if !strings.HasPrefix(version, prefix) {
+		return "", false
+	}
+	remainder := strings.TrimPrefix(version, prefix)
+	minorText, _, found := strings.Cut(remainder, ".")
+	if !found {
+		return "", false
+	}
+	minor, err := strconv.Atoi(minorText)
+	if err != nil {
+		return "", false
+	}
+	if minor >= 10 {
+		return "application/yaml", true
+	}
+	return "application/x-yaml", true
+}
+
+// analyzeOpaqueResponse records renderers whose exact wire bytes cannot be
+// represented by gnr8's typed JSON response model. Keeping the body opaque
+// preserves the status and media type without pretending another serializer's
+// output follows the source type's JSON shape.
+func (a *Analyzer) analyzeOpaqueResponse(
+	h handlerDecl,
+	call *ast.CallExpr,
+	method string,
+	route routes.Route,
+	cf *CodeFacts,
+	seenStatus map[uint16]bool,
+	provisionalStatus map[uint16]bool,
+	diags *diag.Accumulator,
+) {
+	if len(call.Args) < 1 {
+		return
+	}
+	contentType, mediaTypeKnown := ginOpaqueRendererMediaType(method, a.ginVersion)
+	if !mediaTypeKnown {
+		if diags != nil {
+			file, line := positionOf(h.fset, call.Pos())
+			diags.DynamicResponse(
+				route.Method,
+				untypedRouteLabel(route),
+				route.Handler,
+				method+" response media type is not known for Gin "+strconv.Quote(a.ginVersion),
+				file,
+				line,
+			)
+		}
+		return
+	}
+	status, ok := statusOf(h.info, call.Args[0])
+	if !ok {
+		file, line := positionOf(h.fset, call.Pos())
+		diags.DynamicResponse(route.Method, untypedRouteLabel(route), route.Handler, "non-constant HTTP status", file, line)
+		return
+	}
+	a.analyzeBinaryStatus(cf, seenStatus, provisionalStatus, status, contentType)
 }
 
 func (a *Analyzer) analyzeBinaryStatus(
@@ -4320,7 +4501,9 @@ func (c *responseHeaderCollector) recordGinResponse(
 	status := uint16(0)
 	ok := false
 	switch name {
-	case "JSON", "Status", "AbortWithStatus", "Data", "DataFromReader", "Redirect":
+	case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON",
+		"String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf",
+		"Status", "AbortWithStatus", "Data", "DataFromReader", "Redirect":
 		status, ok = responseStatusInFrame(frame, call, 0)
 	case "File", "FileAttachment", "SSEvent":
 		status, ok = 200, true
@@ -5417,7 +5600,7 @@ func parameterFromGinAccess(
 		param.Schema = facts.ArrayType(facts.PrimitiveType(facts.StringPrim()))
 		param.Style = "form"
 		param.Explode = boolPointer(true)
-	case "QueryMap":
+	case "QueryMap", "GetQueryMap":
 		param.Schema = facts.MapTypeOf(
 			facts.PrimitiveType(facts.StringPrim()),
 			facts.PrimitiveType(facts.StringPrim()),
@@ -5543,13 +5726,14 @@ func (a *Analyzer) parametersFromBoundType(
 			}
 			continue
 		}
-		schema = schemaWithParameterEnums(schema, tag, name, route, diags, file, line)
+		schema = schemaWithParameterConstraints(schema, tag, name, route, diags, file, line)
 		param := requestParameter(
 			name,
 			location,
 			// Field scope only: a `required` behind `dive`/`keys` constrains the values
 			// inside a repeated parameter, not whether the parameter must be sent.
-			tags.HasFieldToken(tag.Get("binding"), "required") ||
+			location == "path" ||
+				tags.HasFieldToken(tag.Get("binding"), "required") ||
 				tags.HasFieldToken(tag.Get("validate"), "required"),
 			schema,
 			fset,
@@ -5599,8 +5783,11 @@ func (a *Analyzer) parametersFromBoundType(
 
 func parameterWireName(tag reflect.StructTag, fallback, location string) (string, []string, bool) {
 	key := "form"
-	if location == "header" {
+	switch location {
+	case "header":
 		key = "header"
+	case "path":
+		key = "uri"
 	}
 	raw, ok := tag.Lookup(key)
 	if !ok || raw == "" {
@@ -5718,34 +5905,33 @@ func namedStringEnumMembers(named *gotypes.Named) []string {
 	return out
 }
 
-// enumTarget names the one schema an enum replaces. A bound parameter carries its
-// facts in `facts.ParamFact.Schema` and nowhere else — unlike a schema field there
-// is no constraint object standing beside it — so stating an enum means replacing a
-// schema, and a rule that cannot name which schema it replaces cannot be applied.
-type enumTarget int
+// parameterRuleTarget names the one schema an enum or string format refines. A
+// bound parameter carries its facts in `facts.ParamFact.Schema` and nowhere else,
+// so a rule that cannot name which schema it refines cannot be applied.
+type parameterRuleTarget int
 
 const (
-	// enumTargetNone is a rule that reaches no schema on this parameter.
-	enumTargetNone enumTarget = iota
-	// enumTargetSelf is the parameter's own schema.
-	enumTargetSelf
-	// enumTargetElement is an array's element or a map's value.
-	enumTargetElement
+	// parameterRuleTargetNone is a rule that reaches no schema on this parameter.
+	parameterRuleTargetNone parameterRuleTarget = iota
+	// parameterRuleTargetSelf is the parameter's own schema.
+	parameterRuleTargetSelf
+	// parameterRuleTargetElement is an array's element or a map's value.
+	parameterRuleTargetElement
 )
 
-// enumTargets is iterated instead of the grouping map, whose order Go randomizes.
+// parameterRuleTargets is iterated instead of the grouping map, whose order Go randomizes.
 //
-// Only one of these can hold rules for any given parameter: enumTargetOf answers
+// Only one of these can hold rules for any given parameter: parameterRuleTargetOf answers
 // Self only for a scalar and Element only for a container, and the schema is one or
 // the other. The loop does not lean on that, so a future target — a constrained map
 // key, once a document can carry one — needs a line here and nothing else.
-var enumTargets = [...]enumTarget{enumTargetSelf, enumTargetElement}
+var parameterRuleTargets = [...]parameterRuleTarget{parameterRuleTargetSelf, parameterRuleTargetElement}
 
-func (t enumTarget) label() string {
+func (t parameterRuleTarget) label() string {
 	switch t {
-	case enumTargetSelf:
+	case parameterRuleTargetSelf:
 		return "the parameter itself"
-	case enumTargetElement:
+	case parameterRuleTargetElement:
 		return "the values inside the parameter"
 	}
 	return "nothing"
@@ -5761,7 +5947,7 @@ type parameterEnumRule struct {
 	text   string
 }
 
-// enumTargetOf resolves the one schema a rule written at the given scope replaces.
+// parameterRuleTargetOf resolves the one schema a rule written at the given scope replaces.
 // Every scope has a single destination: nothing is attempted twice and nothing is
 // recovered on failure, so the tag's own shape decides where its members land.
 //
@@ -5778,27 +5964,27 @@ type parameterEnumRule struct {
 // rather than a rescue: `facts.Type` has no room for an enum beside an array or a
 // map, so the members can only be describing the values, and reading them that way
 // is one deterministic answer, not a choice between two.
-func enumTargetOf(schema facts.Type, scope tags.Scope) enumTarget {
+func parameterRuleTargetOf(schema facts.Type, scope tags.Scope) parameterRuleTarget {
 	container := schema.Type == facts.TypeArray || schema.Type == facts.TypeMap
 	switch scope {
 	case tags.ScopeField:
 		if container {
-			return enumTargetElement
+			return parameterRuleTargetElement
 		}
-		return enumTargetSelf
+		return parameterRuleTargetSelf
 	case tags.ScopeElement:
 		if container {
-			return enumTargetElement
+			return parameterRuleTargetElement
 		}
 	}
-	return enumTargetNone
+	return parameterRuleTargetNone
 }
 
-func schemaWithEnum(schema facts.Type, values []string, target enumTarget) facts.Type {
+func schemaWithEnum(schema facts.Type, values []string, target parameterRuleTarget) facts.Type {
 	switch target {
-	case enumTargetSelf:
+	case parameterRuleTargetSelf:
 		return facts.EnumType(values)
-	case enumTargetElement:
+	case parameterRuleTargetElement:
 		if schema.Type == facts.TypeArray {
 			return facts.ArrayType(facts.EnumType(values))
 		}
@@ -5809,14 +5995,14 @@ func schemaWithEnum(schema facts.Type, values []string, target enumTarget) facts
 	return schema
 }
 
-// schemaWithParameterEnums places each enum a bound parameter's tag states onto the
-// value that tag says it constrains.
+// schemaWithParameterConstraints places each enum or well-known string format a
+// bound parameter's enforced validation tags state onto the value that tag names.
 //
 // Two rules that land on the same value are a contradiction the extractor refuses to
 // settle. Choosing between them would be a precedence rule, and a fact stated twice
 // has no winner even when both spellings agree, so both are dropped and the
 // parameter is reported rather than published with a guess.
-func schemaWithParameterEnums(
+func schemaWithParameterConstraints(
 	schema facts.Type,
 	tag reflect.StructTag,
 	name string,
@@ -5825,35 +6011,142 @@ func schemaWithParameterEnums(
 	file string,
 	line uint32,
 ) facts.Type {
-	stated := map[enumTarget][]parameterEnumRule{}
+	statedEnums := map[parameterRuleTarget][]parameterEnumRule{}
 	for _, rule := range parameterEnumRules(tag) {
-		target := enumTargetOf(schema, rule.scope)
-		if target == enumTargetNone {
+		target := parameterRuleTargetOf(schema, rule.scope)
+		if target == parameterRuleTargetNone {
 			continue
 		}
-		stated[target] = append(stated[target], rule)
+		statedEnums[target] = append(statedEnums[target], rule)
 	}
-	for _, target := range enumTargets {
-		rules := stated[target]
-		switch {
-		case len(rules) == 0:
+	statedFormats := map[parameterRuleTarget][]parameterFormatRule{}
+	for _, rule := range parameterFormatRules(tag) {
+		target := parameterRuleTargetOf(schema, rule.scope)
+		if target == parameterRuleTargetNone {
 			continue
-		case len(rules) > 1:
+		}
+		statedFormats[target] = append(statedFormats[target], rule)
+	}
+	for _, target := range parameterRuleTargets {
+		enumRules := statedEnums[target]
+		formatRules := statedFormats[target]
+		if len(enumRules) > 0 && len(formatRules) > 0 {
 			if diags != nil {
 				diags.RequestParameterAmbiguous(
 					name,
 					route.Method,
 					untypedRouteLabel(route),
-					"enum stated more than once for "+target.label()+" ("+renderEnumRules(rules)+")",
+					"enum and format both constrain "+target.label()+" ("+renderEnumRules(enumRules)+", "+renderFormatRules(formatRules)+")",
 					file,
 					line,
 				)
 			}
-		default:
-			schema = schemaWithEnum(schema, rules[0].values, target)
+			continue
+		}
+		switch {
+		case len(enumRules) > 1:
+			if diags != nil {
+				diags.RequestParameterAmbiguous(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"enum stated more than once for "+target.label()+" ("+renderEnumRules(enumRules)+")",
+					file,
+					line,
+				)
+			}
+		case len(enumRules) == 1:
+			schema = schemaWithEnum(schema, enumRules[0].values, target)
+		}
+		switch {
+		case len(formatRules) > 1:
+			if diags != nil {
+				diags.RequestParameterAmbiguous(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"format stated more than once for "+target.label()+" ("+renderFormatRules(formatRules)+")",
+					file,
+					line,
+				)
+			}
+		case len(formatRules) == 1:
+			var applied bool
+			schema, applied = schemaWithWellKnownFormat(schema, formatRules[0].format, target)
+			if !applied && diags != nil {
+				diags.RequestParameterUnresolved(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"format "+strconv.Quote(formatRules[0].format)+" requires a string parameter at "+target.label(),
+					file,
+					line,
+				)
+			}
 		}
 	}
 	return schema
+}
+
+type parameterFormatRule struct {
+	scope  tags.Scope
+	format string
+	text   string
+}
+
+func parameterFormatRules(tag reflect.StructTag) []parameterFormatRule {
+	rules := []parameterFormatRule{}
+	for _, key := range []string{"binding", "validate"} {
+		for _, token := range tags.Scoped(tag.Get(key)) {
+			format := ""
+			switch token.Text {
+			case "uuid":
+				format = facts.WellKnownUUID
+			case "uri":
+				format = facts.WellKnownURI
+			}
+			if format != "" {
+				rules = append(rules, parameterFormatRule{scope: token.Scope, format: format, text: quoteTagRule(key, token.Text)})
+			}
+		}
+	}
+	return rules
+}
+
+func schemaWithWellKnownFormat(schema facts.Type, format string, target parameterRuleTarget) (facts.Type, bool) {
+	formatted := facts.WellKnownType(format)
+	switch target {
+	case parameterRuleTargetSelf:
+		if isPrimitiveStringType(schema) {
+			return formatted, true
+		}
+		return schema, schema.Type == facts.TypeWellKnown && schema.Of == format
+	case parameterRuleTargetElement:
+		if schema.Type == facts.TypeArray {
+			element, ok := schema.Of.(*facts.Type)
+			if ok && element != nil {
+				updated, applied := schemaWithWellKnownFormat(*element, format, parameterRuleTargetSelf)
+				if applied {
+					return facts.ArrayType(updated), true
+				}
+			}
+		}
+		if mapped, ok := schema.Of.(*facts.MapType); ok && mapped != nil {
+			updated, applied := schemaWithWellKnownFormat(mapped.Value, format, parameterRuleTargetSelf)
+			if applied {
+				return facts.MapTypeOf(mapped.Key, updated), true
+			}
+		}
+	}
+	return schema, false
+}
+
+func renderFormatRules(rules []parameterFormatRule) string {
+	spellings := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		spellings = append(spellings, rule.text)
+	}
+	return strings.Join(spellings, ", ")
 }
 
 // parameterEnumRules reads every enum a bound parameter's tag states. `binding` and

@@ -257,6 +257,26 @@ JSON, `application/*+json`, form, multipart, text, and binary choices use the sa
 classification in every target. Multipart array fields become repeated parts; absent or null fields
 are omitted.
 
+## Success return types
+
+An SDK method has one return type, and one rule decides it: **an operation that declares a JSON
+success model returns that model.** Every other declared success status — a bodyless 2xx, a declared
+redirect, or a success answering opaque bytes beside the typed one — returns the language's empty
+value (`nil`/zero in Go, `None` in Python, `undefined` in TypeScript) and is read through the
+client's response hook, which sees the raw response.
+
+Python response hooks receive the already-buffered bytes as `HookContext.response_body`; Go and
+TypeScript hooks receive their native response object.
+
+A handler answering `c.JSON(200, …)` on one status and `c.String(202, …)` on another therefore
+generates a method returning the 200 model, with a documentation line naming 202 on the method
+itself. The OpenAPI document still states both responses in full; the narrowing is the SDK's, so it
+is stated where an SDK caller reads it rather than by rewriting the response.
+
+Only when no JSON success model is declared do opaque successes become the return type (`[]byte`,
+`bytes`, `Blob`). Two body-bearing successes pointing at *different* JSON models remain a generation
+error: neither model is the operation's, so there is no return type to choose.
+
 Declared 3xx responses are successful operation outcomes. Generated clients do not follow redirects
 by default. Go, Python, and server-side TypeScript Fetch implementations expose the actual status and
 headers to response hooks. Browser Fetch instead returns an `opaqueredirect` response whose status is
