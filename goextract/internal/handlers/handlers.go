@@ -220,12 +220,25 @@ type untypedQueryRead struct {
 	line uint32
 }
 
+// rawBodyRead is a GetRawData call whose bytes state neither a media type nor a
+// schema. The diagnostic is deferred rather than reported at the call, because the
+// same read can still resolve: rawJSONRequestSchema derives a free-form JSON body
+// from raw bytes handed to encoding/json, and that runs after the walk. Reporting
+// during the walk states a body is unresolved on an operation that goes on to state
+// one, which is the same fact answered twice in opposite directions.
+type rawBodyRead struct {
+	subject string
+	file    string
+	line    uint32
+}
+
 type contextTraversal struct {
 	route                  routes.Route
 	cf                     *CodeFacts
 	seenParam              map[string]bool
 	resolvedParam          map[string]bool
 	untypedQueryReads      *[]untypedQueryRead
+	rawBodyReads           *[]rawBodyRead
 	formFields             map[string]facts.FieldFact
 	boundFormRefs          map[string]bool
 	manualFormFields       map[string]bool
@@ -847,7 +860,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 	case "PostFormMap", "GetPostFormMap":
 		a.reportTraversedUnresolvedBody(frame, call, traversal, method, formMapUnrepresentable)
 	case "GetRawData":
-		a.reportTraversedUnresolvedBody(frame, call, traversal, method, rawGinBodyReason)
+		recordRawBodyRead(traversal.rawBodyReads, frame.decl.fset, call, method)
 	case "BindXML", "ShouldBindXML", "ShouldBindBodyWithXML",
 		"BindYAML", "ShouldBindYAML", "ShouldBindBodyWithYAML",
 		"BindTOML", "ShouldBindTOML", "ShouldBindBodyWithTOML",
@@ -2071,6 +2084,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 	seenParam := map[string]bool{}
 	resolvedParam := map[string]bool{}
 	untypedQueryReads := []untypedQueryRead{}
+	rawBodyReads := []rawBodyRead{}
 	seenStatus := map[uint16]bool{}
 	provisionalStatus := map[uint16]bool{}
 	formFields := map[string]facts.FieldFact{}
@@ -2156,6 +2170,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					seenParam:              seenParam,
 					resolvedParam:          resolvedParam,
 					untypedQueryReads:      &untypedQueryReads,
+					rawBodyReads:           &rawBodyReads,
 					formFields:             formFields,
 					boundFormRefs:          boundFormRefs,
 					manualFormFields:       manualFormFields,
@@ -2233,7 +2248,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			"BindPlain", "ShouldBindPlain", "ShouldBindBodyWithPlain":
 			reportDirectUnresolvedBody(diags, h, route, call, name, unsupportedGinBodyBindingReason(name))
 		case "GetRawData":
-			reportDirectUnresolvedBody(diags, h, route, call, name, rawGinBodyReason)
+			recordRawBodyRead(&rawBodyReads, h.fset, call, name)
 		case "JSON", "AbortWithStatusJSON", "AbortWithStatusPureJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(h, call, route, &cf, seenStatus, provisionalStatus, diags)
 		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf", "BSON":
@@ -2397,6 +2412,18 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 	if hasBodyBind {
 		cf.RequestBodyRequired = !allBodyBindsOptional
 	}
+	if cf.RequestBody == nil && diags != nil {
+		for _, read := range rawBodyReads {
+			diags.RequestBodyUnresolved(
+				read.subject,
+				route.Method,
+				untypedRouteLabel(route),
+				rawGinBodyReason,
+				read.file,
+				read.line,
+			)
+		}
+	}
 	if diags != nil {
 		reported := map[string]bool{}
 		for _, read := range untypedQueryReads {
@@ -2466,6 +2493,16 @@ func reportDirectUnresolvedBody(
 	}
 	file, line := positionOf(h.fset, call.Pos())
 	diags.RequestBodyUnresolved(subject, route.Method, untypedRouteLabel(route), reason, file, line)
+}
+
+// recordRawBodyRead defers one GetRawData read. Analyze reports the whole set once,
+// and only when the operation ends with no body of any kind.
+func recordRawBodyRead(reads *[]rawBodyRead, fset *token.FileSet, call *ast.CallExpr, subject string) {
+	if reads == nil {
+		return
+	}
+	file, line := positionOf(fset, call.Pos())
+	*reads = append(*reads, rawBodyRead{subject: subject, file: file, line: line})
 }
 
 func (a *Analyzer) setRequestBodyFact(
@@ -4925,6 +4962,10 @@ func ginResponseWriterExpr(frame helperFrame, expr ast.Expr, followLocals bool) 
 // this analysis cannot read as `c.Writer` disqualifies the local entirely: the cost
 // of dropping it is a header or status gnr8 does not state, while the cost of
 // keeping it is a response fact attributed to an operation that never sends it.
+//
+// The chain is one hop deep, the same bound responseWriterHeaderVars carries: an
+// alias of an alias is not followed. Widening it would only ever recover a proof,
+// never correct a wrong one, so the bound stays until a real source shape needs it.
 func ginResponseWriterVars(frame helperFrame) map[gotypes.Object]bool {
 	vars := map[gotypes.Object]bool{}
 	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil {

@@ -27,7 +27,8 @@ must move the minor version.
   package, and XML, YAML, TOML, plain-text, dynamic, or unsupported binders are diagnosed rather
   than publishing a JSON-shaped schema under an unproved wire format. A cookie read through
   `c.Request.Cookie` now matches `c.Cookie`, including bounded Gin-context helpers. `GetRawData` is
-  explicitly unresolved because raw bytes state neither a media type nor a schema.
+  explicitly unresolved when nothing else states the body; raw bytes that reach `encoding/json`
+  keep resolving into the free-form JSON body they always did.
 - **Go/Gin response extraction covers additional statically knowable context and writer
   surfaces.** `AbortWithStatusPureJSON`, `AbortWithError`, `BSON`, and `FileFromFS` now preserve
   their response facts. Constant response arguments passed through bounded helpers are propagated,

@@ -1720,6 +1720,12 @@ func (s Server) ingest(c *gin.Context) {
 	if len(cf.Schemas) != 1 || cf.Schemas[0].Body.Type != facts.TypeAny {
 		t.Fatalf("raw JSON body schema should be Any, got %+v", cf.Schemas)
 	}
+	// The read that produced the body cannot also report the body as unresolved.
+	for _, item := range diags.Items() {
+		if item.Code == "request.body.unresolved" {
+			t.Fatalf("a resolved raw JSON body must not also be diagnosed: %+v", item)
+		}
+	}
 }
 
 func TestGetRawDataIgnoresUnrelatedJSONStringEvidence(t *testing.T) {
@@ -1781,6 +1787,108 @@ func (s Server) ingest(c *gin.Context) {
 	}
 	if cf.RequestBody != nil || cf.RequestBodyContentType != "" || len(cf.Schemas) != 0 {
 		t.Fatalf("unrelated JSON string evidence should not synthesize raw JSON body, got body=%+v content_type=%q schemas=%+v", cf.RequestBody, cf.RequestBodyContentType, cf.Schemas)
+	}
+	// Nothing stated the body, so the raw read stays visible instead of vanishing.
+	unresolved := false
+	for _, item := range diags.Items() {
+		if item.Code == "request.body.unresolved" && strings.Contains(item.Message, "GetRawData") {
+			unresolved = true
+		}
+	}
+	if !unresolved {
+		t.Fatalf("an unresolved raw body read must be diagnosed: %+v", diags.Items())
+	}
+}
+
+// A raw body read reached through a bounded helper obeys the same rule as a direct
+// one: it is reported when the operation ends with no body, and silent when some
+// other binding already stated one. Reporting it either way would answer "what is
+// this body?" twice, in opposite directions, for one operation.
+func TestHelperRawBodyReadIsDiagnosedOnlyWhenNoBodyIsStated(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/rawhelper
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) POST(string, HandlerFunc) {}
+func (c *Context) ShouldBindJSON(any) error { return nil }
+func (c *Context) GetRawData() ([]byte, error) { return nil, nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package rawhelper
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type Payload struct { Name string `+"`"+`json:"name"`+"`"+` }
+type Result struct { OK bool `+"`"+`json:"ok"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.POST("/typed", s.typed)
+	s.R.POST("/raw-only", s.rawOnly)
+}
+
+func readRaw(c *gin.Context) []byte {
+	raw, _ := c.GetRawData()
+	return raw
+}
+
+func (s Server) typed(c *gin.Context) {
+	var payload Payload
+	_ = c.ShouldBindJSON(&payload)
+	_ = readRaw(c)
+	c.JSON(200, Result{})
+}
+
+func (s Server) rawOnly(c *gin.Context) {
+	_ = readRaw(c)
+	c.JSON(200, Result{})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load raw helper fixture: %v", err)
+	}
+	for _, loadErr := range res.Errors {
+		t.Fatalf("raw helper fixture must type-check: %+v", loadErr)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/rawhelper", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	assertBodySuffix(t, got["typed"].RequestBody, "Payload")
+	if got["rawOnly"].RequestBody != nil {
+		t.Fatalf("a helper raw read states no body: %+v", got["rawOnly"])
+	}
+	unresolved := map[string]bool{}
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.body.unresolved" {
+			unresolved[item.Operation] = true
+		}
+	}
+	if unresolved["POST /typed"] {
+		t.Fatalf("a stated body must not also be diagnosed as unresolved: %+v", diagnostics.Items())
+	}
+	if !unresolved["POST /raw-only"] {
+		t.Fatalf("an unresolved helper raw read must stay visible: %+v", diagnostics.Items())
 	}
 }
 

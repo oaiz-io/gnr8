@@ -135,8 +135,10 @@ Gin's XML, YAML, TOML, and plain-text request binders are diagnosed as
 schema gnr8 extracts, so publishing that schema under a different media type would claim a wire
 shape the source types do not state. The same applies to a binder selected dynamically or to a
 similarly named value outside Gin's own `binding` package.
-`GetRawData` is diagnosed for the same reason: the byte read states neither a media type nor a
-schema.
+`GetRawData` states neither a media type nor a schema on its own. Raw bytes handed to
+`encoding/json`, or read alongside JSON content-type evidence, still resolve into a free-form
+`application/json` body; the read is reported as `request.body.unresolved` only when the operation
+ends with no body at all, so one operation is never told its body is both stated and unresolved.
 
 ### Direct Gin query requiredness
 
