@@ -2499,7 +2499,7 @@ func TestGinRenderersProduceTypedOrOpaqueResponses(t *testing.T) {
 
 go 1.22
 
-require github.com/gin-gonic/gin v0.0.0
+require github.com/gin-gonic/gin v1.10.0
 
 replace github.com/gin-gonic/gin => ./ginstub
 `)
@@ -2603,6 +2603,83 @@ func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "pr
 		if diagnostic.Code == "response.missing" || diagnostic.Code == "response.dynamic" {
 			t.Fatalf("recognized Gin renderer should not lose its response: %+v", diagnostic)
 		}
+	}
+}
+
+func TestGinYAMLRendererUsesTheLoadedGinVersionMediaType(t *testing.T) {
+	for _, test := range []struct {
+		version     string
+		contentType string
+	}{
+		{version: "v0.0.0", contentType: ""},
+		{version: "v1.9.1", contentType: "application/x-yaml"},
+		{version: "v1.10.0", contentType: "application/yaml"},
+	} {
+		t.Run(test.version, func(t *testing.T) {
+			dir := t.TempDir()
+			moduleFile := strings.ReplaceAll(`module example.com/yamlrenderer
+
+go 1.22
+
+require github.com/gin-gonic/gin VERSION
+
+replace github.com/gin-gonic/gin => ./ginstub
+`, "VERSION", test.version)
+			mustWrite(t, filepath.Join(dir, "go.mod"), moduleFile)
+			if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+				t.Fatalf("mkdir ginstub: %v", err)
+			}
+			mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+			mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) YAML(int, any) {}
+`)
+			mustWrite(t, filepath.Join(dir, "app.go"), `package yamlrenderer
+
+import "github.com/gin-gonic/gin"
+
+type Response struct { Message string `+"`"+`json:"message"`+"`"+` }
+
+func Register(engine *gin.Engine) {
+	engine.GET("/yaml", yamlResponse)
+}
+
+func yamlResponse(c *gin.Context) {
+	c.YAML(200, Response{Message: "ok"})
+}
+`)
+
+			res, err := load.Load(dir)
+			if err != nil {
+				t.Fatalf("load YAML renderer fixture: %v", err)
+			}
+			diagnostics := diag.New()
+			analyzer := handlers.NewAnalyzer(res, "example.com/yamlrenderer", diagnostics)
+			var code handlers.CodeFacts
+			for _, route := range routes.Recognize(res) {
+				code = analyzer.Analyze(route, diagnostics)
+			}
+
+			if test.contentType == "" {
+				if len(code.Responses) != 0 {
+					t.Fatalf("unknown Gin version must not guess a YAML media type: %+v", code.Responses)
+				}
+				for _, diagnostic := range diagnostics.Items() {
+					if diagnostic.Code == "response.schema.unresolved" {
+						return
+					}
+				}
+				t.Fatalf("unknown Gin version must diagnose its YAML media type: %+v", diagnostics.Items())
+			}
+			if len(code.Responses) != 1 || len(code.Responses[0].ContentTypes) != 1 || code.Responses[0].ContentTypes[0] != test.contentType {
+				t.Fatalf("Gin %s YAML media type mismatch: %+v", test.version, code.Responses)
+			}
+		})
 	}
 }
 

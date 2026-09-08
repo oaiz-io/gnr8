@@ -127,6 +127,7 @@ type Analyzer struct {
 	idx           Index
 	declsByObject map[string]handlerDecl
 	modulePrefix  string
+	ginVersion    string
 	collisions    []handlerCollision
 }
 
@@ -245,8 +246,32 @@ func NewAnalyzer(res *load.Result, module string, diags *diag.Accumulator) *Anal
 		idx:           idx,
 		declsByObject: buildDeclObjectIndex(res, module),
 		modulePrefix:  module,
+		ginVersion:    loadedPackageModuleVersion(res, routes.GinPkgPath),
 		collisions:    collisions,
 	}
+}
+
+// loadedPackageModuleVersion returns the one selected module version that owns a
+// loaded package. go/packages gets this from the target module's own resolved
+// build list, so renderer behavior follows the code being analyzed rather than
+// whichever Gin release gnr8 happened to be developed against.
+func loadedPackageModuleVersion(res *load.Result, pkgPath string) string {
+	if res == nil {
+		return ""
+	}
+	versions := map[string]bool{}
+	packages.Visit(res.Packages, nil, func(pkg *packages.Package) {
+		if pkg != nil && pkg.PkgPath == pkgPath && pkg.Module != nil && pkg.Module.Version != "" {
+			versions[pkg.Module.Version] = true
+		}
+	})
+	if len(versions) != 1 {
+		return ""
+	}
+	for version := range versions {
+		return version
+	}
+	return ""
 }
 
 // Index exposes the underlying handler index (for callers that look up docs or
@@ -2094,7 +2119,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(h, call, route, &cf, seenStatus, provisionalStatus, diags)
 		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf":
-			a.analyzeOpaqueResponse(h, call, ginOpaqueRendererMediaType(name), route, &cf, seenStatus, provisionalStatus, diags)
+			a.analyzeOpaqueResponse(h, call, name, route, &cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(h, call, route, &cf, seenStatus, provisionalStatus, true, diags)
 		case "AbortWithStatus":
@@ -2809,7 +2834,7 @@ func (a *Analyzer) analyzeDelegatedResponses(
 		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(callee, nested, route, cf, seenStatus, provisionalStatus, diags)
 		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf":
-			a.analyzeOpaqueResponse(callee, nested, ginOpaqueRendererMediaType(name), route, cf, seenStatus, provisionalStatus, diags)
+			a.analyzeOpaqueResponse(callee, nested, name, route, cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(callee, nested, route, cf, seenStatus, provisionalStatus, true, diags)
 		case "AbortWithStatus":
@@ -3855,36 +3880,61 @@ func (a *Analyzer) analyzeStatus(
 	a.addResponse(cf, seenStatus, provisionalStatus, facts.ResponseFact{Status: status}, provisional)
 }
 
-// ginOpaqueRendererMediaType names the media type each opaque renderer writes.
+// ginOpaqueRendererMediaType names the media type each opaque renderer writes
+// in the selected Gin release.
 //
 // One table serves the handler body and the bounded-helper traversal, so a renderer
 // cannot answer one media type through a direct call and another through a helper.
-// Its callers switch on exactly these names, which is why the closing line is an
-// unreachable total-function answer rather than a fallback for a missing fact.
+// Its callers switch on exactly these names; the bool distinguishes a media type
+// the selected Gin release states from one gnr8 cannot determine.
 //
 // Render and Negotiate are deliberately absent: they choose their serializer from a
 // value or from the request's Accept header, so no media type is stated in the source
 // and the operation keeps `response.missing` rather than being given a guessed one.
-func ginOpaqueRendererMediaType(method string) string {
+func ginOpaqueRendererMediaType(method, ginVersion string) (string, bool) {
 	switch method {
 	case "String":
-		return "text/plain"
+		return "text/plain", true
 	case "HTML":
-		return "text/html"
+		return "text/html", true
 	case "SecureJSON":
-		return "application/json"
+		return "application/json", true
 	case "JSONP":
-		return "application/javascript"
+		return "application/javascript", true
 	case "XML":
-		return "application/xml"
+		return "application/xml", true
 	case "YAML":
-		return "application/yaml"
+		return ginYAMLRendererMediaType(ginVersion)
 	case "TOML":
-		return "application/toml"
+		return "application/toml", true
 	case "ProtoBuf":
-		return "application/x-protobuf"
+		return "application/x-protobuf", true
 	}
-	return "application/octet-stream"
+	return "", false
+}
+
+// ginYAMLRendererMediaType follows the selected Gin module's one versioned
+// behavior change: releases through v1.9 write application/x-yaml, while v1.10
+// and later v1 releases write application/yaml. A version outside the v1 module
+// line states no known answer and is diagnosed by the caller rather than guessed.
+func ginYAMLRendererMediaType(version string) (string, bool) {
+	const prefix = "v1."
+	if !strings.HasPrefix(version, prefix) {
+		return "", false
+	}
+	remainder := strings.TrimPrefix(version, prefix)
+	minorText, _, found := strings.Cut(remainder, ".")
+	if !found {
+		return "", false
+	}
+	minor, err := strconv.Atoi(minorText)
+	if err != nil {
+		return "", false
+	}
+	if minor >= 10 {
+		return "application/yaml", true
+	}
+	return "application/x-yaml", true
 }
 
 // analyzeOpaqueResponse records renderers whose exact wire bytes cannot be
@@ -3894,7 +3944,7 @@ func ginOpaqueRendererMediaType(method string) string {
 func (a *Analyzer) analyzeOpaqueResponse(
 	h handlerDecl,
 	call *ast.CallExpr,
-	contentType string,
+	method string,
 	route routes.Route,
 	cf *CodeFacts,
 	seenStatus map[uint16]bool,
@@ -3902,6 +3952,21 @@ func (a *Analyzer) analyzeOpaqueResponse(
 	diags *diag.Accumulator,
 ) {
 	if len(call.Args) < 1 {
+		return
+	}
+	contentType, mediaTypeKnown := ginOpaqueRendererMediaType(method, a.ginVersion)
+	if !mediaTypeKnown {
+		if diags != nil {
+			file, line := positionOf(h.fset, call.Pos())
+			diags.DynamicResponse(
+				route.Method,
+				untypedRouteLabel(route),
+				route.Handler,
+				method+" response media type is not known for Gin "+strconv.Quote(a.ginVersion),
+				file,
+				line,
+			)
+		}
 		return
 	}
 	status, ok := statusOf(h.info, call.Args[0])

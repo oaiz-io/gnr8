@@ -74,9 +74,10 @@ must move the minor version.
 - **Go/Gin renderers no longer leave operations without responses.** `String` and `HTML` record
   opaque `text/plain` and `text/html` responses; `IndentedJSON`, `PureJSON`, and `AsciiJSON` retain
   typed JSON schemas; and `SecureJSON`, `JSONP`, `XML`, `YAML`, `TOML`, and `ProtoBuf` record honest
-  opaque responses with their Gin media types. `Render` and `Negotiate` pick a serializer at runtime,
-  so they still report `response.missing` rather than a guessed media type. Direct and bounded helper
-  calls follow the same rules.
+  opaque responses with their Gin media types. YAML follows the selected module version:
+  `application/x-yaml` through Gin v1.9 and `application/yaml` from v1.10. An unrecognized version,
+  like `Render` or `Negotiate` selecting a serializer at runtime, remains unresolved instead of
+  receiving a guessed media type. Direct and bounded helper calls follow the same rules.
 
   A handler that answers JSON on one 2xx and bytes on another — `c.JSON(200, …)` beside
   `c.String(202, …)` — now states both, which the OpenAPI document represents in full. See the SDK

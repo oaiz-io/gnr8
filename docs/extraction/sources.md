@@ -103,9 +103,11 @@ Recognized route facts include:
 `String` (`text/plain`) and `HTML` (`text/html`) responses are recorded as opaque bytes. Renderers
 whose serializer changes or wraps the source value are recorded the same way with their actual media
 type: `SecureJSON` (`application/json`), `JSONP` (`application/javascript`), `XML`
-(`application/xml`), `YAML` (`application/yaml`), `TOML` (`application/toml`), and `ProtoBuf`
-(`application/x-protobuf`). This preserves a truthful transport contract for every built-in SDK
-without inferring a JSON schema for non-JSON bytes or for JSON that Gin may prefix or wrap.
+(`application/xml`), `TOML` (`application/toml`), and `ProtoBuf` (`application/x-protobuf`). YAML
+follows the selected Gin module: releases through v1.9 write `application/x-yaml`, and v1.10 onward
+write `application/yaml`. If the loaded module version does not identify either behavior, the YAML
+response is unresolved rather than guessed. This preserves a truthful transport contract for every
+built-in SDK without inferring a JSON schema for non-JSON bytes or for JSON that Gin may prefix or wrap.
 `Render` and `Negotiate` choose their serializer from a value or from the request's `Accept` header,
 so no media type is stated in the source and the operation keeps `response.missing` rather than a
 guessed one.
