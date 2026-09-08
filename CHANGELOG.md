@@ -33,7 +33,8 @@ must move the minor version.
   and its header map now answer one dataflow rule: a local holds either only when every assignment
   to it holds it. A header map reassigned to an unrelated `http.Header` before being written to no
   longer contributes a header the operation never sends, and an alias of the writer or of its header
-  map contributes the one it does.
+  map contributes the one it does. Helper parameters use their caller argument as the initial value,
+  so reassigning one away from the Gin writer likewise prevents false response facts.
 - **Go/Gin response extraction covers additional statically knowable context and writer
   surfaces.** `AbortWithStatusPureJSON`, `AbortWithError`, `BSON`, and `FileFromFS` now preserve
   their response facts. Constant response arguments passed through bounded helpers are propagated,

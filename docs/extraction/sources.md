@@ -77,11 +77,12 @@ Recognized route facts include:
   `c.Header`, `c.Writer.Header()`, or a bounded `http.ResponseWriter` helper — so mutating
   `c.Request.Header` or a local `http.Header` states nothing about the response. The writer and its
   header map are proved by one rule: a local holds either only when every assignment to it does, so
-  an alias of one still counts while a local reassigned to anything else stops counting. A header
-  written
-  under a name that is not a constant is omitted and reported as `response.header.unresolved`
-  rather than guessed; a named constant resolves like the string it was declared from. `SetCookie`,
-  `SetCookieData`, and `http.SetCookie(c.Writer, ...)` contribute the `Set-Cookie` response header.
+  an alias of one still counts while a local reassigned to anything else stops counting. A helper
+  parameter starts with the caller's argument and obeys that same all-assignments rule. A header
+  written under a name that is not a constant is omitted and reported as
+  `response.header.unresolved` rather than guessed; a named constant resolves like the string it was
+  declared from. `SetCookie`, `SetCookieData`, and `http.SetCookie(c.Writer, ...)` contribute the
+  `Set-Cookie` response header.
 - Status-only responses through `AbortWithError` and `c.Writer.WriteHeader`, including a bounded
   `http.ResponseWriter` helper reached from that exact Gin writer. Constant response arguments are
   propagated through bounded helpers; an unrelated writer cannot contribute to the routed

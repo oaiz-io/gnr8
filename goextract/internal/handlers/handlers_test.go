@@ -4111,9 +4111,12 @@ func (s Server) Register() {
 	s.R.GET("/writer-status", s.writerStatus)
 	s.R.GET("/writer-status-helper", s.writerStatusHelper)
 	s.R.GET("/writer-alias", s.writerAlias)
+	s.R.GET("/writer-declaration", s.writerDeclaration)
 	s.R.GET("/writer-alias-status", s.writerAliasStatus)
 	s.R.GET("/foreign-writer", s.foreignWriter)
 	s.R.GET("/rebound-writer", s.reboundWriter)
+	s.R.GET("/rebound-writer-helper", s.reboundWriterHelper)
+	s.R.GET("/ranged-writer-helper", s.rangedWriterHelper)
 	s.R.GET("/chained-writer", s.chainedWriter)
 	s.R.GET("/chained-rebound", s.chainedRebound)
 	s.R.GET("/self-alias", s.selfAlias)
@@ -4176,6 +4179,12 @@ func (s Server) writerAlias(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (s Server) writerDeclaration(c *gin.Context) {
+	var w = c.Writer
+	w.Header().Set("X-Writer-Declaration", "v")
+	c.Status(http.StatusNoContent)
+}
+
 func (s Server) writerAliasStatus(c *gin.Context) {
 	w := c.Writer
 	w.WriteHeader(http.StatusAccepted)
@@ -4193,6 +4202,29 @@ func (s Server) reboundWriter(c *gin.Context) {
 	w := c.Writer
 	w = newWriter()
 	w.Header().Set("X-Rebound", "v")
+	c.Status(http.StatusNoContent)
+}
+
+func writeToReplacement(w http.ResponseWriter) {
+	w = newWriter()
+	w.Header().Set("X-Helper-Rebound", "v")
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s Server) reboundWriterHelper(c *gin.Context) {
+	writeToReplacement(c.Writer)
+	c.Status(http.StatusNoContent)
+}
+
+func writeToRangedReplacement(w http.ResponseWriter) {
+	for _, w = range []http.ResponseWriter{newWriter()} {
+	}
+	w.Header().Set("X-Helper-Range", "v")
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s Server) rangedWriterHelper(c *gin.Context) {
+	writeToRangedReplacement(c.Writer)
 	c.Status(http.StatusNoContent)
 }
 
@@ -4279,7 +4311,7 @@ func (s Server) rawCookie(c *gin.Context) {
 	// and neither is one written to a writer that is not this operation's.
 	for _, handler := range []string{
 		"requestMutation", "localMap", "foreignWriter", "reboundWriter",
-		"chainedRebound", "selfAlias", "reboundHeader",
+		"reboundWriterHelper", "rangedWriterHelper", "chainedRebound", "selfAlias", "reboundHeader",
 	} {
 		if names := headerNames(handler); len(names) != 0 {
 			t.Fatalf("%s writes no response header, got %+v", handler, names)
@@ -4291,6 +4323,7 @@ func (s Server) rawCookie(c *gin.Context) {
 		"writerVar":           "X-Writer-Var",
 		"writerHelper":        "X-Writer-Helper",
 		"writerAlias":         "X-Writer-Alias",
+		"writerDeclaration":   "X-Writer-Declaration",
 		"chainedWriter":       "X-Chained",
 		"chainedHeader":       "X-Chained-Header",
 		"aliasedWriterHeader": "X-Aliased-Writer-Header",
@@ -4307,6 +4340,12 @@ func (s Server) rawCookie(c *gin.Context) {
 		responses := analyzed[handler].Responses
 		if len(responses) != 1 || responses[0].Status != 202 || responses[0].Body != nil {
 			t.Fatalf("%s must preserve the Gin response writer status: %+v", handler, responses)
+		}
+	}
+	for _, handler := range []string{"reboundWriterHelper", "rangedWriterHelper"} {
+		responses := analyzed[handler].Responses
+		if len(responses) != 1 || responses[0].Status != 204 || responses[0].Body != nil {
+			t.Fatalf("%s reassigns its helper parameter away from the Gin writer and contributes no response: %+v", handler, responses)
 		}
 	}
 	for _, handler := range []string{"cookies", "rawCookie"} {

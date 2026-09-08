@@ -4936,9 +4936,6 @@ func (p valueProvenance) provesWith(frame helperFrame, expr ast.Expr, locals *as
 		return false
 	}
 	object := frame.decl.info.ObjectOf(ident)
-	if binding, exists := frame.bindings[object]; exists && p.bound(binding) {
-		return true
-	}
 	// The type is a filter, never the answer: it keeps the body walk below off the
 	// identifiers that cannot hold the value, and provenance still decides.
 	if object == nil || !p.carries(frameTypeOf(frame, ident)) {
@@ -4947,21 +4944,34 @@ func (p valueProvenance) provesWith(frame helperFrame, expr ast.Expr, locals *as
 	if locals == nil {
 		locals = assignedLocalsOf(frame)
 	}
-	return p.provesLocal(frame, object, locals)
+	if binding, exists := frame.bindings[object]; exists {
+		// The argument is the parameter's initial value. It must hold the proved
+		// value, and every assignment inside the helper must keep holding it.
+		if !p.bound(binding) {
+			return false
+		}
+		return p.provesAssignedValue(frame, object, locals, true)
+	}
+	return p.provesAssignedValue(frame, object, locals, false)
 }
 
-// provesLocal reports whether object is a local that provably holds the value: it has
-// at least one assignment, every assignment holds the value, and the chain that
-// establishes it is acyclic.
+// provesAssignedValue reports whether object provably holds the value: its initial
+// value is proved by the caller, or it has at least one assignment; every assignment
+// holds the value; and the chain that establishes it is acyclic.
 //
 // Requiring every assignment is what makes an alias safe to follow. `v := w` inherits
 // w's answer, so it inherits w's disqualification too: one assignment this analysis
 // cannot read as the value drops the local and every alias reading from it. The cost
 // of dropping one is a fact gnr8 does not state, while the cost of keeping one is a
 // fact attributed to an operation that never had it.
-func (p valueProvenance) provesLocal(frame helperFrame, object gotypes.Object, locals *assignedLocals) bool {
+func (p valueProvenance) provesAssignedValue(
+	frame helperFrame,
+	object gotypes.Object,
+	locals *assignedLocals,
+	initiallyProven bool,
+) bool {
 	values := locals.values[object]
-	if locals.rebound[object] || len(values) == 0 || locals.visiting[object] {
+	if locals.rebound[object] || (!initiallyProven && len(values) == 0) || locals.visiting[object] {
 		return false
 	}
 	locals.visiting[object] = true
@@ -4975,10 +4985,11 @@ func (p valueProvenance) provesLocal(frame helperFrame, object gotypes.Object, l
 }
 
 // assignedLocals is one function's assignment map, read for whichever value is being
-// proved. values holds what each local is assigned; rebound marks a local assigned in
-// a shape this analysis cannot pair with a value (`w, err := f()`), which can never
-// prove anything. visiting is the chain currently being resolved, so an alias that
-// reads from itself terminates instead of vouching for itself.
+// proved. values holds paired assignments and declaration initializers for locals or
+// parameters; rebound marks an assignment this analysis cannot pair with a value
+// (`w, err := f()` or a range assignment), which can never prove anything. visiting
+// is the chain currently being resolved, so an alias that reads from itself terminates
+// instead of vouching for itself.
 type assignedLocals struct {
 	values   map[gotypes.Object][]ast.Expr
 	rebound  map[gotypes.Object]bool
@@ -4994,26 +5005,60 @@ func assignedLocalsOf(frame helperFrame) *assignedLocals {
 	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil {
 		return locals
 	}
-	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
-		assign, ok := node.(*ast.AssignStmt)
-		if !ok {
-			return true
+	record := func(target ast.Expr, value ast.Expr, resolved bool) {
+		for {
+			paren, ok := target.(*ast.ParenExpr)
+			if !ok {
+				break
+			}
+			target = paren.X
 		}
-		paired := len(assign.Lhs) == len(assign.Rhs)
-		for index, target := range assign.Lhs {
-			ident, ok := target.(*ast.Ident)
-			if !ok || ident.Name == "_" {
-				continue
+		ident, ok := target.(*ast.Ident)
+		if !ok || ident.Name == "_" {
+			return
+		}
+		object := frame.decl.info.ObjectOf(ident)
+		if object == nil {
+			return
+		}
+		if !resolved {
+			locals.rebound[object] = true
+			return
+		}
+		locals.values[object] = append(locals.values[object], value)
+	}
+	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
+		switch statement := node.(type) {
+		case *ast.AssignStmt:
+			paired := len(statement.Lhs) == len(statement.Rhs)
+			for index, target := range statement.Lhs {
+				if paired {
+					record(target, statement.Rhs[index], true)
+				} else {
+					record(target, nil, false)
+				}
 			}
-			object := frame.decl.info.ObjectOf(ident)
-			if object == nil {
-				continue
+		case *ast.ValueSpec:
+			if len(statement.Values) == 0 {
+				return true
 			}
-			if !paired {
-				locals.rebound[object] = true
-				continue
+			paired := len(statement.Names) == len(statement.Values)
+			for index, name := range statement.Names {
+				if paired {
+					record(name, statement.Values[index], true)
+				} else {
+					record(name, nil, false)
+				}
 			}
-			locals.values[object] = append(locals.values[object], assign.Rhs[index])
+		case *ast.RangeStmt:
+			// Range values are selected at runtime, so assigning one to a
+			// writer/header local cannot prove the operation-owned value.
+			if statement.Key != nil {
+				record(statement.Key, nil, false)
+			}
+			if statement.Value != nil {
+				record(statement.Value, nil, false)
+			}
 		}
 		return true
 	})
