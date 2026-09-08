@@ -2983,12 +2983,7 @@ func (a *Analyzer) analyzeDelegatedResponses(
 		name, recvPkg, ok := routes.GinMethod(callee.info, nested)
 		if !ok || recvPkg != routes.GinPkgPath {
 			if isGinResponseWriterCall(frame, nested, "WriteHeader") {
-				if status, known := responseStatusInFrame(frame, nested, 0); known {
-					a.addResponse(cf, seenStatus, provisionalStatus, facts.ResponseFact{Status: status}, true)
-				} else if diags != nil {
-					file, line := positionOf(callee.fset, nested.Pos())
-					diags.DynamicResponse(route.Method, untypedRouteLabel(route), route.Handler, "non-constant HTTP status", file, line)
-				}
+				a.analyzeStatusInFrame(frame, nested, route, cf, seenStatus, provisionalStatus, true, diags)
 			}
 			if isHTTPRedirectCall(callee.info, nested) {
 				a.analyzeRedirectInFrame(frame, nested, 3, route, cf, seenStatus, provisionalStatus, diags)
@@ -4922,16 +4917,16 @@ func isResponseWriterType(t gotypes.Type) bool {
 // the function assigned it to. An unrelated `http.ResponseWriter` says nothing about
 // this operation, so the provenance is proved rather than assumed from the type.
 func isGinResponseWriterExpr(frame helperFrame, expr ast.Expr) bool {
-	return ginResponseWriterExpr(frame, expr, true)
+	return ginResponseWriterExpr(frame, expr, nil)
 }
 
-// ginResponseWriterExpr answers isGinResponseWriterExpr with the local lookup made
-// optional, so ginResponseWriterVars can classify an assignment's right-hand side
-// without re-entering the collector that is still building that set.
-func ginResponseWriterExpr(frame helperFrame, expr ast.Expr, followLocals bool) bool {
+// ginResponseWriterExpr answers isGinResponseWriterExpr, carrying the function's
+// assignment map once it has been built so an alias chain resolves without rebuilding
+// it at every hop. locals is nil until an identifier actually needs it.
+func ginResponseWriterExpr(frame helperFrame, expr ast.Expr, locals *writerLocals) bool {
 	switch node := expr.(type) {
 	case *ast.ParenExpr:
-		return ginResponseWriterExpr(frame, node.X, followLocals)
+		return ginResponseWriterExpr(frame, node.X, locals)
 	case *ast.SelectorExpr:
 		return node.Sel != nil && node.Sel.Name == "Writer" && isGinContextType(frameTypeOf(frame, node.X))
 	case *ast.Ident:
@@ -4944,34 +4939,63 @@ func ginResponseWriterExpr(frame helperFrame, expr ast.Expr, followLocals bool) 
 		}
 		// The type is a filter, never the answer: it keeps the body walk below off
 		// the identifiers that cannot be a writer, and provenance still decides.
-		if !followLocals || object == nil || !isResponseWriterType(frameTypeOf(frame, node)) {
+		if object == nil || !isResponseWriterType(frameTypeOf(frame, node)) {
 			return false
 		}
-		return ginResponseWriterVars(frame)[object]
+		if locals == nil {
+			locals = writerLocalsOf(frame)
+		}
+		return locals.provesWriter(frame, object)
 	default:
 		return false
 	}
 }
 
-// ginResponseWriterVars collects the locals bound to the routed Gin context's own
-// response writer, so the `w := c.Writer; w.Header().Set(…)` idiom stays a response
-// fact while an unrelated `http.ResponseWriter` value does not. It is the writer
-// twin of responseWriterHeaderVars, which does the same for the header map.
+// writerLocals is one function's assignment map. values holds what each local is
+// assigned; rebound marks a local assigned in a shape this analysis cannot pair with
+// a value (`w, err := f()`), which can never prove the writer. visiting is the chain
+// currently being resolved, so an alias that reads from itself terminates.
+type writerLocals struct {
+	values   map[gotypes.Object][]ast.Expr
+	rebound  map[gotypes.Object]bool
+	visiting map[gotypes.Object]bool
+}
+
+// provesWriter reports whether object is a local that provably holds the routed Gin
+// context's own response writer, so `w := c.Writer; w.Header().Set(…)` stays a
+// response fact while an unrelated `http.ResponseWriter` value does not. It is the
+// writer twin of responseWriterHeaderVars, which does the same for the header map.
 //
-// A local qualifies only when every assignment to it is that writer. One assignment
-// this analysis cannot read as `c.Writer` disqualifies the local entirely: the cost
-// of dropping it is a header or status gnr8 does not state, while the cost of
-// keeping it is a response fact attributed to an operation that never sends it.
-//
-// The chain is one hop deep, the same bound responseWriterHeaderVars carries: an
-// alias of an alias is not followed. Widening it would only ever recover a proof,
-// never correct a wrong one, so the bound stays until a real source shape needs it.
-func ginResponseWriterVars(frame helperFrame) map[gotypes.Object]bool {
-	vars := map[gotypes.Object]bool{}
-	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil {
-		return vars
+// Every assignment to the local has to be that writer, and an alias is resolved
+// through the local it reads from, so `v := w` inherits w's answer and w's
+// disqualification alike. One assignment this analysis cannot read as the writer
+// drops the local and every alias of it: the cost of dropping one is a header or
+// status gnr8 does not state, while the cost of keeping one is a response fact
+// attributed to an operation that never sends it.
+func (l *writerLocals) provesWriter(frame helperFrame, object gotypes.Object) bool {
+	values := l.values[object]
+	if l.rebound[object] || len(values) == 0 || l.visiting[object] {
+		return false
 	}
-	rebound := map[gotypes.Object]bool{}
+	l.visiting[object] = true
+	defer delete(l.visiting, object)
+	for _, value := range values {
+		if !ginResponseWriterExpr(frame, value, l) {
+			return false
+		}
+	}
+	return true
+}
+
+func writerLocalsOf(frame helperFrame) *writerLocals {
+	locals := &writerLocals{
+		values:   map[gotypes.Object][]ast.Expr{},
+		rebound:  map[gotypes.Object]bool{},
+		visiting: map[gotypes.Object]bool{},
+	}
+	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil {
+		return locals
+	}
 	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
 		assign, ok := node.(*ast.AssignStmt)
 		if !ok {
@@ -4987,18 +5011,15 @@ func ginResponseWriterVars(frame helperFrame) map[gotypes.Object]bool {
 			if object == nil {
 				continue
 			}
-			if paired && ginResponseWriterExpr(frame, assign.Rhs[index], false) {
-				vars[object] = true
+			if !paired {
+				locals.rebound[object] = true
 				continue
 			}
-			rebound[object] = true
+			locals.values[object] = append(locals.values[object], assign.Rhs[index])
 		}
 		return true
 	})
-	for object := range rebound {
-		delete(vars, object)
-	}
-	return vars
+	return locals
 }
 
 func isGinResponseWriterCall(frame helperFrame, call *ast.CallExpr, method string) bool {

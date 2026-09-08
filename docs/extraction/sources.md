@@ -82,8 +82,9 @@ Recognized route facts include:
 - Status-only responses through `AbortWithError` and `c.Writer.WriteHeader`, including a bounded
   `http.ResponseWriter` helper reached from that exact Gin writer. Constant response arguments are
   propagated through bounded helpers; an unrelated writer cannot contribute to the routed
-  operation. Provenance follows the value, not the type, so a local `w := c.Writer` is still that
-  writer while an `http.ResponseWriter` from any other source is not.
+  operation. Provenance follows the value, not the type: a local assigned `c.Writer`, and an alias
+  of that local, is still that writer, while an `http.ResponseWriter` from any other source is not.
+  One assignment that is not the routed writer drops the local and every alias reading from it.
 - Independent inbound/outbound presence and null behavior for Go fields.
 
   On a `json:`-tagged field (or one with no payload tag), outbound presence is the omission option —
