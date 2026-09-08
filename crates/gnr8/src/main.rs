@@ -12,6 +12,7 @@ mod changes;
 mod cli;
 mod doctor;
 mod render;
+mod verify;
 mod watch;
 
 use anyhow::{bail, Result};
@@ -54,6 +55,7 @@ fn run() -> Result<()> {
         Commands::Guide { topic } => run_guide(*topic, output),
         Commands::Generate { force } => run_generate(*force, policy, output),
         Commands::Check => run_check(policy, output),
+        Commands::Verify => run_verify(policy, output),
         Commands::Changes {
             base,
             exempt_tag,
@@ -136,7 +138,7 @@ fn run_changes(
 /// This is the process's ONE reading of the environment for it: the engine takes the resolved store
 /// as an argument everywhere below, so no library call can pick up an ambient one and no test can
 /// reach the developer's own store by accident.
-fn cache_store() -> Option<Store> {
+pub(crate) fn cache_store() -> Option<Store> {
     Store::from_env()
 }
 
@@ -155,13 +157,13 @@ fn worker_policy(cli: &Cli) -> WorkerPolicy {
 }
 
 #[derive(Clone, Copy)]
-struct Output {
-    json: bool,
+pub(crate) struct Output {
+    pub(crate) json: bool,
     verbose: u8,
 }
 
 impl Output {
-    fn new(json: bool, verbose: u8) -> Self {
+    pub(crate) fn new(json: bool, verbose: u8) -> Self {
         Self { json, verbose }
     }
 
@@ -170,13 +172,13 @@ impl Output {
         Self { json: true, ..self }
     }
 
-    fn progress(self, message: impl AsRef<str>) {
+    pub(crate) fn progress(self, message: impl AsRef<str>) {
         if !self.json {
             println!("{}", message.as_ref());
         }
     }
 
-    fn verbose(self, message: impl AsRef<str>) {
+    pub(crate) fn verbose(self, message: impl AsRef<str>) {
         if !self.json && self.verbose > 0 {
             println!("  {}", message.as_ref());
         }
@@ -204,7 +206,7 @@ impl Output {
 /// The current project root, resolved against the working directory. The child runs with this as its
 /// `current_dir`, and `regenerate`/`plan_only` resolve output paths against it. A `current_dir` failure
 /// surfaces as `CoreError::Workspace` (clean message, never a panic).
-fn project_root() -> Result<std::path::PathBuf, gnr8_engine::CoreError> {
+pub(crate) fn project_root() -> Result<std::path::PathBuf, gnr8_engine::CoreError> {
     std::env::current_dir().map_err(|e| gnr8_engine::CoreError::Workspace {
         message: format!("failed to resolve the current directory: {e}"),
     })
@@ -477,18 +479,18 @@ struct LifecycleCounts {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct LifecycleTimings {
-    pipeline: u128,
-    write: u128,
-    total: u128,
+pub(crate) struct LifecycleTimings {
+    pub(crate) pipeline: u128,
+    pub(crate) write: u128,
+    pub(crate) total: u128,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct DiagnosticCounts {
-    total: usize,
-    info: usize,
-    warn: usize,
-    error: usize,
+pub(crate) struct DiagnosticCounts {
+    pub(crate) total: usize,
+    pub(crate) info: usize,
+    pub(crate) warn: usize,
+    pub(crate) error: usize,
 }
 
 /// Run `gnr8 generate` (+ `--force`): run the project's pipeline, then write only changed files and
@@ -678,6 +680,78 @@ fn run_check(policy: WorkerPolicy, output: Output) -> Result<()> {
     Ok(())
 }
 
+/// Run `gnr8 verify`: generate in memory, then run every generated SDK contract test with its own
+/// language's test tool.
+///
+/// A compiling SDK can still send the wrong request, so this is the executable half of the
+/// guarantee `doctor` only checks structurally. The suites come from the pipeline's targets, the
+/// artifacts are materialized into a temp tree (so a stale working tree cannot pass), and each
+/// suite's runner reports what its tool actually did. Exits 1 when any suite fails — the gate,
+/// matching `check` — and surfaces a run-stopping problem through the anyhow boundary.
+fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
+    let root = project_root()?;
+    let total_start = Instant::now();
+
+    output.progress("verify: running pipeline");
+    let pipeline_start = Instant::now();
+    let run = gnr8_engine::worker::run_pipeline(&root, policy, cache_store().as_ref())?;
+    let pipeline_elapsed = pipeline_start.elapsed();
+
+    let diagnostics = run.outcome.diagnostics;
+    print_diagnostics(output, &diagnostics);
+
+    if run.outcome.contract_test_suites.is_empty() {
+        bail!(
+            "no SDK contract tests to run — add a Go, Python or TypeScript SDK target to .gnr8/src/main.rs"
+        );
+    }
+
+    output.progress("verify: running contract tests");
+    let run_start = Instant::now();
+    let suites = verify::run_suites(
+        &root,
+        &run.outcome.contract_test_suites,
+        &run.outcome.artifacts,
+    );
+    let run_elapsed = run_start.elapsed();
+
+    let report = verify::VerifyReport::new(
+        suites,
+        verify::VerifyTimings {
+            pipeline: duration_ms(pipeline_elapsed),
+            tests: duration_ms(run_elapsed),
+            total: duration_ms(total_start.elapsed()),
+        },
+        diagnostic_counts(&diagnostics),
+        run.worker_origin.label().to_string(),
+    );
+
+    if output.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.render_human());
+        output.verbose(format!("worker: {}", run.worker_origin.label()));
+        output.verbose(format!("pipeline: {}", fmt_duration(pipeline_elapsed)));
+        output.verbose(format!("contract tests: {}", fmt_duration(run_elapsed)));
+        output.verbose(format!("total: {}", fmt_duration(total_start.elapsed())));
+    }
+
+    if !report.verified {
+        for suite in report.failures() {
+            eprintln!(
+                "error: {} contract tests failed: {}",
+                suite.label,
+                suite.reason()
+            );
+        }
+        std::io::stdout().flush()?;
+        std::io::stderr().flush()?;
+        // Deliberate non-zero exit so `gnr8 verify` is a usable CI gate (mirrors run_check).
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Probe whether the DETECTED source language's toolchain is ACTUALLY ready, returning `(language,
 /// present)`.
 ///
@@ -794,7 +868,7 @@ fn readiness_for_target(
     }
 }
 
-fn path_extension_is(path: &str, ext: &str) -> bool {
+pub(crate) fn path_extension_is(path: &str, ext: &str) -> bool {
     Path::new(path)
         .extension()
         .is_some_and(|actual| actual.eq_ignore_ascii_case(ext))
@@ -919,7 +993,7 @@ fn package_dir_display(
 ///
 /// The walk is bounded by `root` — the materialized tree — so it can never escape into the ambient
 /// filesystem and adopt an unrelated `__init__.py` as the package root.
-fn python_package_root(target_dir: &Path, root: &Path) -> PathBuf {
+pub(crate) fn python_package_root(target_dir: &Path, root: &Path) -> PathBuf {
     let is_package =
         |dir: &Path| dir.join("pyproject.toml").is_file() || dir.join("__init__.py").is_file();
     if is_package(target_dir) {
@@ -1029,9 +1103,9 @@ fn validate_typescript_target(
     doctor::SdkReadiness::ready("typescript", anchor, TOOLCHAIN)
 }
 
-struct MaterializedTarget {
-    root: PathBuf,
-    target_dir: PathBuf,
+pub(crate) struct MaterializedTarget {
+    pub(crate) root: PathBuf,
+    pub(crate) target_dir: PathBuf,
 }
 
 impl Drop for MaterializedTarget {
@@ -1040,7 +1114,7 @@ impl Drop for MaterializedTarget {
     }
 }
 
-fn materialize_artifact_group(
+pub(crate) fn materialize_artifact_group(
     anchor: &str,
     artifacts: &[gnr8_engine::sdk::Artifact],
     label: &str,
@@ -1094,7 +1168,7 @@ fn unique_doctor_temp_dir(label: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn safe_temp_artifact_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_temp_artifact_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let path = Path::new(rel);
     if path.is_absolute() {
         return Err(format!("artifact path {rel:?} must be project-relative"));
@@ -1112,11 +1186,11 @@ fn safe_temp_artifact_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(root.join(path))
 }
 
-fn command_available(program: &str, args: &[&str]) -> Result<(), String> {
+pub(crate) fn command_available(program: &str, args: &[&str]) -> Result<(), String> {
     command_success_in(program, args, Path::new("."), &[])
 }
 
-fn command_success_in(
+pub(crate) fn command_success_in(
     program: &str,
     args: &[&str],
     cwd: &Path,
@@ -1148,7 +1222,7 @@ fn command_label(program: &str, args: &[&str]) -> String {
     }
 }
 
-fn command_output_excerpt(output: &std::process::Output) -> String {
+pub(crate) fn command_output_excerpt(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     text_output_excerpt(&stderr, &stdout)
@@ -1259,12 +1333,12 @@ with warnings.catch_warnings(record=True) as caught:
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TypeScriptCompiler {
+pub(crate) enum TypeScriptCompiler {
     NodeScript(PathBuf),
     Executable(String),
 }
 
-fn typescript_compiler(project_root: &Path, anchor: &str) -> Option<TypeScriptCompiler> {
+pub(crate) fn typescript_compiler(project_root: &Path, anchor: &str) -> Option<TypeScriptCompiler> {
     let output_dir = safe_temp_artifact_path(project_root, anchor).ok()?;
     if let Some(path) = local_typescript_compiler(&output_dir) {
         return Some(TypeScriptCompiler::NodeScript(path));
@@ -1285,7 +1359,7 @@ fn typescript_compiler(project_root: &Path, anchor: &str) -> Option<TypeScriptCo
         .then_some(TypeScriptCompiler::NodeScript(development_sidecar))
 }
 
-fn link_typescript_node_modules(
+pub(crate) fn link_typescript_node_modules(
     project_root: &Path,
     anchor: &str,
     materialized_target: &Path,
@@ -1332,7 +1406,7 @@ fn local_typescript_compiler(cwd: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn run_typescript_compiler(
+pub(crate) fn run_typescript_compiler(
     compiler: &TypeScriptCompiler,
     args: &[String],
     cwd: &Path,
@@ -1727,7 +1801,7 @@ fn lifecycle_summary(outcome: &gnr8_engine::lifecycle::GenerateOutcome) -> Strin
     )
 }
 
-fn print_diagnostics(output: Output, diagnostics: &[gnr8_engine::graph::Diagnostic]) {
+pub(crate) fn print_diagnostics(output: Output, diagnostics: &[gnr8_engine::graph::Diagnostic]) {
     if diagnostics.is_empty() || output.json {
         return;
     }
@@ -1767,7 +1841,9 @@ fn diagnostic_summary(counts: &DiagnosticCounts) -> String {
     format!("info: {total} pipeline diagnostics (run with -v for details)")
 }
 
-fn diagnostic_counts(diagnostics: &[gnr8_engine::graph::Diagnostic]) -> DiagnosticCounts {
+pub(crate) fn diagnostic_counts(
+    diagnostics: &[gnr8_engine::graph::Diagnostic],
+) -> DiagnosticCounts {
     let info = diagnostics
         .iter()
         .filter(|diagnostic| diagnostic.severity.eq_ignore_ascii_case("INFO"))
@@ -1788,11 +1864,11 @@ fn diagnostic_counts(diagnostics: &[gnr8_engine::graph::Diagnostic]) -> Diagnost
     }
 }
 
-fn duration_ms(duration: Duration) -> u128 {
+pub(crate) fn duration_ms(duration: Duration) -> u128 {
     duration.as_millis()
 }
 
-fn fmt_duration(duration: Duration) -> String {
+pub(crate) fn fmt_duration(duration: Duration) -> String {
     let millis = duration.as_secs_f64() * 1000.0;
     if millis < 10.0 {
         format!("{millis:.1} ms")

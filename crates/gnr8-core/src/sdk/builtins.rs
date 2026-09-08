@@ -38,6 +38,7 @@ use crate::sdk::model::SdkModel;
 use crate::sdk::model_style::PyModelStyle;
 use crate::sdk::resolved_lexically;
 use crate::store::{Namespace, Store};
+use crate::verify::ContractTestSuite;
 use crate::CoreError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -86,6 +87,19 @@ pub trait TargetExec {
     /// Generated targets `gnr8 doctor` can validate with a built-in readiness check.
     fn readiness_targets(&self) -> Vec<ReadinessTarget> {
         Vec::new()
+    }
+
+    /// The generated contract-test suites `gnr8 verify` can run for this target.
+    ///
+    /// Takes the graph because a suite reports how many cases the sampler drew from it, and the
+    /// sampler is the single place that decides (`crate::verify`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the target's own typed failure when the graph carries a fact the planner rejects.
+    fn contract_test_suites(&self, ir: &ApiGraph) -> Result<Vec<ContractTestSuite>, CoreError> {
+        let _ = ir;
+        Ok(Vec::new())
     }
 }
 
@@ -3887,6 +3901,25 @@ pub fn target_readiness_targets(spec: &BuiltinTarget) -> Vec<ReadinessTarget> {
         BuiltinTarget::GoSdk(t) => t.readiness_targets(),
         BuiltinTarget::PySdk(t) => t.readiness_targets(),
         BuiltinTarget::TsSdk(t) => t.readiness_targets(),
+    }
+}
+
+/// Resolve the generated contract-test suites a declared built-in target contributes.
+///
+/// # Errors
+///
+/// Returns the target's own typed failure when the graph carries a fact the planner rejects.
+pub fn target_contract_test_suites(
+    spec: &BuiltinTarget,
+    ir: &ApiGraph,
+) -> Result<Vec<ContractTestSuite>, CoreError> {
+    match spec {
+        BuiltinTarget::OpenApi31(t) => t.contract_test_suites(ir),
+        BuiltinTarget::OpenApi31Json(t) => t.contract_test_suites(ir),
+        BuiltinTarget::StaticFiles(t) => t.contract_test_suites(ir),
+        BuiltinTarget::GoSdk(t) => t.contract_test_suites(ir),
+        BuiltinTarget::PySdk(t) => t.contract_test_suites(ir),
+        BuiltinTarget::TsSdk(t) => t.contract_test_suites(ir),
     }
 }
 

@@ -27,6 +27,8 @@ The current research question:
 - [Publishing API change reports on pull requests](2026-09-05-pr-change-reports.md)
   — what issue #76 still needs after `gnr8 changes` shipped, and how the Action should publish it
   ([implementation review](2026-09-05-pr85-implementation-review.md))
+- [Generated SDK contract tests and `gnr8 verify`](2026-09-08-generated-sdk-contract-tests.md)
+  — what the sampled cases assert, where the artifacts live, and how each language's tests are run
 
 ## Current Position
 

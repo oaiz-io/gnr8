@@ -1,7 +1,8 @@
 //! The gnr8 command-line surface, defined with the clap derive API.
 //!
 //! Commands either scaffold/teach (`init`, `guide`), run the project-local `.gnr8` pipeline
-//! (`generate`, `check`, `changes`, `watch`, `doctor`), or inspect source facts directly (`inspect`).
+//! (`generate`, `check`, `verify`, `changes`, `watch`, `doctor`), or inspect source facts directly
+//! (`inspect`).
 //! The global `--json` flag gives agents machine-readable output where useful.
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -87,6 +88,8 @@ pub(crate) enum Commands {
     },
     /// Verify generated outputs are up to date.
     Check,
+    /// Run the generated SDK contract tests with each target language's own test tool.
+    Verify,
     /// Classify API changes against a committed graph artifact.
     Changes {
         /// Git revision whose committed graph artifact is the comparison base.
@@ -275,6 +278,15 @@ mod tests {
             Cli::try_parse_from(["gnr8", "check"]).unwrap().command,
             Commands::Check
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["gnr8", "verify"]).unwrap().command,
+            Commands::Verify
+        ));
+        let cli = Cli::try_parse_from(["gnr8", "--json", "verify"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(cli.command, Commands::Verify));
+        // `verify` takes no positional or command-local flags: the suites come from the pipeline.
+        assert!(Cli::try_parse_from(["gnr8", "verify", "go"]).is_err());
         let cli = Cli::try_parse_from([
             "gnr8",
             "changes",
