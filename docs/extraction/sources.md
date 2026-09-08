@@ -75,16 +75,18 @@ Recognized route facts include:
   at each call site, and response headers are associated only with statuses reached on paths where
   those headers were written. A response header is read from the response writer's own map —
   `c.Header`, `c.Writer.Header()`, or a bounded `http.ResponseWriter` helper — so mutating
-  `c.Request.Header` or a local `http.Header` states nothing about the response. A header written
+  `c.Request.Header` or a local `http.Header` states nothing about the response. The writer and its
+  header map are proved by one rule: a local holds either only when every assignment to it does, so
+  an alias of one still counts while a local reassigned to anything else stops counting. A header
+  written
   under a name that is not a constant is omitted and reported as `response.header.unresolved`
   rather than guessed; a named constant resolves like the string it was declared from. `SetCookie`,
   `SetCookieData`, and `http.SetCookie(c.Writer, ...)` contribute the `Set-Cookie` response header.
 - Status-only responses through `AbortWithError` and `c.Writer.WriteHeader`, including a bounded
   `http.ResponseWriter` helper reached from that exact Gin writer. Constant response arguments are
   propagated through bounded helpers; an unrelated writer cannot contribute to the routed
-  operation. Provenance follows the value, not the type: a local assigned `c.Writer`, and an alias
-  of that local, is still that writer, while an `http.ResponseWriter` from any other source is not.
-  One assignment that is not the routed writer drops the local and every alias reading from it.
+  operation. Provenance follows the value, not the type, under the same rule the header map above
+  obeys: an `http.ResponseWriter` from any other source is not this operation's writer.
 - Independent inbound/outbound presence and null behavior for Go fields.
 
   On a `json:`-tagged field (or one with no payload tag), outbound presence is the omission option —

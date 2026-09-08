@@ -4878,21 +4878,9 @@ func responseHeaderMutation(frame helperFrame, call *ast.CallExpr) bool {
 }
 
 // responseWriterHeaderExpr reports whether expr is a response writer's own header
-// map: either `<writer>.Header()` directly, or a variable bound to one.
+// map: `<writer>.Header()` directly, or a local that provably holds one.
 func responseWriterHeaderExpr(frame helperFrame, expr ast.Expr) bool {
-	switch node := expr.(type) {
-	case *ast.ParenExpr:
-		return responseWriterHeaderExpr(frame, node.X)
-	case *ast.CallExpr:
-		return isResponseWriterHeaderCall(frame, node)
-	case *ast.Ident:
-		if frame.decl.info == nil {
-			return false
-		}
-		object := frame.decl.info.ObjectOf(node)
-		return object != nil && responseWriterHeaderVars(frame)[object]
-	}
-	return false
+	return ginResponseWriterHeader.proves(frame, expr)
 }
 
 func isResponseWriterHeaderCall(frame helperFrame, call *ast.CallExpr) bool {
@@ -4912,83 +4900,93 @@ func isResponseWriterType(t gotypes.Type) bool {
 		isNamedType(t, routes.GinPkgPath, "ResponseWriter")
 }
 
-// isGinResponseWriterExpr reports whether expr is the routed Gin context's own
-// response writer: `c.Writer` itself, a parameter a caller bound to it, or a local
-// the function assigned it to. An unrelated `http.ResponseWriter` says nothing about
-// this operation, so the provenance is proved rather than assumed from the type.
-func isGinResponseWriterExpr(frame helperFrame, expr ast.Expr) bool {
-	return ginResponseWriterExpr(frame, expr, nil)
+// valueProvenance proves that an expression denotes one specific value the routed
+// operation owns. Two values are tracked — the Gin context's response writer and
+// that writer's own header map — and both need the same answer to the same Go
+// question: does this local provably hold it? Deriving that twice is how one
+// spelling ends up recognized in one place and dropped in the other, so the
+// dataflow lives here once and each value states only what makes it that value.
+type valueProvenance struct {
+	// root reports whether expr denotes the value without following any local. It
+	// never sees a bare identifier; proves handles those.
+	root func(frame helperFrame, expr ast.Expr) bool
+	// carries reports whether a type could hold the value at all. It is a filter that
+	// keeps the body walk off unrelated identifiers; it never proves anything.
+	carries func(gotypes.Type) bool
+	// bound reports whether a caller bound this parameter to the value.
+	bound func(helperBinding) bool
 }
 
-// ginResponseWriterExpr answers isGinResponseWriterExpr, carrying the function's
-// assignment map once it has been built so an alias chain resolves without rebuilding
-// it at every hop. locals is nil until an identifier actually needs it.
-func ginResponseWriterExpr(frame helperFrame, expr ast.Expr, locals *writerLocals) bool {
-	switch node := expr.(type) {
-	case *ast.ParenExpr:
-		return ginResponseWriterExpr(frame, node.X, locals)
-	case *ast.SelectorExpr:
-		return node.Sel != nil && node.Sel.Name == "Writer" && isGinContextType(frameTypeOf(frame, node.X))
-	case *ast.Ident:
-		if frame.decl.info == nil {
-			return false
-		}
-		object := frame.decl.info.ObjectOf(node)
-		if binding, ok := frame.bindings[object]; ok && binding.responseWriter {
-			return true
-		}
-		// The type is a filter, never the answer: it keeps the body walk below off
-		// the identifiers that cannot be a writer, and provenance still decides.
-		if object == nil || !isResponseWriterType(frameTypeOf(frame, node)) {
-			return false
-		}
-		if locals == nil {
-			locals = writerLocalsOf(frame)
-		}
-		return locals.provesWriter(frame, object)
-	default:
+func (p valueProvenance) proves(frame helperFrame, expr ast.Expr) bool {
+	return p.provesWith(frame, expr, nil)
+}
+
+// provesWith carries the function's assignment map once it has been built, so an
+// alias chain resolves without rebuilding it at every hop. locals stays nil until an
+// identifier actually needs it.
+func (p valueProvenance) provesWith(frame helperFrame, expr ast.Expr, locals *assignedLocals) bool {
+	if paren, ok := expr.(*ast.ParenExpr); ok {
+		return p.provesWith(frame, paren.X, locals)
+	}
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return expr != nil && p.root(frame, expr)
+	}
+	if frame.decl.info == nil {
 		return false
 	}
+	object := frame.decl.info.ObjectOf(ident)
+	if binding, exists := frame.bindings[object]; exists && p.bound(binding) {
+		return true
+	}
+	// The type is a filter, never the answer: it keeps the body walk below off the
+	// identifiers that cannot hold the value, and provenance still decides.
+	if object == nil || !p.carries(frameTypeOf(frame, ident)) {
+		return false
+	}
+	if locals == nil {
+		locals = assignedLocalsOf(frame)
+	}
+	return p.provesLocal(frame, object, locals)
 }
 
-// writerLocals is one function's assignment map. values holds what each local is
-// assigned; rebound marks a local assigned in a shape this analysis cannot pair with
-// a value (`w, err := f()`), which can never prove the writer. visiting is the chain
-// currently being resolved, so an alias that reads from itself terminates.
-type writerLocals struct {
-	values   map[gotypes.Object][]ast.Expr
-	rebound  map[gotypes.Object]bool
-	visiting map[gotypes.Object]bool
-}
-
-// provesWriter reports whether object is a local that provably holds the routed Gin
-// context's own response writer, so `w := c.Writer; w.Header().Set(…)` stays a
-// response fact while an unrelated `http.ResponseWriter` value does not. It is the
-// writer twin of responseWriterHeaderVars, which does the same for the header map.
+// provesLocal reports whether object is a local that provably holds the value: it has
+// at least one assignment, every assignment holds the value, and the chain that
+// establishes it is acyclic.
 //
-// Every assignment to the local has to be that writer, and an alias is resolved
-// through the local it reads from, so `v := w` inherits w's answer and w's
-// disqualification alike. One assignment this analysis cannot read as the writer
-// drops the local and every alias of it: the cost of dropping one is a header or
-// status gnr8 does not state, while the cost of keeping one is a response fact
-// attributed to an operation that never sends it.
-func (l *writerLocals) provesWriter(frame helperFrame, object gotypes.Object) bool {
-	values := l.values[object]
-	if l.rebound[object] || len(values) == 0 || l.visiting[object] {
+// Requiring every assignment is what makes an alias safe to follow. `v := w` inherits
+// w's answer, so it inherits w's disqualification too: one assignment this analysis
+// cannot read as the value drops the local and every alias reading from it. The cost
+// of dropping one is a fact gnr8 does not state, while the cost of keeping one is a
+// fact attributed to an operation that never had it.
+func (p valueProvenance) provesLocal(frame helperFrame, object gotypes.Object, locals *assignedLocals) bool {
+	values := locals.values[object]
+	if locals.rebound[object] || len(values) == 0 || locals.visiting[object] {
 		return false
 	}
-	l.visiting[object] = true
-	defer delete(l.visiting, object)
+	locals.visiting[object] = true
+	defer delete(locals.visiting, object)
 	for _, value := range values {
-		if !ginResponseWriterExpr(frame, value, l) {
+		if !p.provesWith(frame, value, locals) {
 			return false
 		}
 	}
 	return true
 }
 
-func writerLocalsOf(frame helperFrame) *writerLocals {
-	locals := &writerLocals{
+// assignedLocals is one function's assignment map, read for whichever value is being
+// proved. values holds what each local is assigned; rebound marks a local assigned in
+// a shape this analysis cannot pair with a value (`w, err := f()`), which can never
+// prove anything. visiting is the chain currently being resolved, so an alias that
+// reads from itself terminates instead of vouching for itself.
+type assignedLocals struct {
+	values   map[gotypes.Object][]ast.Expr
+	rebound  map[gotypes.Object]bool
+	visiting map[gotypes.Object]bool
+}
+
+func assignedLocalsOf(frame helperFrame) *assignedLocals {
+	locals := &assignedLocals{
 		values:   map[gotypes.Object][]ast.Expr{},
 		rebound:  map[gotypes.Object]bool{},
 		visiting: map[gotypes.Object]bool{},
@@ -5022,6 +5020,36 @@ func writerLocalsOf(frame helperFrame) *writerLocals {
 	return locals
 }
 
+// ginResponseWriter is the routed Gin context's own response writer: `c.Writer`
+// itself, a parameter a caller bound to it, or a local holding one. An unrelated
+// `http.ResponseWriter` says nothing about this operation, so provenance is proved
+// rather than assumed from the type.
+var ginResponseWriter = valueProvenance{
+	root: func(frame helperFrame, expr ast.Expr) bool {
+		selector, ok := expr.(*ast.SelectorExpr)
+		return ok && selector.Sel != nil && selector.Sel.Name == "Writer" &&
+			isGinContextType(frameTypeOf(frame, selector.X))
+	},
+	carries: isResponseWriterType,
+	bound:   func(binding helperBinding) bool { return binding.responseWriter },
+}
+
+// ginResponseWriterHeader is that writer's own header map. `c.Request.Header` and a
+// scratch `http.Header` have the same type, so the map has to be provably the
+// writer's. No caller binds a header map to a parameter, so no binding proves one.
+var ginResponseWriterHeader = valueProvenance{
+	root: func(frame helperFrame, expr ast.Expr) bool {
+		call, ok := expr.(*ast.CallExpr)
+		return ok && isResponseWriterHeaderCall(frame, call)
+	},
+	carries: func(t gotypes.Type) bool { return isNamedType(t, "net/http", "Header") },
+	bound:   func(helperBinding) bool { return false },
+}
+
+func isGinResponseWriterExpr(frame helperFrame, expr ast.Expr) bool {
+	return ginResponseWriter.proves(frame, expr)
+}
+
 func isGinResponseWriterCall(frame helperFrame, call *ast.CallExpr, method string) bool {
 	selector, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || selector.Sel == nil || selector.Sel.Name != method {
@@ -5038,33 +5066,6 @@ func isHTTPSetCookieCall(frame helperFrame, call *ast.CallExpr) bool {
 	function := calledFuncObject(frame.decl.info, call.Fun)
 	return function != nil && function.Pkg() != nil &&
 		function.Pkg().Path() == "net/http" && function.Name() == "SetCookie"
-}
-
-// responseWriterHeaderVars collects the variables bound to a response writer's
-// header map, so the `h := c.Writer.Header(); h.Set(…)` idiom stays a response
-// fact while an unrelated `http.Header` value does not.
-func responseWriterHeaderVars(frame helperFrame) map[gotypes.Object]bool {
-	vars := map[gotypes.Object]bool{}
-	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil {
-		return vars
-	}
-	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
-		assign, ok := node.(*ast.AssignStmt)
-		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) != 1 {
-			return true
-		}
-		call, ok := assign.Rhs[0].(*ast.CallExpr)
-		if !ok || !isResponseWriterHeaderCall(frame, call) {
-			return true
-		}
-		if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
-			if object := frame.decl.info.ObjectOf(ident); object != nil {
-				vars[object] = true
-			}
-		}
-		return true
-	})
-	return vars
 }
 
 func frameCallPassesResponseContext(frame helperFrame, call *ast.CallExpr) bool {

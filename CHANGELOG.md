@@ -29,6 +29,11 @@ must move the minor version.
   `c.Request.Cookie` now matches `c.Cookie`, including bounded Gin-context helpers. `GetRawData` is
   explicitly unresolved when nothing else states the body; raw bytes that reach `encoding/json`
   keep resolving into the free-form JSON body they always did.
+- **A response header is proved from the writer it was written to, not from its type.** The writer
+  and its header map now answer one dataflow rule: a local holds either only when every assignment
+  to it holds it. A header map reassigned to an unrelated `http.Header` before being written to no
+  longer contributes a header the operation never sends, and an alias of the writer or of its header
+  map contributes the one it does.
 - **Go/Gin response extraction covers additional statically knowable context and writer
   surfaces.** `AbortWithStatusPureJSON`, `AbortWithError`, `BSON`, and `FileFromFS` now preserve
   their response facts. Constant response arguments passed through bounded helpers are propagated,

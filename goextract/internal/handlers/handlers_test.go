@@ -4117,6 +4117,9 @@ func (s Server) Register() {
 	s.R.GET("/chained-writer", s.chainedWriter)
 	s.R.GET("/chained-rebound", s.chainedRebound)
 	s.R.GET("/self-alias", s.selfAlias)
+	s.R.GET("/rebound-header", s.reboundHeader)
+	s.R.GET("/chained-header", s.chainedHeader)
+	s.R.GET("/aliased-writer-header", s.aliasedWriterHeader)
 	s.R.GET("/cookies", s.cookies)
 	s.R.GET("/raw-cookie", s.rawCookie)
 }
@@ -4208,6 +4211,29 @@ func (s Server) chainedRebound(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func scratch() http.Header { return http.Header{} }
+
+func (s Server) reboundHeader(c *gin.Context) {
+	h := c.Writer.Header()
+	h = scratch()
+	h.Set("X-Rebound-Header", "v")
+	c.Status(http.StatusNoContent)
+}
+
+func (s Server) chainedHeader(c *gin.Context) {
+	h := c.Writer.Header()
+	g := h
+	g.Set("X-Chained-Header", "v")
+	c.Status(http.StatusNoContent)
+}
+
+func (s Server) aliasedWriterHeader(c *gin.Context) {
+	w := c.Writer
+	h := w.Header()
+	h.Set("X-Aliased-Writer-Header", "v")
+	c.Status(http.StatusNoContent)
+}
+
 func (s Server) selfAlias(c *gin.Context) {
 	var a, b http.ResponseWriter
 	a = b
@@ -4253,7 +4279,7 @@ func (s Server) rawCookie(c *gin.Context) {
 	// and neither is one written to a writer that is not this operation's.
 	for _, handler := range []string{
 		"requestMutation", "localMap", "foreignWriter", "reboundWriter",
-		"chainedRebound", "selfAlias",
+		"chainedRebound", "selfAlias", "reboundHeader",
 	} {
 		if names := headerNames(handler); len(names) != 0 {
 			t.Fatalf("%s writes no response header, got %+v", handler, names)
@@ -4261,11 +4287,13 @@ func (s Server) rawCookie(c *gin.Context) {
 	}
 	// Every shape that provably reaches the response writer stays a response fact.
 	for handler, want := range map[string]string{
-		"writer":        "X-Writer",
-		"writerVar":     "X-Writer-Var",
-		"writerHelper":  "X-Writer-Helper",
-		"writerAlias":   "X-Writer-Alias",
-		"chainedWriter": "X-Chained",
+		"writer":              "X-Writer",
+		"writerVar":           "X-Writer-Var",
+		"writerHelper":        "X-Writer-Helper",
+		"writerAlias":         "X-Writer-Alias",
+		"chainedWriter":       "X-Chained",
+		"chainedHeader":       "X-Chained-Header",
+		"aliasedWriterHeader": "X-Aliased-Writer-Header",
 	} {
 		if names := headerNames(handler); !names[want] {
 			t.Fatalf("%s must declare %s, got %+v", handler, want, names)
