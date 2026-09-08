@@ -2863,6 +2863,7 @@ type Context struct{}
 type Error struct{}
 
 func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Status(int) {}
 func (c *Context) String(int, string, ...any) {}
 func (c *Context) HTML(int, string, any) {}
 func (c *Context) IndentedJSON(int, any) {}
@@ -2883,7 +2884,11 @@ func (c *Context) Negotiate(int, any) {}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package renderers
 
-import "github.com/gin-gonic/gin"
+import (
+	"errors"
+
+	"github.com/gin-gonic/gin"
+)
 
 type Server struct{ R *gin.Engine }
 type Response struct { Message string `+"`"+`json:"message"`+"`"+` }
@@ -2896,11 +2901,18 @@ func (s Server) Register() {
 	s.R.GET("/ascii", s.asciiJSON)
 	s.R.GET("/secure", s.secureJSON)
 	s.R.GET("/jsonp", s.jsonp)
+	s.R.GET("/jsonp-helper", s.jsonpHelper)
 	s.R.GET("/xml", s.xml)
 	s.R.GET("/yaml", s.yaml)
 	s.R.GET("/toml", s.toml)
 	s.R.GET("/protobuf", s.protobuf)
 	s.R.GET("/bson", s.bson)
+	s.R.GET("/reassigned-helper-status", s.reassignedHelperStatus)
+	s.R.GET("/incremented-helper-status", s.incrementedHelperStatus)
+	s.R.GET("/escaped-helper-status", s.escapedHelperStatus)
+	s.R.GET("/no-body-json", s.noBodyJSON)
+	s.R.GET("/not-modified-xml", s.notModifiedXML)
+	s.R.GET("/informational-string", s.informationalString)
 	s.R.GET("/abort-pure", s.abortPureJSON)
 	s.R.GET("/abort-error", s.abortError)
 	s.R.GET("/file-from-fs", s.fileFromFS)
@@ -2910,7 +2922,21 @@ func (s Server) Register() {
 
 func renderXML(c *gin.Context) { c.XML(203, Response{Message: "xml"}) }
 func renderBSON(c *gin.Context, status int, response Response) { c.BSON(status, response) }
+func renderWithReassignedStatus(c *gin.Context, status int, response Response) {
+	status = 299
+	c.BSON(status, response)
+}
+func renderWithIncrementedStatus(c *gin.Context, status int, response Response) {
+	status++
+	c.BSON(status, response)
+}
+func changeStatus(*int) {}
+func renderWithEscapedStatus(c *gin.Context, status int, response Response) {
+	changeStatus(&status)
+	c.BSON(status, response)
+}
 func rejectPure(c *gin.Context, status int, response Response) { c.AbortWithStatusPureJSON(status, response) }
+func renderJSONP(c *gin.Context) { c.JSONP(202, Response{Message: "jsonp"}) }
 
 func (s Server) stringResponse(c *gin.Context) { c.String(200, "pong %s", "now") }
 func (s Server) html(c *gin.Context) { c.HTML(200, "index.tmpl", Response{Message: "html"}) }
@@ -2919,13 +2945,29 @@ func (s Server) pureJSON(c *gin.Context) { c.PureJSON(200, Response{Message: "pu
 func (s Server) asciiJSON(c *gin.Context) { c.AsciiJSON(200, Response{Message: "ascii"}) }
 func (s Server) secureJSON(c *gin.Context) { c.SecureJSON(201, []Response{{Message: "secure"}}) }
 func (s Server) jsonp(c *gin.Context) { c.JSONP(202, Response{Message: "jsonp"}) }
+func (s Server) jsonpHelper(c *gin.Context) { renderJSONP(c) }
 func (s Server) xml(c *gin.Context) { renderXML(c) }
 func (s Server) yaml(c *gin.Context) { c.YAML(205, Response{Message: "yaml"}) }
 func (s Server) toml(c *gin.Context) { c.TOML(206, Response{Message: "toml"}) }
 func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "protobuf"}) }
 func (s Server) bson(c *gin.Context) { renderBSON(c, 208, Response{Message: "bson"}) }
+func (s Server) reassignedHelperStatus(c *gin.Context) {
+	renderWithReassignedStatus(c, 208, Response{Message: "reassigned"})
+	c.Status(204)
+}
+func (s Server) incrementedHelperStatus(c *gin.Context) {
+	renderWithIncrementedStatus(c, 208, Response{Message: "incremented"})
+	c.Status(204)
+}
+func (s Server) escapedHelperStatus(c *gin.Context) {
+	renderWithEscapedStatus(c, 208, Response{Message: "escaped"})
+	c.Status(204)
+}
+func (s Server) noBodyJSON(c *gin.Context) { c.PureJSON(204, Response{Message: "suppressed"}) }
+func (s Server) notModifiedXML(c *gin.Context) { c.XML(304, Response{Message: "suppressed"}) }
+func (s Server) informationalString(c *gin.Context) { c.String(103, "suppressed") }
 func (s Server) abortPureJSON(c *gin.Context) { rejectPure(c, 422, Response{Message: "invalid"}) }
-func (s Server) abortError(c *gin.Context) { _ = c.AbortWithError(400, nil) }
+func (s Server) abortError(c *gin.Context) { _ = c.AbortWithError(400, errors.New("invalid")) }
 func (s Server) fileFromFS(c *gin.Context) { c.FileFromFS("/report.pdf", nil) }
 func (s Server) render(c *gin.Context) { c.Render(209, nil) }
 func (s Server) negotiate(c *gin.Context) { c.Negotiate(210, nil) }
@@ -2960,7 +3002,6 @@ func (s Server) negotiate(c *gin.Context) { c.Negotiate(210, nil) }
 		"stringResponse": {status: 200, contentType: "text/plain"},
 		"html":           {status: 200, contentType: "text/html"},
 		"secureJSON":     {status: 201, contentType: "application/json"},
-		"jsonp":          {status: 202, contentType: "application/javascript"},
 		"xml":            {status: 203, contentType: "application/xml"},
 		"yaml":           {status: 205, contentType: "application/yaml"},
 		"toml":           {status: 206, contentType: "application/toml"},
@@ -2970,6 +3011,31 @@ func (s Server) negotiate(c *gin.Context) { c.Negotiate(210, nil) }
 	}
 	if responses := got["abortError"].Responses; len(responses) != 1 || responses[0].Status != 400 || responses[0].Body != nil {
 		t.Fatalf("AbortWithError must preserve its status-only response: %+v", responses)
+	}
+	for _, handler := range []string{"reassignedHelperStatus", "incrementedHelperStatus", "escapedHelperStatus"} {
+		if responses := got[handler].Responses; len(responses) != 1 || responses[0].Status != 204 || responses[0].Body != nil {
+			t.Fatalf("%s mutates its helper parameter and must not retain the caller's status: %+v", handler, responses)
+		}
+	}
+	for handler, status := range map[string]uint16{
+		"noBodyJSON": 204, "notModifiedXML": 304, "informationalString": 103,
+	} {
+		responses := got[handler].Responses
+		if len(responses) != 1 || responses[0].Status != status || responses[0].Body != nil ||
+			responses[0].BodyKind != "" || responses[0].ContentType != "" || len(responses[0].ContentTypes) != 0 {
+			t.Fatalf("%s status forbids a response body: %+v", handler, responses)
+		}
+	}
+	for _, handler := range []string{"jsonp", "jsonpHelper"} {
+		responses := got[handler].Responses
+		if len(responses) != 1 || responses[0].Status != 202 || responses[0].BodyKind != "binary" || responses[0].Body != nil ||
+			!equalStrings(responses[0].ContentTypes, []string{"application/json", "application/javascript"}) {
+			t.Fatalf("%s must preserve both JSONP media types: %+v", handler, responses)
+		}
+		callback, ok := paramByName(got[handler].Params, "callback")
+		if !ok || callback.Location != "query" || callback.Required || primName(callback.Schema) != facts.PrimString {
+			t.Fatalf("%s must expose Gin's optional callback query parameter: %+v", handler, got[handler].Params)
+		}
 	}
 	for handler, expected := range opaque {
 		responses := got[handler].Responses
@@ -2983,16 +3049,31 @@ func (s Server) negotiate(c *gin.Context) { c.Negotiate(210, nil) }
 		}
 	}
 	unresolvedRenderers := map[string]bool{}
+	mutatedStatusUnresolved := map[string]bool{}
 	for _, diagnostic := range diagnostics.Items() {
 		if diagnostic.Code == "response.schema.unresolved" && (diagnostic.Operation == "GET /render" || diagnostic.Operation == "GET /negotiate") {
 			unresolvedRenderers[diagnostic.Operation] = true
 		}
-		if (diagnostic.Code == "response.missing" || diagnostic.Code == "response.dynamic") && diagnostic.Operation != "GET /render" && diagnostic.Operation != "GET /negotiate" {
+		if diagnostic.Code == "response.schema.unresolved" {
+			mutatedStatusUnresolved[diagnostic.Operation] = true
+		}
+		if (diagnostic.Code == "response.missing" || diagnostic.Code == "response.dynamic") &&
+			diagnostic.Operation != "GET /render" && diagnostic.Operation != "GET /negotiate" &&
+			diagnostic.Operation != "GET /reassigned-helper-status" &&
+			diagnostic.Operation != "GET /incremented-helper-status" &&
+			diagnostic.Operation != "GET /escaped-helper-status" {
 			t.Fatalf("recognized Gin renderer should not lose its response: %+v", diagnostic)
 		}
 	}
 	if !unresolvedRenderers["GET /render"] || !unresolvedRenderers["GET /negotiate"] {
 		t.Fatalf("runtime-selected renderers must be diagnosed explicitly: %+v", diagnostics.Items())
+	}
+	for _, operation := range []string{
+		"GET /reassigned-helper-status", "GET /incremented-helper-status", "GET /escaped-helper-status",
+	} {
+		if !mutatedStatusUnresolved[operation] {
+			t.Fatalf("%s must be unresolved rather than copied from the caller: %+v", operation, diagnostics.Items())
+		}
 	}
 }
 
@@ -3958,6 +4039,7 @@ type Context struct {
 
 func (e *Engine) GET(string, HandlerFunc)                                          {}
 func (c *Context) Status(int)                                                      {}
+func (c *Context) Cookie(string) (string, error)                                  { return "", nil }
 func (c *Context) DataFromReader(int, int64, string, io.Reader, map[string]string) {}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package dynamicheaders
@@ -4117,6 +4199,11 @@ func (s Server) Register() {
 	s.R.GET("/rebound-writer", s.reboundWriter)
 	s.R.GET("/rebound-writer-helper", s.reboundWriterHelper)
 	s.R.GET("/ranged-writer-helper", s.rangedWriterHelper)
+	s.R.GET("/nested-rebound-writer-helper", s.nestedReboundWriterHelper)
+	s.R.GET("/escaped-writer-helper", s.escapedWriterHelper)
+	s.R.GET("/foreign-context", s.foreignContext)
+	s.R.GET("/rebound-context-helper", s.reboundContextHelper)
+	s.R.GET("/context-alias", s.contextAlias)
 	s.R.GET("/chained-writer", s.chainedWriter)
 	s.R.GET("/chained-rebound", s.chainedRebound)
 	s.R.GET("/self-alias", s.selfAlias)
@@ -4228,6 +4315,65 @@ func (s Server) rangedWriterHelper(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func writeNested(_ *gin.Context, w http.ResponseWriter) {
+	w.Header().Set("X-Nested-Rebound", "v")
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func rebindThenDelegate(c *gin.Context, w http.ResponseWriter) {
+	w = newWriter()
+	writeNested(c, w)
+	c.Status(http.StatusNoContent)
+}
+
+func (s Server) nestedReboundWriterHelper(c *gin.Context) {
+	rebindThenDelegate(c, c.Writer)
+}
+
+func possiblyReplaceWriter(*http.ResponseWriter) {}
+
+func escapeThenDelegate(c *gin.Context, w http.ResponseWriter) {
+	possiblyReplaceWriter(&w)
+	writeNested(c, w)
+}
+
+func (s Server) escapedWriterHelper(c *gin.Context) {
+	escapeThenDelegate(c, c.Writer)
+	c.Status(http.StatusNoContent)
+}
+
+func newGinContext() *gin.Context {
+	return &gin.Context{Request: &http.Request{Header: http.Header{}}, Writer: newWriter()}
+}
+
+func (s Server) foreignContext(c *gin.Context) {
+	other := newGinContext()
+	_, _ = other.Cookie("foreign-cookie")
+	_, _ = other.Request.Cookie("foreign-request-cookie")
+	other.Writer.Header().Set("X-Foreign-Context", "v")
+	other.Writer.WriteHeader(http.StatusAccepted)
+	other.Status(http.StatusNonAuthoritativeInfo)
+	c.Status(http.StatusNoContent)
+}
+
+func useReplacementContext(c *gin.Context) {
+	c = newGinContext()
+	_, _ = c.Cookie("replacement-cookie")
+	c.Writer.Header().Set("X-Replacement-Context", "v")
+	c.Status(http.StatusNonAuthoritativeInfo)
+}
+
+func (s Server) reboundContextHelper(c *gin.Context) {
+	useReplacementContext(c)
+	c.Status(http.StatusNoContent)
+}
+
+func (s Server) contextAlias(c *gin.Context) {
+	ctx := c
+	ctx.Writer.Header().Set("X-Context-Alias", "v")
+	ctx.Status(http.StatusNoContent)
+}
+
 func (s Server) chainedWriter(c *gin.Context) {
 	w := c.Writer
 	v := w
@@ -4311,7 +4457,9 @@ func (s Server) rawCookie(c *gin.Context) {
 	// and neither is one written to a writer that is not this operation's.
 	for _, handler := range []string{
 		"requestMutation", "localMap", "foreignWriter", "reboundWriter",
-		"reboundWriterHelper", "rangedWriterHelper", "chainedRebound", "selfAlias", "reboundHeader",
+		"reboundWriterHelper", "rangedWriterHelper", "nestedReboundWriterHelper",
+		"escapedWriterHelper", "foreignContext", "reboundContextHelper",
+		"chainedRebound", "selfAlias", "reboundHeader",
 	} {
 		if names := headerNames(handler); len(names) != 0 {
 			t.Fatalf("%s writes no response header, got %+v", handler, names)
@@ -4324,6 +4472,7 @@ func (s Server) rawCookie(c *gin.Context) {
 		"writerHelper":        "X-Writer-Helper",
 		"writerAlias":         "X-Writer-Alias",
 		"writerDeclaration":   "X-Writer-Declaration",
+		"contextAlias":        "X-Context-Alias",
 		"chainedWriter":       "X-Chained",
 		"chainedHeader":       "X-Chained-Header",
 		"aliasedWriterHeader": "X-Aliased-Writer-Header",
@@ -4342,10 +4491,18 @@ func (s Server) rawCookie(c *gin.Context) {
 			t.Fatalf("%s must preserve the Gin response writer status: %+v", handler, responses)
 		}
 	}
-	for _, handler := range []string{"reboundWriterHelper", "rangedWriterHelper"} {
+	for _, handler := range []string{
+		"reboundWriterHelper", "rangedWriterHelper", "nestedReboundWriterHelper", "escapedWriterHelper",
+		"foreignContext", "reboundContextHelper",
+	} {
 		responses := analyzed[handler].Responses
 		if len(responses) != 1 || responses[0].Status != 204 || responses[0].Body != nil {
-			t.Fatalf("%s reassigns its helper parameter away from the Gin writer and contributes no response: %+v", handler, responses)
+			t.Fatalf("%s must contribute only the routed context's 204 response: %+v", handler, responses)
+		}
+	}
+	for _, handler := range []string{"foreignContext", "reboundContextHelper"} {
+		if params := analyzed[handler].Params; len(params) != 0 {
+			t.Fatalf("%s must not contribute request parameters from a different Gin context: %+v", handler, params)
 		}
 	}
 	for _, handler := range []string{"cookies", "rawCookie"} {

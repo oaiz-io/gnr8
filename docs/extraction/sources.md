@@ -75,19 +75,23 @@ Recognized route facts include:
   at each call site, and response headers are associated only with statuses reached on paths where
   those headers were written. A response header is read from the response writer's own map —
   `c.Header`, `c.Writer.Header()`, or a bounded `http.ResponseWriter` helper — so mutating
-  `c.Request.Header` or a local `http.Header` states nothing about the response. The writer and its
-  header map are proved by one rule: a local holds either only when every assignment to it does, so
-  an alias of one still counts while a local reassigned to anything else stops counting. A helper
-  parameter starts with the caller's argument and obeys that same all-assignments rule. A header
+  `c.Request.Header` or a local `http.Header` states nothing about the response. The routed Gin
+  context, its writer, and its header map are proved by one rule: a local holds one only when every
+  assignment to it does, so an alias still counts while a local reassigned to anything else stops
+  counting. A second `*gin.Context` cannot contribute request or response facts merely because it
+  has the same type. A helper parameter starts with the caller's argument and obeys that same
+  all-assignments rule, including across nested helpers and address escapes. A header
   written under a name that is not a constant is omitted and reported as
   `response.header.unresolved` rather than guessed; a named constant resolves like the string it was
   declared from. `SetCookie`, `SetCookieData`, and `http.SetCookie(c.Writer, ...)` contribute the
   `Set-Cookie` response header.
 - Status-only responses through `AbortWithError` and `c.Writer.WriteHeader`, including a bounded
   `http.ResponseWriter` helper reached from that exact Gin writer. Constant response arguments are
-  propagated through bounded helpers; an unrelated writer cannot contribute to the routed
-  operation. Provenance follows the value, not the type, under the same rule the header map above
-  obeys: an `http.ResponseWriter` from any other source is not this operation's writer.
+  propagated through bounded helpers only while their parameters remain unmodified; reassignment,
+  increment/decrement, or address escape makes the value unresolved. An unrelated writer cannot
+  contribute to the routed operation. Provenance follows the value, not the type, under the same
+  rule the header map above obeys: an `http.ResponseWriter` from any other source is not this
+  operation's writer.
 - Independent inbound/outbound presence and null behavior for Go fields.
 
   On a `json:`-tagged field (or one with no payload tag), outbound presence is the omission option —
@@ -121,7 +125,8 @@ Recognized route facts include:
 
 `String` (`text/plain`) and `HTML` (`text/html`) responses are recorded as opaque bytes. Renderers
 whose serializer changes or wraps the source value are recorded the same way with their actual media
-type: `SecureJSON` (`application/json`), `JSONP` (`application/javascript`), `XML`
+type: `SecureJSON` (`application/json`), `JSONP` (`application/json` when its implicit optional
+`callback` query parameter is absent and `application/javascript` when present), `XML`
 (`application/xml`), `TOML` (`application/toml`), and `ProtoBuf` (`application/x-protobuf`). YAML
 follows the selected Gin module: releases through v1.9 write `application/x-yaml`, and v1.10 onward
 write `application/yaml`. If the loaded module version does not identify either behavior, the YAML
@@ -129,6 +134,8 @@ response is unresolved rather than guessed. This preserves a truthful transport 
 built-in SDK without inferring a JSON schema for non-JSON bytes or for JSON that Gin may prefix or wrap.
 `Render` and `Negotiate` choose their serializer from a value or from the request's `Accept` header,
 so no media type is stated in the source; the call is diagnosed and no response shape is guessed.
+For every renderer, informational, `204`, and `304` statuses remain bodyless because Gin suppresses
+the renderer payload at those statuses.
 
 `BSON` is likewise recorded as opaque `application/bson`. `File`, `FileFromFS`, and
 `FileAttachment` are binary responses whose media type comes from an explicit response
