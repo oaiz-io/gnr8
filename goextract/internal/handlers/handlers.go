@@ -868,6 +868,9 @@ func addTraversedMultipartFileField(name string, traversal *contextTraversal) {
 	)
 }
 
+// setTraversedRequestBody publishes a body a helper binds. contentType is always a
+// media type the caller already proved: a binder gnr8 cannot read is diagnosed at
+// the call site and never reaches here, so this function has one path, not two.
 func (a *Analyzer) setTraversedRequestBody(
 	frame helperFrame,
 	call *ast.CallExpr,
@@ -890,17 +893,6 @@ func (a *Analyzer) setTraversedRequestBody(
 			)
 		}
 		return
-	}
-	if contentType == "" && traversal.diagnostics != nil {
-		file, line := positionOf(frame.decl.fset, call.Pos())
-		traversal.diagnostics.RequestBodyUnresolved(
-			selectorName(call.Fun),
-			traversal.route.Method,
-			untypedRouteLabel(traversal.route),
-			"binding media type is selected dynamically or is unsupported",
-			file,
-			line,
-		)
 	}
 	a.setRequestBodyFact(
 		traversal.cf,
@@ -4876,27 +4868,96 @@ func isResponseWriterHeaderCall(frame helperFrame, call *ast.CallExpr) bool {
 	if !ok || selector.Sel == nil || selector.Sel.Name != "Header" || len(call.Args) != 0 {
 		return false
 	}
-	writer := frameTypeOf(frame, selector.X)
-	return (isNamedType(writer, "net/http", "ResponseWriter") ||
-		isNamedType(writer, routes.GinPkgPath, "ResponseWriter")) &&
+	return isResponseWriterType(frameTypeOf(frame, selector.X)) &&
 		isGinResponseWriterExpr(frame, selector.X)
 }
 
+// isResponseWriterType states the necessary condition every writer check shares:
+// the receiver is a response writer at all. It is never sufficient on its own,
+// which is exactly what isGinResponseWriterExpr adds.
+func isResponseWriterType(t gotypes.Type) bool {
+	return isNamedType(t, "net/http", "ResponseWriter") ||
+		isNamedType(t, routes.GinPkgPath, "ResponseWriter")
+}
+
+// isGinResponseWriterExpr reports whether expr is the routed Gin context's own
+// response writer: `c.Writer` itself, a parameter a caller bound to it, or a local
+// the function assigned it to. An unrelated `http.ResponseWriter` says nothing about
+// this operation, so the provenance is proved rather than assumed from the type.
 func isGinResponseWriterExpr(frame helperFrame, expr ast.Expr) bool {
+	return ginResponseWriterExpr(frame, expr, true)
+}
+
+// ginResponseWriterExpr answers isGinResponseWriterExpr with the local lookup made
+// optional, so ginResponseWriterVars can classify an assignment's right-hand side
+// without re-entering the collector that is still building that set.
+func ginResponseWriterExpr(frame helperFrame, expr ast.Expr, followLocals bool) bool {
 	switch node := expr.(type) {
 	case *ast.ParenExpr:
-		return isGinResponseWriterExpr(frame, node.X)
+		return ginResponseWriterExpr(frame, node.X, followLocals)
 	case *ast.SelectorExpr:
 		return node.Sel != nil && node.Sel.Name == "Writer" && isGinContextType(frameTypeOf(frame, node.X))
 	case *ast.Ident:
 		if frame.decl.info == nil {
 			return false
 		}
-		binding, ok := frame.bindings[frame.decl.info.ObjectOf(node)]
-		return ok && binding.responseWriter
+		object := frame.decl.info.ObjectOf(node)
+		if binding, ok := frame.bindings[object]; ok && binding.responseWriter {
+			return true
+		}
+		// The type is a filter, never the answer: it keeps the body walk below off
+		// the identifiers that cannot be a writer, and provenance still decides.
+		if !followLocals || object == nil || !isResponseWriterType(frameTypeOf(frame, node)) {
+			return false
+		}
+		return ginResponseWriterVars(frame)[object]
 	default:
 		return false
 	}
+}
+
+// ginResponseWriterVars collects the locals bound to the routed Gin context's own
+// response writer, so the `w := c.Writer; w.Header().Set(…)` idiom stays a response
+// fact while an unrelated `http.ResponseWriter` value does not. It is the writer
+// twin of responseWriterHeaderVars, which does the same for the header map.
+//
+// A local qualifies only when every assignment to it is that writer. One assignment
+// this analysis cannot read as `c.Writer` disqualifies the local entirely: the cost
+// of dropping it is a header or status gnr8 does not state, while the cost of
+// keeping it is a response fact attributed to an operation that never sends it.
+func ginResponseWriterVars(frame helperFrame) map[gotypes.Object]bool {
+	vars := map[gotypes.Object]bool{}
+	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil {
+		return vars
+	}
+	rebound := map[gotypes.Object]bool{}
+	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		paired := len(assign.Lhs) == len(assign.Rhs)
+		for index, target := range assign.Lhs {
+			ident, ok := target.(*ast.Ident)
+			if !ok || ident.Name == "_" {
+				continue
+			}
+			object := frame.decl.info.ObjectOf(ident)
+			if object == nil {
+				continue
+			}
+			if paired && ginResponseWriterExpr(frame, assign.Rhs[index], false) {
+				vars[object] = true
+				continue
+			}
+			rebound[object] = true
+		}
+		return true
+	})
+	for object := range rebound {
+		delete(vars, object)
+	}
+	return vars
 }
 
 func isGinResponseWriterCall(frame helperFrame, call *ast.CallExpr, method string) bool {
@@ -4904,9 +4965,7 @@ func isGinResponseWriterCall(frame helperFrame, call *ast.CallExpr, method strin
 	if !ok || selector.Sel == nil || selector.Sel.Name != method {
 		return false
 	}
-	writer := frameTypeOf(frame, selector.X)
-	return (isNamedType(writer, "net/http", "ResponseWriter") ||
-		isNamedType(writer, routes.GinPkgPath, "ResponseWriter")) &&
+	return isResponseWriterType(frameTypeOf(frame, selector.X)) &&
 		isGinResponseWriterExpr(frame, selector.X)
 }
 

@@ -4002,6 +4002,10 @@ func (s Server) Register() {
 	s.R.GET("/const-key", s.constKey)
 	s.R.GET("/writer-status", s.writerStatus)
 	s.R.GET("/writer-status-helper", s.writerStatusHelper)
+	s.R.GET("/writer-alias", s.writerAlias)
+	s.R.GET("/writer-alias-status", s.writerAliasStatus)
+	s.R.GET("/foreign-writer", s.foreignWriter)
+	s.R.GET("/rebound-writer", s.reboundWriter)
 	s.R.GET("/cookies", s.cookies)
 	s.R.GET("/raw-cookie", s.rawCookie)
 }
@@ -4052,6 +4056,32 @@ func (s Server) writerStatusHelper(c *gin.Context) {
 	writeStatus(c.Writer, http.StatusAccepted)
 }
 
+func (s Server) writerAlias(c *gin.Context) {
+	w := c.Writer
+	w.Header().Set("X-Writer-Alias", "v")
+	c.Status(http.StatusNoContent)
+}
+
+func (s Server) writerAliasStatus(c *gin.Context) {
+	w := c.Writer
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func newWriter() http.ResponseWriter { return nil }
+
+func (s Server) foreignWriter(c *gin.Context) {
+	w := newWriter()
+	w.Header().Set("X-Foreign", "v")
+	c.Status(http.StatusNoContent)
+}
+
+func (s Server) reboundWriter(c *gin.Context) {
+	w := c.Writer
+	w = newWriter()
+	w.Header().Set("X-Rebound", "v")
+	c.Status(http.StatusNoContent)
+}
+
 func (s Server) cookies(c *gin.Context) {
 	c.SetCookie("session", "value", 3600, "/", "", true, true)
 	c.SetCookieData(&http.Cookie{Name: "theme", Value: "dark"})
@@ -4085,8 +4115,9 @@ func (s Server) rawCookie(c *gin.Context) {
 		return out
 	}
 
-	// A header the handler only reads or keeps locally is not part of what it sends.
-	for _, handler := range []string{"requestMutation", "localMap"} {
+	// A header the handler only reads or keeps locally is not part of what it sends,
+	// and neither is one written to a writer that is not this operation's.
+	for _, handler := range []string{"requestMutation", "localMap", "foreignWriter", "reboundWriter"} {
 		if names := headerNames(handler); len(names) != 0 {
 			t.Fatalf("%s writes no response header, got %+v", handler, names)
 		}
@@ -4096,6 +4127,7 @@ func (s Server) rawCookie(c *gin.Context) {
 		"writer":       "X-Writer",
 		"writerVar":    "X-Writer-Var",
 		"writerHelper": "X-Writer-Helper",
+		"writerAlias":  "X-Writer-Alias",
 	} {
 		if names := headerNames(handler); !names[want] {
 			t.Fatalf("%s must declare %s, got %+v", handler, want, names)
@@ -4105,7 +4137,7 @@ func (s Server) rawCookie(c *gin.Context) {
 	if names := headerNames("constKey"); !names[sessionHeaderConstant] {
 		t.Fatalf("constant map keys must resolve, got %+v", names)
 	}
-	for _, handler := range []string{"writerStatus", "writerStatusHelper"} {
+	for _, handler := range []string{"writerStatus", "writerStatusHelper", "writerAliasStatus"} {
 		responses := analyzed[handler].Responses
 		if len(responses) != 1 || responses[0].Status != 202 || responses[0].Body != nil {
 			t.Fatalf("%s must preserve the Gin response writer status: %+v", handler, responses)

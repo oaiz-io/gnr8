@@ -367,13 +367,14 @@ import (
 
 type Server struct{ R *gin.Engine }
 
-func (s Server) Register(dynamic string) {
+func (s Server) Register(dynamic string, dynamicMethods []string) {
 	s.R.Handle(http.MethodTrace, "/trace/:id", guard, s.trace)
 	s.R.Match([]string{http.MethodPatch}, "/single", s.single)
 	s.R.Handle(dynamic, "/dynamic", s.dynamic)
 	s.R.Handle(http.MethodConnect, "/connect", s.connect)
 	s.R.Handle("get", "/lowercase", s.lowercase)
 	s.R.Match([]string{http.MethodGet, http.MethodPost}, "/multi", s.multi)
+	s.R.Match(dynamicMethods, "/dynamic-methods", s.dynamicMethods)
 	s.R.Any("/any", s.any)
 	s.R.StaticFile("/favicon.ico", "./favicon.ico")
 	s.R.StaticFileFS("/robots.txt", "./robots.txt", nil)
@@ -388,6 +389,7 @@ func (s Server) dynamic(c *gin.Context) {}
 func (s Server) connect(c *gin.Context) {}
 func (s Server) lowercase(c *gin.Context) {}
 func (s Server) multi(c *gin.Context) {}
+func (s Server) dynamicMethods(c *gin.Context) {}
 func (s Server) any(c *gin.Context) {}
 `)
 
@@ -420,7 +422,8 @@ func (s Server) any(c *gin.Context) {}
 		}
 	}
 	for _, fragment := range []string{
-		"dynamic HTTP method", `"CONNECT"`, `"get"`, "Match registers zero or multiple", "Any registers multiple",
+		"dynamic HTTP method for Handle", "dynamic HTTP method list for Match",
+		`"CONNECT"`, `"get"`, "Match registers zero or multiple", "Any registers multiple",
 		"StaticFile registers framework-generated", "StaticFileFS registers framework-generated",
 		"Static registers framework-generated", "StaticFS registers framework-generated",
 	} {

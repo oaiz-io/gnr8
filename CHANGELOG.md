@@ -32,10 +32,11 @@ must move the minor version.
   surfaces.** `AbortWithStatusPureJSON`, `AbortWithError`, `BSON`, and `FileFromFS` now preserve
   their response facts. Constant response arguments passed through bounded helpers are propagated,
   and `c.Writer.WriteHeader` (including a module-owned `http.ResponseWriter` helper reached from
-  that writer) records the same status and requiredness evidence as `c.Status`. Response-writer
-  provenance prevents unrelated `http.ResponseWriter` values from contributing facts. `SetCookie`,
-  `SetCookieData`, and `http.SetCookie(c.Writer, ...)` preserve the `Set-Cookie` response header;
-  runtime-selected `Render` and `Negotiate` calls now carry an explicit unresolved diagnostic.
+  that writer, and a local `w := c.Writer` alias) records the same status and requiredness evidence
+  as `c.Status`. Response-writer provenance follows the value rather than the type, so an unrelated
+  `http.ResponseWriter` contributes no facts. `SetCookie`, `SetCookieData`, and
+  `http.SetCookie(c.Writer, ...)` preserve the `Set-Cookie` response header; runtime-selected
+  `Render` and `Negotiate` calls now carry an explicit unresolved diagnostic.
 
 ## 0.13.0 — 2026-09-08
 

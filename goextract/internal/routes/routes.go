@@ -287,8 +287,17 @@ func ginRouteRegistration(
 		}
 		return routeRegistration{method: method, pathIndex: 1, middlewareStart: 2, handlerIndex: last}, true
 	case "Match":
-		methods, ok := constantStringSlice(info, firstCallArg(call))
-		if !ok || len(methods) != 1 {
+		if len(call.Args) < 3 {
+			return routeRegistration{}, false
+		}
+		methods, ok := constantStringSlice(info, call.Args[0])
+		if !ok {
+			if diags != nil {
+				diags.UnsupportedRoutePattern("dynamic HTTP method list for Match registration", span.File, span.StartLine)
+			}
+			return routeRegistration{}, false
+		}
+		if len(methods) != 1 {
 			if diags != nil {
 				diags.UnsupportedRoutePattern("Match registers zero or multiple operations for one handler identity", span.File, span.StartLine)
 			}
@@ -312,13 +321,6 @@ func ginRouteRegistration(
 		}
 	}
 	return routeRegistration{}, false
-}
-
-func firstCallArg(call *ast.CallExpr) ast.Expr {
-	if call == nil || len(call.Args) == 0 {
-		return nil
-	}
-	return call.Args[0]
 }
 
 func constantString(info *gotypes.Info, expr ast.Expr) (string, bool) {
