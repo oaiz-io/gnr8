@@ -694,7 +694,7 @@ pub(crate) fn path_tokens_match(tokens: &[String], params: &[&str]) -> bool {
 pub(crate) struct SuccessResponses {
     /// Declared successful or redirect statuses, sorted by status code.
     pub(crate) statuses: Vec<u16>,
-    /// The single success body model, when all body-bearing 2xx/3xx responses share one model.
+    /// The single typed JSON success model, when all JSON successes share one model.
     pub(crate) body_model: Option<String>,
     /// The statuses that carry [`Self::body_model`].
     pub(crate) body_statuses: Vec<u16>,
@@ -867,10 +867,6 @@ pub(crate) fn error_response_bodies_of(
     Ok(out)
 }
 
-/// Reject a response that declares a body on a status that cannot carry one.
-///
-/// Silently dropping the body here while the `OpenAPI` lowering kept it would make one graph
-/// describe two different contracts, so the contradiction is surfaced instead (CLAUDE.md rule 3).
 /// Render a status list for a message, so it names the responses to act on rather than
 /// only the operation that carries them.
 fn join_statuses(statuses: &[u16]) -> String {
@@ -881,6 +877,10 @@ fn join_statuses(statuses: &[u16]) -> String {
         .join(", ")
 }
 
+/// Reject a response that declares a body on a status that cannot carry one.
+///
+/// Silently dropping the body here while the `OpenAPI` lowering kept it would make one graph
+/// describe two different contracts, so the contradiction is surfaced instead (CLAUDE.md rule 3).
 fn reject_impossible_body(op: &Operation, resp: &crate::graph::Response) -> Result<(), CoreError> {
     if !resp.declares_impossible_body() {
         return Ok(());

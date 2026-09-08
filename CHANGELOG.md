@@ -54,6 +54,10 @@ must move the minor version.
   that an opaque success beside a typed one no longer changes the return type to raw bytes. Two
   body-bearing successes pointing at different JSON models remain an error.
 
+  Python response hooks expose the buffered bytes as `HookContext.response_body`, so an opaque
+  success named by this rule remains readable just as it is through the native response object in
+  the Go and TypeScript hooks.
+
 ### Fixed
 
 - **Go/Gin extraction recognizes a multipart file read through `c.Request.FormFile`.** A file part

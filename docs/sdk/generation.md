@@ -265,6 +265,9 @@ redirect, or a success answering opaque bytes beside the typed one — returns t
 value (`nil`/zero in Go, `None` in Python, `undefined` in TypeScript) and is read through the
 client's response hook, which sees the raw response.
 
+Python response hooks receive the already-buffered bytes as `HookContext.response_body`; Go and
+TypeScript hooks receive their native response object.
+
 A handler answering `c.JSON(200, …)` on one status and `c.String(202, …)` on another therefore
 generates a method returning the 200 model, with a documentation line naming 202 on the method
 itself. The OpenAPI document still states both responses in full; the narrowing is the SDK's, so it

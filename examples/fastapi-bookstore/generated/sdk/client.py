@@ -134,6 +134,7 @@ class HookContext:
         self.request_metadata = request_metadata
         self.status: Optional[int] = None
         self.response_headers: dict[str, str] = {}
+        self.response_body: bytes = b""
 
 
 class ClientHooks:
@@ -385,6 +386,7 @@ class Client:
                     raw = e.read()
                 context.status = status
                 context.response_headers = response_headers
+                context.response_body = raw
                 for hook in self._hooks.response:
                     hook(context)
                 if (
