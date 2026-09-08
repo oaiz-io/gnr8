@@ -25,6 +25,7 @@ package routes
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	gotypes "go/types"
 	"strconv"
@@ -43,10 +44,18 @@ const GinPkgPath = "github.com/gin-gonic/gin"
 // ginPkgPath is the unexported alias kept for in-package readability.
 const ginPkgPath = GinPkgPath
 
-// httpMethods is the set of *gin.RouterGroup methods that register a route.
-var httpMethods = map[string]bool{
+// ginNamedHTTPMethods is the set of *gin.RouterGroup verb shortcuts.
+var ginNamedHTTPMethods = map[string]bool{
 	"GET": true, "POST": true, "PUT": true, "DELETE": true,
 	"PATCH": true, "HEAD": true, "OPTIONS": true,
+}
+
+// openAPIOperationMethods is the standard-method set the graph can lower into
+// OpenAPI Path Item operation slots. Gin has no named TRACE shortcut, but Handle
+// and Match can state it exactly.
+var openAPIOperationMethods = map[string]bool{
+	"GET": true, "POST": true, "PUT": true, "DELETE": true,
+	"PATCH": true, "HEAD": true, "OPTIONS": true, "TRACE": true,
 }
 
 // Route is one recognized HTTP route plus the handler symbol and enclosing group,
@@ -174,34 +183,39 @@ func recognizeFile(
 			return true
 		}
 		name, recvPkg, ok := ginMethod(info, call)
-		if !ok || recvPkg != ginPkgPath || !httpMethods[name] {
+		if !ok || recvPkg != ginPkgPath {
 			return true
 		}
-		if len(call.Args) < 2 {
+		registration, recognized := ginRouteRegistration(info, call, name, fset, diags)
+		if !recognized {
+			return true
+		}
+		if len(call.Args) <= registration.handlerIndex {
 			return true // not a (path, handler) registration; skip defensively.
 		}
-		pathLit, ok := stringLiteral(call.Args[0])
+		pathLit, ok := stringLiteral(call.Args[registration.pathIndex])
 		if !ok {
 			if diags != nil {
 				span := spanOf(fset, call.Pos(), call.End())
-				diags.UnsupportedRoutePattern("dynamic route path for "+name+" registration", span.File, span.StartLine)
+				diags.UnsupportedRoutePattern("dynamic route path for "+registration.method+" registration", span.File, span.StartLine)
 			}
 			return true // dynamic path arg; not folded here.
 		}
-		handler := handlerSymbol(call.Args[len(call.Args)-1])
+		handlerArg := call.Args[registration.handlerIndex]
+		handler := handlerSymbol(handlerArg)
 		if handler == "" {
 			if diags != nil {
 				span := spanOf(fset, call.Pos(), call.End())
-				diags.UnsupportedRoutePattern("route handler for "+name+" "+pathLit+" is not a named function or method", span.File, span.StartLine)
+				diags.UnsupportedRoutePattern("route handler for "+registration.method+" "+pathLit+" is not a named function or method", span.File, span.StartLine)
 			}
 			return true
 		}
-		handlerFn := HandlerFunc(info, call.Args[len(call.Args)-1])
+		handlerFn := HandlerFunc(info, handlerArg)
 
 		prefix := receiverPrefix(info, groups, call)
 		middleware := receiverMiddlewareAt(info, rawGroups, middlewareUses, call, call.Pos())
-		if len(call.Args) > 2 {
-			middleware = appendUniqueStrings(middleware, middlewareSymbols(info, call.Args[1:len(call.Args)-1])...)
+		if registration.middlewareStart < registration.handlerIndex {
+			middleware = appendUniqueStrings(middleware, middlewareSymbols(info, call.Args[registration.middlewareStart:registration.handlerIndex])...)
 		}
 		secured := len(middleware) > 0
 		if obj := receiverObject(info, call); obj != nil {
@@ -212,7 +226,7 @@ func recognizeFile(
 		}
 
 		out = append(out, Route{
-			Method:          name,
+			Method:          registration.method,
 			Path:            joinPaths(prefix, normalizePath(pathLit)),
 			Handler:         handler,
 			HandlerKey:      FuncObjectKey(handlerFn),
@@ -225,6 +239,114 @@ func recognizeFile(
 		return true
 	})
 	return out
+}
+
+type routeRegistration struct {
+	method          string
+	pathIndex       int
+	middlewareStart int
+	handlerIndex    int
+}
+
+// ginRouteRegistration lowers the route shapes that state exactly one OpenAPI
+// operation. The named verb methods and Handle have a single method/path/handler
+// identity. Any and a multi-method Match do not: gnr8's native operation identity
+// is the one routed handler symbol, so expanding either call would create several
+// operations with the same identity. Those calls are diagnosed and skipped rather
+// than silently disappearing or receiving invented operation names.
+func ginRouteRegistration(
+	info *gotypes.Info,
+	call *ast.CallExpr,
+	name string,
+	fset *token.FileSet,
+	diags *diag.Accumulator,
+) (routeRegistration, bool) {
+	last := len(call.Args) - 1
+	if ginNamedHTTPMethods[name] {
+		if len(call.Args) < 2 {
+			return routeRegistration{}, false
+		}
+		return routeRegistration{method: name, pathIndex: 0, middlewareStart: 1, handlerIndex: last}, true
+	}
+	span := spanOf(fset, call.Pos(), call.End())
+	switch name {
+	case "Handle":
+		if len(call.Args) < 3 {
+			return routeRegistration{}, false
+		}
+		method, ok := constantString(info, call.Args[0])
+		if !ok || !openAPIOperationMethods[method] {
+			if diags != nil {
+				reason := "dynamic HTTP method for Handle registration"
+				if ok {
+					reason = "HTTP method " + strconv.Quote(method) + " from Handle cannot be represented"
+				}
+				diags.UnsupportedRoutePattern(reason, span.File, span.StartLine)
+			}
+			return routeRegistration{}, false
+		}
+		return routeRegistration{method: method, pathIndex: 1, middlewareStart: 2, handlerIndex: last}, true
+	case "Match":
+		if len(call.Args) < 3 {
+			return routeRegistration{}, false
+		}
+		methods, ok := constantStringSlice(info, call.Args[0])
+		if !ok {
+			if diags != nil {
+				diags.UnsupportedRoutePattern("dynamic HTTP method list for Match registration", span.File, span.StartLine)
+			}
+			return routeRegistration{}, false
+		}
+		if len(methods) != 1 {
+			if diags != nil {
+				diags.UnsupportedRoutePattern("Match registers zero or multiple operations for one handler identity", span.File, span.StartLine)
+			}
+			return routeRegistration{}, false
+		}
+		method := methods[0]
+		if !openAPIOperationMethods[method] {
+			if diags != nil {
+				diags.UnsupportedRoutePattern("HTTP method "+strconv.Quote(method)+" from Match cannot be represented", span.File, span.StartLine)
+			}
+			return routeRegistration{}, false
+		}
+		return routeRegistration{method: method, pathIndex: 1, middlewareStart: 2, handlerIndex: last}, true
+	case "Any":
+		if diags != nil {
+			diags.UnsupportedRoutePattern("Any registers multiple operations, including CONNECT, for one handler identity", span.File, span.StartLine)
+		}
+	case "StaticFile", "StaticFileFS", "Static", "StaticFS":
+		if diags != nil {
+			diags.UnsupportedRoutePattern(name+" registers framework-generated GET and HEAD operations without a source handler identity", span.File, span.StartLine)
+		}
+	}
+	return routeRegistration{}, false
+}
+
+func constantString(info *gotypes.Info, expr ast.Expr) (string, bool) {
+	if info == nil || expr == nil {
+		return "", false
+	}
+	if value, ok := info.Types[expr]; ok && value.Value != nil && value.Value.Kind() == constant.String {
+		return constant.StringVal(value.Value), true
+	}
+	return stringLiteral(expr)
+}
+
+func constantStringSlice(info *gotypes.Info, expr ast.Expr) ([]string, bool) {
+	literal, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(literal.Elts))
+	for _, element := range literal.Elts {
+		value, ok := constantString(info, element)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, value)
+	}
+	return out, true
 }
 
 // inferRouterGroupParameterMiddleware follows router-group arguments through

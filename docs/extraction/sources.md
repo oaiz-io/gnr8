@@ -37,15 +37,21 @@ the graph.
 
 Recognized route facts include:
 
-- Static nested `Group` prefixes and Gin HTTP method registrations.
+- Static nested `Group` prefixes; Gin's named HTTP methods; constant standard methods registered
+  through `Handle`; and a `Match` containing exactly one constant standard method. `Any` and a
+  multi-method `Match` cannot share gnr8's one handler-derived operation identity, while `CONNECT`
+  has no OpenAPI operation slot, so those registrations are diagnosed and skipped rather than
+  partially expanded. `Static`, `StaticFS`, `StaticFile`, and `StaticFileFS` are also diagnosed:
+  Gin creates their GET/HEAD handlers internally, so the source states no handler identity for the
+  operations.
 - Handler functions and bounded, cycle-safe helper traversal across packages.
 - Constant arguments propagated through helper calls.
 - `Param` path parameters.
 - `Query`, `DefaultQuery`, `GetQuery`, and all array/map query accessors, including `GetQueryMap`.
-- `GetHeader` and `Request.Header.Get` headers, `Cookie` cookies. Both header access paths resolve
-  constant arguments through the same handler-scoped rules. A read is optional unless the handler
-  or a bounded helper rejects an absent value, and a rejection is any known 4xx written through the
-  same `gin.Context` response surface the query proof below reads.
+- `GetHeader` and `Request.Header.Get` headers; `Cookie` and `Request.Cookie` cookies. Both access
+  paths resolve constant arguments through the same handler-scoped rules. A read is optional unless
+  the handler or a bounded helper rejects an absent value, and a rejection is any known 4xx written
+  through the same `gin.Context` response surface the query proof below reads.
 - `PostForm`, `DefaultPostForm`, `GetPostForm`, `PostFormArray`, `GetPostFormArray`, and file reads
   through either `FormFile` or `Request.FormFile` form values. `PostFormArray`/`GetPostFormArray`
   state a repeated string part. A string part becomes required when an empty value is explicitly
@@ -53,22 +59,39 @@ Recognized route facts include:
   optional. `PostFormMap`/`GetPostFormMap` collect the parts named `field[key]`, a wire shape a form
   body field cannot state, so they are reported as `request.body.unresolved` rather than published
   under the flat expansion an object property would mean.
-- `ShouldBindJSON`/`BindJSON`; `ShouldBindQuery`/`BindQuery` and
+- `ShouldBindJSON`/`BindJSON`/`ShouldBindBodyWithJSON`; explicit JSON through
+  `ShouldBindWith`, `BindWith`, `MustBindWith`, or `ShouldBindBodyWith`;
+  `ShouldBindQuery`/`BindQuery` and
   `ShouldBindHeader`/`BindHeader`; generic bind variants for typed form, multipart, query, and
   header structs.
 - `ShouldBindUri`/`BindUri` path structs. Runtime `uri` tags supply parameter names, Go field types
   supply schemas, and enforced `uuid`/`uri` validation rules refine string formats. URI-bound
   parameters enrich matching route or `Param` evidence rather than creating duplicates; conflicting
   typed schemas are diagnosed.
-- JSON responses from `JSON`, `AbortWithStatusJSON`, `IndentedJSON`, `PureJSON`, and `AsciiJSON`;
+- JSON responses from `JSON`, `AbortWithStatusJSON`, `AbortWithStatusPureJSON`, `IndentedJSON`,
+  `PureJSON`, and `AsciiJSON`;
   response status/media facts; constant redirects; response headers; Go structs; nested types; and
   string enums. Redirect status values passed through bounded helpers are resolved
   at each call site, and response headers are associated only with statuses reached on paths where
   those headers were written. A response header is read from the response writer's own map —
   `c.Header`, `c.Writer.Header()`, or a bounded `http.ResponseWriter` helper — so mutating
-  `c.Request.Header` or a local `http.Header` states nothing about the response. A header written
-  under a name that is not a constant is omitted and reported as `response.header.unresolved`
-  rather than guessed; a named constant resolves like the string it was declared from.
+  `c.Request.Header` or a local `http.Header` states nothing about the response. The routed Gin
+  context, its writer, and its header map are proved by one rule: a local holds one only when every
+  assignment to it does, so an alias still counts while a local reassigned to anything else stops
+  counting. A second `*gin.Context` cannot contribute request or response facts merely because it
+  has the same type. A helper parameter starts with the caller's argument and obeys that same
+  all-assignments rule, including across nested helpers and address escapes. A header
+  written under a name that is not a constant is omitted and reported as
+  `response.header.unresolved` rather than guessed; a named constant resolves like the string it was
+  declared from. `SetCookie`, `SetCookieData`, and `http.SetCookie(c.Writer, ...)` contribute the
+  `Set-Cookie` response header.
+- Status-only responses through `AbortWithError` and `c.Writer.WriteHeader`, including a bounded
+  `http.ResponseWriter` helper reached from that exact Gin writer. Constant response arguments are
+  propagated through bounded helpers only while their parameters remain unmodified; reassignment,
+  increment/decrement, or address escape makes the value unresolved. An unrelated writer cannot
+  contribute to the routed operation. Provenance follows the value, not the type, under the same
+  rule the header map above obeys: an `http.ResponseWriter` from any other source is not this
+  operation's writer.
 - Independent inbound/outbound presence and null behavior for Go fields.
 
   On a `json:`-tagged field (or one with no payload tag), outbound presence is the omission option —
@@ -102,15 +125,31 @@ Recognized route facts include:
 
 `String` (`text/plain`) and `HTML` (`text/html`) responses are recorded as opaque bytes. Renderers
 whose serializer changes or wraps the source value are recorded the same way with their actual media
-type: `SecureJSON` (`application/json`), `JSONP` (`application/javascript`), `XML`
+type: `SecureJSON` (`application/json`), `JSONP` (`application/json` when its implicit optional
+`callback` query parameter is absent and `application/javascript` when present), `XML`
 (`application/xml`), `TOML` (`application/toml`), and `ProtoBuf` (`application/x-protobuf`). YAML
 follows the selected Gin module: releases through v1.9 write `application/x-yaml`, and v1.10 onward
 write `application/yaml`. If the loaded module version does not identify either behavior, the YAML
 response is unresolved rather than guessed. This preserves a truthful transport contract for every
 built-in SDK without inferring a JSON schema for non-JSON bytes or for JSON that Gin may prefix or wrap.
 `Render` and `Negotiate` choose their serializer from a value or from the request's `Accept` header,
-so no media type is stated in the source and the operation keeps `response.missing` rather than a
-guessed one.
+so no media type is stated in the source; the call is diagnosed and no response shape is guessed.
+For every renderer, informational, `204`, and `304` statuses remain bodyless because Gin suppresses
+the renderer payload at those statuses.
+
+`BSON` is likewise recorded as opaque `application/bson`. `File`, `FileFromFS`, and
+`FileAttachment` are binary responses whose media type comes from an explicit response
+`Content-Type` when source states one, or `application/octet-stream` otherwise.
+
+Gin's XML, YAML, TOML, and plain-text request binders are diagnosed as
+`request.body.unresolved`. Their field naming is owned by serializers other than the JSON/form
+schema gnr8 extracts, so publishing that schema under a different media type would claim a wire
+shape the source types do not state. The same applies to a binder selected dynamically or to a
+similarly named value outside Gin's own `binding` package.
+`GetRawData` states neither a media type nor a schema on its own. Raw bytes handed to
+`encoding/json`, or read alongside JSON content-type evidence, still resolve into a free-form
+`application/json` body; the read is reported as `request.body.unresolved` only when the operation
+ends with no body at all, so one operation is never told its body is both stated and unresolved.
 
 ### Direct Gin query requiredness
 
