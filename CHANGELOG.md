@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.13.0 — 2026-09-08
+
 ### Breaking
 
 - **A direct `c.Query("name")` read now states requiredness from the handler's own control flow, and
