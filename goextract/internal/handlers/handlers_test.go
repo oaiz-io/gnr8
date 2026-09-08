@@ -913,9 +913,11 @@ replace github.com/gin-gonic/gin => ./ginstub
 	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
 	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
 
+import "net/http"
+
 type HandlerFunc func(*Context)
 type Engine struct{}
-type Context struct{}
+type Context struct{ Writer http.ResponseWriter }
 
 func (e *Engine) GET(string, HandlerFunc) {}
 func (c *Context) Query(string) string { return "" }
@@ -957,6 +959,7 @@ func (s Server) Register() {
 	s.R.GET("/loop-guard", s.loopGuard)
 	s.R.GET("/string-rejected", s.stringRejected)
 	s.R.GET("/aborted-with-error", s.abortedWithError)
+	s.R.GET("/writer-rejected", s.writerRejected)
 	s.R.GET("/silent-abort", s.silentAbort)
 	s.R.GET("/parsed-guard", s.parsedGuard)
 	s.R.GET("/init-guard", s.initGuard)
@@ -1105,6 +1108,15 @@ func (s Server) abortedWithError(c *gin.Context) {
 	c.JSON(200, Result{})
 }
 
+func (s Server) writerRejected(c *gin.Context) {
+	value := c.Query("name")
+	if value == "" {
+		c.Writer.WriteHeader(400)
+		return
+	}
+	c.JSON(200, Result{})
+}
+
 func (s Server) silentAbort(c *gin.Context) {
 	value := c.Query("name")
 	if value == "" {
@@ -1227,7 +1239,7 @@ func helperRejects(string) bool { return false }
 
 	for _, path := range []string{
 		"/required", "/inverted", "/early-nested", "/multiple",
-		"/string-rejected", "/aborted-with-error", "/init-guard",
+		"/string-rejected", "/aborted-with-error", "/writer-rejected", "/init-guard",
 	} {
 		param, ok := paramByName(byPath[path].Params, "name")
 		if !ok || !param.Required {
@@ -1255,7 +1267,7 @@ func helperRejects(string) bool { return false }
 	}
 	for _, path := range []string{
 		"/required", "/inverted", "/optional", "/present", "/early-nested", "/multiple",
-		"/string-rejected", "/aborted-with-error", "/init-guard",
+		"/string-rejected", "/aborted-with-error", "/writer-rejected", "/init-guard",
 	} {
 		operation := "GET " + path
 		if unresolved[operation] {
@@ -1967,6 +1979,10 @@ func MultipartParts(c *gin.Context, fileName, titleName string) {
 	_, _, _ = c.Request.FormFile("requestAttachment")
 	_ = c.PostForm(titleName)
 }
+
+func Cookie(c *gin.Context, name string) {
+	_, _ = c.Request.Cookie(name)
+}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package typedrequests
 
@@ -2028,6 +2044,8 @@ func (s Server) search(c *gin.Context) {
 	_ = c.GetHeader("Authorization")
 	_ = c.Request.Header.Get("X-Request-Direct")
 	_, _ = c.Cookie("session")
+	_, _ = c.Request.Cookie("raw-session")
+	requesthelpers.Cookie(c, "helper-raw-session")
 	_, _ = c.GetPostForm("note")
 	requesthelpers.MultipartParts(c, "attachment", "title")
 	c.JSON(200, Response{OK: true})
@@ -2109,9 +2127,11 @@ func (s Server) search(c *gin.Context) {
 			t.Fatalf("OpenAPI representation header %s must not be emitted as a parameter: %+v", headerName, code.Params)
 		}
 	}
-	cookie, _ := paramByName(code.Params, "session")
-	if cookie.Location != "cookie" || cookie.Required {
-		t.Fatalf("cookie mismatch: %+v", cookie)
+	for _, cookieName := range []string{"session", "raw-session", "helper-raw-session"} {
+		cookie, exists := paramByName(code.Params, cookieName)
+		if !exists || cookie.Location != "cookie" || cookie.Required {
+			t.Fatalf("cookie %s mismatch: %+v", cookieName, cookie)
+		}
 	}
 
 	if code.RequestBody == nil || code.RequestBodyContentType != "multipart/form-data" || len(code.Schemas) != 1 {
@@ -2493,13 +2513,233 @@ func (s Server) helper(c *gin.Context) {
 	}
 }
 
+func TestGinBindingEntryPointsStaySemanticallyAligned(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/ginbindings
+
+go 1.22
+
+require github.com/gin-gonic/gin v1.12.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	for _, child := range []string{"ginstub", "ginstub/binding", "fakebinding"} {
+		if err := os.Mkdir(filepath.Join(dir, child), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", child, err)
+		}
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "binding", "binding.go"), `package binding
+
+type Binding interface{}
+type BindingBody interface{ Binding }
+type body struct{}
+type fields struct{}
+var JSON BindingBody = body{}
+var XML BindingBody = body{}
+var Query Binding = fields{}
+var Header Binding = fields{}
+`)
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin/binding"
+)
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{ Request *http.Request }
+
+func (e *Engine) POST(string, HandlerFunc) {}
+func (c *Context) ShouldBindBodyWithJSON(any) error { return nil }
+func (c *Context) ShouldBindWith(any, binding.Binding) error { return nil }
+func (c *Context) BindWith(any, binding.Binding) error { return nil }
+func (c *Context) ShouldBindBodyWith(any, binding.BindingBody) error { return nil }
+func (c *Context) MustBindWith(any, binding.Binding) error { return nil }
+func (c *Context) ShouldBindXML(any) error { return nil }
+func (c *Context) GetRawData() ([]byte, error) { return nil, nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "fakebinding", "fake.go"), `package fakebinding
+
+import "github.com/gin-gonic/gin/binding"
+
+var JSON binding.Binding = fake{}
+type fake struct{}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package ginbindings
+
+import (
+	"example.com/ginbindings/fakebinding"
+	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
+)
+
+type Server struct{ R *gin.Engine }
+type Body struct { Name string `+"`"+`json:"name"`+"`"+` }
+type Params struct {
+	Limit int `+"`"+`form:"limit"`+"`"+`
+	Trace string `+"`"+`header:"X-Trace"`+"`"+`
+}
+type Response struct { OK bool `+"`"+`json:"ok"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.POST("/shortcut", s.shortcut)
+	s.R.POST("/generic", s.generic)
+	s.R.POST("/with", s.with)
+	s.R.POST("/bind-with", s.bindWith)
+	s.R.POST("/must", s.must)
+	s.R.POST("/typed-helper", s.typedHelper)
+	s.R.POST("/optional", s.optional)
+	s.R.POST("/query", s.query)
+	s.R.POST("/header-helper", s.headerHelper)
+	s.R.POST("/xml", s.xml)
+	s.R.POST("/raw", s.raw)
+	s.R.POST("/foreign-json", s.foreignJSON)
+}
+
+func (s Server) shortcut(c *gin.Context) {
+	var body Body
+	_ = c.ShouldBindBodyWithJSON(&body)
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) generic(c *gin.Context) {
+	var body Body
+	_ = c.ShouldBindBodyWith(&body, binding.JSON)
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) with(c *gin.Context) {
+	var body Body
+	_ = c.ShouldBindWith(&body, binding.JSON)
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) bindWith(c *gin.Context) {
+	var body Body
+	_ = c.BindWith(&body, binding.JSON)
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) must(c *gin.Context) {
+	var body Body
+	_ = c.MustBindWith(&body, binding.JSON)
+	c.JSON(200, Response{OK: true})
+}
+
+func bindBody[T any](c *gin.Context) (T, error) {
+	var body T
+	return body, c.ShouldBindBodyWithJSON(&body)
+}
+
+func (s Server) typedHelper(c *gin.Context) {
+	_, _ = bindBody[Body](c)
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) optional(c *gin.Context) {
+	if c.Request.ContentLength > 0 {
+		var body Body
+		_ = c.ShouldBindBodyWithJSON(&body)
+	}
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) query(c *gin.Context) {
+	var params Params
+	_ = c.ShouldBindWith(&params, binding.Query)
+	c.JSON(200, Response{OK: true})
+}
+
+func bindHeaders(c *gin.Context, params *Params) { _ = c.MustBindWith(params, binding.Header) }
+
+func (s Server) headerHelper(c *gin.Context) {
+	var params Params
+	bindHeaders(c, &params)
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) xml(c *gin.Context) {
+	var body Body
+	_ = c.ShouldBindXML(&body)
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) raw(c *gin.Context) {
+	_, _ = c.GetRawData()
+	c.JSON(200, Response{OK: true})
+}
+
+func (s Server) foreignJSON(c *gin.Context) {
+	var body Body
+	_ = c.ShouldBindWith(&body, fakebinding.JSON)
+	c.JSON(200, Response{OK: true})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load Gin bindings fixture: %v", err)
+	}
+	for _, loadErr := range res.Errors {
+		t.Fatalf("Gin bindings fixture must type-check: %+v", loadErr)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/ginbindings", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for _, handler := range []string{"shortcut", "generic", "with", "bindWith", "must", "typedHelper", "optional"} {
+		assertBodySuffix(t, got[handler].RequestBody, "Body")
+		if got[handler].RequestBodyContentType != "application/json" {
+			t.Fatalf("%s JSON binding media type mismatch: %+v", handler, got[handler])
+		}
+	}
+	if !got["shortcut"].RequestBodyRequired || !got["generic"].RequestBodyRequired || !got["with"].RequestBodyRequired || !got["bindWith"].RequestBodyRequired || !got["must"].RequestBodyRequired || !got["typedHelper"].RequestBodyRequired {
+		t.Fatalf("unguarded JSON bindings must remain required")
+	}
+	if got["optional"].RequestBodyRequired {
+		t.Fatalf("ContentLength-guarded ShouldBindBodyWithJSON must remain optional: %+v", got["optional"])
+	}
+	query, ok := paramByName(got["query"].Params, "limit")
+	if !ok || query.Location != "query" || primName(query.Schema) != facts.PrimInt {
+		t.Fatalf("explicit binding.Query must produce query parameters, not a body: %+v", got["query"])
+	}
+	header, ok := paramByName(got["headerHelper"].Params, "X-Trace")
+	if !ok || header.Location != "header" || primName(header.Schema) != facts.PrimString {
+		t.Fatalf("helper binding.Header must produce header parameters, not a body: %+v", got["headerHelper"])
+	}
+	for _, handler := range []string{"xml", "raw", "foreignJSON"} {
+		if got[handler].RequestBody != nil {
+			t.Fatalf("%s must not publish a body under an unproved media/schema contract: %+v", handler, got[handler])
+		}
+	}
+
+	unresolved := map[string]bool{}
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.body.unresolved" {
+			unresolved[item.Operation] = true
+		}
+	}
+	for _, operation := range []string{"POST /xml", "POST /raw", "POST /foreign-json"} {
+		if !unresolved[operation] {
+			t.Fatalf("%s must expose its unrepresentable binding: %+v", operation, diagnostics.Items())
+		}
+	}
+}
+
 func TestGinRenderersProduceTypedOrOpaqueResponses(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/renderers
 
 go 1.22
 
-require github.com/gin-gonic/gin v1.10.0
+require github.com/gin-gonic/gin v1.12.0
 
 replace github.com/gin-gonic/gin => ./ginstub
 `)
@@ -2512,6 +2752,7 @@ replace github.com/gin-gonic/gin => ./ginstub
 type HandlerFunc func(*Context)
 type Engine struct{}
 type Context struct{}
+type Error struct{}
 
 func (e *Engine) GET(string, HandlerFunc) {}
 func (c *Context) String(int, string, ...any) {}
@@ -2525,6 +2766,12 @@ func (c *Context) XML(int, any) {}
 func (c *Context) YAML(int, any) {}
 func (c *Context) TOML(int, any) {}
 func (c *Context) ProtoBuf(int, any) {}
+func (c *Context) BSON(int, any) {}
+func (c *Context) AbortWithStatusPureJSON(int, any) {}
+func (c *Context) AbortWithError(int, error) *Error { return nil }
+func (c *Context) FileFromFS(string, any) {}
+func (c *Context) Render(int, any) {}
+func (c *Context) Negotiate(int, any) {}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package renderers
 
@@ -2545,9 +2792,17 @@ func (s Server) Register() {
 	s.R.GET("/yaml", s.yaml)
 	s.R.GET("/toml", s.toml)
 	s.R.GET("/protobuf", s.protobuf)
+	s.R.GET("/bson", s.bson)
+	s.R.GET("/abort-pure", s.abortPureJSON)
+	s.R.GET("/abort-error", s.abortError)
+	s.R.GET("/file-from-fs", s.fileFromFS)
+	s.R.GET("/render", s.render)
+	s.R.GET("/negotiate", s.negotiate)
 }
 
 func renderXML(c *gin.Context) { c.XML(203, Response{Message: "xml"}) }
+func renderBSON(c *gin.Context, status int, response Response) { c.BSON(status, response) }
+func rejectPure(c *gin.Context, status int, response Response) { c.AbortWithStatusPureJSON(status, response) }
 
 func (s Server) stringResponse(c *gin.Context) { c.String(200, "pong %s", "now") }
 func (s Server) html(c *gin.Context) { c.HTML(200, "index.tmpl", Response{Message: "html"}) }
@@ -2560,6 +2815,12 @@ func (s Server) xml(c *gin.Context) { renderXML(c) }
 func (s Server) yaml(c *gin.Context) { c.YAML(205, Response{Message: "yaml"}) }
 func (s Server) toml(c *gin.Context) { c.TOML(206, Response{Message: "toml"}) }
 func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "protobuf"}) }
+func (s Server) bson(c *gin.Context) { renderBSON(c, 208, Response{Message: "bson"}) }
+func (s Server) abortPureJSON(c *gin.Context) { rejectPure(c, 422, Response{Message: "invalid"}) }
+func (s Server) abortError(c *gin.Context) { _ = c.AbortWithError(400, nil) }
+func (s Server) fileFromFS(c *gin.Context) { c.FileFromFS("/report.pdf", nil) }
+func (s Server) render(c *gin.Context) { c.Render(209, nil) }
+func (s Server) negotiate(c *gin.Context) { c.Negotiate(210, nil) }
 `)
 
 	res, err := load.Load(dir)
@@ -2580,6 +2841,10 @@ func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "pr
 			t.Fatalf("%s JSON media type mismatch: %+v", handler, response)
 		}
 	}
+	assertResponseSuffix(t, got["abortPureJSON"].Responses, 422, "Response")
+	if response := got["abortPureJSON"].Responses[0]; len(response.ContentTypes) != 1 || response.ContentTypes[0] != "application/json" {
+		t.Fatalf("AbortWithStatusPureJSON media type mismatch: %+v", response)
+	}
 	opaque := map[string]struct {
 		status      uint16
 		contentType string
@@ -2592,6 +2857,11 @@ func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "pr
 		"yaml":           {status: 205, contentType: "application/yaml"},
 		"toml":           {status: 206, contentType: "application/toml"},
 		"protobuf":       {status: 207, contentType: "application/x-protobuf"},
+		"bson":           {status: 208, contentType: "application/bson"},
+		"fileFromFS":     {status: 200, contentType: "application/octet-stream"},
+	}
+	if responses := got["abortError"].Responses; len(responses) != 1 || responses[0].Status != 400 || responses[0].Body != nil {
+		t.Fatalf("AbortWithError must preserve its status-only response: %+v", responses)
 	}
 	for handler, expected := range opaque {
 		responses := got[handler].Responses
@@ -2599,10 +2869,22 @@ func (s Server) protobuf(c *gin.Context) { c.ProtoBuf(207, Response{Message: "pr
 			t.Fatalf("%s opaque response mismatch: %+v", handler, responses)
 		}
 	}
+	for _, handler := range []string{"render", "negotiate"} {
+		if len(got[handler].Responses) != 0 {
+			t.Fatalf("%s must not guess a runtime-selected renderer: %+v", handler, got[handler].Responses)
+		}
+	}
+	unresolvedRenderers := map[string]bool{}
 	for _, diagnostic := range diagnostics.Items() {
-		if diagnostic.Code == "response.missing" || diagnostic.Code == "response.dynamic" {
+		if diagnostic.Code == "response.schema.unresolved" && (diagnostic.Operation == "GET /render" || diagnostic.Operation == "GET /negotiate") {
+			unresolvedRenderers[diagnostic.Operation] = true
+		}
+		if (diagnostic.Code == "response.missing" || diagnostic.Code == "response.dynamic") && diagnostic.Operation != "GET /render" && diagnostic.Operation != "GET /negotiate" {
 			t.Fatalf("recognized Gin renderer should not lose its response: %+v", diagnostic)
 		}
+	}
+	if !unresolvedRenderers["GET /render"] || !unresolvedRenderers["GET /negotiate"] {
+		t.Fatalf("runtime-selected renderers must be diagnosed explicitly: %+v", diagnostics.Items())
 	}
 }
 
@@ -3695,6 +3977,8 @@ type Context struct {
 func (e *Engine) GET(string, HandlerFunc)                                          {}
 func (c *Context) Status(int)                                                      {}
 func (c *Context) DataFromReader(int, int64, string, io.Reader, map[string]string) {}
+func (c *Context) SetCookie(string, string, int, string, string, bool, bool)        {}
+func (c *Context) SetCookieData(*http.Cookie)                                      {}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package headerprovenance
 
@@ -3716,6 +4000,10 @@ func (s Server) Register() {
 	s.R.GET("/writer-var", s.writerVar)
 	s.R.GET("/writer-helper", s.writerHelper)
 	s.R.GET("/const-key", s.constKey)
+	s.R.GET("/writer-status", s.writerStatus)
+	s.R.GET("/writer-status-helper", s.writerStatusHelper)
+	s.R.GET("/cookies", s.cookies)
+	s.R.GET("/raw-cookie", s.rawCookie)
 }
 
 func (s Server) requestMutation(c *gin.Context) {
@@ -3752,6 +4040,27 @@ func (s Server) constKey(c *gin.Context) {
 	c.DataFromReader(http.StatusOK, 5, "text/plain", strings.NewReader("hello"), map[string]string{
 		sessionHeader: "v",
 	})
+}
+
+func (s Server) writerStatus(c *gin.Context) {
+	c.Writer.WriteHeader(http.StatusAccepted)
+}
+
+func writeStatus(w http.ResponseWriter, status int) { w.WriteHeader(status) }
+
+func (s Server) writerStatusHelper(c *gin.Context) {
+	writeStatus(c.Writer, http.StatusAccepted)
+}
+
+func (s Server) cookies(c *gin.Context) {
+	c.SetCookie("session", "value", 3600, "/", "", true, true)
+	c.SetCookieData(&http.Cookie{Name: "theme", Value: "dark"})
+	c.Status(http.StatusNoContent)
+}
+
+func (s Server) rawCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{Name: "session", Value: "value"})
+	c.Status(http.StatusNoContent)
 }
 `)
 
@@ -3795,6 +4104,17 @@ func (s Server) constKey(c *gin.Context) {
 	// A named constant key is statically known, so it is extracted, not diagnosed.
 	if names := headerNames("constKey"); !names[sessionHeaderConstant] {
 		t.Fatalf("constant map keys must resolve, got %+v", names)
+	}
+	for _, handler := range []string{"writerStatus", "writerStatusHelper"} {
+		responses := analyzed[handler].Responses
+		if len(responses) != 1 || responses[0].Status != 202 || responses[0].Body != nil {
+			t.Fatalf("%s must preserve the Gin response writer status: %+v", handler, responses)
+		}
+	}
+	for _, handler := range []string{"cookies", "rawCookie"} {
+		if names := headerNames(handler); !names["Set-Cookie"] {
+			t.Fatalf("%s must preserve the response cookie header: %+v", handler, names)
+		}
 	}
 	for _, item := range diagnostics.Items() {
 		if item.Code == "response.header.unresolved" {

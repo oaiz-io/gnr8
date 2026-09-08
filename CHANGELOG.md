@@ -9,6 +9,34 @@ must move the minor version.
 
 ## Unreleased
 
+### Fixed
+
+- **Go/Gin route extraction covers the framework's exact single-operation registration forms.**
+  `Handle` now resolves constant standard methods (including `TRACE`), and a `Match` containing one
+  constant standard method is equivalent to its named-verb form. `Any`, multi-method `Match`,
+  dynamic methods, and methods such as `CONNECT` are reported as `source.route.unresolved` instead
+  of silently disappearing: they cannot be expanded without assigning several operations the one
+  handler-derived operation identity or emitting a method OpenAPI cannot represent. Gin's `Static*`
+  registrations are likewise diagnosed because their GET/HEAD handlers are framework-generated and
+  have no source handler identity.
+- **Go/Gin request extraction keeps Gin shortcuts, explicit binders, and the underlying request in
+  one contract.** `ShouldBindBodyWithJSON`, the `ShouldBindWith`/`BindWith`/`MustBindWith` forms, and
+  `ShouldBindBodyWith(..., binding.JSON)` now produce the same JSON body as `ShouldBindJSON`,
+  including typed generic helpers and optional-body guards. Explicit `binding.Query` and `binding.Header`
+  produce parameters rather than malformed bodies. Binder identity is resolved from Gin's own
+  package, and XML, YAML, TOML, plain-text, dynamic, or unsupported binders are diagnosed rather
+  than publishing a JSON-shaped schema under an unproved wire format. A cookie read through
+  `c.Request.Cookie` now matches `c.Cookie`, including bounded Gin-context helpers. `GetRawData` is
+  explicitly unresolved because raw bytes state neither a media type nor a schema.
+- **Go/Gin response extraction covers additional statically knowable context and writer
+  surfaces.** `AbortWithStatusPureJSON`, `AbortWithError`, `BSON`, and `FileFromFS` now preserve
+  their response facts. Constant response arguments passed through bounded helpers are propagated,
+  and `c.Writer.WriteHeader` (including a module-owned `http.ResponseWriter` helper reached from
+  that writer) records the same status and requiredness evidence as `c.Status`. Response-writer
+  provenance prevents unrelated `http.ResponseWriter` values from contributing facts. `SetCookie`,
+  `SetCookieData`, and `http.SetCookie(c.Writer, ...)` preserve the `Set-Cookie` response header;
+  runtime-selected `Render` and `Negotiate` calls now carry an explicit unresolved diagnostic.
+
 ## 0.13.0 — 2026-09-08
 
 ### Breaking
