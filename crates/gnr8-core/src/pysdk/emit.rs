@@ -309,7 +309,7 @@ fn pydantic_field_ident(field: &Field) -> String {
 }
 
 /// Quote a Python string literal for generated source.
-fn py_string_literal(value: &str) -> String {
+pub(crate) fn py_string_literal(value: &str) -> String {
     format!("{value:?}")
 }
 
@@ -2239,6 +2239,44 @@ fn resolve_op_args<'op>(
     })
 }
 
+/// The Python identifier every one of an operation's parameters is bound to, keyed by wire name.
+///
+/// The contract test calls each operation by keyword, and this is the SAME resolution
+/// [`resolve_op_args`] performs for the method signature — so a parameter whose safe identifier was
+/// disambiguated is passed under the name the method actually declares.
+///
+/// # Errors
+///
+/// Returns [`CoreError::SdkGen`] on an argument-identifier collision, exactly as signature emission
+/// does.
+pub(crate) fn resolve_op_args_for(
+    op: &Operation,
+    graph: &ApiGraph,
+) -> Result<std::collections::BTreeMap<String, String>, CoreError> {
+    let path_params: Vec<&Param> = op.params.iter().filter(|p| p.location == "path").collect();
+    let request_params: Vec<&Param> = op.params.iter().filter(|p| p.location != "path").collect();
+    let has_body = !request_body_models_of(op, graph)?.is_empty();
+    let resolved = resolve_op_args(op, &path_params, &request_params, has_body)?;
+    let mut out = std::collections::BTreeMap::new();
+    for (param, ident) in path_params.iter().zip(resolved.path_idents.iter()) {
+        out.insert(param.name.clone(), ident.clone());
+    }
+    for (param, ident) in resolved
+        .required_query
+        .iter()
+        .zip(resolved.required_query_idents.iter())
+        .chain(
+            resolved
+                .optional_query
+                .iter()
+                .zip(resolved.optional_query_idents.iter()),
+        )
+    {
+        out.insert(param.name.clone(), ident.clone());
+    }
+    Ok(out)
+}
+
 /// Emit the generated method's docstring, PEP 257 style: a one-line summary, a blank
 /// line, then the description.
 ///
@@ -2788,14 +2826,12 @@ fn emit_operation(
             "            _data = json.loads(_raw) if _raw else {{}}"
         )
         .map_err(sink)?;
-        match model_style {
-            PyModelStyle::Pydantic => {
-                writeln!(out, "            return {model}.model_validate(_data)").map_err(sink)?;
-            }
-            PyModelStyle::Dataclass => {
-                writeln!(out, "            return {model}.from_dict(_data)").map_err(sink)?;
-            }
-        }
+        writeln!(
+            out,
+            "            return {}",
+            py_decode_expr(model, graph, model_style)
+        )
+        .map_err(sink)?;
         if success.has_bodyless_alternative() {
             writeln!(out, "        return None").map_err(sink)?;
         } else {
@@ -2805,6 +2841,30 @@ fn emit_operation(
         writeln!(out, "        return json.loads(_raw) if _raw else None").map_err(sink)?;
     }
     Ok(())
+}
+
+/// The expression that turns one decoded JSON payload into the operation's success model.
+///
+/// A generated object model reconstructs through the constructor its own file emits
+/// (`model_validate` for Pydantic, `from_dict` for a dataclass). A named union, array, map or scalar
+/// is emitted as a **type alias**: there is no generated constructor to call, and this SDK does not
+/// invent a discriminator for a union the source did not discriminate, so the decoded JSON is the
+/// value — the same answer the TypeScript target gives for the same graph. Calling `model_validate`
+/// on an alias raised `AttributeError` at runtime; the SDK compiled and the operation could not be
+/// called at all.
+fn py_decode_expr(model: &str, graph: &ApiGraph, model_style: PyModelStyle) -> String {
+    let is_object = graph
+        .schemas
+        .iter()
+        .find(|schema| schema.name == model)
+        .is_some_and(|schema| matches!(schema.body, Type::Object(_)));
+    if !is_object {
+        return "_data".to_string();
+    }
+    match model_style {
+        PyModelStyle::Pydantic => format!("{model}.model_validate(_data)"),
+        PyModelStyle::Dataclass => format!("{model}.from_dict(_data)"),
+    }
 }
 
 fn py_parameter_style(param: &Param) -> &str {
@@ -3203,7 +3263,7 @@ fn py_pagination_info(
     })
 }
 
-fn py_field_ident(field: &Field, model_style: PyModelStyle) -> String {
+pub(crate) fn py_field_ident(field: &Field, model_style: PyModelStyle) -> String {
     match model_style {
         PyModelStyle::Pydantic => pydantic_field_ident(field),
         PyModelStyle::Dataclass => safe_ident(&field.json_name),

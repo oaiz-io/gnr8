@@ -11,6 +11,7 @@
 //! runs and never panics (RUST-04); [`write_to_dir`] materializes the same framing for 03-03's compile
 //! test.
 
+mod contract;
 mod emit;
 mod gofmt;
 
@@ -201,6 +202,36 @@ fn operation_groups<'op>(ops: &[&'op Operation]) -> BTreeMap<String, Vec<&'op Op
     }
     groups
 }
+
+/// Render the Go SDK's contract test as one `gofmt`-clean file, or `None` when the graph samples
+/// no cases.
+///
+/// Emitted beside the SDK rather than inside [`generate_files_with_layout`]'s bundle: the bundle is
+/// the library a consumer imports, and `contract_test.go` is a target-level artifact the `GoSdk`
+/// declaration switches on and off.
+///
+/// # Errors
+///
+/// Returns [`crate::CoreError::SdkGen`] for a sampled value with no Go literal, or
+/// [`crate::CoreError::GoFmt`] if `gofmt` rejects the emitted source.
+pub(crate) fn generate_contract_test(
+    graph: &ApiGraph,
+    package: &str,
+    plan: &crate::verify::ContractTestPlan,
+    memo_dir: Option<&std::path::Path>,
+) -> Result<Option<SdkFile>, crate::CoreError> {
+    let Some(raw) = contract::emit_contract_test(graph, package, plan)? else {
+        return Ok(None);
+    };
+    let mut formatted = gofmt::gofmt_files(
+        vec![raw_go_file(contract::CONTRACT_TEST_FILE, raw)],
+        memo_dir,
+    )?;
+    Ok(formatted.pop())
+}
+
+/// The file name the Go SDK's contract test is written at, relative to the target's output dir.
+pub(crate) const CONTRACT_TEST_FILE: &str = contract::CONTRACT_TEST_FILE;
 
 fn raw_go_file(name: impl Into<String>, raw: impl Into<String>) -> SdkFile {
     SdkFile {

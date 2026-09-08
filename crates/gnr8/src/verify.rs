@@ -163,7 +163,24 @@ pub(crate) fn run_suites(
     suites
         .iter()
         .zip(labels)
-        .map(|(suite, label)| run_suite(project_root, suite, label, artifacts))
+        .map(|(suite, label)| {
+            let owned = artifacts_under(artifacts, &suite.output_path);
+            run_suite(project_root, suite, label, &owned)
+        })
+        .collect()
+}
+
+/// The artifacts that belong to one suite's output directory.
+///
+/// A project can configure two SDK targets of the same language, so a suite must never see another
+/// target's sources: the TypeScript runner compiles every `.ts` file it is handed.
+fn artifacts_under(artifacts: &[Artifact], output_path: &str) -> Vec<Artifact> {
+    let output_path = output_path.trim_end_matches('/');
+    let prefix = format!("{output_path}/");
+    artifacts
+        .iter()
+        .filter(|artifact| artifact.path == output_path || artifact.path.starts_with(&prefix))
+        .cloned()
         .collect()
 }
 
@@ -406,9 +423,7 @@ mod tests {
     // test module so the workspace-wide RUST-04 deny stays intact for production code.
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{
-        suite_labels, SuiteReport, VerifyCounts, VerifyReport, VerifyTimings, FAILED, PASSED,
-    };
+    use super::{suite_labels, SuiteReport, VerifyReport, VerifyTimings, FAILED, PASSED};
     use crate::DiagnosticCounts;
     use gnr8_engine::verify::{ContractTestLanguage, ContractTestSuite};
 
@@ -550,9 +565,5 @@ mod tests {
         assert_eq!(value["suites"][0]["cases"], serde_json::json!(3));
         assert!(value["timings_ms"]["tests"].is_number());
         assert!(value["diagnostics"]["total"].is_number());
-        let _ = VerifyCounts {
-            passed: 0,
-            failed: 0,
-        };
     }
 }

@@ -2166,6 +2166,11 @@ impl StaticFiles {
     }
 }
 
+/// Generated contract tests are on unless a target turns them off.
+const fn default_contract_tests() -> bool {
+    true
+}
+
 /// The Go SDK target: generates the multi-file Go SDK bundle and writes each file under [`GoSdk::to`].
 ///
 /// Derives the SDK's Go package name from [`GoSdk::module`] (the last path segment, sanitized — the
@@ -2181,6 +2186,8 @@ pub struct GoSdk {
     pub docs: SdkDocs,
     pub package_metadata: bool,
     pub package_info: SdkPackageMetadata,
+    #[serde(default = "default_contract_tests")]
+    pub contract_tests: bool,
 }
 
 impl GoSdk {
@@ -2195,6 +2202,7 @@ impl GoSdk {
             docs: SdkDocs::default(),
             package_metadata: true,
             package_info: SdkPackageMetadata::default(),
+            contract_tests: true,
         }
     }
 
@@ -2273,6 +2281,16 @@ impl GoSdk {
         self
     }
 
+    /// Stop emitting the generated contract test `gnr8 verify` runs for this target.
+    ///
+    /// The suite is emitted by default: it is the executable statement of the wire contract this
+    /// SDK was generated from, and `gnr8 verify` has to mean something without extra configuration.
+    #[must_use]
+    pub const fn without_contract_tests(mut self) -> Self {
+        self.contract_tests = false;
+        self
+    }
+
     /// Emit source files only, without docs or package metadata.
     #[must_use]
     pub fn source_only(self) -> Self {
@@ -2305,6 +2323,8 @@ pub struct PySdk {
     pub package_metadata: bool,
     pub package_info: SdkPackageMetadata,
     pub root_exports: Vec<(String, String)>,
+    #[serde(default = "default_contract_tests")]
+    pub contract_tests: bool,
 }
 
 impl PySdk {
@@ -2320,6 +2340,7 @@ impl PySdk {
             package_metadata: true,
             package_info: SdkPackageMetadata::default(),
             root_exports: Vec::new(),
+            contract_tests: true,
         }
     }
 
@@ -2415,6 +2436,13 @@ impl PySdk {
         self
     }
 
+    /// Stop emitting the generated contract test `gnr8 verify` runs for this target.
+    #[must_use]
+    pub const fn without_contract_tests(mut self) -> Self {
+        self.contract_tests = false;
+        self
+    }
+
     /// Emit source files only, without generated docs.
     #[must_use]
     pub fn source_only(self) -> Self {
@@ -2445,6 +2473,8 @@ pub struct TsSdk {
     pub docs: SdkDocs,
     pub package_metadata: Option<bool>,
     pub package_info: SdkPackageMetadata,
+    #[serde(default = "default_contract_tests")]
+    pub contract_tests: bool,
 }
 
 impl TsSdk {
@@ -2458,6 +2488,7 @@ impl TsSdk {
             docs: SdkDocs::default(),
             package_metadata: None,
             package_info: SdkPackageMetadata::default(),
+            contract_tests: true,
         }
     }
 
@@ -2521,6 +2552,13 @@ impl TsSdk {
             self.package_metadata = Some(true);
         }
         self.package_info = metadata;
+        self
+    }
+
+    /// Stop emitting the generated contract test `gnr8 verify` runs for this target.
+    #[must_use]
+    pub const fn without_contract_tests(mut self) -> Self {
+        self.contract_tests = false;
         self
     }
 

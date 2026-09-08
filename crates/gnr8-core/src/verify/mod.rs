@@ -473,8 +473,7 @@ impl<'op> Candidate<'op> {
         self.bodies_complete && self.bodies.len() > 1
     }
 
-    fn query_pairs(&self, body: Option<&SampleBody>) -> Vec<(String, Vec<String>)> {
-        let _ = body;
+    fn query_pairs(&self) -> Vec<(String, Vec<String>)> {
         let mut pairs: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for param in self.params.iter().filter(|p| p.location == "query") {
             pairs
@@ -553,7 +552,7 @@ impl<'op> Candidate<'op> {
             operation_id: self.op.id.clone(),
             method: self.op.method.to_ascii_uppercase(),
             expected_path: self.absolute_path.clone(),
-            expected_query: self.query_pairs(body),
+            expected_query: self.query_pairs(),
             expected_headers: self.header_pairs(body),
             expected_body: body.map(|body| body.value.clone()),
             params: self.params.clone(),
@@ -787,13 +786,7 @@ fn typed_error_cases(candidates: &[Candidate<'_>], graph: &ApiGraph) -> Vec<Cont
             .collect();
         statuses.insert(UNDECLARED_ERROR_STATUS);
         for status in statuses {
-            if candidate
-                .op
-                .responses
-                .iter()
-                .any(|response| response.status == status && response.status < 400)
-                || !seen.insert(status)
-            {
+            if !seen.insert(status) {
                 continue;
             }
             let payload = error_payload(candidate.op, status, graph);

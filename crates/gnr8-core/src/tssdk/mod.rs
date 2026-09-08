@@ -14,6 +14,7 @@
 //! markers; the pipeline is byte-identical across runs and never panics (RUST-04). [`write_to_dir`]
 //! materializes the same framing.
 
+mod contract;
 mod emit;
 
 use crate::graph::direction::{directions_of, schema_directions};
@@ -73,6 +74,21 @@ pub fn generate_with_layout(
 
 /// Emit the TypeScript SDK files from a graph that is ALREADY direction-projected — the twin of
 /// [`crate::gosdk::generate_files_with_layout`], and projected by its caller for the same reason.
+/// The file name the TypeScript SDK's contract test is written at, relative to the output dir.
+pub(crate) const CONTRACT_TEST_FILE: &str = contract::CONTRACT_TEST_FILE;
+
+/// Render the TypeScript SDK's contract test, or `None` when the graph samples no cases.
+///
+/// # Errors
+///
+/// Returns [`crate::CoreError::SdkGen`] for a sampled value with no TypeScript literal.
+pub(crate) fn generate_contract_test(
+    graph: &ApiGraph,
+    plan: &crate::verify::ContractTestPlan,
+) -> Result<Option<String>, crate::CoreError> {
+    contract::emit_contract_test(graph, plan)
+}
+
 pub(crate) fn generate_files_with_layout(
     graph: &ApiGraph,
     package: &str,
