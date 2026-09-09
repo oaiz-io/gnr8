@@ -111,6 +111,24 @@ func (a *Accumulator) RequestParameterUnresolved(subject, method, route, reason,
 	})
 }
 
+// CookieRequirednessUnresolved records a helper-wrapped cookie whose name and
+// type are known but whose operation-specific absence behavior is not. The
+// parameter remains optional because requiredness needs a positive proof.
+func (a *Accumulator) CookieRequirednessUnresolved(name, method, route, file string, line uint32) {
+	a.items = append(a.items, facts.DiagnosticFact{
+		Code:     "request.parameter.unresolved",
+		Severity: severityWarn,
+		Category: categoryRequestParameter,
+		Message: "cookie parameter '" + name + "' on " + method + " " + route +
+			": requiredness cannot be proven from the operation caller's absence control flow; keep the absence branch explicit or add a typed parameter override",
+		File:      file,
+		Line:      line,
+		EndLine:   line,
+		Operation: method + " " + route,
+		Subject:   name,
+	})
+}
+
 // RequestParameterAmbiguous records a bound parameter whose tags state one fact
 // about it twice. This is an error rather than a warning because gnr8 read the
 // source perfectly well and refused to settle it: choosing a winner would be a

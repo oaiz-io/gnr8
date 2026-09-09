@@ -949,6 +949,10 @@ fn apply_field_meta(field: &Field, prop: &mut SchemaObject) {
     let constraints = &field.meta.constraints;
     prop.min_length = constraints.min_length;
     prop.max_length = constraints.max_length;
+    prop.min_items = constraints.min_items;
+    prop.max_items = constraints.max_items;
+    prop.min_properties = constraints.min_properties;
+    prop.max_properties = constraints.max_properties;
     prop.minimum.clone_from(&constraints.minimum);
     prop.maximum.clone_from(&constraints.maximum);
     prop.exclusive_minimum
@@ -2264,38 +2268,62 @@ mod tests {
     fn field_metadata_lowers_to_yaml_and_json_schema_keywords() {
         use crate::graph::{Field, Type};
         let mut graph = sample_graph();
-        graph.schemas[1].body = Type::Object(vec![Field {
-            json_name: "name".to_string(),
-            serializer_may_omit: false,
-            deserializer_accepts_absent: false,
-            deserializer_accepts_null: false,
-            serializer_may_emit_null: false,
-            validator_requires_presence: true,
-            validator_rejects_null: false,
-            schema: Type::Primitive(crate::graph::Prim::String),
-            description: Some("Goal name".to_string()),
-            example: Some("alpha example".to_string()),
-            meta: FieldMeta {
-                constraints: Constraints {
-                    min_length: Some(3),
-                    max_length: Some(80),
-                    enum_values: vec!["beta".to_string(), "alpha".to_string()],
-                    ..Constraints::default()
+        graph.schemas[1].body = Type::Object(vec![
+            Field {
+                json_name: "name".to_string(),
+                serializer_may_omit: false,
+                deserializer_accepts_absent: false,
+                deserializer_accepts_null: false,
+                serializer_may_emit_null: false,
+                validator_requires_presence: true,
+                validator_rejects_null: false,
+                schema: Type::Primitive(crate::graph::Prim::String),
+                description: Some("Goal name".to_string()),
+                example: Some("alpha example".to_string()),
+                meta: FieldMeta {
+                    constraints: Constraints {
+                        min_length: Some(3),
+                        max_length: Some(80),
+                        enum_values: vec!["beta".to_string(), "alpha".to_string()],
+                        ..Constraints::default()
+                    },
+                    default: Some(LiteralValue::String("alpha".to_string())),
+                    format: Some("slug".to_string()),
+                    extensions: vec![Extension {
+                        name: "x-gnr8-render".to_string(),
+                        value: LiteralValue::String("textarea".to_string()),
+                    }],
                 },
-                default: Some(LiteralValue::String("alpha".to_string())),
-                format: Some("slug".to_string()),
-                extensions: vec![Extension {
-                    name: "x-gnr8-render".to_string(),
-                    value: LiteralValue::String("textarea".to_string()),
-                }],
             },
-        }]);
+            Field {
+                json_name: "tags".to_string(),
+                serializer_may_omit: false,
+                deserializer_accepts_absent: false,
+                deserializer_accepts_null: false,
+                serializer_may_emit_null: false,
+                validator_requires_presence: true,
+                validator_rejects_null: false,
+                schema: Type::Array(Box::new(Type::Primitive(crate::graph::Prim::String))),
+                description: None,
+                example: None,
+                meta: FieldMeta {
+                    constraints: Constraints {
+                        min_items: Some(1),
+                        max_items: Some(5),
+                        ..Constraints::default()
+                    },
+                    ..FieldMeta::default()
+                },
+            },
+        ]);
 
         let yaml = to_openapi(&graph, "goalservice", "/goal", &security_config()).unwrap();
         let block = yaml.split("CreateGoalInput:").nth(1).expect("schema block");
         let block = block.split("GoalResponse:").next().unwrap_or(block);
         assert!(block.contains("minLength: 3"), "{block}");
         assert!(block.contains("maxLength: 80"), "{block}");
+        assert!(block.contains("minItems: 1"), "{block}");
+        assert!(block.contains("maxItems: 5"), "{block}");
         assert!(block.contains("format: slug"), "{block}");
         assert!(block.contains("enum: [alpha, beta]"), "{block}");
         assert!(block.contains("default: alpha"), "{block}");
@@ -2313,6 +2341,9 @@ mod tests {
         assert_eq!(prop["default"], "alpha");
         assert_eq!(prop["example"], "alpha example");
         assert_eq!(prop["x-gnr8-render"], "textarea");
+        let tags = &json["components"]["schemas"]["CreateGoalInput"]["properties"]["tags"];
+        assert_eq!(tags["minItems"], 1);
+        assert_eq!(tags["maxItems"], 5);
         assert!(
             !json_text.contains("min_length"),
             "internal metadata key leaked into JSON:\n{json_text}"

@@ -454,35 +454,7 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
     if !schema.enum_values.is_empty() {
         let _ = writeln!(out, "{pad}enum: {}", flow_seq(&schema.enum_values));
     }
-    if let Some(min_length) = schema.min_length {
-        let _ = writeln!(out, "{pad}minLength: {min_length}");
-    }
-    if let Some(max_length) = schema.max_length {
-        let _ = writeln!(out, "{pad}maxLength: {max_length}");
-    }
-    if let Some(minimum) = &schema.minimum {
-        let _ = writeln!(out, "{pad}minimum: {}", number_or_scalar(minimum));
-    }
-    if let Some(maximum) = &schema.maximum {
-        let _ = writeln!(out, "{pad}maximum: {}", number_or_scalar(maximum));
-    }
-    if let Some(exclusive_minimum) = &schema.exclusive_minimum {
-        let _ = writeln!(
-            out,
-            "{pad}exclusiveMinimum: {}",
-            number_or_scalar(exclusive_minimum)
-        );
-    }
-    if let Some(exclusive_maximum) = &schema.exclusive_maximum {
-        let _ = writeln!(
-            out,
-            "{pad}exclusiveMaximum: {}",
-            number_or_scalar(exclusive_maximum)
-        );
-    }
-    if let Some(pattern) = &schema.pattern {
-        let _ = writeln!(out, "{pad}pattern: {}", scalar(pattern));
-    }
+    write_schema_constraints(out, schema, &pad);
     if let Some(default_value) = &schema.default_value {
         let _ = writeln!(out, "{pad}default: {}", literal(default_value));
     }
@@ -517,6 +489,53 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
         write_schema(out, value_schema, depth + 1);
     } else if schema.additional_properties == Some(true) {
         let _ = writeln!(out, "{pad}additionalProperties: true");
+    }
+}
+
+/// Emit the JSON Schema validation keywords in one fixed order. They travel together on
+/// [`SchemaObject`] and the JSON writer emits the same group, so keeping them in one place is what
+/// keeps the two writers from drifting apart on ordering.
+fn write_schema_constraints(out: &mut String, schema: &SchemaObject, pad: &str) {
+    if let Some(min_length) = schema.min_length {
+        let _ = writeln!(out, "{pad}minLength: {min_length}");
+    }
+    if let Some(max_length) = schema.max_length {
+        let _ = writeln!(out, "{pad}maxLength: {max_length}");
+    }
+    if let Some(min_items) = schema.min_items {
+        let _ = writeln!(out, "{pad}minItems: {min_items}");
+    }
+    if let Some(max_items) = schema.max_items {
+        let _ = writeln!(out, "{pad}maxItems: {max_items}");
+    }
+    if let Some(min_properties) = schema.min_properties {
+        let _ = writeln!(out, "{pad}minProperties: {min_properties}");
+    }
+    if let Some(max_properties) = schema.max_properties {
+        let _ = writeln!(out, "{pad}maxProperties: {max_properties}");
+    }
+    if let Some(minimum) = &schema.minimum {
+        let _ = writeln!(out, "{pad}minimum: {}", number_or_scalar(minimum));
+    }
+    if let Some(maximum) = &schema.maximum {
+        let _ = writeln!(out, "{pad}maximum: {}", number_or_scalar(maximum));
+    }
+    if let Some(exclusive_minimum) = &schema.exclusive_minimum {
+        let _ = writeln!(
+            out,
+            "{pad}exclusiveMinimum: {}",
+            number_or_scalar(exclusive_minimum)
+        );
+    }
+    if let Some(exclusive_maximum) = &schema.exclusive_maximum {
+        let _ = writeln!(
+            out,
+            "{pad}exclusiveMaximum: {}",
+            number_or_scalar(exclusive_maximum)
+        );
+    }
+    if let Some(pattern) = &schema.pattern {
+        let _ = writeln!(out, "{pad}pattern: {}", scalar(pattern));
     }
 }
 

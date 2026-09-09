@@ -82,6 +82,206 @@ func TestFieldMetaFromTagsParsesNumericBindingsAndUnsupportedDiagnostics(t *test
 	}
 }
 
+func TestFieldMetaFromTagsLowersCollectionCardinalityWithoutChangingScalarRules(t *testing.T) {
+	tests := []struct {
+		name     string
+		tag      string
+		schema   facts.Type
+		minItems *uint64
+		maxItems *uint64
+	}{
+		{
+			name:     "binding minimum before dive",
+			tag:      `json:"names" binding:"required,min=1,dive"`,
+			schema:   facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+			minItems: uint64Ptr(1),
+		},
+		{
+			name:     "validate minimum without dive",
+			tag:      `json:"codes" validate:"required,min=1"`,
+			schema:   facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+			minItems: uint64Ptr(1),
+		},
+		{
+			name:     "binding maximum before dive",
+			tag:      `json:"slots" binding:"required,max=100,dive"`,
+			schema:   facts.ArrayType(facts.PrimitiveType(facts.IntPrim(64, true))),
+			maxItems: uint64Ptr(100),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tag := reflect.StructTag(tc.tag)
+			diags := diag.New()
+			meta := fieldMetaFromTags(
+				"CollectionRules",
+				"Values",
+				tag,
+				string(tag),
+				tc.schema,
+				"dto.go",
+				12,
+				diags,
+			)
+
+			if meta == nil || meta.Constraints == nil {
+				t.Fatalf("expected collection constraints, got %#v", meta)
+			}
+			if !equalUint64Ptr(meta.Constraints.MinItems, tc.minItems) ||
+				!equalUint64Ptr(meta.Constraints.MaxItems, tc.maxItems) {
+				t.Fatalf("collection bounds mismatch: %#v", meta.Constraints)
+			}
+			if meta.Constraints.MinLength != nil || meta.Constraints.MaxLength != nil ||
+				meta.Constraints.Minimum != nil || meta.Constraints.Maximum != nil {
+				t.Fatalf("collection bounds must not become string or numeric bounds: %#v", meta.Constraints)
+			}
+			if len(diags.Items()) != 0 {
+				t.Fatalf("supported collection bounds must not be unresolved: %#v", diags.Items())
+			}
+		})
+	}
+
+	dived := reflect.StructTag(`json:"values" validate:"min=1,dive,min=2,max=8"`)
+	divedDiags := diag.New()
+	divedMeta := fieldMetaFromTags(
+		"CollectionRules",
+		"Values",
+		dived,
+		string(dived),
+		facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+		"dto.go",
+		13,
+		divedDiags,
+	)
+	if divedMeta == nil || divedMeta.Constraints == nil ||
+		divedMeta.Constraints.MinItems == nil || *divedMeta.Constraints.MinItems != 1 ||
+		divedMeta.Constraints.MaxItems != nil {
+		t.Fatalf("post-dive bounds must not overwrite collection cardinality: %#v", divedMeta)
+	}
+	if len(divedDiags.Items()) != 0 {
+		t.Fatalf("post-dive item rules remain understood: %#v", divedDiags.Items())
+	}
+
+	unknown := reflect.StructTag(`json:"values" validate:"min=1,dive,email"`)
+	unknownDiags := diag.New()
+	_ = fieldMetaFromTags(
+		"CollectionRules",
+		"Values",
+		unknown,
+		string(unknown),
+		facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+		"dto.go",
+		14,
+		unknownDiags,
+	)
+	if !hasMetadataDiag(unknownDiags.Items(), "unsupported validate tag", "email") {
+		t.Fatalf("unrelated unsupported item rule must remain diagnosed: %#v", unknownDiags.Items())
+	}
+}
+
+// go-playground reads min/gte, max/lte, gt and lt all as bounds on len() once
+// the field is a collection, so every spelling must reach the same keyword pair.
+// A numeric bound on an array or object states nothing a validator reads.
+func TestFieldMetaFromTagsLowersEverySizeSpellingOnCollections(t *testing.T) {
+	slice := facts.ArrayType(facts.PrimitiveType(facts.StringPrim()))
+	mapping := facts.MapTypeOf(facts.PrimitiveType(facts.StringPrim()), facts.PrimitiveType(facts.StringPrim()))
+
+	for _, tc := range []struct {
+		name          string
+		tag           string
+		schema        facts.Type
+		minItems      *uint64
+		maxItems      *uint64
+		minProperties *uint64
+		maxProperties *uint64
+	}{
+		{name: "slice gte", tag: `json:"v" validate:"gte=2"`, schema: slice, minItems: uint64Ptr(2)},
+		{name: "slice lte", tag: `json:"v" validate:"lte=7"`, schema: slice, maxItems: uint64Ptr(7)},
+		// A length is a whole number, so a strict bound is exactly an inclusive one.
+		{name: "slice gt", tag: `json:"v" validate:"gt=0"`, schema: slice, minItems: uint64Ptr(1)},
+		{name: "slice lt", tag: `json:"v" validate:"lt=5"`, schema: slice, maxItems: uint64Ptr(4)},
+		{name: "map min", tag: `json:"v" validate:"min=1"`, schema: mapping, minProperties: uint64Ptr(1)},
+		{name: "map max", tag: `json:"v" binding:"max=4"`, schema: mapping, maxProperties: uint64Ptr(4)},
+		{name: "map gte", tag: `json:"v" validate:"gte=3"`, schema: mapping, minProperties: uint64Ptr(3)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tag := reflect.StructTag(tc.tag)
+			diags := diag.New()
+			meta := fieldMetaFromTags("Rules", "V", tag, string(tag), tc.schema, "dto.go", 20, diags)
+			if meta == nil || meta.Constraints == nil {
+				t.Fatalf("expected collection constraints, got %#v", meta)
+			}
+			c := meta.Constraints
+			if !equalUint64Ptr(c.MinItems, tc.minItems) || !equalUint64Ptr(c.MaxItems, tc.maxItems) ||
+				!equalUint64Ptr(c.MinProperties, tc.minProperties) || !equalUint64Ptr(c.MaxProperties, tc.maxProperties) {
+				t.Fatalf("collection bounds mismatch: %#v", c)
+			}
+			if c.Minimum != nil || c.Maximum != nil || c.ExclusiveMinimum != nil || c.ExclusiveMaximum != nil ||
+				c.MinLength != nil || c.MaxLength != nil {
+				t.Fatalf("a collection size rule must not become a scalar bound: %#v", c)
+			}
+			if len(diags.Items()) != 0 {
+				t.Fatalf("supported collection bounds must not be unresolved: %#v", diags.Items())
+			}
+		})
+	}
+
+	// `lt=0` demands a negative length. Nothing satisfies it and no keyword
+	// states it, so it is reported rather than turned into maxItems.
+	tag := reflect.StructTag(`json:"v" validate:"lt=0"`)
+	diags := diag.New()
+	meta := fieldMetaFromTags("Rules", "V", tag, string(tag), slice, "dto.go", 21, diags)
+	if meta != nil && meta.Constraints != nil && meta.Constraints.MaxItems != nil {
+		t.Fatalf("unsatisfiable bound must not be published: %#v", meta.Constraints)
+	}
+	if !hasMetadataDiag(diags.Items(), "unsupported validate tag", "lt=0") {
+		t.Fatalf("unsatisfiable bound must be reported: %#v", diags.Items())
+	}
+}
+
+func TestFieldMetaFromTagsKeepsStringSizeSpellingsAsLengths(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		tag       string
+		minLength *uint64
+		maxLength *uint64
+	}{
+		{name: "gte", tag: `json:"v" validate:"gte=2"`, minLength: uint64Ptr(2)},
+		{name: "lte", tag: `json:"v" validate:"lte=7"`, maxLength: uint64Ptr(7)},
+		{name: "gt", tag: `json:"v" validate:"gt=0"`, minLength: uint64Ptr(1)},
+		{name: "lt", tag: `json:"v" validate:"lt=5"`, maxLength: uint64Ptr(4)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tag := reflect.StructTag(tc.tag)
+			diags := diag.New()
+			meta := fieldMetaFromTags(
+				"Rules",
+				"V",
+				tag,
+				string(tag),
+				facts.PrimitiveType(facts.StringPrim()),
+				"dto.go",
+				22,
+				diags,
+			)
+			if meta == nil || meta.Constraints == nil {
+				t.Fatalf("expected string constraints, got %#v", meta)
+			}
+			c := meta.Constraints
+			if !equalUint64Ptr(c.MinLength, tc.minLength) || !equalUint64Ptr(c.MaxLength, tc.maxLength) {
+				t.Fatalf("string length bounds mismatch: %#v", c)
+			}
+			if c.Minimum != nil || c.Maximum != nil || c.ExclusiveMinimum != nil || c.ExclusiveMaximum != nil {
+				t.Fatalf("string size rule must not become a numeric bound: %#v", c)
+			}
+			if len(diags.Items()) != 0 {
+				t.Fatalf("supported string length must not be unresolved: %#v", diags.Items())
+			}
+		})
+	}
+}
+
 func TestFieldMetaFromTagsScopesConstraintsToTheFieldItself(t *testing.T) {
 	// `min=3` bounds the field; everything past `dive` bounds each element. Before
 	// scope-awareness the trailing pair overwrote the field's own bound.
@@ -277,4 +477,12 @@ func hasMetadataDiag(diags []facts.DiagnosticFact, rule string, token string) bo
 		}
 	}
 	return false
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
+}
+
+func equalUint64Ptr(left, right *uint64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }

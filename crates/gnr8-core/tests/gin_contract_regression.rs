@@ -221,6 +221,80 @@ fn assert_graph_request_contracts(graph: &ApiGraph) {
         "missing targeted Request.FormFile diagnostic: {:#?}",
         graph.diagnostics
     );
+
+    assert_collection_constraints(graph);
+}
+
+fn assert_collection_constraints(graph: &ApiGraph) {
+    let collections = graph
+        .schemas
+        .iter()
+        .filter(|schema| schema.name.starts_with("CollectionRules"))
+        .collect::<Vec<_>>();
+    assert_eq!(collections.len(), 2, "{:#?}", graph.schemas);
+    for collection in collections {
+        let Type::Object(fields) = &collection.body else {
+            panic!("CollectionRules must be an object: {collection:#?}");
+        };
+        // `min`/`max` and `gte`/`lte` state one rule on a collection, and a map is
+        // counted in keys rather than elements.
+        for (name, min_items, max_items, min_properties, max_properties) in [
+            ("names", Some(1), None, None, None),
+            ("codes", Some(1), None, None, None),
+            ("slots", None, Some(100), None, None),
+            ("sizes", Some(2), Some(6), None, None),
+            ("labels", None, None, Some(1), Some(4)),
+        ] {
+            let field = fields
+                .iter()
+                .find(|field| field.json_name == name)
+                .unwrap_or_else(|| panic!("missing CollectionRules.{name}"));
+            assert_eq!(field.meta.constraints.min_items, min_items, "{field:#?}");
+            assert_eq!(field.meta.constraints.max_items, max_items, "{field:#?}");
+            assert_eq!(
+                field.meta.constraints.min_properties, min_properties,
+                "{field:#?}"
+            );
+            assert_eq!(
+                field.meta.constraints.max_properties, max_properties,
+                "{field:#?}"
+            );
+            assert!(field.meta.constraints.min_length.is_none(), "{field:#?}");
+            assert!(field.meta.constraints.max_length.is_none(), "{field:#?}");
+            assert!(field.meta.constraints.minimum.is_none(), "{field:#?}");
+            assert!(field.meta.constraints.maximum.is_none(), "{field:#?}");
+            assert!(
+                field.meta.constraints.exclusive_minimum.is_none(),
+                "{field:#?}"
+            );
+            assert!(
+                field.meta.constraints.exclusive_maximum.is_none(),
+                "{field:#?}"
+            );
+        }
+        let label = fields
+            .iter()
+            .find(|field| field.json_name == "label")
+            .expect("CollectionRules.label");
+        assert_eq!(label.meta.constraints.min_length, Some(2));
+        assert_eq!(label.meta.constraints.max_length, Some(24));
+        let rank = fields
+            .iter()
+            .find(|field| field.json_name == "rank")
+            .expect("CollectionRules.rank");
+        assert_eq!(rank.meta.constraints.minimum.as_deref(), Some("1"));
+        assert_eq!(rank.meta.constraints.maximum.as_deref(), Some("9"));
+    }
+    for diagnostic in &graph.diagnostics {
+        if diagnostic.code == "schema.metadata.unresolved"
+            && matches!(
+                diagnostic.subject.as_deref(),
+                Some("Names" | "Codes" | "Slots" | "Sizes" | "Labels")
+            )
+        {
+            panic!("collection cardinality must not remain unresolved: {diagnostic:#?}");
+        }
+    }
 }
 
 fn assert_typescript_client(ts_client: &str) {
@@ -387,6 +461,25 @@ fn assert_graph(graph_json: &str) {
             "graph requiredness for {operation_id}.{parameter_name}"
         );
     }
+    for (operation_id, required) in [
+        ("cookieAccepted", false),
+        ("cookieDefault", false),
+        ("cookieRejected", true),
+        ("cookieUnresolved", false),
+    ] {
+        let operation = artifact
+            .graph
+            .operations
+            .iter()
+            .find(|operation| operation.id == operation_id)
+            .unwrap_or_else(|| panic!("missing graph operation {operation_id}"));
+        let cookie = operation
+            .params
+            .iter()
+            .find(|parameter| parameter.location == "cookie" && parameter.name == "shared-cookie")
+            .unwrap_or_else(|| panic!("missing shared cookie on {operation_id}"));
+        assert_eq!(cookie.required, required, "{operation_id}: {cookie:#?}");
+    }
 }
 
 fn assert_openapi(openapi: &str) {
@@ -434,6 +527,46 @@ fn assert_openapi(openapi: &str) {
         .next()
         .expect("bounded ids property");
     assert!(!ids.contains("null"), "{ids}");
+
+    let collection = path_section(openapi, "/v1/items/collection-cardinality");
+    assert!(
+        collection.contains("#/components/schemas/CollectionPayloadInput")
+            && collection.contains("#/components/schemas/CollectionPayloadOutput"),
+        "input/output schema projection lost the collection DTO:\n{collection}"
+    );
+    for schema_name in ["CollectionRulesInput", "CollectionRulesOutput"] {
+        let rules = component_section(openapi, schema_name);
+        for (name, keyword) in [
+            ("names", "minItems: 1"),
+            ("codes", "minItems: 1"),
+            ("slots", "maxItems: 100"),
+            ("sizes", "minItems: 2"),
+            ("sizes", "maxItems: 6"),
+            ("labels", "minProperties: 1"),
+            ("labels", "maxProperties: 4"),
+        ] {
+            let property = property_section(rules, name);
+            assert!(
+                property.contains("type:") && property.contains(keyword),
+                "{name} missing {keyword}:\n{rules}"
+            );
+            assert!(
+                !property.contains("minLength:")
+                    && !property.contains("maxLength:")
+                    && !property.contains("minimum:")
+                    && !property.contains("maximum:"),
+                "{schema_name}.{name}:\n{property}"
+            );
+        }
+        assert!(
+            rules.contains("minLength: 2") && rules.contains("maxLength: 24"),
+            "{rules}"
+        );
+        assert!(
+            rules.contains("minimum: 1") && rules.contains("maximum: 9"),
+            "{rules}"
+        );
+    }
 }
 
 fn assert_openapi_request_contracts(openapi: &str) {
@@ -606,6 +739,20 @@ fn assert_openapi_parameter_contracts(openapi: &str) {
         optional.contains("name: view\n        in: query\n        required: false"),
         "optional direct-query proof did not reach OpenAPI:\n{optional}"
     );
+    for (path, required) in [
+        ("/v1/items/cookie-accepted", false),
+        ("/v1/items/cookie-default", false),
+        ("/v1/items/cookie-rejected", true),
+        ("/v1/items/cookie-unresolved", false),
+    ] {
+        let operation = path_section(openapi, path);
+        assert!(
+            operation.contains(&format!(
+                "name: shared-cookie\n        in: cookie\n        required: {required}"
+            )),
+            "shared cookie requiredness mismatch for {path}:\n{operation}"
+        );
+    }
 }
 
 fn path_section<'a>(openapi: &'a str, path: &str) -> &'a str {
@@ -625,6 +772,25 @@ fn component_section<'a>(openapi: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing OpenAPI component {name}"));
     let end = section
         .match_indices("\n    ")
+        .find_map(|(index, marker)| {
+            section
+                .as_bytes()
+                .get(index + marker.len())
+                .is_some_and(|next| *next != b' ')
+                .then_some(index)
+        })
+        .unwrap_or(section.len());
+    &section[..end]
+}
+
+fn property_section<'a>(schema: &'a str, name: &str) -> &'a str {
+    let marker = format!("        {name}:\n");
+    let section = schema
+        .split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing schema property {name}"));
+    let end = section
+        .match_indices("\n        ")
         .find_map(|(index, marker)| {
             section
                 .as_bytes()
@@ -762,6 +928,20 @@ fn go_gin_contract_pipeline_generates_expected_sdk_surfaces() {
         "Authorization reads must remain actionable until user code configures security: {:?}",
         outcome.diagnostics
     );
+    let cookie_diagnostics = outcome
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code == "request.parameter.unresolved"
+                && diagnostic.subject.as_deref() == Some("shared-cookie")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cookie_diagnostics.len(), 1, "{:?}", outcome.diagnostics);
+    assert_eq!(
+        cookie_diagnostics[0].operation.as_deref(),
+        Some("GET /v1/items/cookie-unresolved")
+    );
+    assert!(cookie_diagnostics[0].message.contains("requiredness"));
 
     for file in &outcome.artifacts {
         assert!(

@@ -64,6 +64,7 @@ func TestGinContractRegressionFacts(t *testing.T) {
 		"response.missing\x00GET /v1/items/raw-stream":                        true,
 		"response.header.unresolved\x00GET /v1/files/{fileId}/dynamic-header": true,
 		"request.parameter.unresolved\x00POST /v1/files/dynamic-upload":       true,
+		"request.parameter.unresolved\x00GET /v1/items/cookie-unresolved":     true,
 		"request.body.unresolved\x00POST /v1/files/dynamic-upload":            true,
 		"request.body.unresolved\x00POST /v1/files/form-file/request-dynamic": true,
 		"security.requirement.missing\x00GET /v1/items/request-observations":  true,

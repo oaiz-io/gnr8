@@ -2446,6 +2446,10 @@ fn field_meta_from_schema(schema: &Value) -> FieldMeta {
         constraints: Constraints {
             min_length: schema.get("minLength").and_then(Value::as_u64),
             max_length: schema.get("maxLength").and_then(Value::as_u64),
+            min_items: schema.get("minItems").and_then(Value::as_u64),
+            max_items: schema.get("maxItems").and_then(Value::as_u64),
+            min_properties: schema.get("minProperties").and_then(Value::as_u64),
+            max_properties: schema.get("maxProperties").and_then(Value::as_u64),
             minimum: schema.get("minimum").map(json_number_or_string),
             maximum: schema.get("maximum").map(json_number_or_string),
             exclusive_minimum: schema.get("exclusiveMinimum").map(json_number_or_string),

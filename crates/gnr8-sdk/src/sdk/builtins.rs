@@ -1902,6 +1902,34 @@ impl OpenApiFieldPatch {
         self
     }
 
+    /// Set `minItems`.
+    #[must_use]
+    pub fn min_items(mut self, value: u64) -> Self {
+        self.constraints.min_items = Some(value);
+        self
+    }
+
+    /// Set `maxItems`.
+    #[must_use]
+    pub fn max_items(mut self, value: u64) -> Self {
+        self.constraints.max_items = Some(value);
+        self
+    }
+
+    /// Set `minProperties`.
+    #[must_use]
+    pub fn min_properties(mut self, value: u64) -> Self {
+        self.constraints.min_properties = Some(value);
+        self
+    }
+
+    /// Set `maxProperties`.
+    #[must_use]
+    pub fn max_properties(mut self, value: u64) -> Self {
+        self.constraints.max_properties = Some(value);
+        self
+    }
+
     /// Set inclusive numeric `minimum`.
     #[must_use]
     pub fn minimum(mut self, value: impl Into<String>) -> Self {

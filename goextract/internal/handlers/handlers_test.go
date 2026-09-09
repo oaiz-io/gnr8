@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -3237,6 +3239,429 @@ func (s Server) data(c *gin.Context) {
 		if !ok || param.Location != "header" || !param.Required {
 			t.Fatalf("%s should reject an absent %s: %+v", handler, header, param)
 		}
+	}
+}
+
+func TestSharedCookieHelperRequirednessComesFromEachCaller(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/cookierequiredness
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Cookie(string) (string, error) { return "", nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package cookierequiredness
+
+import (
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct{ R *gin.Engine }
+type Response struct { Value string `+"`"+`json:"value"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/accepted", s.accepted)
+	s.R.GET("/default", s.defaultValue)
+	s.R.GET("/rejected", s.rejected)
+	s.R.GET("/unresolved", s.unresolved)
+	s.R.GET("/rejected-then-not-found", s.rejectedThenNotFound)
+	s.R.GET("/discarded-then-not-found", s.discardedThenNotFound)
+	s.R.GET("/direct-optional", s.directOptional)
+	s.R.GET("/direct-required", s.directRequired)
+}
+
+func readCookie(c *gin.Context) (string, error) {
+	return c.Cookie("shared-cookie")
+}
+
+func lookup(id string) (string, error) {
+	return id, nil
+}
+
+func (s Server) accepted(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil {
+		value = "anonymous"
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) defaultValue(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil {
+		c.JSON(200, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) rejected(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) unresolved(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil && time.Now().Unix()%2 == 0 {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) rejectedThenNotFound(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	item, err := lookup(value)
+	if err != nil {
+		c.JSON(404, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: item})
+}
+
+func (s Server) discardedThenNotFound(c *gin.Context) {
+	value, _ := readCookie(c)
+	item, err := lookup(value)
+	if err != nil {
+		c.JSON(404, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: item})
+}
+
+func (s Server) directOptional(c *gin.Context) {
+	_, _ = c.Cookie("direct-optional")
+	c.JSON(200, Response{})
+}
+
+func (s Server) directRequired(c *gin.Context) {
+	_, err := c.Cookie("direct-required")
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load shared cookie fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/cookierequiredness", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for handler, expected := range map[string]struct {
+		name     string
+		required bool
+	}{
+		"accepted":     {name: "shared-cookie"},
+		"defaultValue": {name: "shared-cookie"},
+		"rejected":     {name: "shared-cookie", required: true},
+		"unresolved":   {name: "shared-cookie"},
+		// A second response path after the absence branch belongs to the present
+		// cookie, so it cannot unsettle what the absent one proved.
+		"rejectedThenNotFound":  {name: "shared-cookie", required: true},
+		"discardedThenNotFound": {name: "shared-cookie"},
+		"directOptional":        {name: "direct-optional"},
+		"directRequired":        {name: "direct-required", required: true},
+	} {
+		name := expected.name
+		param, ok := paramByName(got[handler].Params, name)
+		if !ok || param.Location != "cookie" || param.Required != expected.required {
+			t.Fatalf("%s cookie requiredness mismatch: %+v", handler, param)
+		}
+	}
+
+	// Exactly one caller leaves requiredness open, so exactly one operation may be
+	// diagnosed: a proof that reads past the absence branch would also report the
+	// callers that answer twice, which are settled.
+	var reported []facts.DiagnosticFact
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.parameter.unresolved" && item.Subject == "shared-cookie" {
+			reported = append(reported, item)
+		}
+	}
+	if len(reported) != 1 {
+		t.Fatalf("expected one unresolved shared-cookie requiredness diagnostic, got: %+v", reported)
+	}
+	if reported[0].Operation != "GET /unresolved" || !strings.Contains(reported[0].Message, "requiredness") {
+		t.Fatalf("cookie requiredness diagnostic must be scoped to the unresolved caller: %+v", reported[0])
+	}
+}
+
+// The absence branch is one fact, so every spelling Go offers for it must reach
+// the same answer, and a branch that is not about this read must reach none.
+func TestCookieAbsenceBranchIsReadInEveryGoSpelling(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/cookiespellings
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Cookie(string) (string, error) { return "", nil }
+func (c *Context) GetHeader(string) string       { return "" }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package cookiespellings
+
+import (
+	"errors"
+	"io"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct{ R *gin.Engine }
+type Response struct { Value string `+"`"+`json:"value"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/if-with-init", s.ifWithInit)
+	s.R.GET("/errors-is", s.errorsIs)
+	s.R.GET("/statement-between", s.statementBetween)
+	s.R.GET("/direct-errors-is", s.directErrorsIs)
+	s.R.GET("/direct-unrelated-sentinel", s.directUnrelatedSentinel)
+	s.R.GET("/rebound-error", s.reboundError)
+	s.R.GET("/swallowed", s.swallowed)
+	s.R.GET("/unrelated-sentinel", s.unrelatedSentinel)
+	s.R.GET("/normalized", s.normalized)
+	s.R.GET("/multi-hop", s.multiHop)
+	s.R.GET("/header-helper", s.headerHelper)
+}
+
+func readCookie(c *gin.Context) (string, error) { return c.Cookie("shared") }
+
+func forwardCookie(c *gin.Context) (string, error) { return readCookie(c) }
+
+func normalizedCookie(c *gin.Context) (string, error) {
+	value, err := c.Cookie("normalized")
+	if errors.Is(err, http.ErrNoCookie) {
+		return "anonymous", nil
+	}
+	return value, err
+}
+
+// Reads a cookie, then answers with a failure of its own: the caller rejecting
+// that failure says nothing about the cookie.
+func swallowingHelper(c *gin.Context) (string, error) {
+	value, _ := c.Cookie("swallowed")
+	if value == "" {
+		return "", errors.New("unrelated failure")
+	}
+	return value, nil
+}
+
+// GetHeader answers absence with an empty string, so this error is unrelated to
+// the header it happens to read.
+func headerAndError(c *gin.Context) (string, error) {
+	_ = c.GetHeader("X-Trace")
+	return "", errors.New("unrelated failure")
+}
+
+func nextValue() (string, error) { return "", nil }
+
+func (s Server) ifWithInit(c *gin.Context) {
+	if value, err := readCookie(c); err != nil {
+		c.JSON(401, Response{})
+		return
+	} else {
+		c.JSON(200, Response{Value: value})
+	}
+}
+
+func (s Server) errorsIs(c *gin.Context) {
+	value, err := readCookie(c)
+	if errors.Is(err, http.ErrNoCookie) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) statementBetween(c *gin.Context) {
+	value, err := readCookie(c)
+	trace := "cookie-read"
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value + trace})
+}
+
+func (s Server) directErrorsIs(c *gin.Context) {
+	value, err := c.Cookie("direct")
+	if errors.Is(err, http.ErrNoCookie) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) directUnrelatedSentinel(c *gin.Context) {
+	value, err := c.Cookie("direct-unrelated")
+	if errors.Is(err, io.EOF) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+// The same object is rebound by the second read, so this branch tests that
+// read's failure and proves nothing about the cookie.
+func (s Server) reboundError(c *gin.Context) {
+	value, err := readCookie(c)
+	other, err := nextValue()
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value + other})
+}
+
+func (s Server) swallowed(c *gin.Context) {
+	value, err := swallowingHelper(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) unrelatedSentinel(c *gin.Context) {
+	value, err := readCookie(c)
+	if errors.Is(err, io.EOF) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) normalized(c *gin.Context) {
+	value, err := normalizedCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) multiHop(c *gin.Context) {
+	value, err := forwardCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) headerHelper(c *gin.Context) {
+	value, err := headerAndError(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load cookie spelling fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/cookiespellings", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for handler, expected := range map[string]struct {
+		name     string
+		location string
+		required bool
+	}{
+		// Every spelling of "this read failed" proves the same rejection.
+		"ifWithInit":              {name: "shared", location: "cookie", required: true},
+		"errorsIs":                {name: "shared", location: "cookie", required: true},
+		"statementBetween":        {name: "shared", location: "cookie", required: true},
+		"directErrorsIs":          {name: "direct", location: "cookie", required: true},
+		"directUnrelatedSentinel": {name: "direct-unrelated", location: "cookie"},
+		// A branch about a different failure proves nothing.
+		"reboundError": {name: "shared", location: "cookie"},
+		"swallowed":    {name: "swallowed", location: "cookie"},
+		// An unrelated sentinel is not proof that absence is rejected, and a
+		// helper that converts ErrNoCookie to a successful default is optional.
+		"unrelatedSentinel": {name: "shared", location: "cookie"},
+		"normalized":        {name: "normalized", location: "cookie"},
+		// Transparent helper hops preserve the operation caller's proof.
+		"multiHop":     {name: "shared", location: "cookie", required: true},
+		"headerHelper": {name: "X-Trace", location: "header"},
+	} {
+		param, ok := paramByName(got[handler].Params, expected.name)
+		if !ok || param.Location != expected.location || param.Required != expected.required {
+			t.Fatalf("%s requiredness mismatch: %+v", handler, param)
+		}
+	}
+
+	// Rebinding loses the read identity, and comparing with an unrelated
+	// sentinel does not prove how ErrNoCookie flows. A helper that handles
+	// ErrNoCookie itself is settled optional and a transparent hop is settled
+	// required, so neither is diagnosed.
+	var reported []string
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.parameter.unresolved" {
+			reported = append(reported, item.Operation)
+		}
+	}
+	sort.Strings(reported)
+	wantReported := []string{"GET /rebound-error", "GET /unrelated-sentinel"}
+	if !reflect.DeepEqual(reported, wantReported) {
+		t.Fatalf("unexpected unresolved parameter diagnostics: %+v", reported)
 	}
 }
 

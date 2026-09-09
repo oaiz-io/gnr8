@@ -84,6 +84,20 @@ type SharedPayload struct {
 	Data []string `json:"data,omitempty"`
 }
 
+type CollectionRules struct {
+	Names  []string          `json:"names" binding:"required,min=1,dive"`
+	Codes  []string          `json:"codes" validate:"required,min=1"`
+	Slots  [3]int            `json:"slots" binding:"required,max=100,dive"`
+	Sizes  []int             `json:"sizes" validate:"gte=2,lte=6"`
+	Labels map[string]string `json:"labels" binding:"min=1,max=4"`
+	Label  string            `json:"label" validate:"min=2,max=24"`
+	Rank   int               `json:"rank" binding:"min=1,max=9"`
+}
+
+type CollectionPayload struct {
+	Rules CollectionRules `json:"rules" binding:"required"`
+}
+
 type FileBytes []byte
 
 const (
@@ -136,6 +150,11 @@ func RegisterRoutes(r *gin.Engine, h *Handler) {
 	items.GET("/directional", h.directional)
 	items.POST("/validated", h.validated)
 	items.POST("/shared", h.shared)
+	items.POST("/collection-cardinality", h.collectionCardinality)
+	items.GET("/cookie-accepted", h.cookieAccepted)
+	items.GET("/cookie-default", h.cookieDefault)
+	items.GET("/cookie-rejected", h.cookieRejected)
+	items.GET("/cookie-unresolved", h.cookieUnresolved)
 	items.POST("/queueable", h.queueable)
 	items.DELETE("/:itemId", h.deleteItem)
 }
@@ -366,6 +385,54 @@ func (h *Handler) shared(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, body)
+}
+
+func (h *Handler) collectionCardinality(c *gin.Context) {
+	var body CollectionPayload
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, MessageResponse{Message: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, body)
+}
+
+func sharedCookie(c *gin.Context) (string, error) {
+	return c.Cookie("shared-cookie")
+}
+
+func (h *Handler) cookieAccepted(c *gin.Context) {
+	value, err := sharedCookie(c)
+	if err != nil {
+		value = "anonymous"
+	}
+	c.JSON(http.StatusOK, MessageResponse{Message: value})
+}
+
+func (h *Handler) cookieDefault(c *gin.Context) {
+	value, err := sharedCookie(c)
+	if err != nil {
+		c.JSON(http.StatusOK, MessageResponse{})
+		return
+	}
+	c.JSON(http.StatusOK, MessageResponse{Message: value})
+}
+
+func (h *Handler) cookieRejected(c *gin.Context) {
+	value, err := sharedCookie(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, MessageResponse{Message: "missing cookie"})
+		return
+	}
+	c.JSON(http.StatusOK, MessageResponse{Message: value})
+}
+
+func (h *Handler) cookieUnresolved(c *gin.Context) {
+	value, err := sharedCookie(c)
+	if err != nil && time.Now().Unix()%2 == 0 {
+		c.JSON(http.StatusUnauthorized, MessageResponse{Message: "missing cookie"})
+		return
+	}
+	c.JSON(http.StatusOK, MessageResponse{Message: value})
 }
 
 func (h *Handler) searchItems(c *gin.Context) {
