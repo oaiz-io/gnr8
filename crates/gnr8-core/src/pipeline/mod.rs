@@ -16,6 +16,7 @@ use crate::sdk::{
     StagePlan,
 };
 use crate::store::Store;
+use crate::verify::ContractTestSuite;
 use crate::CoreError;
 
 /// The worker-side half of a pipeline run: whatever executes the user's own stages.
@@ -163,6 +164,8 @@ pub struct PipelineOutcome {
     pub output_anchors: Vec<String>,
     /// Readiness checks declared by every target.
     pub readiness_targets: Vec<ReadinessTarget>,
+    /// Generated contract-test suites declared by every target.
+    pub contract_test_suites: Vec<ContractTestSuite>,
     /// How many distinct source files contributed a fact to the graph.
     pub source_files: usize,
 }
@@ -194,6 +197,26 @@ pub fn readiness_targets(plan: &StagePlan) -> Vec<ReadinessTarget> {
             } => readiness_targets.clone(),
         })
         .collect()
+}
+
+/// The generated contract-test suites a plan's targets declare for one graph.
+///
+/// # Errors
+///
+/// Returns [`CoreError`] when a target's planner rejects a fact in the graph.
+pub fn contract_test_suites(
+    plan: &StagePlan,
+    ir: &ApiGraph,
+) -> Result<Vec<ContractTestSuite>, CoreError> {
+    let mut suites = Vec::new();
+    for stage in &plan.targets {
+        // A custom target is the user's own code; gnr8 has no emitter for its wire contract and does
+        // not invent one.
+        if let PlanStage::Builtin(spec) = stage {
+            suites.extend(builtins::target_contract_test_suites(spec, ir)?);
+        }
+    }
+    Ok(suites)
 }
 
 /// Project-relative input roots the plan's built-in source declares.
@@ -401,6 +424,8 @@ pub fn run(
 
     // This internal artifact is intentionally created after post-processors. Formatters and banner
     // writers apply to user-configured target output; the versioned graph must remain exact JSON.
+    let contract_test_suites = contract_test_suites(plan, &generation_ir)?;
+
     artifacts.begin_stage("gnr8:GraphArtifact");
     let graph_json = crate::graph_artifact::GraphArtifact::new(generation_ir).to_json()?;
     artifacts.create(crate::graph_artifact::GRAPH_ARTIFACT_PATH, graph_json)?;
@@ -412,6 +437,7 @@ pub fn run(
         diagnostics,
         output_anchors: output_anchors(plan),
         readiness_targets: readiness_targets(plan),
+        contract_test_suites,
         source_files,
     })
 }

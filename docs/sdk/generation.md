@@ -32,14 +32,38 @@ derive the generated package name unless package metadata supplies a registry na
 
 ## Defaults
 
-| Target | Model/runtime default | Layout | Docs | Package metadata |
-|---|---|---|---|---|
-| Go | Go 1.23, minimal client | compact | README + `reference.md` | `go.mod` + `PUBLISHING.md` |
-| Python | Pydantic v2, minimal client | compact | README + `reference.md` | `pyproject.toml` + `PUBLISHING.md` |
-| TypeScript | minimal fetch-based client | compact | README + `reference.md` | off by default |
+| Target | Model/runtime default | Layout | Docs | Package metadata | Contract test |
+|---|---|---|---|---|---|
+| Go | Go 1.23, minimal client | compact | README + `reference.md` | `go.mod` + `PUBLISHING.md` | `contract_test.go` |
+| Python | Pydantic v2, minimal client | compact | README + `reference.md` | `pyproject.toml` + `PUBLISHING.md` | `contract_test.py` |
+| TypeScript | minimal fetch-based client | compact | README + `reference.md` | off by default | `contract.test.ts` |
 
 Package metadata defaults to version `0.1.0`. `source_only()` disables generated docs and package
 metadata. `without_docs()` disables docs only; `package_metadata(bool)` controls metadata files.
+
+## Generated contract tests
+
+Every SDK target emits a contract test beside its sources, derived from the same API graph the SDK
+was generated from. `gnr8 verify` runs it with that language's own test tool — `go test ./...`,
+`unittest`, and the project's `typescript` followed by `node --test` — against a fake transport
+installed on the seam the client already exposes (`WithHTTPClient`, `opener`, `ClientOptions.fetch`).
+The cases assert the request method, path, query encoding and headers, the serialized request body,
+response decoding including an omitted optional field, typed errors, authentication, and that a
+redirect is surfaced rather than followed.
+
+Cases are sampled per wire-shape class, not per operation: one representative per distinct request
+shape, success model, error status and security scheme, capped at 24 cases per target. The file is a
+generated artifact like any other, so `gnr8 check` reports it when it drifts and `gnr8 generate`
+removes it when the operations it covered disappear.
+
+`without_contract_tests()` stops a target emitting it:
+
+```rust
+GoSdk::new()
+    .module("example.com/acme/sdk")
+    .to("sdk")
+    .without_contract_tests()
+```
 
 ## Field presence in generated models
 

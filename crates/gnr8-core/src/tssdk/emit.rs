@@ -99,7 +99,7 @@ fn upper_camel_first(name: &str) -> String {
 /// so the SDK's compile-time contract would no longer match the wire value. Escaping `\` and `"`
 /// (plus newline/CR/tab and other C0 control chars) preserves the wire value EXACTLY while keeping
 /// the emitted literal valid TS (CR-01).
-fn ts_string_literal(s: &str) -> String {
+pub(crate) fn ts_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for ch in s.chars() {
@@ -126,7 +126,7 @@ fn ts_string_literal(s: &str) -> String {
 /// (kebab-case, leading digit, spaces, empty) must be emitted as a QUOTED string-literal member via
 /// [`ts_string_literal`] (CR-02). Reserved words are intentionally NOT rejected: TypeScript accepts
 /// reserved words as object/interface member names, so treating them as bare identifiers is valid.
-fn is_ident(name: &str) -> bool {
+pub(crate) fn is_ident(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
@@ -1444,8 +1444,8 @@ struct ResolvedParam<'op> {
 /// `params` is in GRAPH order — the declaration order the emitted `{Operation}Params` type reproduces.
 /// Wire-append order (required first, then optional) is applied at the write sites so the emitted query
 /// string is unchanged by this shape.
-struct ResolvedArgs<'op> {
-    path_idents: Vec<String>,
+pub(crate) struct ResolvedArgs<'op> {
+    pub(crate) path_idents: Vec<String>,
     params: Vec<ResolvedParam<'op>>,
 }
 
@@ -1476,7 +1476,17 @@ const RESERVED_ARGS: &[&str] = &[
     "res",
 ];
 
-impl ResolvedArgs<'_> {
+impl<'op> ResolvedArgs<'op> {
+    /// The properties the generated `{Operation}Params` object declares, with their emitted keys.
+    ///
+    /// A parameter the fetch transport owns (a cookie, a forbidden header) never becomes a property,
+    /// so a caller that reads this cannot name one that does not exist.
+    pub(crate) fn properties(&self) -> impl Iterator<Item = (&'op Param, &str)> + '_ {
+        self.params
+            .iter()
+            .map(|resolved| (resolved.param, resolved.key.as_str()))
+    }
+
     /// Whether this operation takes a params object at all.
     fn has_params(&self) -> bool {
         !self.params.is_empty()
@@ -1623,7 +1633,7 @@ pub(crate) fn operation_params_type_name(op: &Operation) -> String {
     format!("{}Params", upper_camel_first(&operation_method_name(op)))
 }
 
-fn operation_body_type_name(op: &Operation) -> String {
+pub(crate) fn operation_body_type_name(op: &Operation) -> String {
     format!("{}Body", upper_camel_first(&operation_method_name(op)))
 }
 
@@ -2120,10 +2130,10 @@ fn body_at_style_depth(body: &str, style: OperationEmitStyle) -> String {
 /// Resolved ONCE per site by [`ts_operation_shape`] so the method signature, the emitted
 /// `{Operation}Params` type, and the pagination generators are all derived from the same reading of
 /// the operation (rule 3: one path per fact).
-struct TsOperationShape<'op> {
-    path_params: Vec<&'op Param>,
-    body_models: Vec<RequestBodyModel>,
-    resolved: ResolvedArgs<'op>,
+pub(crate) struct TsOperationShape<'op> {
+    pub(crate) path_params: Vec<&'op Param>,
+    pub(crate) body_models: Vec<RequestBodyModel>,
+    pub(crate) resolved: ResolvedArgs<'op>,
 }
 
 /// Split one operation's parameters into positional path params and params-object properties.
@@ -2131,7 +2141,7 @@ struct TsOperationShape<'op> {
 /// # Errors
 ///
 /// Returns [`CoreError::SdkGen`] on a dangling request-body `$ref` or an argument-identifier collision.
-fn ts_operation_shape<'op>(
+pub(crate) fn ts_operation_shape<'op>(
     op: &'op Operation,
     graph: &ApiGraph,
 ) -> Result<TsOperationShape<'op>, CoreError> {
@@ -2157,9 +2167,9 @@ fn ts_operation_shape<'op>(
 /// `declared` is the method's parameter list; `forwarded` is the matching call-site list. The
 /// pagination generators reuse the same builder so their signature can never drift from the operation
 /// method they call.
-struct TsOperationArgs {
+pub(crate) struct TsOperationArgs {
     declared: Vec<String>,
-    forwarded: Vec<String>,
+    pub(crate) forwarded: Vec<String>,
 }
 
 /// Assemble one operation's argument list: positional path params, the typed body, the single params
@@ -2172,7 +2182,7 @@ struct TsOperationArgs {
 ///
 /// `params_expr` is what `forwarded` passes in the params slot: the caller's own `params` for a
 /// straight forward, or the generator's mutable page-local copy.
-fn ts_operation_args(
+pub(crate) fn ts_operation_args(
     op: &Operation,
     graph: &ApiGraph,
     path_params: &[&Param],

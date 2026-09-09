@@ -11,6 +11,7 @@
 //! file is framed into a [`bundle::SdkBundle`] with stable file markers; the pipeline is byte-identical
 //! across runs and never panics (RUST-04). [`write_to_dir`] materializes the same framing.
 
+mod contract;
 mod emit;
 
 use std::collections::BTreeMap;
@@ -89,6 +90,35 @@ pub fn generate_with_options(
     let files = generate_files_with_options(&projected, package, base_path, layout, model_style)?;
     let bundle = SdkBundle { files };
     Ok(bundle.to_string())
+}
+
+/// The file name the Python SDK's contract test is written at, relative to the target's output dir.
+pub(crate) const CONTRACT_TEST_FILE: &str = contract::CONTRACT_TEST_FILE;
+
+/// The module the generated package imports its models from, for one file layout.
+///
+/// The contract test imports the same module the client does, resolved the one way
+/// [`generate_files_with_options`] resolves it.
+pub(crate) fn model_module_for(layout: &SdkFileLayout) -> String {
+    layout
+        .model_dir_ref()
+        .unwrap_or("models")
+        .trim_matches('/')
+        .replace('/', ".")
+}
+
+/// Render the Python SDK's contract test, or `None` when the graph samples no cases.
+///
+/// # Errors
+///
+/// Returns [`crate::CoreError::SdkGen`] for a sampled value with no Python literal.
+pub(crate) fn generate_contract_test(
+    graph: &ApiGraph,
+    layout: &SdkFileLayout,
+    model_style: PyModelStyle,
+    plan: &crate::verify::ContractTestPlan,
+) -> Result<Option<String>, crate::CoreError> {
+    contract::emit_contract_test(graph, &model_module_for(layout), model_style, plan)
 }
 
 /// Emit the Python SDK files from a graph that is ALREADY direction-projected — the twin of

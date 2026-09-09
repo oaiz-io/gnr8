@@ -43,6 +43,7 @@ pub mod resource;
 pub mod sdk;
 pub mod store;
 pub mod tssdk;
+pub mod verify;
 pub mod worker;
 pub mod workspace;
 

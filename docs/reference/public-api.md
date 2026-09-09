@@ -109,9 +109,9 @@ See [OpenAPI generation](../openapi/generation.md).
 
 | Symbol | Use |
 |---|---|
-| `GoSdk` | Go client/model/docs/package target |
-| `PySdk` | Python client/model/docs/package target |
-| `TsSdk` | TypeScript client/model/docs/package target |
+| `GoSdk` | Go client/model/docs/package/contract-test target |
+| `PySdk` | Python client/model/docs/package/contract-test target |
+| `TsSdk` | TypeScript client/model/docs/package/contract-test target |
 | `SdkFileLayout` | compact/split files, directories, and templates |
 | `OperationFileSplit` | compact/per-tag/per-endpoint operation layout enum |
 | `SdkDocs` | none/reference generated docs policy |
@@ -120,6 +120,9 @@ See [OpenAPI generation](../openapi/generation.md).
 | `StaticFiles` | copy exact companion files or included directory trees |
 | `ReadinessTarget` | declare a generated package/artifact for `doctor` validation |
 | `ReadinessKind` | choose the OpenAPI, Go, Python, or TypeScript readiness validator |
+
+Each SDK target emits a contract test `gnr8 verify` runs with that language's own test tool;
+`without_contract_tests()` stops it.
 
 See [SDK generation](../sdk/generation.md).
 

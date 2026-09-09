@@ -37,7 +37,57 @@ must move the minor version.
   whose absence branch proves neither result stays optional and is reported as
   `request.parameter.unresolved` rather than claiming a requiredness the source does not state.
 
+### Added
+
+- **`gnr8 verify` runs generated SDK contract tests.** Every configured Go, Python and TypeScript SDK
+  target now emits a contract test beside its sources — `contract_test.go`, `contract_test.py`,
+  `contract.test.ts` — derived from the same API graph the SDK was generated from, and one command
+  generates the artifacts and runs each with that language's own test tool:
+
+  ```text
+  $ gnr8 verify
+  Go SDK          passed
+  Python SDK      passed
+  TypeScript SDK  passed
+  ```
+
+  The cases drive the client through a fake transport installed on the seam it already exposes (a Go
+  `http.RoundTripper`, a Python `urllib` opener, a TypeScript `fetch` closure) and assert the request
+  method, path, query encoding and headers, the serialized request body and its media type, response
+  decoding including an omitted optional field, typed errors, authentication, and that a redirect is
+  surfaced rather than followed. Nothing opens a socket, so a suite runs in milliseconds.
+
+  Cases are sampled per wire-shape class rather than per operation — one representative per distinct
+  request shape, success model, error status and security scheme, capped at 24 per target — so a
+  large API still emits a suite that runs quickly. The file is a generated artifact like any other:
+  the ownership manifest records it, `gnr8 check` reports it when it drifts, and it is removed when
+  the operations it covered disappear. `without_contract_tests()` on a target stops it being
+  emitted. `--json` reports a `verified` verdict and one entry per suite.
+
 ### Fixed
+
+- **A Go extraction no longer fails with `invalid GOTOOLCHAIN "1"` when `GOTOOLCHAIN` is unset.**
+  gnr8 pins the `goextract` helper build to the toolchain the analyzed module selects, reading it
+  from `go env GOVERSION GOOS GOARCH GOFLAGS CGO_ENABLED GOTOOLCHAIN`. That reading was interpreted
+  positionally — first line the version, last line the selection — but `go env` prints an EMPTY line
+  for an unset setting, so on any machine that leaves `GOTOOLCHAIN` unset the last line was
+  `CGO_ENABLED`'s default `1`, and the helper build was pinned to `GOTOOLCHAIN=1`, which `go build`
+  rejects outright. Every value is now matched to the setting that produced it by order, an unset
+  `GOTOOLCHAIN` reads as Go's own documented `auto` default (so the build pin still preserves the
+  caller's switching policy), and a reading that cannot be matched to the requested settings is a
+  typed error rather than a guess.
+- **`gnr8 verify` runs against a copy of the real output tree, so a Python package that ships
+  hand-owned modules beside its generated files still imports.** `verify` materializes the fresh
+  generated artifacts over a copy of the target's output directory (caches, virtualenvs and
+  `node_modules` are skipped, symlinks are not followed, nothing is written back to the project),
+  then runs its suites there. Found on a real Go/Gin project whose generated `__init__.py` imports
+  a hand-written exceptions module: the suite died with `ModuleNotFoundError` before any test ran.
+
+- **A Python SDK operation whose success response is a named union, array, map or scalar can be
+  called again.** Those schemas are emitted as type aliases, which have no `model_validate` or
+  `from_dict`, so decoding one raised `AttributeError` at runtime: the SDK compiled and the operation
+  was unusable. The decoded JSON is now the value, which is what the TypeScript target already
+
 
 - **A size rule on a collection or string publishes the keyword its own type states.** Field-scope
   `min`/`max` on a slice or array now publish `minItems`/`maxItems`, and on a map
@@ -94,7 +144,6 @@ must move the minor version.
   and bounded-helper calls.
 - **Gin renderer arguments no longer become impossible HTTP bodies.** Informational, `204`, and
   `304` statuses are recorded as bodyless even when the handler calls a JSON, XML, or opaque
-  renderer, matching the body suppression Gin applies before rendering.
 
 ## 0.13.0 — 2026-09-08
 

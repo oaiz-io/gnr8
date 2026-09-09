@@ -248,33 +248,113 @@ fn run_goextract_command(mut cmd: Command) -> Result<facts::GoFacts, CoreError> 
 /// declare. `go/types` in turn admits only the language version the application was BUILT with, so
 /// the binary has to be produced by at least that same toolchain.
 ///
-/// `sdk::builtins::go_toolchain_identity` reads the same `go env` line from the same module scope for
-/// the extracted-facts cache key, for the same reason.
+/// [`ExtractorIdentity::module_toolchain`] carries this same reading into the extracted-facts cache
+/// key (`sdk::builtins::go_gin_cache_key`), for the same reason.
+#[derive(Debug)]
 struct GoToolchain {
     /// `GOVERSION` alone — the toolchain name the `goextract` build is pinned to.
     version: String,
-    /// The caller's effective `GOTOOLCHAIN` selection policy.
+    /// The caller's effective `GOTOOLCHAIN` selection policy, with an unset selection resolved to
+    /// the documented default [`GO_TOOLCHAIN_DEFAULT`] rather than left empty.
     selection: String,
-    /// The full `GOVERSION`/`GOOS`/`GOARCH`/`GOFLAGS`/`CGO_ENABLED`/`GOTOOLCHAIN` reading, which
-    /// keys the binary cache. The policy is part of the key so a binary built while downloads were
-    /// allowed cannot bypass a later `local` or `path` run. `CGO_ENABLED` is there because it is a
-    /// build constraint like `GOOS`: it decides whether the cgo-gated files of a package compile,
-    /// and therefore which types the analysis sees. `GOTOOLCHAIN` stays LAST because
-    /// [`GoToolchain::selection`] reads the final line.
+    /// The full [`GO_ENV_SETTINGS`] reading, one `NAME=value` line per setting, which keys the
+    /// binary cache. The policy is part of the key so a binary built while downloads were allowed
+    /// cannot bypass a later `local` or `path` run. `CGO_ENABLED` is there because it is a build
+    /// constraint like `GOOS`: it decides whether the cgo-gated files of a package compile, and
+    /// therefore which types the analysis sees. Each value is NAMED rather than positional, so no
+    /// reader of this string can mistake one setting's value for another's.
     identity: String,
+}
+
+/// The `go env` settings that decide a Go extraction, in the order they are requested.
+///
+/// The reading is matched to these names BY ORDER (see [`go_env_reading`]), never by position from
+/// the end: `go env` prints one line per requested setting and an UNSET setting prints an EMPTY
+/// line, so the last line is not the last setting that happens to have a value. Reading the final
+/// line as the `GOTOOLCHAIN` selection is what pinned the helper build to `CGO_ENABLED`'s `1` on
+/// every machine with an unset `GOTOOLCHAIN`, which `go build` rejects as
+/// `invalid GOTOOLCHAIN "1"` (issue #79).
+const GO_ENV_SETTINGS: [&str; 6] = [
+    "GOVERSION",
+    "GOOS",
+    "GOARCH",
+    "GOFLAGS",
+    "CGO_ENABLED",
+    "GOTOOLCHAIN",
+];
+
+/// The `GOTOOLCHAIN` policy an UNSET `GOTOOLCHAIN` means: Go's own documented default. An unset
+/// setting reads as an empty value, and the empty string is not a policy `go build` accepts, so the
+/// effective policy is what the build pin has to preserve.
+const GO_TOOLCHAIN_DEFAULT: &str = "auto";
+
+/// The values `go env` printed for `settings`, matched to them BY ORDER.
+///
+/// `go env NAME...` prints exactly one line per requested setting, in the requested order, and an
+/// unset setting prints an EMPTY line — so an empty line is a real value, not a missing one, and the
+/// only thing that says which value is which is the position in the requested list. A reading whose
+/// line count does not match is not interpreted at all: it is [`CoreError::GoEnvUnreadable`], never
+/// a guess.
+///
+/// Pure, so every reading a real toolchain can produce is testable without one.
+fn go_env_reading<'a>(
+    stdout: &str,
+    settings: &'a [&'a str],
+) -> Result<Vec<(&'a str, String)>, CoreError> {
+    let mut lines: Vec<&str> = stdout.split('\n').collect();
+    // `go env` terminates the LAST value with a newline too, so the split leaves one trailing empty
+    // element that is not a value. Every other empty element IS one: an unset setting.
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    if lines.len() != settings.len() {
+        return Err(CoreError::GoEnvUnreadable {
+            requested: settings.join(" "),
+            expected: settings.len(),
+            found: lines.len(),
+            stdout: stdout.to_string(),
+        });
+    }
+    Ok(settings
+        .iter()
+        .copied()
+        .zip(lines.into_iter().map(|line| line.trim().to_string()))
+        .collect())
+}
+
+/// The [`GoToolchain`] a [`GO_ENV_SETTINGS`] reading describes.
+///
+/// Pure so the real-world readings — including an unset `GOTOOLCHAIN` — are testable on a machine
+/// with no `go` at all.
+fn go_toolchain_from_env(stdout: &str) -> Result<GoToolchain, CoreError> {
+    let reading = go_env_reading(stdout, &GO_ENV_SETTINGS)?;
+    let value = |name: &str| -> &str {
+        reading
+            .iter()
+            .find(|(setting, _)| *setting == name)
+            .map_or("", |(_, value)| value.as_str())
+    };
+    let version = value("GOVERSION").to_string();
+    let selection = match value("GOTOOLCHAIN") {
+        "" => GO_TOOLCHAIN_DEFAULT.to_string(),
+        set => set.to_string(),
+    };
+    let identity = reading
+        .iter()
+        .map(|(setting, value)| format!("{setting}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(GoToolchain {
+        version,
+        selection,
+        identity,
+    })
 }
 
 fn go_toolchain(go_bin: &str, target_dir: &str) -> Result<GoToolchain, CoreError> {
     let output = Command::new(go_bin)
-        .args([
-            "env",
-            "GOVERSION",
-            "GOOS",
-            "GOARCH",
-            "GOFLAGS",
-            "CGO_ENABLED",
-            "GOTOOLCHAIN",
-        ])
+        .arg("env")
+        .args(GO_ENV_SETTINGS)
         .current_dir(target_dir)
         .output()
         .map_err(|source| CoreError::GoToolchainMissing { source })?;
@@ -284,24 +364,7 @@ fn go_toolchain(go_bin: &str, target_dir: &str) -> Result<GoToolchain, CoreError
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-    let identity = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let version = identity
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let selection = identity
-        .lines()
-        .last()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    Ok(GoToolchain {
-        version,
-        selection,
-        identity,
-    })
+    go_toolchain_from_env(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// The `GOTOOLCHAIN` the `goextract` build runs under: the target module's selected version while
@@ -700,6 +763,131 @@ mod tests {
             assert!(!extractor_is_behind_module("", "go1.26.2"));
             assert!(!extractor_is_behind_module("go1.27.0", "not-a-version"));
             assert!(!extractor_is_behind_module("not-a-version", "go1.26.2"));
+        }
+    }
+
+    /// The `go env` reading is matched to the settings BY ORDER, so an unset setting — which prints
+    /// an EMPTY line — can never be confused with the next setting that has a value.
+    mod go_env {
+        use super::super::{go_env_reading, go_toolchain_from_env, GO_ENV_SETTINGS};
+        use crate::CoreError;
+
+        /// The reading from the module that broke: a `go 1.27.0` module on a go1.26.5 PATH with
+        /// `GOTOOLCHAIN` unset and no explicit `CGO_ENABLED`. The last NON-empty line is
+        /// `CGO_ENABLED`'s default `1`; reading it as the selection pinned the helper build to
+        /// `GOTOOLCHAIN=1`, which `go build` rejects as `invalid GOTOOLCHAIN "1"` (issue #79).
+        const UNSET_GOTOOLCHAIN_READING: &str = "go1.26.5\nlinux\namd64\n\n1\n\n";
+
+        #[test]
+        fn an_unset_gotoolchain_is_the_default_policy_not_the_next_setting() {
+            let toolchain =
+                go_toolchain_from_env(UNSET_GOTOOLCHAIN_READING).expect("six settings, six lines");
+            assert_eq!(toolchain.version, "go1.26.5");
+            assert_eq!(
+                toolchain.selection, "auto",
+                "an unset GOTOOLCHAIN is the documented default policy, never CGO_ENABLED's value"
+            );
+        }
+
+        /// The whole point of the parse: what the build pin ends up preserving.
+        #[test]
+        fn an_unset_gotoolchain_pins_the_build_to_the_default_policy() {
+            let toolchain =
+                go_toolchain_from_env(UNSET_GOTOOLCHAIN_READING).expect("six settings, six lines");
+            assert_eq!(
+                super::super::goextract_build_toolchain(&toolchain.version, &toolchain.selection),
+                "go1.26.5+auto"
+            );
+        }
+
+        /// A machine that DOES carry an explicit selection is unchanged — the fixtures' reading.
+        #[test]
+        fn an_explicit_selection_is_read_verbatim() {
+            let toolchain = go_toolchain_from_env("go1.26.5\nlinux\namd64\n\n1\nlocal\n")
+                .expect("six settings, six lines");
+            assert_eq!(toolchain.version, "go1.26.5");
+            assert_eq!(toolchain.selection, "local");
+            assert_eq!(
+                super::super::goextract_build_toolchain(&toolchain.version, &toolchain.selection),
+                "local"
+            );
+        }
+
+        /// Every setting is named in the identity, so the cache key distinguishes an unset
+        /// `GOTOOLCHAIN` from any other setting being unset — and no later reader can take a value
+        /// positionally.
+        #[test]
+        fn the_identity_names_every_setting() {
+            let toolchain =
+                go_toolchain_from_env(UNSET_GOTOOLCHAIN_READING).expect("six settings, six lines");
+            assert_eq!(
+                toolchain.identity,
+                "GOVERSION=go1.26.5\nGOOS=linux\nGOARCH=amd64\nGOFLAGS=\nCGO_ENABLED=1\nGOTOOLCHAIN="
+            );
+        }
+
+        /// A reading that cannot be matched to the requested settings is a typed error, never a
+        /// guess: guessing is exactly what produced `GOTOOLCHAIN=1`.
+        #[test]
+        fn a_line_count_mismatch_is_a_typed_error() {
+            let err = go_toolchain_from_env("go1.26.5\nlinux\namd64\n")
+                .expect_err("three lines cannot describe six settings");
+            assert!(
+                matches!(
+                    err,
+                    CoreError::GoEnvUnreadable {
+                        expected: 6,
+                        found: 3,
+                        ..
+                    }
+                ),
+                "expected GoEnvUnreadable, got {err:?}"
+            );
+            let text = err.to_string();
+            assert!(text.contains("GOTOOLCHAIN"), "{text}");
+        }
+
+        /// An empty reading is a mismatch too, not six empty values.
+        #[test]
+        fn an_empty_reading_is_a_typed_error() {
+            assert!(matches!(
+                go_toolchain_from_env(""),
+                Err(CoreError::GoEnvUnreadable { found: 0, .. })
+            ));
+        }
+
+        /// The values come back paired with the settings that produced them, in order — including
+        /// the empty ones.
+        #[test]
+        fn values_pair_with_the_settings_in_order() {
+            let reading = go_env_reading(UNSET_GOTOOLCHAIN_READING, &GO_ENV_SETTINGS)
+                .expect("six settings, six lines");
+            assert_eq!(
+                reading,
+                vec![
+                    ("GOVERSION", "go1.26.5".to_string()),
+                    ("GOOS", "linux".to_string()),
+                    ("GOARCH", "amd64".to_string()),
+                    ("GOFLAGS", String::new()),
+                    ("CGO_ENABLED", "1".to_string()),
+                    ("GOTOOLCHAIN", String::new()),
+                ]
+            );
+        }
+
+        /// A Windows `go env` terminates each value with CRLF; the carriage return is not part of
+        /// the value.
+        #[test]
+        fn a_crlf_reading_carries_no_carriage_returns() {
+            let reading = go_env_reading("go1.26.5\r\nwindows\r\n", &["GOVERSION", "GOOS"])
+                .expect("two settings, two lines");
+            assert_eq!(
+                reading,
+                vec![
+                    ("GOVERSION", "go1.26.5".to_string()),
+                    ("GOOS", "windows".to_string()),
+                ]
+            );
         }
     }
 

@@ -90,7 +90,7 @@ pub(crate) fn exported(name: &str) -> String {
     out
 }
 
-fn operation_method_name(op: &Operation) -> String {
+pub(crate) fn operation_method_name(op: &Operation) -> String {
     exported(&op.id)
 }
 
@@ -111,7 +111,11 @@ fn operation_method_name(op: &Operation) -> String {
 ///
 /// Returns [`CoreError::SdkGen`] on a dangling `Named` ref, or a [`Type`] the Go target cannot
 /// represent (e.g. [`Type::Union`] — Go has no sum types).
-fn go_type(schema: &Type, nullable: bool, graph: &ApiGraph) -> Result<String, CoreError> {
+pub(crate) fn go_type(
+    schema: &Type,
+    nullable: bool,
+    graph: &ApiGraph,
+) -> Result<String, CoreError> {
     let base = match schema {
         // A base scalar maps to its Go type. Floating-point width is preserved so an OpenAPI number
         // (64-bit by default) is never silently narrowed.
@@ -438,12 +442,12 @@ fn emit_struct(
     Ok(())
 }
 
-struct GoFieldEmission<'a> {
-    field: &'a Field,
-    go_name: String,
+pub(crate) struct GoFieldEmission<'a> {
+    pub(crate) field: &'a Field,
+    pub(crate) go_name: String,
 }
 
-fn go_field_emissions(fields: &[Field]) -> Result<Vec<GoFieldEmission<'_>>, CoreError> {
+pub(crate) fn go_field_emissions(fields: &[Field]) -> Result<Vec<GoFieldEmission<'_>>, CoreError> {
     let mut used_go = BTreeSet::new();
     let mut out = Vec::with_capacity(fields.len());
     for field in fields {
@@ -504,7 +508,7 @@ fn emit_struct_field(
     Ok(())
 }
 
-fn go_struct_field_type(
+pub(crate) fn go_struct_field_type(
     field: &Field,
     graph: &ApiGraph,
     multipart_request: bool,
@@ -1481,7 +1485,7 @@ fn emit_group_facades(
 }
 
 /// Emit a single operation method, including its `<Method>Params` struct when the op has query params.
-fn ordered_path_params(op: &Operation) -> Result<Vec<&crate::graph::Param>, CoreError> {
+pub(crate) fn ordered_path_params(op: &Operation) -> Result<Vec<&crate::graph::Param>, CoreError> {
     path_tokens(&op.path)
         .iter()
         .map(|token| {
@@ -1594,7 +1598,10 @@ fn go_request_body_encoding_label(encoding: RequestBodyEncoding) -> &'static str
     }
 }
 
-fn go_request_body_variant_names(method_name: &str, models: &[RequestBodyModel]) -> Vec<String> {
+pub(crate) fn go_request_body_variant_names(
+    method_name: &str,
+    models: &[RequestBodyModel],
+) -> Vec<String> {
     let mut names = Vec::with_capacity(models.len());
     let mut used = BTreeMap::<String, usize>::new();
     for model in models {
@@ -2164,7 +2171,7 @@ fn go_pagination_info(
 
 /// How many pointer layers a generated struct field type carries, so a helper that reads the field
 /// can spell the same number of indirections.
-fn go_pointer_depth(go_type: &str) -> usize {
+pub(crate) fn go_pointer_depth(go_type: &str) -> usize {
     go_type.bytes().take_while(|byte| *byte == b'*').count()
 }
 
@@ -3555,7 +3562,7 @@ fn emit_params_struct(
 /// `uuid`), and subsequent words use the exported (initialism-aware) form: `uuid`→`uuid`,
 /// `goalId`→`goalID`, `page_size`→`pageSize`. An unexported leading word avoids exporting the local
 /// argument while keeping `gofmt`-clean, compiling Go (03-03 `go build`).
-fn lower_camel(name: &str) -> String {
+pub(crate) fn lower_camel(name: &str) -> String {
     let words = split_words(name);
     let mut out = String::new();
     for (i, word) in words.iter().enumerate() {

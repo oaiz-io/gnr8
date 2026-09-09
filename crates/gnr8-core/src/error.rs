@@ -68,6 +68,29 @@ pub enum CoreError {
         stderr: String,
     },
 
+    /// A `go env` reading could not be matched to the settings that were requested.
+    ///
+    /// `go env NAME...` prints exactly one line per requested setting, in the order requested, and
+    /// an UNSET setting prints an EMPTY line. That correspondence is the only thing that says which
+    /// value is which, so a reading with a different number of lines cannot be interpreted at all.
+    /// Raised instead of guessing: a misread here silently pins the `goextract` build to another
+    /// setting's value (issue #79 — an unset `GOTOOLCHAIN` read as `CGO_ENABLED`'s `1`, which
+    /// `go build` then rejects as `invalid GOTOOLCHAIN "1"`).
+    #[error(
+        "`go env {requested}` returned {found} value line(s) for {expected} requested setting(s), \
+         so the reading cannot be matched to the settings that produced it. Output was:\n{stdout}"
+    )]
+    GoEnvUnreadable {
+        /// The settings that were requested, space-separated and in the order requested.
+        requested: String,
+        /// How many value lines the requested settings imply.
+        expected: usize,
+        /// How many value lines the reading actually carried.
+        found: usize,
+        /// The verbatim `go env` standard output, so the mismatch is diagnosable.
+        stdout: String,
+    },
+
     /// The compiled `goextract` helper is older than the toolchain the analyzed module selects.
     ///
     /// `go/types` admits only the language version the application was built with, so a helper
@@ -408,6 +431,20 @@ mod tests {
             assert!(msg.contains("exited with status"), "{msg}");
             assert!(msg.contains("Some(2)"), "{msg}");
             assert!(msg.contains("go: cannot find module"), "{msg}");
+        }
+
+        #[test]
+        fn go_env_unreadable_names_the_settings_and_shows_the_output() {
+            let err = CoreError::GoEnvUnreadable {
+                requested: "GOVERSION GOTOOLCHAIN".to_string(),
+                expected: 2,
+                found: 1,
+                stdout: "go1.26.5\n".to_string(),
+            };
+            let msg = err.to_string();
+            assert!(msg.contains("GOVERSION GOTOOLCHAIN"), "{msg}");
+            assert!(msg.contains("1 value line(s) for 2"), "{msg}");
+            assert!(msg.contains("go1.26.5"), "{msg}");
         }
 
         #[test]

@@ -38,6 +38,7 @@ use crate::sdk::model::SdkModel;
 use crate::sdk::model_style::PyModelStyle;
 use crate::sdk::resolved_lexically;
 use crate::store::{Namespace, Store};
+use crate::verify::{ContractTestLanguage, ContractTestSuite};
 use crate::CoreError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -86,6 +87,19 @@ pub trait TargetExec {
     /// Generated targets `gnr8 doctor` can validate with a built-in readiness check.
     fn readiness_targets(&self) -> Vec<ReadinessTarget> {
         Vec::new()
+    }
+
+    /// The generated contract-test suites `gnr8 verify` can run for this target.
+    ///
+    /// Takes the graph because a suite reports how many cases the sampler drew from it, and the
+    /// sampler is the single place that decides (`crate::verify`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the target's own typed failure when the graph carries a fact the planner rejects.
+    fn contract_test_suites(&self, ir: &ApiGraph) -> Result<Vec<ContractTestSuite>, CoreError> {
+        let _ = ir;
+        Ok(Vec::new())
     }
 }
 
@@ -2838,6 +2852,22 @@ impl TargetExec for GoSdk {
             Some(&cache_dir(cx)),
         )?;
         write_sdk_files(out, &self.dir, files)?;
+        if self.contract_tests {
+            // The suite is planned from the SAME projected graph the SDK was emitted from, so the
+            // assertions and the client can never describe two different contracts.
+            let plan = crate::verify::plan_contract_tests(ir)?;
+            if let Some(file) = crate::gosdk::generate_contract_test(
+                ir,
+                &model.package,
+                &plan,
+                Some(&cache_dir(cx)),
+            )? {
+                out.create(
+                    format!("{}/{}", self.dir.trim_end_matches('/'), file.name),
+                    file.contents,
+                )?;
+            }
+        }
         write_sdk_docs(out, &self.dir, "Go", &model.package, ir, &model, &self.docs)?;
         if self.package_metadata {
             out.create(
@@ -2873,6 +2903,25 @@ impl TargetExec for GoSdk {
                 self.dir.trim_end_matches('/'),
             )]
         }
+    }
+
+    fn contract_test_suites(&self, ir: &ApiGraph) -> Result<Vec<ContractTestSuite>, CoreError> {
+        if !self.contract_tests || self.dir.is_empty() || self.module.is_empty() {
+            return Ok(Vec::new());
+        }
+        let projected = crate::graph::projection::for_generation(ir)?;
+        let plan = crate::verify::plan_contract_tests(&projected)?;
+        if plan.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dir = self.dir.trim_end_matches('/');
+        Ok(vec![ContractTestSuite {
+            language: ContractTestLanguage::Go,
+            output_path: dir.to_string(),
+            package: sdk_package(&self.module)?,
+            test_file: format!("{dir}/{}", crate::gosdk::CONTRACT_TEST_FILE),
+            cases: plan.len(),
+        }])
     }
 }
 
@@ -2924,6 +2973,21 @@ impl TargetExec for PySdk {
             files.sort_by(|a, b| a.name.cmp(&b.name));
         }
         write_sdk_files(out, &self.dir, files)?;
+        if self.contract_tests {
+            let plan = crate::verify::plan_contract_tests(ir)?;
+            if let Some(text) =
+                crate::pysdk::generate_contract_test(ir, &self.layout, self.model_style, &plan)?
+            {
+                out.create(
+                    format!(
+                        "{}/{}",
+                        self.dir.trim_end_matches('/'),
+                        crate::pysdk::CONTRACT_TEST_FILE
+                    ),
+                    text,
+                )?;
+            }
+        }
         write_sdk_docs(
             out,
             &self.dir,
@@ -2957,6 +3021,25 @@ impl TargetExec for PySdk {
                 self.dir.trim_end_matches('/'),
             )]
         }
+    }
+
+    fn contract_test_suites(&self, ir: &ApiGraph) -> Result<Vec<ContractTestSuite>, CoreError> {
+        if !self.contract_tests || self.dir.is_empty() || self.module.is_empty() {
+            return Ok(Vec::new());
+        }
+        let projected = crate::graph::projection::for_generation(ir)?;
+        let plan = crate::verify::plan_contract_tests(&projected)?;
+        if plan.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dir = self.dir.trim_end_matches('/');
+        Ok(vec![ContractTestSuite {
+            language: ContractTestLanguage::Python,
+            output_path: dir.to_string(),
+            package: sdk_package(&self.module)?,
+            test_file: format!("{dir}/{}", crate::pysdk::CONTRACT_TEST_FILE),
+            cases: plan.len(),
+        }])
     }
 }
 
@@ -3136,6 +3219,19 @@ impl TargetExec for TsSdk {
             });
         }
         write_sdk_files(out, &self.dir, files)?;
+        if self.contract_tests {
+            let plan = crate::verify::plan_contract_tests(ir)?;
+            if let Some(text) = crate::tssdk::generate_contract_test(ir, &plan)? {
+                out.create(
+                    format!(
+                        "{}/{}",
+                        self.dir.trim_end_matches('/'),
+                        crate::tssdk::CONTRACT_TEST_FILE
+                    ),
+                    text,
+                )?;
+            }
+        }
         write_sdk_docs(
             out,
             &self.dir,
@@ -3169,6 +3265,25 @@ impl TargetExec for TsSdk {
                 self.dir.trim_end_matches('/'),
             )]
         }
+    }
+
+    fn contract_test_suites(&self, ir: &ApiGraph) -> Result<Vec<ContractTestSuite>, CoreError> {
+        if !self.contract_tests || self.dir.is_empty() || self.module.is_empty() {
+            return Ok(Vec::new());
+        }
+        let projected = crate::graph::projection::for_generation(ir)?;
+        let plan = crate::verify::plan_contract_tests(&projected)?;
+        if plan.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dir = self.dir.trim_end_matches('/');
+        Ok(vec![ContractTestSuite {
+            language: ContractTestLanguage::TypeScript,
+            output_path: dir.to_string(),
+            package: sdk_package(&self.module)?,
+            test_file: format!("{dir}/{}", crate::tssdk::CONTRACT_TEST_FILE),
+            cases: plan.len(),
+        }])
     }
 }
 
@@ -3899,6 +4014,25 @@ pub fn target_readiness_targets(spec: &BuiltinTarget) -> Vec<ReadinessTarget> {
         BuiltinTarget::GoSdk(t) => t.readiness_targets(),
         BuiltinTarget::PySdk(t) => t.readiness_targets(),
         BuiltinTarget::TsSdk(t) => t.readiness_targets(),
+    }
+}
+
+/// Resolve the generated contract-test suites a declared built-in target contributes.
+///
+/// # Errors
+///
+/// Returns the target's own typed failure when the graph carries a fact the planner rejects.
+pub fn target_contract_test_suites(
+    spec: &BuiltinTarget,
+    ir: &ApiGraph,
+) -> Result<Vec<ContractTestSuite>, CoreError> {
+    match spec {
+        BuiltinTarget::OpenApi31(t) => t.contract_test_suites(ir),
+        BuiltinTarget::OpenApi31Json(t) => t.contract_test_suites(ir),
+        BuiltinTarget::StaticFiles(t) => t.contract_test_suites(ir),
+        BuiltinTarget::GoSdk(t) => t.contract_test_suites(ir),
+        BuiltinTarget::PySdk(t) => t.contract_test_suites(ir),
+        BuiltinTarget::TsSdk(t) => t.contract_test_suites(ir),
     }
 }
 

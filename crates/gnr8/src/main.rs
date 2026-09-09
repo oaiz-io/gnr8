@@ -12,6 +12,7 @@ mod changes;
 mod cli;
 mod doctor;
 mod render;
+mod verify;
 mod watch;
 
 use anyhow::{bail, Result};
@@ -54,6 +55,7 @@ fn run() -> Result<()> {
         Commands::Guide { topic } => run_guide(*topic, output),
         Commands::Generate { force } => run_generate(*force, policy, output),
         Commands::Check => run_check(policy, output),
+        Commands::Verify => run_verify(policy, output),
         Commands::Changes {
             base,
             exempt_tag,
@@ -136,7 +138,7 @@ fn run_changes(
 /// This is the process's ONE reading of the environment for it: the engine takes the resolved store
 /// as an argument everywhere below, so no library call can pick up an ambient one and no test can
 /// reach the developer's own store by accident.
-fn cache_store() -> Option<Store> {
+pub(crate) fn cache_store() -> Option<Store> {
     Store::from_env()
 }
 
@@ -155,13 +157,13 @@ fn worker_policy(cli: &Cli) -> WorkerPolicy {
 }
 
 #[derive(Clone, Copy)]
-struct Output {
-    json: bool,
+pub(crate) struct Output {
+    pub(crate) json: bool,
     verbose: u8,
 }
 
 impl Output {
-    fn new(json: bool, verbose: u8) -> Self {
+    pub(crate) fn new(json: bool, verbose: u8) -> Self {
         Self { json, verbose }
     }
 
@@ -170,13 +172,13 @@ impl Output {
         Self { json: true, ..self }
     }
 
-    fn progress(self, message: impl AsRef<str>) {
+    pub(crate) fn progress(self, message: impl AsRef<str>) {
         if !self.json {
             println!("{}", message.as_ref());
         }
     }
 
-    fn verbose(self, message: impl AsRef<str>) {
+    pub(crate) fn verbose(self, message: impl AsRef<str>) {
         if !self.json && self.verbose > 0 {
             println!("  {}", message.as_ref());
         }
@@ -204,7 +206,7 @@ impl Output {
 /// The current project root, resolved against the working directory. The child runs with this as its
 /// `current_dir`, and `regenerate`/`plan_only` resolve output paths against it. A `current_dir` failure
 /// surfaces as `CoreError::Workspace` (clean message, never a panic).
-fn project_root() -> Result<std::path::PathBuf, gnr8_engine::CoreError> {
+pub(crate) fn project_root() -> Result<std::path::PathBuf, gnr8_engine::CoreError> {
     std::env::current_dir().map_err(|e| gnr8_engine::CoreError::Workspace {
         message: format!("failed to resolve the current directory: {e}"),
     })
@@ -477,18 +479,18 @@ struct LifecycleCounts {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct LifecycleTimings {
-    pipeline: u128,
-    write: u128,
-    total: u128,
+pub(crate) struct LifecycleTimings {
+    pub(crate) pipeline: u128,
+    pub(crate) write: u128,
+    pub(crate) total: u128,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct DiagnosticCounts {
-    total: usize,
-    info: usize,
-    warn: usize,
-    error: usize,
+pub(crate) struct DiagnosticCounts {
+    pub(crate) total: usize,
+    pub(crate) info: usize,
+    pub(crate) warn: usize,
+    pub(crate) error: usize,
 }
 
 /// Run `gnr8 generate` (+ `--force`): run the project's pipeline, then write only changed files and
@@ -678,6 +680,79 @@ fn run_check(policy: WorkerPolicy, output: Output) -> Result<()> {
     Ok(())
 }
 
+/// Run `gnr8 verify`: generate in memory, then run every generated SDK contract test with its own
+/// language's test tool.
+///
+/// A compiling SDK can still send the wrong request, so this is the executable half of the
+/// guarantee `doctor` only checks structurally. The suites come from the pipeline's targets, the
+/// artifacts are materialized into a temp tree (so a stale working tree cannot pass), and each
+/// suite's runner reports what its tool actually did. Exits 1 when any suite fails — the gate,
+/// matching `check` — and surfaces a run-stopping problem through the anyhow boundary.
+fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
+    let root = project_root()?;
+    let total_start = Instant::now();
+
+    // `verify`'s output IS the report, like `changes`: progress lines would bury the verdict.
+    output.verbose("verify: running pipeline");
+    let pipeline_start = Instant::now();
+    let run = gnr8_engine::worker::run_pipeline(&root, policy, cache_store().as_ref())?;
+    let pipeline_elapsed = pipeline_start.elapsed();
+
+    let diagnostics = run.outcome.diagnostics;
+    print_diagnostics(output, &diagnostics);
+
+    if run.outcome.contract_test_suites.is_empty() {
+        bail!(
+            "no SDK contract tests to run — add a Go, Python or TypeScript SDK target to .gnr8/src/main.rs"
+        );
+    }
+
+    output.verbose("verify: running contract tests");
+    let run_start = Instant::now();
+    let suites = verify::run_suites(
+        &root,
+        &run.outcome.contract_test_suites,
+        &run.outcome.artifacts,
+    );
+    let run_elapsed = run_start.elapsed();
+
+    let report = verify::VerifyReport::new(
+        suites,
+        verify::VerifyTimings {
+            pipeline: duration_ms(pipeline_elapsed),
+            tests: duration_ms(run_elapsed),
+            total: duration_ms(total_start.elapsed()),
+        },
+        diagnostic_counts(&diagnostics),
+        run.worker_origin.label().to_string(),
+    );
+
+    if output.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.render_human());
+        output.verbose(format!("worker: {}", run.worker_origin.label()));
+        output.verbose(format!("pipeline: {}", fmt_duration(pipeline_elapsed)));
+        output.verbose(format!("contract tests: {}", fmt_duration(run_elapsed)));
+        output.verbose(format!("total: {}", fmt_duration(total_start.elapsed())));
+    }
+
+    if !report.verified {
+        for suite in report.failures() {
+            eprintln!(
+                "error: {} contract tests failed: {}",
+                suite.label,
+                suite.reason()
+            );
+        }
+        std::io::stdout().flush()?;
+        std::io::stderr().flush()?;
+        // Deliberate non-zero exit so `gnr8 verify` is a usable CI gate (mirrors run_check).
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Probe whether the DETECTED source language's toolchain is ACTUALLY ready, returning `(language,
 /// present)`.
 ///
@@ -794,7 +869,7 @@ fn readiness_for_target(
     }
 }
 
-fn path_extension_is(path: &str, ext: &str) -> bool {
+pub(crate) fn path_extension_is(path: &str, ext: &str) -> bool {
     Path::new(path)
         .extension()
         .is_some_and(|actual| actual.eq_ignore_ascii_case(ext))
@@ -820,7 +895,7 @@ fn validate_go_target(
     if let Err(reason) = command_available("go", &["version"]) {
         return doctor::SdkReadiness::not_ready("go", anchor, TOOLCHAIN, reason);
     }
-    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "go") else {
+    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "go", None) else {
         return doctor::SdkReadiness::not_ready(
             "go",
             anchor,
@@ -863,7 +938,7 @@ fn validate_python_target(
     if let Err(reason) = command_available("python3", &["--version"]) {
         return doctor::SdkReadiness::not_ready("python", anchor, TOOLCHAIN, reason);
     }
-    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "python") else {
+    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "python", None) else {
         return doctor::SdkReadiness::not_ready(
             "python",
             anchor,
@@ -919,7 +994,7 @@ fn package_dir_display(
 ///
 /// The walk is bounded by `root` — the materialized tree — so it can never escape into the ambient
 /// filesystem and adopt an unrelated `__init__.py` as the package root.
-fn python_package_root(target_dir: &Path, root: &Path) -> PathBuf {
+pub(crate) fn python_package_root(target_dir: &Path, root: &Path) -> PathBuf {
     let is_package =
         |dir: &Path| dir.join("pyproject.toml").is_file() || dir.join("__init__.py").is_file();
     if is_package(target_dir) {
@@ -962,7 +1037,7 @@ fn validate_typescript_target(
             "typescript compiler not found; install it in the project with `npm install --save-dev typescript` or provide `tsc` on PATH",
         );
     };
-    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "typescript") else {
+    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "typescript", None) else {
         return doctor::SdkReadiness::not_ready(
             "typescript",
             anchor,
@@ -1029,9 +1104,9 @@ fn validate_typescript_target(
     doctor::SdkReadiness::ready("typescript", anchor, TOOLCHAIN)
 }
 
-struct MaterializedTarget {
-    root: PathBuf,
-    target_dir: PathBuf,
+pub(crate) struct MaterializedTarget {
+    pub(crate) root: PathBuf,
+    pub(crate) target_dir: PathBuf,
 }
 
 impl Drop for MaterializedTarget {
@@ -1040,13 +1115,93 @@ impl Drop for MaterializedTarget {
     }
 }
 
-fn materialize_artifact_group(
+/// Directory names never copied out of a real output tree.
+///
+/// Caches, virtualenvs and installed dependencies: none of them is a hand-owned companion the
+/// generated package needs in order to import, and copying them would dominate the run.
+const UNCOPIED_OUTPUT_DIRECTORIES: &[&str] = &[
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+];
+
+/// Copy a real output directory into the temp tree, skipping caches and anything that is not a
+/// plain file or directory.
+///
+/// Symlinks are skipped rather than followed: the temp tree must stay a self-contained copy, and a
+/// link out of the output directory would make it one that reaches back into the project.
+fn copy_output_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(destination).map_err(|err| {
+        format!(
+            "failed to create readiness temp dir '{}': {err}",
+            destination.display()
+        )
+    })?;
+    let entries = std::fs::read_dir(source).map_err(|err| {
+        format!(
+            "failed to read the output directory '{}': {err}",
+            source.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            format!(
+                "failed to read the output directory '{}': {err}",
+                source.display()
+            )
+        })?;
+        let name = entry.file_name();
+        let file_type = entry
+            .file_type()
+            .map_err(|err| format!("failed to inspect '{}': {err}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if name
+                .to_str()
+                .is_some_and(|name| UNCOPIED_OUTPUT_DIRECTORIES.contains(&name))
+            {
+                continue;
+            }
+            copy_output_tree(&entry.path(), &destination.join(&name))?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), destination.join(&name))
+                .map_err(|err| format!("failed to copy '{}': {err}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write an artifact set into a fresh temp tree, optionally over a copy of the real output tree.
+///
+/// `seed` is the project's own output directory for `anchor`. When it is given and exists, the temp
+/// tree starts as a copy of it and the artifacts are then written over that copy, so a package that
+/// ships hand-owned companions beside its generated files still imports — while every generated file
+/// is the one the pipeline produced on THIS run, because the artifacts are written last. When the
+/// seed is absent (a target whose output has never been written) the copy is simply empty; there is
+/// no second code path, only an emptier one.
+///
+/// Callers that answer *about the generated set itself* — `doctor`'s structural readiness — pass
+/// `None`: seeding would let a file the pipeline never emitted decide the verdict.
+pub(crate) fn materialize_artifact_group(
     anchor: &str,
     artifacts: &[gnr8_engine::sdk::Artifact],
     label: &str,
+    seed: Option<&Path>,
 ) -> Result<MaterializedTarget, String> {
     let root = unique_doctor_temp_dir(label)?;
     let result = (|| {
+        let target_dir = safe_temp_artifact_path(&root, anchor)?;
+        if let Some(seed) = seed.filter(|seed| seed.is_dir()) {
+            copy_output_tree(seed, &target_dir)?;
+        }
         for artifact in artifacts {
             let path = safe_temp_artifact_path(&root, &artifact.path)?;
             if let Some(parent) = path.parent() {
@@ -1064,7 +1219,6 @@ fn materialize_artifact_group(
                 )
             })?;
         }
-        let target_dir = safe_temp_artifact_path(&root, anchor)?;
         Ok(MaterializedTarget {
             root: root.clone(),
             target_dir,
@@ -1094,7 +1248,7 @@ fn unique_doctor_temp_dir(label: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn safe_temp_artifact_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_temp_artifact_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let path = Path::new(rel);
     if path.is_absolute() {
         return Err(format!("artifact path {rel:?} must be project-relative"));
@@ -1112,11 +1266,11 @@ fn safe_temp_artifact_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(root.join(path))
 }
 
-fn command_available(program: &str, args: &[&str]) -> Result<(), String> {
+pub(crate) fn command_available(program: &str, args: &[&str]) -> Result<(), String> {
     command_success_in(program, args, Path::new("."), &[])
 }
 
-fn command_success_in(
+pub(crate) fn command_success_in(
     program: &str,
     args: &[&str],
     cwd: &Path,
@@ -1148,7 +1302,7 @@ fn command_label(program: &str, args: &[&str]) -> String {
     }
 }
 
-fn command_output_excerpt(output: &std::process::Output) -> String {
+pub(crate) fn command_output_excerpt(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     text_output_excerpt(&stderr, &stdout)
@@ -1259,12 +1413,12 @@ with warnings.catch_warnings(record=True) as caught:
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TypeScriptCompiler {
+pub(crate) enum TypeScriptCompiler {
     NodeScript(PathBuf),
     Executable(String),
 }
 
-fn typescript_compiler(project_root: &Path, anchor: &str) -> Option<TypeScriptCompiler> {
+pub(crate) fn typescript_compiler(project_root: &Path, anchor: &str) -> Option<TypeScriptCompiler> {
     let output_dir = safe_temp_artifact_path(project_root, anchor).ok()?;
     if let Some(path) = local_typescript_compiler(&output_dir) {
         return Some(TypeScriptCompiler::NodeScript(path));
@@ -1285,7 +1439,7 @@ fn typescript_compiler(project_root: &Path, anchor: &str) -> Option<TypeScriptCo
         .then_some(TypeScriptCompiler::NodeScript(development_sidecar))
 }
 
-fn link_typescript_node_modules(
+pub(crate) fn link_typescript_node_modules(
     project_root: &Path,
     anchor: &str,
     materialized_target: &Path,
@@ -1332,7 +1486,7 @@ fn local_typescript_compiler(cwd: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn run_typescript_compiler(
+pub(crate) fn run_typescript_compiler(
     compiler: &TypeScriptCompiler,
     args: &[String],
     cwd: &Path,
@@ -1727,7 +1881,7 @@ fn lifecycle_summary(outcome: &gnr8_engine::lifecycle::GenerateOutcome) -> Strin
     )
 }
 
-fn print_diagnostics(output: Output, diagnostics: &[gnr8_engine::graph::Diagnostic]) {
+pub(crate) fn print_diagnostics(output: Output, diagnostics: &[gnr8_engine::graph::Diagnostic]) {
     if diagnostics.is_empty() || output.json {
         return;
     }
@@ -1767,7 +1921,9 @@ fn diagnostic_summary(counts: &DiagnosticCounts) -> String {
     format!("info: {total} pipeline diagnostics (run with -v for details)")
 }
 
-fn diagnostic_counts(diagnostics: &[gnr8_engine::graph::Diagnostic]) -> DiagnosticCounts {
+pub(crate) fn diagnostic_counts(
+    diagnostics: &[gnr8_engine::graph::Diagnostic],
+) -> DiagnosticCounts {
     let info = diagnostics
         .iter()
         .filter(|diagnostic| diagnostic.severity.eq_ignore_ascii_case("INFO"))
@@ -1788,11 +1944,11 @@ fn diagnostic_counts(diagnostics: &[gnr8_engine::graph::Diagnostic]) -> Diagnost
     }
 }
 
-fn duration_ms(duration: Duration) -> u128 {
+pub(crate) fn duration_ms(duration: Duration) -> u128 {
     duration.as_millis()
 }
 
-fn fmt_duration(duration: Duration) -> String {
+pub(crate) fn fmt_duration(duration: Duration) -> String {
     let millis = duration.as_secs_f64() * 1000.0;
     if millis < 10.0 {
         format!("{millis:.1} ms")
@@ -1807,9 +1963,9 @@ mod tests {
 
     use super::{
         diagnostic_counts, diagnostic_summary, link_typescript_node_modules, local_node_modules,
-        local_typescript_compiler, readiness_for_target, reconcile_doctor_source_probe,
-        text_output_excerpt, typescript_compiler, validate_typescript_package_entrypoints,
-        MaterializedTarget, TypeScriptCompiler,
+        local_typescript_compiler, materialize_artifact_group, readiness_for_target,
+        reconcile_doctor_source_probe, text_output_excerpt, typescript_compiler,
+        validate_typescript_package_entrypoints, MaterializedTarget, TypeScriptCompiler,
     };
     use gnr8_engine::graph::{Diagnostic, DiagnosticCategory, SourceSpan};
     use gnr8_engine::sdk::{Artifact, ReadinessKind, ReadinessTarget};
@@ -1992,6 +2148,53 @@ mod tests {
         assert!(materialized
             .join("node_modules/example-package/index.d.ts")
             .is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materializing_over_the_real_output_tree_keeps_companions_and_overwrites_generated_files() {
+        let root = temp_root("materialize-seed");
+        let output = root.join("generated/sdk");
+        std::fs::create_dir_all(output.join("__pycache__")).unwrap();
+        std::fs::create_dir_all(output.join(".venv/lib")).unwrap();
+        std::fs::create_dir_all(output.join("node_modules/left-pad")).unwrap();
+        std::fs::write(output.join("exceptions_user.py"), "MARKER = 1\n").unwrap();
+        std::fs::write(output.join("__init__.py"), "stale\n").unwrap();
+        std::fs::write(output.join("__pycache__/stale.pyc"), "cache").unwrap();
+        std::fs::write(output.join(".venv/lib/site.py"), "venv").unwrap();
+        std::fs::write(output.join("node_modules/left-pad/index.js"), "dep").unwrap();
+
+        let artifacts = vec![Artifact::new("generated/sdk/__init__.py", "fresh\n")];
+        let materialized =
+            materialize_artifact_group("generated/sdk", &artifacts, "seed", Some(&output)).unwrap();
+
+        // The hand-owned companion comes along, so the generated package can import it.
+        assert!(materialized.target_dir.join("exceptions_user.py").is_file());
+        // The fresh artifact wins over the file already on disk.
+        assert_eq!(
+            std::fs::read_to_string(materialized.target_dir.join("__init__.py")).unwrap(),
+            "fresh\n"
+        );
+        // Caches, virtualenvs and installed dependencies stay behind.
+        assert!(!materialized.target_dir.join("__pycache__").exists());
+        assert!(!materialized.target_dir.join(".venv").exists());
+        assert!(!materialized.target_dir.join("node_modules").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materializing_without_a_seed_writes_only_the_generated_artifacts() {
+        let root = temp_root("materialize-no-seed");
+        let output = root.join("generated/sdk");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("exceptions_user.py"), "MARKER = 1\n").unwrap();
+
+        let artifacts = vec![Artifact::new("generated/sdk/__init__.py", "fresh\n")];
+        let materialized =
+            materialize_artifact_group("generated/sdk", &artifacts, "no-seed", None).unwrap();
+
+        assert!(materialized.target_dir.join("__init__.py").is_file());
+        assert!(!materialized.target_dir.join("exceptions_user.py").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
