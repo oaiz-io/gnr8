@@ -9,6 +9,45 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **A cookie or header read reached through a helper now states requiredness from the operation
+  caller's own absence branch, and the helper-signature heuristic that used to answer it is gone.**
+  A cookie read inside a helper returning `(T, error)` was required for every operation that called
+  it, whatever those operations did with the failure. Each call site now answers for itself: a caller
+  that returns a known 4xx is required, one that substitutes a value or answers 2xx is optional, and
+  one that discards the error states nothing and stays optional. What the caller does once the cookie
+  is present — a later not-found answer, a delegated render — belongs to the other path and does not
+  change the verdict, so moving a read into a helper gives the same answer as writing it inline.
+
+  The branch is read in either spelling Go offers for it, `value, err := read(c)` followed by the
+  check or the read in the `if`'s own initializer, and in either spelling of the test, `err != nil` or
+  `errors.Is(err, http.ErrNoCookie)`. Book-keeping between the read and its check is stepped over; a
+  statement that answers the request or reassigns the error is not. The proof applies only when the
+  helper actually forwards that read's error: one that handles `ErrNoCookie` into a successful
+  default, or that fails for a reason of its own, is not judged by its caller's rejection. A header
+  read is judged only in its own frame, because `GetHeader` answers an absent header with an empty
+  string and an enclosing helper's error therefore reports some other failure unless that helper
+  converts the empty read itself.
+
+  `required` decides the generated parameter's shape, so this moves existing surfaces in both
+  directions: a Go field between `string` and `*string`, a Python argument between positional and
+  keyword-with-default, a TypeScript property between `name: string` and `name?: string`. A read
+  whose absence branch proves neither result stays optional and is reported as
+  `request.parameter.unresolved` rather than claiming a requiredness the source does not state.
+
+### Fixed
+
+- **A size rule on a collection or string publishes the keyword its own type states.** Field-scope
+  `min`/`max` on a slice or array now publish `minItems`/`maxItems`, and on a map
+  `minProperties`/`maxProperties`, where they were previously dropped as unreadable. `gte`/`lte`/`gt`
+  and `lt` state the same rule — go-playground reads all six as bounds on `len()` once the field is a
+  collection — so they publish those same keywords instead of the numeric `minimum`/`maximum` that
+  no validator reads on an array or object, and on a string they publish `minLength`/`maxLength`. A
+  strict bound is exact as an inclusive one on a discrete size, so `gt=0` is `minItems: 1`; `lt=0`
+  demands a negative size and is reported rather than invented. `OpenApiFieldPatch` gained
+  `min_items`, `max_items`, `min_properties`, and `max_properties` to state the same facts by hand.
+
 ## 0.13.1 — 2026-09-08
 
 ### Fixed
