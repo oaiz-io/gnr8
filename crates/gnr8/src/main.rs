@@ -895,7 +895,7 @@ fn validate_go_target(
     if let Err(reason) = command_available("go", &["version"]) {
         return doctor::SdkReadiness::not_ready("go", anchor, TOOLCHAIN, reason);
     }
-    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "go") else {
+    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "go", None) else {
         return doctor::SdkReadiness::not_ready(
             "go",
             anchor,
@@ -938,7 +938,7 @@ fn validate_python_target(
     if let Err(reason) = command_available("python3", &["--version"]) {
         return doctor::SdkReadiness::not_ready("python", anchor, TOOLCHAIN, reason);
     }
-    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "python") else {
+    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "python", None) else {
         return doctor::SdkReadiness::not_ready(
             "python",
             anchor,
@@ -1037,7 +1037,7 @@ fn validate_typescript_target(
             "typescript compiler not found; install it in the project with `npm install --save-dev typescript` or provide `tsc` on PATH",
         );
     };
-    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "typescript") else {
+    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "typescript", None) else {
         return doctor::SdkReadiness::not_ready(
             "typescript",
             anchor,
@@ -1115,13 +1115,93 @@ impl Drop for MaterializedTarget {
     }
 }
 
+/// Directory names never copied out of a real output tree.
+///
+/// Caches, virtualenvs and installed dependencies: none of them is a hand-owned companion the
+/// generated package needs in order to import, and copying them would dominate the run.
+const UNCOPIED_OUTPUT_DIRECTORIES: &[&str] = &[
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+];
+
+/// Copy a real output directory into the temp tree, skipping caches and anything that is not a
+/// plain file or directory.
+///
+/// Symlinks are skipped rather than followed: the temp tree must stay a self-contained copy, and a
+/// link out of the output directory would make it one that reaches back into the project.
+fn copy_output_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(destination).map_err(|err| {
+        format!(
+            "failed to create readiness temp dir '{}': {err}",
+            destination.display()
+        )
+    })?;
+    let entries = std::fs::read_dir(source).map_err(|err| {
+        format!(
+            "failed to read the output directory '{}': {err}",
+            source.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            format!(
+                "failed to read the output directory '{}': {err}",
+                source.display()
+            )
+        })?;
+        let name = entry.file_name();
+        let file_type = entry
+            .file_type()
+            .map_err(|err| format!("failed to inspect '{}': {err}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if name
+                .to_str()
+                .is_some_and(|name| UNCOPIED_OUTPUT_DIRECTORIES.contains(&name))
+            {
+                continue;
+            }
+            copy_output_tree(&entry.path(), &destination.join(&name))?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), destination.join(&name))
+                .map_err(|err| format!("failed to copy '{}': {err}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write an artifact set into a fresh temp tree, optionally over a copy of the real output tree.
+///
+/// `seed` is the project's own output directory for `anchor`. When it is given and exists, the temp
+/// tree starts as a copy of it and the artifacts are then written over that copy, so a package that
+/// ships hand-owned companions beside its generated files still imports — while every generated file
+/// is the one the pipeline produced on THIS run, because the artifacts are written last. When the
+/// seed is absent (a target whose output has never been written) the copy is simply empty; there is
+/// no second code path, only an emptier one.
+///
+/// Callers that answer *about the generated set itself* — `doctor`'s structural readiness — pass
+/// `None`: seeding would let a file the pipeline never emitted decide the verdict.
 pub(crate) fn materialize_artifact_group(
     anchor: &str,
     artifacts: &[gnr8_engine::sdk::Artifact],
     label: &str,
+    seed: Option<&Path>,
 ) -> Result<MaterializedTarget, String> {
     let root = unique_doctor_temp_dir(label)?;
     let result = (|| {
+        let target_dir = safe_temp_artifact_path(&root, anchor)?;
+        if let Some(seed) = seed.filter(|seed| seed.is_dir()) {
+            copy_output_tree(seed, &target_dir)?;
+        }
         for artifact in artifacts {
             let path = safe_temp_artifact_path(&root, &artifact.path)?;
             if let Some(parent) = path.parent() {
@@ -1139,7 +1219,6 @@ pub(crate) fn materialize_artifact_group(
                 )
             })?;
         }
-        let target_dir = safe_temp_artifact_path(&root, anchor)?;
         Ok(MaterializedTarget {
             root: root.clone(),
             target_dir,
@@ -1884,9 +1963,9 @@ mod tests {
 
     use super::{
         diagnostic_counts, diagnostic_summary, link_typescript_node_modules, local_node_modules,
-        local_typescript_compiler, readiness_for_target, reconcile_doctor_source_probe,
-        text_output_excerpt, typescript_compiler, validate_typescript_package_entrypoints,
-        MaterializedTarget, TypeScriptCompiler,
+        local_typescript_compiler, materialize_artifact_group, readiness_for_target,
+        reconcile_doctor_source_probe, text_output_excerpt, typescript_compiler,
+        validate_typescript_package_entrypoints, MaterializedTarget, TypeScriptCompiler,
     };
     use gnr8_engine::graph::{Diagnostic, DiagnosticCategory, SourceSpan};
     use gnr8_engine::sdk::{Artifact, ReadinessKind, ReadinessTarget};
@@ -2069,6 +2148,53 @@ mod tests {
         assert!(materialized
             .join("node_modules/example-package/index.d.ts")
             .is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materializing_over_the_real_output_tree_keeps_companions_and_overwrites_generated_files() {
+        let root = temp_root("materialize-seed");
+        let output = root.join("generated/sdk");
+        std::fs::create_dir_all(output.join("__pycache__")).unwrap();
+        std::fs::create_dir_all(output.join(".venv/lib")).unwrap();
+        std::fs::create_dir_all(output.join("node_modules/left-pad")).unwrap();
+        std::fs::write(output.join("exceptions_user.py"), "MARKER = 1\n").unwrap();
+        std::fs::write(output.join("__init__.py"), "stale\n").unwrap();
+        std::fs::write(output.join("__pycache__/stale.pyc"), "cache").unwrap();
+        std::fs::write(output.join(".venv/lib/site.py"), "venv").unwrap();
+        std::fs::write(output.join("node_modules/left-pad/index.js"), "dep").unwrap();
+
+        let artifacts = vec![Artifact::new("generated/sdk/__init__.py", "fresh\n")];
+        let materialized =
+            materialize_artifact_group("generated/sdk", &artifacts, "seed", Some(&output)).unwrap();
+
+        // The hand-owned companion comes along, so the generated package can import it.
+        assert!(materialized.target_dir.join("exceptions_user.py").is_file());
+        // The fresh artifact wins over the file already on disk.
+        assert_eq!(
+            std::fs::read_to_string(materialized.target_dir.join("__init__.py")).unwrap(),
+            "fresh\n"
+        );
+        // Caches, virtualenvs and installed dependencies stay behind.
+        assert!(!materialized.target_dir.join("__pycache__").exists());
+        assert!(!materialized.target_dir.join(".venv").exists());
+        assert!(!materialized.target_dir.join("node_modules").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materializing_without_a_seed_writes_only_the_generated_artifacts() {
+        let root = temp_root("materialize-no-seed");
+        let output = root.join("generated/sdk");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("exceptions_user.py"), "MARKER = 1\n").unwrap();
+
+        let artifacts = vec![Artifact::new("generated/sdk/__init__.py", "fresh\n")];
+        let materialized =
+            materialize_artifact_group("generated/sdk", &artifacts, "no-seed", None).unwrap();
+
+        assert!(materialized.target_dir.join("__init__.py").is_file());
+        assert!(!materialized.target_dir.join("exceptions_user.py").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

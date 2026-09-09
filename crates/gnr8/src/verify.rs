@@ -1,15 +1,18 @@
 //! `gnr8 verify` — run each generated SDK's contract test with that language's own test tool.
 //!
 //! The pipeline declares the suites (`gnr8_engine::verify::ContractTestSuite`); this module
-//! materializes the artifact set into a temp tree and runs the tool there. Materializing rather than
-//! reading the working tree means `verify` is answering for what the pipeline produces *now*, so a
-//! stale or hand-edited checkout cannot make a suite pass.
+//! materializes the artifact set into a temp tree and runs the tool there. The temp tree starts as a
+//! copy of the target's real output directory and the fresh artifacts are written over it, so a
+//! package that ships hand-owned companions beside its generated files still imports, while every
+//! generated file under test is the one the pipeline produced *now* — a stale or hand-edited
+//! generated file cannot make a suite pass, because it is overwritten before the tool runs. Nothing
+//! is ever written back into the project.
 //!
 //! Each runner is the language's own tool, spawned with fixed argument literals — never a shell.
 //! Nothing here decides what the tests assert; that is the graph's job, in `gnr8-engine::verify`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gnr8_engine::sdk::Artifact;
@@ -211,10 +214,13 @@ fn run_suite(
 ) -> SuiteReport {
     let started = Instant::now();
     let (tool, outcome) = match suite.language {
-        ContractTestLanguage::Go => ("go test ./...".to_string(), run_go(suite, artifacts)),
+        ContractTestLanguage::Go => (
+            "go test ./...".to_string(),
+            run_go(project_root, suite, artifacts),
+        ),
         ContractTestLanguage::Python => (
             "python3 -m unittest".to_string(),
-            run_python(suite, artifacts),
+            run_python(project_root, suite, artifacts),
         ),
         ContractTestLanguage::TypeScript => (
             "tsc && node --test".to_string(),
@@ -238,9 +244,23 @@ fn run_suite(
     }
 }
 
-fn run_go(suite: &ContractTestSuite, artifacts: &[Artifact]) -> Result<(), String> {
+/// The target's real output directory in the project, the tree a suite's temp copy is seeded from.
+///
+/// `None` only when the declared output path is not project-relative, which `safe_temp_artifact_path`
+/// already refuses to join.
+fn output_dir(project_root: &Path, output_path: &str) -> Option<PathBuf> {
+    crate::safe_temp_artifact_path(project_root, output_path).ok()
+}
+
+fn run_go(
+    project_root: &Path,
+    suite: &ContractTestSuite,
+    artifacts: &[Artifact],
+) -> Result<(), String> {
     command_available("go", &["version"])?;
-    let materialized = materialize_artifact_group(&suite.output_path, artifacts, "verify-go")?;
+    let seed = output_dir(project_root, &suite.output_path);
+    let materialized =
+        materialize_artifact_group(&suite.output_path, artifacts, "verify-go", seed.as_deref())?;
     let go_mod = materialized.target_dir.join("go.mod");
     if !go_mod.is_file() {
         // The target emits no package metadata, so the temp tree gets a module of its own. Nothing
@@ -288,9 +308,19 @@ result = unittest.TextTestRunner(verbosity=2).run(suite)
 raise SystemExit(0 if result.wasSuccessful() else 1)
 "#;
 
-fn run_python(suite: &ContractTestSuite, artifacts: &[Artifact]) -> Result<(), String> {
+fn run_python(
+    project_root: &Path,
+    suite: &ContractTestSuite,
+    artifacts: &[Artifact],
+) -> Result<(), String> {
     command_available("python3", &["--version"])?;
-    let materialized = materialize_artifact_group(&suite.output_path, artifacts, "verify-python")?;
+    let seed = output_dir(project_root, &suite.output_path);
+    let materialized = materialize_artifact_group(
+        &suite.output_path,
+        artifacts,
+        "verify-python",
+        seed.as_deref(),
+    )?;
     let package_dir = crate::python_package_root(&materialized.target_dir, &materialized.root);
     let init = package_dir.join("__init__.py");
     if !init.is_file() {
@@ -343,8 +373,13 @@ fn run_typescript(
          `npm install --save-dev typescript` or provide `tsc` on PATH"
             .to_string()
     })?;
-    let materialized =
-        materialize_artifact_group(&suite.output_path, artifacts, "verify-typescript")?;
+    let seed = output_dir(project_root, &suite.output_path);
+    let materialized = materialize_artifact_group(
+        &suite.output_path,
+        artifacts,
+        "verify-typescript",
+        seed.as_deref(),
+    )?;
     link_typescript_node_modules(project_root, &suite.output_path, &materialized.target_dir)?;
     let sources: Vec<String> = artifacts
         .iter()
@@ -423,9 +458,13 @@ mod tests {
     // test module so the workspace-wide RUST-04 deny stays intact for production code.
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{suite_labels, SuiteReport, VerifyReport, VerifyTimings, FAILED, PASSED};
+    use super::{
+        run_python, suite_labels, SuiteReport, VerifyReport, VerifyTimings, FAILED, PASSED,
+    };
     use crate::DiagnosticCounts;
+    use gnr8_engine::sdk::Artifact;
     use gnr8_engine::verify::{ContractTestLanguage, ContractTestSuite};
+    use std::path::PathBuf;
 
     fn suite(language: ContractTestLanguage, dir: &str) -> ContractTestSuite {
         ContractTestSuite {
@@ -548,6 +587,104 @@ mod tests {
             labels,
             vec!["Go SDK (generated/sdk)", "Go SDK (generated/admin-sdk)"]
         );
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "gnr8-verify-test-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// A generated package whose `__init__.py` imports a module the pipeline does not emit — the
+    /// shape a project takes when it keeps hand-owned helpers inside the generated package.
+    fn companion_artifacts() -> Vec<Artifact> {
+        vec![
+            Artifact::new(
+                "generated/sdk/__init__.py",
+                "from .exceptions_user import UserError\n\n__all__ = [\"UserError\"]\n",
+            ),
+            Artifact::new(
+                "generated/sdk/contract_test.py",
+                "import unittest\n\nfrom sdk import UserError\n\n\n\
+                 class CompanionContract(unittest.TestCase):\n    \
+                 def test_the_companion_is_importable(self):\n        \
+                 self.assertTrue(issubclass(UserError, Exception))\n",
+            ),
+        ]
+    }
+
+    fn python_suite() -> ContractTestSuite {
+        ContractTestSuite {
+            language: ContractTestLanguage::Python,
+            output_path: "generated/sdk".to_string(),
+            package: "sdk".to_string(),
+            test_file: "generated/sdk/contract_test.py".to_string(),
+            cases: 1,
+        }
+    }
+
+    #[test]
+    fn a_python_suite_runs_against_a_copy_of_the_real_output_tree() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 unavailable");
+            return;
+        }
+        let root = temp_root("python-companion");
+        let output = root.join("generated/sdk");
+        std::fs::create_dir_all(&output).unwrap();
+        // Hand-owned: the pipeline never emits this file, but the generated package imports it.
+        std::fs::write(
+            output.join("exceptions_user.py"),
+            "class UserError(Exception):\n    pass\n",
+        )
+        .unwrap();
+        // Stale generated files the fresh artifacts must overwrite before the tool runs.
+        std::fs::write(
+            output.join("__init__.py"),
+            "raise AssertionError(\"stale\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            output.join("contract_test.py"),
+            "raise AssertionError(\"stale\")\n",
+        )
+        .unwrap();
+
+        run_python(&root, &python_suite(), &companion_artifacts()).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_python_suite_still_fails_when_the_companion_is_nowhere_on_disk() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 unavailable");
+            return;
+        }
+        let root = temp_root("python-no-companion");
+        std::fs::create_dir_all(root.join("generated/sdk")).unwrap();
+
+        let failure = run_python(&root, &python_suite(), &companion_artifacts())
+            .expect_err("the package cannot import a companion that does not exist");
+        assert!(
+            failure.contains("exceptions_user"),
+            "the tool's own message names the missing module:\n{failure}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

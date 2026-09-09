@@ -147,8 +147,13 @@ large API still emits a suite that runs quickly. `.without_contract_tests()` on 
 file being emitted.
 
 `verify` runs the artifacts the pipeline produces right now, materialized into a temporary tree, so a
-stale or hand-edited working tree cannot make a suite pass. Exit status is `1` when any suite fails
-and `2` when the run could not start (no `.gnr8/`, a pipeline failure, or no SDK target configured).
+stale or hand-edited working tree cannot make a suite pass. The temporary tree starts as a copy of the
+target's output directory and the fresh artifacts are written over that copy, so a package that keeps
+hand-owned helpers beside its generated files — a module the generated `__init__.py` imports, say —
+still imports while every generated file under test is this run's. Caches and installed dependencies
+(`.venv`, `__pycache__`, `node_modules`, `.git`, and the like) are not copied, and nothing is ever
+written back into the project. Exit status is `1` when any suite fails and `2` when the run could not
+start (no `.gnr8/`, a pipeline failure, or no SDK target configured).
 
 The tools it runs, and the toolchains they need:
 
