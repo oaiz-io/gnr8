@@ -28,6 +28,7 @@ import (
 	"go/constant"
 	"go/token"
 	gotypes "go/types"
+	"net/http"
 	"reflect"
 	"sort"
 	"strconv"
@@ -139,10 +140,10 @@ type handlerCollision struct {
 }
 
 type helperBinding struct {
-	stringValue *string
-	literal     *facts.LiteralValue
-	typeValue   gotypes.Type
-	ginContext  bool
+	literal        *facts.LiteralValue
+	typeValue      gotypes.Type
+	ginContext     bool
+	responseWriter bool
 }
 
 type helperFrame struct {
@@ -219,12 +220,25 @@ type untypedQueryRead struct {
 	line uint32
 }
 
+// rawBodyRead is a GetRawData call whose bytes state neither a media type nor a
+// schema. The diagnostic is deferred rather than reported at the call, because the
+// same read can still resolve: rawJSONRequestSchema derives a free-form JSON body
+// from raw bytes handed to encoding/json, and that runs after the walk. Reporting
+// during the walk states a body is unresolved on an operation that goes on to state
+// one, which is the same fact answered twice in opposite directions.
+type rawBodyRead struct {
+	subject string
+	file    string
+	line    uint32
+}
+
 type contextTraversal struct {
 	route                  routes.Route
 	cf                     *CodeFacts
 	seenParam              map[string]bool
 	resolvedParam          map[string]bool
 	untypedQueryReads      *[]untypedQueryRead
+	rawBodyReads           *[]rawBodyRead
 	formFields             map[string]facts.FieldFact
 	boundFormRefs          map[string]bool
 	manualFormFields       map[string]bool
@@ -487,7 +501,7 @@ func (a *Analyzer) analyzeContextHelperCall(
 	traversal.stack[key] = true
 	defer delete(traversal.stack, key)
 
-	optionalBindPositions := collectOptionalBindPositions(callee)
+	optionalBindPositions := collectOptionalBindPositions(next)
 	for name, field := range a.multipartFileMapFieldsInFrame(next, traversal.route, traversal.diagnostics) {
 		traversal.formFields[name] = field
 		traversal.manualFormFields[name] = true
@@ -499,7 +513,7 @@ func (a *Analyzer) analyzeContextHelperCall(
 			return true
 		}
 		name, recvPkg, ginCall := routes.GinMethod(callee.info, nested)
-		if ginCall && recvPkg == routes.GinPkgPath {
+		if ginCall && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(next, nested) {
 			a.analyzeTraversedGinCall(next, nested, name, hint, optionalBindPositions, traversal)
 			return true
 		}
@@ -508,13 +522,27 @@ func (a *Analyzer) analyzeContextHelperCall(
 				a.addTraversedParameter(traversal, requestParameter(
 					pname,
 					"header",
-					requestAccessRequired(callee, nested, "GetHeader"),
+					requestAccessRequired(next, nested, "GetHeader"),
 					facts.PrimitiveType(facts.StringPrim()),
 					callee.fset,
 					nested.Pos(),
 				), true)
 			} else {
 				a.reportDynamicParameterName(next, nested, traversal, "Request.Header.Get")
+			}
+		}
+		if pname, matched, resolved := requestCookieInFrame(next, nested); matched {
+			if resolved {
+				a.addTraversedParameter(traversal, requestParameter(
+					pname,
+					"cookie",
+					requestAccessRequired(next, nested, "Cookie"),
+					facts.PrimitiveType(facts.StringPrim()),
+					callee.fset,
+					nested.Pos(),
+				), true)
+			} else {
+				a.reportDynamicParameterName(next, nested, traversal, "Request.Cookie")
 			}
 		}
 		if name, matched, resolved := requestFormFileInFrame(next, nested); matched {
@@ -576,21 +604,14 @@ func helperCallBindings(caller helperFrame, call *ast.CallExpr, fn *gotypes.Func
 
 func helperBindingFromExpr(frame helperFrame, expr ast.Expr) helperBinding {
 	binding := helperBinding{typeValue: frameTypeOf(frame, expr)}
-	if id, ok := expr.(*ast.Ident); ok {
-		if inherited, exists := frame.bindings[frame.decl.info.ObjectOf(id)]; exists {
-			binding = inherited
-			if binding.typeValue == nil {
-				binding.typeValue = frame.decl.info.TypeOf(expr)
-			}
-		}
-	}
 	if value := frameLiteralValue(frame, expr); value != nil {
 		binding.literal = value
-		if stringValue, ok := literalStringValue(value); ok {
-			binding.stringValue = &stringValue
-		}
 	}
-	binding.ginContext = binding.ginContext || isGinContextType(binding.typeValue)
+	// Provenance is recomputed from the argument in this frame. Copying the
+	// caller's flags would let a reassigned parameter regain its original value
+	// merely by being passed to another helper.
+	binding.ginContext = isRoutedGinContextExpr(frame, expr)
+	binding.responseWriter = isGinResponseWriterExpr(frame, expr)
 	return binding
 }
 
@@ -599,13 +620,8 @@ func frameCallPassesGinContext(frame helperFrame, call *ast.CallExpr) bool {
 		return false
 	}
 	for _, arg := range call.Args {
-		if isGinContextType(frameTypeOf(frame, arg)) {
+		if isRoutedGinContextExpr(frame, arg) {
 			return true
-		}
-		if id, ok := arg.(*ast.Ident); ok {
-			if binding, exists := frame.bindings[frame.decl.info.ObjectOf(id)]; exists && binding.ginContext {
-				return true
-			}
 		}
 	}
 	return false
@@ -628,7 +644,8 @@ func frameLiteralValue(frame helperFrame, expr ast.Expr) *facts.LiteralValue {
 		return nil
 	}
 	if id, ok := expr.(*ast.Ident); ok {
-		if binding, exists := frame.bindings[frame.decl.info.ObjectOf(id)]; exists && binding.literal != nil {
+		object := frame.decl.info.ObjectOf(id)
+		if binding, exists := frame.bindings[object]; exists && binding.literal != nil && frameObjectKeepsInitialValue(frame, object) {
 			return binding.literal
 		}
 	}
@@ -636,12 +653,19 @@ func frameLiteralValue(frame helperFrame, expr ast.Expr) *facts.LiteralValue {
 }
 
 func frameStringValue(frame helperFrame, expr ast.Expr) (string, bool) {
-	if id, ok := expr.(*ast.Ident); ok && frame.decl.info != nil {
-		if binding, exists := frame.bindings[frame.decl.info.ObjectOf(id)]; exists && binding.stringValue != nil {
-			return *binding.stringValue, true
-		}
-	}
 	return literalStringValue(frameLiteralValue(frame, expr))
+}
+
+// frameObjectKeepsInitialValue is the conservative boundary for exact caller
+// values. A helper parameter begins with its argument, but after any assignment
+// the value at a later use is control-flow dependent. Until that assignment is
+// proved at the use site, the caller's literal cannot be reused as the answer.
+func frameObjectKeepsInitialValue(frame helperFrame, object gotypes.Object) bool {
+	if object == nil {
+		return false
+	}
+	locals := assignedLocalsOf(frame)
+	return !locals.rebound[object] && len(locals.values[object]) == 0
 }
 
 func literalStringValue(value *facts.LiteralValue) (string, bool) {
@@ -725,7 +749,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 			if hint.schemaKnown && hint.schema != nil {
 				schema = *hint.schema
 			}
-			required := requestAccessRequired(frame.decl, call, method)
+			required := requestAccessRequired(frame, call, method)
 			if hint.requiredKnown {
 				required = hint.required
 			}
@@ -739,7 +763,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 			if hint.schemaKnown && hint.schema != nil {
 				schema = *hint.schema
 			}
-			required := requestAccessRequired(frame.decl, call, method)
+			required := requestAccessRequired(frame, call, method)
 			if hint.requiredKnown {
 				required = hint.required
 			}
@@ -747,15 +771,27 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		} else {
 			a.reportDynamicParameterName(frame, call, traversal, method)
 		}
+	case "JSONP":
+		// Gin itself reads this query parameter to select JSON or padded
+		// JavaScript; the handler does not need a separate Query call.
+		a.addTraversedParameter(traversal, queryParam("callback", frame.decl.fset, call.Pos()), true)
 	case "ShouldBindQuery", "BindQuery":
 		a.addBoundParameters(frame, call, "query", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
 	case "ShouldBindHeader", "BindHeader":
 		a.addBoundParameters(frame, call, "header", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
 	case "ShouldBindUri", "BindUri":
 		a.addBoundParameters(frame, call, "path", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
-	case "ShouldBindJSON", "BindJSON":
+	case "ShouldBindJSON", "BindJSON", "ShouldBindBodyWithJSON":
 		a.setTraversedRequestBody(frame, call, "application/json", optionalBindPositions, traversal)
-	case "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
+	case "ShouldBind", "Bind", "ShouldBindWith", "BindWith", "MustBindWith", "ShouldBindBodyWith":
+		switch explicitBindingName(frame.decl.info, call) {
+		case "Query":
+			a.addBoundParameters(frame, call, "query", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
+			return
+		case "Header":
+			a.addBoundParameters(frame, call, "header", traversal.cf, traversal.seenParam, traversal.resolvedParam, traversal.route, traversal.diagnostics)
+			return
+		}
 		bound := boundTypeFromCall(frame, call)
 		contentType := bindContentType(method, frame.decl.info, call, bound)
 		if isFormContentType(contentType) {
@@ -792,6 +828,10 @@ func (a *Analyzer) analyzeTraversedGinCall(
 			}
 			return
 		}
+		if contentType == "" {
+			a.reportTraversedUnresolvedBody(frame, call, traversal, method, "binding media type is selected dynamically or is unsupported")
+			return
+		}
 		a.setTraversedRequestBody(frame, call, contentType, optionalBindPositions, traversal)
 	case "FormFile":
 		if name, ok := frameCallStringArg(frame, call, 0); ok {
@@ -806,7 +846,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 				field := formField(
 					name,
 					formAccessSchema(method),
-					requestAccessRequired(frame.decl, call, method),
+					requestAccessRequired(frame, call, method),
 				)
 				if method == "DefaultPostForm" && len(call.Args) > 1 {
 					field.Meta = &facts.FieldMeta{Default: frameLiteralValue(frame, call.Args[1])}
@@ -818,6 +858,13 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		}
 	case "PostFormMap", "GetPostFormMap":
 		a.reportTraversedUnresolvedBody(frame, call, traversal, method, formMapUnrepresentable)
+	case "GetRawData":
+		recordRawBodyRead(traversal.rawBodyReads, frame.decl.fset, call, method)
+	case "BindXML", "ShouldBindXML", "ShouldBindBodyWithXML",
+		"BindYAML", "ShouldBindYAML", "ShouldBindBodyWithYAML",
+		"BindTOML", "ShouldBindTOML", "ShouldBindBodyWithTOML",
+		"BindPlain", "ShouldBindPlain", "ShouldBindBodyWithPlain":
+		a.reportTraversedUnresolvedBody(frame, call, traversal, method, unsupportedGinBodyBindingReason(method))
 	}
 }
 
@@ -833,6 +880,9 @@ func addTraversedMultipartFileField(name string, traversal *contextTraversal) {
 	)
 }
 
+// setTraversedRequestBody publishes a body a helper binds. contentType is always a
+// media type the caller already proved: a binder gnr8 cannot read is diagnosed at
+// the call site and never reaches here, so this function has one path, not two.
 func (a *Analyzer) setTraversedRequestBody(
 	frame helperFrame,
 	call *ast.CallExpr,
@@ -855,17 +905,6 @@ func (a *Analyzer) setTraversedRequestBody(
 			)
 		}
 		return
-	}
-	if contentType == "" && traversal.diagnostics != nil {
-		file, line := positionOf(frame.decl.fset, call.Pos())
-		traversal.diagnostics.RequestBodyUnresolved(
-			selectorName(call.Fun),
-			traversal.route.Method,
-			untypedRouteLabel(traversal.route),
-			"binding media type is selected dynamically or is unsupported",
-			file,
-			line,
-		)
 	}
 	a.setRequestBodyFact(
 		traversal.cf,
@@ -989,15 +1028,11 @@ func (a *Analyzer) reportTraversedUnresolvedBody(
 // multipart.Form returned by Gin. A literal key is a bounded repeated-file
 // contract; a computed key can select an unbounded set and is diagnosed.
 func (a *Analyzer) multipartFileMapFields(
-	h handlerDecl,
+	frame helperFrame,
 	route routes.Route,
 	diags *diag.Accumulator,
 ) map[string]facts.FieldFact {
-	return a.multipartFileMapFieldsInFrame(
-		helperFrame{decl: h, bindings: map[gotypes.Object]helperBinding{}},
-		route,
-		diags,
-	)
+	return a.multipartFileMapFieldsInFrame(frame, route, diags)
 }
 
 func (a *Analyzer) multipartFileMapFieldsInFrame(
@@ -1006,7 +1041,7 @@ func (a *Analyzer) multipartFileMapFieldsInFrame(
 	diags *diag.Accumulator,
 ) map[string]facts.FieldFact {
 	fields := map[string]facts.FieldFact{}
-	formVars := multipartFormResultVars(frame.decl)
+	formVars := multipartFormResultVars(frame)
 	if len(formVars) == 0 || frame.decl.decl == nil || frame.decl.decl.Body == nil {
 		return fields
 	}
@@ -1048,7 +1083,8 @@ func (a *Analyzer) multipartFileMapFieldsInFrame(
 	return fields
 }
 
-func multipartFormResultVars(h handlerDecl) map[gotypes.Object]bool {
+func multipartFormResultVars(frame helperFrame) map[gotypes.Object]bool {
+	h := frame.decl
 	vars := map[gotypes.Object]bool{}
 	if h.decl == nil || h.decl.Body == nil || h.info == nil {
 		return vars
@@ -1063,7 +1099,7 @@ func multipartFormResultVars(h handlerDecl) map[gotypes.Object]bool {
 			return true
 		}
 		name, recvPkg, ok := routes.GinMethod(h.info, call)
-		if !ok || recvPkg != routes.GinPkgPath || name != "MultipartForm" {
+		if !ok || recvPkg != routes.GinPkgPath || name != "MultipartForm" || !isRoutedGinContextCall(frame, call) {
 			return true
 		}
 		if ident, ok := assign.Lhs[0].(*ast.Ident); ok {
@@ -1172,7 +1208,7 @@ func frameReadsDirectQuery(frame helperFrame, name string) bool {
 			return true
 		}
 		method, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
-		if ok && recvPkg == routes.GinPkgPath && method == "Query" {
+		if ok && recvPkg == routes.GinPkgPath && method == "Query" && isRoutedGinContextCall(frame, call) {
 			queryName, resolved := frameCallStringArg(frame, call, 0)
 			found = resolved && queryName == name
 		}
@@ -1436,7 +1472,7 @@ func queryAccessFromExpr(frame helperFrame, name string, expr ast.Expr, state qu
 		return state.values[frame.decl.info.ObjectOf(node)]
 	case *ast.CallExpr:
 		method, recvPkg, ok := routes.GinMethod(frame.decl.info, node)
-		if ok && recvPkg == routes.GinPkgPath && method == "Query" {
+		if ok && recvPkg == routes.GinPkgPath && method == "Query" && isRoutedGinContextCall(frame, node) {
 			queryName, resolved := frameCallStringArg(frame, node, 0)
 			if resolved && queryName == name {
 				return queryAccessExact
@@ -1599,15 +1635,34 @@ func updateQueryResponse(frame helperFrame, node ast.Node, state *queryPathState
 			return true
 		}
 		method, recvPkg, ginCall := routes.GinMethod(frame.decl.info, call)
-		if ginCall && recvPkg == routes.GinPkgPath {
+		if ginCall && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) {
 			mergeQueryResponse(state, ginResponseOutcome(frame.decl.info, method, call))
 			return true
 		}
-		if frameCallPassesGinContext(frame, call) {
+		if isGinResponseWriterCall(frame, call, "WriteHeader") {
+			if status, ok := responseStatusInFrame(frame, call, 0); ok {
+				mergeQueryResponse(state, responseOutcomeForStatus(status))
+			} else {
+				mergeQueryResponse(state, queryResponseUncertain)
+			}
+			return true
+		}
+		if frameCallPassesResponseContext(frame, call) {
 			mergeQueryResponse(state, queryResponseUncertain)
 		}
 		return true
 	})
+}
+
+func responseOutcomeForStatus(status uint16) queryResponseState {
+	switch {
+	case status >= 400 && status < 500:
+		return queryResponseClientError
+	case status >= 200 && status < 400:
+		return queryResponseSuccess
+	default:
+		return queryResponseUncertain
+	}
 }
 
 // ginResponseOutcome classifies what one gin.Context call contributes to a path's
@@ -1654,9 +1709,9 @@ func ginFixedSuccessResponse(method string) bool {
 func ginStatusArgumentResponse(method string) bool {
 	switch method {
 	case "JSON", "IndentedJSON", "SecureJSON", "PureJSON", "AsciiJSON", "JSONP",
-		"XML", "YAML", "TOML", "ProtoBuf", "String", "HTML", "Render", "Negotiate",
+		"XML", "YAML", "TOML", "ProtoBuf", "BSON", "String", "HTML", "Render", "Negotiate",
 		"Data", "DataFromReader", "Redirect", "Status",
-		"AbortWithStatus", "AbortWithStatusJSON", "AbortWithError":
+		"AbortWithStatus", "AbortWithStatusJSON", "AbortWithStatusPureJSON", "AbortWithError":
 		return true
 	}
 	return false
@@ -1676,7 +1731,8 @@ func mergeQueryResponse(state *queryPathState, incoming queryResponseState) {
 // requestAccessRequired answers requiredness from the handler's behavior. A
 // read is observational by default. It becomes required only when the handler
 // proves absence and rejects that branch with a declared 4xx response.
-func requestAccessRequired(h handlerDecl, target *ast.CallExpr, method string) bool {
+func requestAccessRequired(frame helperFrame, target *ast.CallExpr, method string) bool {
+	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil || h.info == nil || target == nil {
 		return false
 	}
@@ -1687,13 +1743,13 @@ func requestAccessRequired(h handlerDecl, target *ast.CallExpr, method string) b
 			if !exprChecksMissingStringAccess(h.info, ifStmt.Cond, target, values) {
 				return false
 			}
-			return blockRejectsRequest(h, ifStmt.Body) || blockReturnsNonNilError(h, ifStmt.Body)
+			return blockRejectsRequest(frame, ifStmt.Body) || blockReturnsNonNilError(h, ifStmt.Body)
 		})
 	case "Cookie":
 		errors := callResultVars(h, target, 1)
 		return len(errors) > 0 && anyMatchingIf(h, func(ifStmt *ast.IfStmt) bool {
 			return exprChecksNonNil(h.info, ifStmt.Cond, errors) &&
-				blockRejectsRequest(h, ifStmt.Body)
+				blockRejectsRequest(frame, ifStmt.Body)
 		})
 	default:
 		return false
@@ -1841,7 +1897,8 @@ func exprIsObject(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object]b
 // proof reads, so one rejection cannot count for a query parameter and not for a
 // header read beside it: naming the response surface twice is how those two answers
 // drift apart.
-func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
+func blockRejectsRequest(frame helperFrame, block *ast.BlockStmt) bool {
+	h := frame.decl
 	if block == nil {
 		return false
 	}
@@ -1855,7 +1912,13 @@ func blockRejectsRequest(h handlerDecl, block *ast.BlockStmt) bool {
 			return true
 		}
 		name, recvPkg, ok := routes.GinMethod(h.info, call)
-		if !ok || recvPkg != routes.GinPkgPath {
+		if !ok || recvPkg != routes.GinPkgPath || !isRoutedGinContextCall(frame, call) {
+			if isGinResponseWriterCall(frame, call, "WriteHeader") {
+				if status, known := responseStatusInFrame(frame, call, 0); known && responseOutcomeForStatus(status) == queryResponseClientError {
+					rejects = true
+				}
+				return !rejects
+			}
 			return true
 		}
 		rejects = ginResponseOutcome(h.info, name, call) == queryResponseClientError
@@ -1890,6 +1953,17 @@ func (a *Analyzer) requestFormFile(h handlerDecl, call *ast.CallExpr) (string, b
 	return name, true, resolved
 }
 
+// requestCookie is the net/http twin of c.Cookie. It is a request fact only when
+// the receiver is the Request field of the routed Gin context; a cookie read from
+// an unrelated *http.Request says nothing about this operation.
+func (a *Analyzer) requestCookie(h handlerDecl, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestCookieCall(helperFrame{decl: h}, call) {
+		return "", false, false
+	}
+	name, resolved := a.callStringArg(h, call, 0)
+	return name, true, resolved
+}
+
 func isRequestHeaderGetCall(frame helperFrame, call *ast.CallExpr) bool {
 	if call == nil || frame.decl.info == nil || len(call.Args) == 0 {
 		return false
@@ -1904,11 +1978,33 @@ func isRequestHeaderGetCall(frame helperFrame, call *ast.CallExpr) bool {
 	}
 	request, ok := header.X.(*ast.SelectorExpr)
 	return ok && request.Sel != nil && request.Sel.Name == "Request" &&
-		isGinContextType(frameTypeOf(frame, request.X))
+		isRoutedGinContextExpr(frame, request.X)
 }
 
 func requestHeaderGetInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
 	if !isRequestHeaderGetCall(frame, call) {
+		return "", false, false
+	}
+	name, resolved := frameCallStringArg(frame, call, 0)
+	return name, true, resolved
+}
+
+func isRequestCookieCall(frame helperFrame, call *ast.CallExpr) bool {
+	if call == nil || frame.decl.info == nil || len(call.Args) == 0 {
+		return false
+	}
+	method, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || method.Sel == nil || method.Sel.Name != "Cookie" ||
+		!isNamedType(frame.decl.info.TypeOf(method.X), "net/http", "Request") {
+		return false
+	}
+	request, ok := method.X.(*ast.SelectorExpr)
+	return ok && request.Sel != nil && request.Sel.Name == "Request" &&
+		isRoutedGinContextExpr(frame, request.X)
+}
+
+func requestCookieInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
+	if !isRequestCookieCall(frame, call) {
 		return "", false, false
 	}
 	name, resolved := frameCallStringArg(frame, call, 0)
@@ -1930,7 +2026,7 @@ func isRequestFormFileCall(frame helperFrame, call *ast.CallExpr) bool {
 	}
 	request, ok := method.X.(*ast.SelectorExpr)
 	return ok && request.Sel != nil && request.Sel.Name == "Request" &&
-		isGinContextType(frameTypeOf(frame, request.X))
+		isRoutedGinContextExpr(frame, request.X)
 }
 
 func requestFormFileInFrame(frame helperFrame, call *ast.CallExpr) (string, bool, bool) {
@@ -1982,23 +2078,25 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 	}
 
 	cf := CodeFacts{RequestBodyRequired: true, Responses: []facts.ResponseFact{}, Params: []facts.ParamFact{}}
+	frame := helperFrame{decl: h, bindings: map[gotypes.Object]helperBinding{}}
 	cf.Summary, cf.Description = handlerProse(h)
 	seenParam := map[string]bool{}
 	resolvedParam := map[string]bool{}
 	untypedQueryReads := []untypedQueryRead{}
+	rawBodyReads := []rawBodyRead{}
 	seenStatus := map[uint16]bool{}
 	provisionalStatus := map[uint16]bool{}
 	formFields := map[string]facts.FieldFact{}
 	boundFormRefs := map[string]bool{}
 	manualFormFields := map[string]bool{}
 	formHasFile := false
-	for name, field := range a.multipartFileMapFields(h, route, diags) {
+	for name, field := range a.multipartFileMapFields(frame, route, diags) {
 		formFields[name] = field
 		manualFormFields[name] = true
 		formHasFile = true
 	}
 	contentTypeHint := ""
-	optionalBindPositions := collectOptionalBindPositions(h)
+	optionalBindPositions := collectOptionalBindPositions(frame)
 	hasBodyBind := false
 	allBodyBindsOptional := true
 	delegatedResponseSeen := map[string]bool{}
@@ -2010,8 +2108,11 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			return true
 		}
 		name, recvPkg, ok := routes.GinMethod(h.info, call)
-		if !ok || recvPkg != routes.GinPkgPath {
-			if isHTTPRedirectCall(h.info, call) {
+		if !ok || recvPkg != routes.GinPkgPath || !isRoutedGinContextCall(frame, call) {
+			if isGinResponseWriterCall(frame, call, "WriteHeader") {
+				a.analyzeStatusInFrame(frame, call, route, &cf, seenStatus, provisionalStatus, true, diags)
+			}
+			if isHTTPRedirectCall(frame, call) {
 				a.analyzeRedirect(h, call, 3, route, &cf, seenStatus, provisionalStatus, diags)
 			}
 			if pname, matched, resolved := a.requestHeaderGet(h, call); matched {
@@ -2020,13 +2121,28 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 						&cf,
 						seenParam,
 						resolvedParam,
-						requestParameter(pname, "header", requestAccessRequired(h, call, "GetHeader"), facts.PrimitiveType(facts.StringPrim()), h.fset, call.Pos()),
+						requestParameter(pname, "header", requestAccessRequired(frame, call, "GetHeader"), facts.PrimitiveType(facts.StringPrim()), h.fset, call.Pos()),
 						true,
 						route,
 						diags,
 					)
 				} else {
 					reportDirectDynamicParameter(diags, h, route, call, "Request.Header.Get")
+				}
+			}
+			if pname, matched, resolved := a.requestCookie(h, call); matched {
+				if resolved {
+					a.addExtractedParameter(
+						&cf,
+						seenParam,
+						resolvedParam,
+						requestParameter(pname, "cookie", requestAccessRequired(frame, call, "Cookie"), facts.PrimitiveType(facts.StringPrim()), h.fset, call.Pos()),
+						true,
+						route,
+						diags,
+					)
+				} else {
+					reportDirectDynamicParameter(diags, h, route, call, "Request.Cookie")
 				}
 			}
 			if fname, matched, resolved := a.requestFormFile(h, call); matched {
@@ -2036,14 +2152,14 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					reportDirectUnresolvedBody(diags, h, route, call, "Request.FormFile", "multipart field name is dynamic")
 				}
 			}
-			if ref, schema, ok := a.bodyFromGenericJSONHelper(h, call); ok {
+			if ref, schema, ok := a.bodyFromGenericJSONHelper(frame, call); ok {
 				a.setRequestBodyFact(&cf, ref, "application/json", route, diags, h.fset, call.Pos(), selectorName(call.Fun))
 				cf.Schemas = append(cf.Schemas, schema...)
 				hasBodyBind = true
 				allBodyBindsOptional = false
 			}
 			a.analyzeContextHelperCall(
-				helperFrame{decl: h, bindings: map[gotypes.Object]helperBinding{}},
+				frame,
 				call,
 				parameterHint{},
 				0,
@@ -2053,6 +2169,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					seenParam:              seenParam,
 					resolvedParam:          resolvedParam,
 					untypedQueryReads:      &untypedQueryReads,
+					rawBodyReads:           &rawBodyReads,
 					formFields:             formFields,
 					boundFormRefs:          boundFormRefs,
 					manualFormFields:       manualFormFields,
@@ -2064,13 +2181,13 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					reportedUnresolvedCall: map[token.Pos]bool{},
 				},
 			)
-			a.analyzeDelegatedResponses(helperFrame{decl: h, bindings: map[gotypes.Object]helperBinding{}}, call, route, &cf, seenStatus, provisionalStatus, diags, delegatedResponseSeen, contentTypeHint)
-			a.analyzePathHelperCall(h, call, &cf, seenParam)
-			a.analyzeQueryHelperCall(h, call, route, &cf, seenParam, resolvedParam, diags)
+			a.analyzeDelegatedResponses(frame, call, route, &cf, seenStatus, provisionalStatus, diags, delegatedResponseSeen, contentTypeHint)
+			a.analyzePathHelperCall(frame, call, &cf, seenParam)
+			a.analyzeQueryHelperCall(frame, call, route, &cf, seenParam, resolvedParam, diags)
 			return true
 		}
 		switch name {
-		case "ShouldBindJSON", "BindJSON":
+		case "ShouldBindJSON", "BindJSON", "ShouldBindBodyWithJSON":
 			if ref, _, ok := a.bindRequestType(h.info, call); ok {
 				a.setRequestBodyFact(&cf, ref, "application/json", route, diags, h.fset, call.Pos(), name)
 				hasBodyBind = true
@@ -2081,48 +2198,73 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 				reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a named schema")
 			}
 		case "ShouldBindQuery", "BindQuery":
-			a.addBoundParameters(helperFrame{decl: h}, call, "query", &cf, seenParam, resolvedParam, route, diags)
+			a.addBoundParameters(frame, call, "query", &cf, seenParam, resolvedParam, route, diags)
 		case "ShouldBindHeader", "BindHeader":
-			a.addBoundParameters(helperFrame{decl: h}, call, "header", &cf, seenParam, resolvedParam, route, diags)
+			a.addBoundParameters(frame, call, "header", &cf, seenParam, resolvedParam, route, diags)
 		case "ShouldBindUri", "BindUri":
-			a.addBoundParameters(helperFrame{decl: h}, call, "path", &cf, seenParam, resolvedParam, route, diags)
-		case "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
-			frame := helperFrame{decl: h}
-			bound := boundTypeFromCall(frame, call)
-			contentType := bindContentType(name, h.info, call, bound)
-			if isFormContentType(contentType) {
-				refID, ok := a.addBoundFormFields(frame, call, formFields, route, diags)
-				if !ok {
-					reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a form object")
-					break
-				}
-				if refID != "" {
-					boundFormRefs[refID] = true
-				}
-				formHasFile = formHasFile || contentType == "multipart/form-data"
-				hasBodyBind = true
-				if !optionalBindPositions[call.Pos()] {
-					allBodyBindsOptional = false
-				}
-			} else if ref, _, ok := a.bindRequestType(h.info, call); ok {
-				if contentType == "" {
+			a.addBoundParameters(frame, call, "path", &cf, seenParam, resolvedParam, route, diags)
+		case "ShouldBind", "Bind", "ShouldBindWith", "BindWith", "MustBindWith", "ShouldBindBodyWith":
+			switch explicitBindingName(h.info, call) {
+			case "Query":
+				a.addBoundParameters(frame, call, "query", &cf, seenParam, resolvedParam, route, diags)
+				break
+			case "Header":
+				a.addBoundParameters(frame, call, "header", &cf, seenParam, resolvedParam, route, diags)
+				break
+			default:
+				bound := boundTypeFromCall(frame, call)
+				contentType := bindContentType(name, h.info, call, bound)
+				if isFormContentType(contentType) {
+					refID, ok := a.addBoundFormFields(frame, call, formFields, route, diags)
+					if !ok {
+						reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a form object")
+						break
+					}
+					if refID != "" {
+						boundFormRefs[refID] = true
+					}
+					formHasFile = formHasFile || contentType == "multipart/form-data"
+					hasBodyBind = true
+					if !optionalBindPositions[call.Pos()] {
+						allBodyBindsOptional = false
+					}
+				} else if contentType == "" {
 					reportDirectUnresolvedBody(diags, h, route, call, name, "binding media type is selected dynamically or is unsupported")
+				} else if ref, _, ok := a.bindRequestType(h.info, call); ok {
+					a.setRequestBodyFact(&cf, ref, contentType, route, diags, h.fset, call.Pos(), name)
+					hasBodyBind = true
+					if !optionalBindPositions[call.Pos()] {
+						allBodyBindsOptional = false
+					}
+				} else {
+					reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a named schema")
 				}
-				a.setRequestBodyFact(&cf, ref, contentType, route, diags, h.fset, call.Pos(), name)
-				hasBodyBind = true
-				if !optionalBindPositions[call.Pos()] {
-					allBodyBindsOptional = false
-				}
-			} else {
-				reportDirectUnresolvedBody(diags, h, route, call, name, "binding target does not resolve to a named schema")
 			}
-		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
+		case "BindXML", "ShouldBindXML", "ShouldBindBodyWithXML",
+			"BindYAML", "ShouldBindYAML", "ShouldBindBodyWithYAML",
+			"BindTOML", "ShouldBindTOML", "ShouldBindBodyWithTOML",
+			"BindPlain", "ShouldBindPlain", "ShouldBindBodyWithPlain":
+			reportDirectUnresolvedBody(diags, h, route, call, name, unsupportedGinBodyBindingReason(name))
+		case "GetRawData":
+			recordRawBodyRead(&rawBodyReads, h.fset, call, name)
+		case "JSON", "AbortWithStatusJSON", "AbortWithStatusPureJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(h, call, route, &cf, seenStatus, provisionalStatus, diags)
-		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf":
+		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf", "BSON":
+			if name == "JSONP" {
+				a.addExtractedParameter(
+					&cf,
+					seenParam,
+					resolvedParam,
+					queryParam("callback", h.fset, call.Pos()),
+					true,
+					route,
+					diags,
+				)
+			}
 			a.analyzeOpaqueResponse(h, call, name, route, &cf, seenStatus, provisionalStatus, diags)
 		case "Status":
 			a.analyzeStatus(h, call, route, &cf, seenStatus, provisionalStatus, true, diags)
-		case "AbortWithStatus":
+		case "AbortWithStatus", "AbortWithError":
 			a.analyzeStatus(h, call, route, &cf, seenStatus, provisionalStatus, false, diags)
 		case "Header":
 			if key, ok := a.callStringArg(h, call, 0); ok && strings.EqualFold(key, "Content-Type") {
@@ -2130,7 +2272,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					contentTypeHint = value
 				}
 			}
-		case "File", "FileAttachment":
+		case "File", "FileFromFS", "FileAttachment":
 			a.analyzeBinaryStatus(&cf, seenStatus, provisionalStatus, 200, contentTypeHint)
 		case "Data":
 			a.analyzeData(h, call, route, &cf, seenStatus, provisionalStatus, diags)
@@ -2141,9 +2283,11 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 		case "SSEvent":
 			a.addSSEResponse(&cf, seenStatus, provisionalStatus)
 		case "Stream":
-			if streamCallContainsSSEvent(h.info, call) {
+			if streamCallContainsSSEvent(frame, call) {
 				a.addSSEResponse(&cf, seenStatus, provisionalStatus)
 			}
+		case "Render", "Negotiate":
+			a.reportUnresolvedGinResponse(frame, call, name, route, diags)
 		case "Param":
 			if pname, ok := a.callStringArg(h, call, 0); ok {
 				a.addExtractedParameter(&cf, seenParam, resolvedParam, pathParam(pname, h.fset, call.Pos()), true, route, diags)
@@ -2156,7 +2300,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 				resolved := name != "Query"
 				hint := parameterHint{}
 				if name == "Query" {
-					switch queryRequiredness(helperFrame{decl: h}, pname) {
+					switch queryRequiredness(frame, pname) {
 					case queryPresenceOptional:
 						resolved = true
 						hint.requiredKnown = true
@@ -2187,7 +2331,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 				a.addExtractedParameter(&cf, seenParam, resolvedParam, requestParameter(
 					pname,
 					"header",
-					requestAccessRequired(h, call, name),
+					requestAccessRequired(frame, call, name),
 					facts.PrimitiveType(facts.StringPrim()),
 					h.fset,
 					call.Pos(),
@@ -2200,7 +2344,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 				a.addExtractedParameter(&cf, seenParam, resolvedParam, requestParameter(
 					pname,
 					"cookie",
-					requestAccessRequired(h, call, name),
+					requestAccessRequired(frame, call, name),
 					facts.PrimitiveType(facts.StringPrim()),
 					h.fset,
 					call.Pos(),
@@ -2221,7 +2365,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					field := formField(
 						fname,
 						formAccessSchema(name),
-						requestAccessRequired(h, call, name),
+						requestAccessRequired(frame, call, name),
 					)
 					if name == "DefaultPostForm" && len(call.Args) > 1 {
 						field.Meta = &facts.FieldMeta{Default: literalValue(h.info, call.Args[1])}
@@ -2268,7 +2412,7 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 		}
 	}
 	if cf.RequestBody == nil {
-		if schema := a.rawJSONRequestSchema(h, route.Handler); schema != nil {
+		if schema := a.rawJSONRequestSchema(frame, route.Handler); schema != nil {
 			cf.RequestBody = &facts.TypeRef{RefID: schema.ID}
 			cf.RequestBodyContentType = "application/json"
 			cf.Schemas = append(cf.Schemas, *schema)
@@ -2276,6 +2420,18 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 	}
 	if hasBodyBind {
 		cf.RequestBodyRequired = !allBodyBindsOptional
+	}
+	if cf.RequestBody == nil && diags != nil {
+		for _, read := range rawBodyReads {
+			diags.RequestBodyUnresolved(
+				read.subject,
+				route.Method,
+				untypedRouteLabel(route),
+				rawGinBodyReason,
+				read.file,
+				read.line,
+			)
+		}
 	}
 	if diags != nil {
 		reported := map[string]bool{}
@@ -2348,6 +2504,16 @@ func reportDirectUnresolvedBody(
 	diags.RequestBodyUnresolved(subject, route.Method, untypedRouteLabel(route), reason, file, line)
 }
 
+// recordRawBodyRead defers one GetRawData read. Analyze reports the whole set once,
+// and only when the operation ends with no body of any kind.
+func recordRawBodyRead(reads *[]rawBodyRead, fset *token.FileSet, call *ast.CallExpr, subject string) {
+	if reads == nil {
+		return
+	}
+	file, line := positionOf(fset, call.Pos())
+	*reads = append(*reads, rawBodyRead{subject: subject, file: file, line: line})
+}
+
 func (a *Analyzer) setRequestBodyFact(
 	cf *CodeFacts,
 	ref *facts.TypeRef,
@@ -2418,19 +2584,20 @@ func (a *Analyzer) handlerForRoute(route routes.Route) (handlerDecl, bool) {
 	return h, ok
 }
 
-func collectOptionalBindPositions(h handlerDecl) map[token.Pos]bool {
+func collectOptionalBindPositions(frame helperFrame) map[token.Pos]bool {
+	h := frame.decl
 	out := map[token.Pos]bool{}
 	if h.decl == nil || h.decl.Body == nil {
 		return out
 	}
 	ast.Inspect(h.decl.Body, func(n ast.Node) bool {
 		ifStmt, ok := n.(*ast.IfStmt)
-		if !ok || !isOptionalBodyGuard(h.info, ifStmt.Cond) {
+		if !ok || !isOptionalBodyGuard(frame, ifStmt.Cond) {
 			return true
 		}
 		ast.Inspect(ifStmt.Body, func(child ast.Node) bool {
 			call, ok := child.(*ast.CallExpr)
-			if !ok || !isGinBindCall(h.info, call) {
+			if !ok || !isGinBindCall(frame, call) {
 				return true
 			}
 			out[call.Pos()] = true
@@ -2441,48 +2608,48 @@ func collectOptionalBindPositions(h handlerDecl) map[token.Pos]bool {
 	return out
 }
 
-func isOptionalBodyGuard(info *gotypes.Info, expr ast.Expr) bool {
-	return isBodyPresentPredicate(info, expr)
+func isOptionalBodyGuard(frame helperFrame, expr ast.Expr) bool {
+	return isBodyPresentPredicate(frame, expr)
 }
 
-func isBodyPresentPredicate(info *gotypes.Info, expr ast.Expr) bool {
+func isBodyPresentPredicate(frame helperFrame, expr ast.Expr) bool {
 	switch node := expr.(type) {
 	case *ast.BinaryExpr:
 		switch node.Op {
 		case token.LOR:
-			return isBodyPresentPredicate(info, node.X) && isBodyPresentPredicate(info, node.Y)
+			return isBodyPresentPredicate(frame, node.X) && isBodyPresentPredicate(frame, node.Y)
 		case token.LAND:
-			return isBodyPresentPredicate(info, node.X) || isBodyPresentPredicate(info, node.Y)
+			return isBodyPresentPredicate(frame, node.X) || isBodyPresentPredicate(frame, node.Y)
 		case token.GTR:
-			return isContentLengthExpr(info, node.X) && isZeroLiteral(node.Y)
+			return isContentLengthExpr(frame, node.X) && isZeroLiteral(node.Y)
 		case token.LSS:
-			return isZeroLiteral(node.X) && isContentLengthExpr(info, node.Y)
+			return isZeroLiteral(node.X) && isContentLengthExpr(frame, node.Y)
 		case token.NEQ:
-			return (isContentLengthExpr(info, node.X) && isZeroLiteral(node.Y)) ||
-				(isZeroLiteral(node.X) && isContentLengthExpr(info, node.Y)) ||
-				(isContentLengthHeaderCall(info, node.X) && isEmptyStringLiteral(node.Y)) ||
-				(isEmptyStringLiteral(node.X) && isContentLengthHeaderCall(info, node.Y))
+			return (isContentLengthExpr(frame, node.X) && isZeroLiteral(node.Y)) ||
+				(isZeroLiteral(node.X) && isContentLengthExpr(frame, node.Y)) ||
+				(isContentLengthHeaderCall(frame, node.X) && isEmptyStringLiteral(node.Y)) ||
+				(isEmptyStringLiteral(node.X) && isContentLengthHeaderCall(frame, node.Y))
 		}
 	case *ast.ParenExpr:
-		return isBodyPresentPredicate(info, node.X)
+		return isBodyPresentPredicate(frame, node.X)
 	}
 	return false
 }
 
-func isContentLengthExpr(info *gotypes.Info, expr ast.Expr) bool {
+func isContentLengthExpr(frame helperFrame, expr ast.Expr) bool {
 	switch node := expr.(type) {
 	case *ast.SelectorExpr:
-		return isGinRequestContentLength(info, node)
+		return isGinRequestContentLength(frame, node)
 	case *ast.CallExpr:
 		if selectorName(node.Fun) == "len" && len(node.Args) == 1 {
-			return isContentLengthHeaderValueExpr(info, node.Args[0])
+			return isContentLengthHeaderValueExpr(frame, node.Args[0])
 		}
 	}
 	return false
 }
 
-func isGinRequestContentLength(info *gotypes.Info, selector *ast.SelectorExpr) bool {
-	if info == nil {
+func isGinRequestContentLength(frame helperFrame, selector *ast.SelectorExpr) bool {
+	if frame.decl.info == nil {
 		return false
 	}
 	if selector == nil || selector.Sel == nil || selector.Sel.Name != "ContentLength" {
@@ -2492,18 +2659,18 @@ func isGinRequestContentLength(info *gotypes.Info, selector *ast.SelectorExpr) b
 	if !ok || requestSelector.Sel == nil || requestSelector.Sel.Name != "Request" {
 		return false
 	}
-	return isGinContextType(info.TypeOf(requestSelector.X)) &&
-		isNamedType(info.TypeOf(requestSelector), "net/http", "Request")
+	return isRoutedGinContextExpr(frame, requestSelector.X) &&
+		isNamedType(frame.decl.info.TypeOf(requestSelector), "net/http", "Request")
 }
 
-func mentionsContentLengthHeader(info *gotypes.Info, expr ast.Expr) bool {
-	if info == nil {
+func mentionsContentLengthHeader(frame helperFrame, expr ast.Expr) bool {
+	if frame.decl.info == nil {
 		return false
 	}
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || !isContentLengthHeaderCall(info, call) {
+		if !ok || !isContentLengthHeaderCall(frame, call) {
 			return true
 		}
 		found = true
@@ -2512,33 +2679,33 @@ func mentionsContentLengthHeader(info *gotypes.Info, expr ast.Expr) bool {
 	return found
 }
 
-func isContentLengthHeaderCall(info *gotypes.Info, expr ast.Expr) bool {
-	if info == nil {
+func isContentLengthHeaderCall(frame helperFrame, expr ast.Expr) bool {
+	if frame.decl.info == nil {
 		return false
 	}
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
-	name, recvPkg, ok := routes.GinMethod(info, call)
-	if !ok || recvPkg != routes.GinPkgPath || name != "GetHeader" {
+	name, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
+	if !ok || recvPkg != routes.GinPkgPath || name != "GetHeader" || !isRoutedGinContextCall(frame, call) {
 		return false
 	}
 	value, ok := stringArg(call, 0)
 	return ok && strings.EqualFold(value, "Content-Length")
 }
 
-func isContentLengthHeaderValueExpr(info *gotypes.Info, expr ast.Expr) bool {
-	if isContentLengthHeaderCall(info, expr) {
+func isContentLengthHeaderValueExpr(frame helperFrame, expr ast.Expr) bool {
+	if isContentLengthHeaderCall(frame, expr) {
 		return true
 	}
 	call, ok := expr.(*ast.CallExpr)
 	if !ok || len(call.Args) != 1 {
 		return false
 	}
-	fn := calledFuncObject(info, call.Fun)
+	fn := calledFuncObject(frame.decl.info, call.Fun)
 	return fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "strings" && fn.Name() == "TrimSpace" &&
-		isContentLengthHeaderValueExpr(info, call.Args[0])
+		isContentLengthHeaderValueExpr(frame, call.Args[0])
 }
 
 func isGinContextType(t gotypes.Type) bool {
@@ -2573,13 +2740,14 @@ func isEmptyStringLiteral(expr ast.Expr) bool {
 	return err == nil && value == ""
 }
 
-func isGinBindCall(info *gotypes.Info, call *ast.CallExpr) bool {
-	name, recvPkg, ok := routes.GinMethod(info, call)
-	if !ok || recvPkg != routes.GinPkgPath {
+func isGinBindCall(frame helperFrame, call *ast.CallExpr) bool {
+	name, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
+	if !ok || recvPkg != routes.GinPkgPath || !isRoutedGinContextCall(frame, call) {
 		return false
 	}
 	switch name {
-	case "ShouldBindJSON", "BindJSON", "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
+	case "ShouldBindJSON", "BindJSON", "ShouldBindBodyWithJSON",
+		"ShouldBind", "Bind", "ShouldBindWith", "BindWith", "MustBindWith", "ShouldBindBodyWith":
 		return true
 	default:
 		return false
@@ -2587,7 +2755,7 @@ func isGinBindCall(info *gotypes.Info, call *ast.CallExpr) bool {
 }
 
 func (a *Analyzer) analyzeQueryHelperCall(
-	h handlerDecl,
+	frame helperFrame,
 	call *ast.CallExpr,
 	route routes.Route,
 	cf *CodeFacts,
@@ -2595,15 +2763,16 @@ func (a *Analyzer) analyzeQueryHelperCall(
 	resolvedParam map[string]bool,
 	diags *diag.Accumulator,
 ) {
+	h := frame.decl
 	// Both handoffs below go through addExtractedParameter rather than bailing when
 	// the parameter is already resolved: a helper read still states the schema the
 	// raw read cannot, and skipping it made the emitted type depend on whether the
 	// guard or the parser came first in the handler.
-	if param, ok := a.queryParamFromModuleHelper(h, call); ok {
+	if param, ok := a.queryParamFromModuleHelper(frame, call); ok {
 		a.addExtractedParameter(cf, seenParam, resolvedParam, param, true, route, diags)
 		return
 	}
-	query, ok := firstQueryCall(h.info, call)
+	query, ok := firstQueryCall(frame, call)
 	if !ok || query == call {
 		return
 	}
@@ -2611,7 +2780,7 @@ func (a *Analyzer) analyzeQueryHelperCall(
 	if !ok {
 		return
 	}
-	if nestedQueryHelperOutranks(h.info, call, query) {
+	if nestedQueryHelperOutranks(frame, call, query) {
 		return
 	}
 	param, requiredKnown, ok := a.queryParamFromHelper(h, call, query, pname)
@@ -2649,8 +2818,9 @@ func (a *Analyzer) queryParamFromHelper(
 	}, requiredKnown, true
 }
 
-func (a *Analyzer) queryParamFromModuleHelper(h handlerDecl, call *ast.CallExpr) (facts.ParamFact, bool) {
-	if !callPassesGinContext(h.info, call) {
+func (a *Analyzer) queryParamFromModuleHelper(frame helperFrame, call *ast.CallExpr) (facts.ParamFact, bool) {
+	h := frame.decl
+	if !frameCallPassesGinContext(frame, call) {
 		return facts.ParamFact{}, false
 	}
 	fn := calledFuncObject(h.info, call.Fun)
@@ -2662,6 +2832,7 @@ func (a *Analyzer) queryParamFromModuleHelper(h handlerDecl, call *ast.CallExpr)
 	if !ok || sig.Params() == nil {
 		return facts.ParamFact{}, false
 	}
+	calleeFrame := helperFrame{decl: callee, bindings: helperCallBindings(frame, call, fn)}
 	schema, ok := queryHelperSchema(h.info.TypeOf(call), call)
 	if !ok {
 		return facts.ParamFact{}, false
@@ -2671,7 +2842,7 @@ func (a *Analyzer) queryParamFromModuleHelper(h handlerDecl, call *ast.CallExpr)
 		if !ok {
 			continue
 		}
-		query, ok := helperQueryCallWithVar(callee, sig.Params().At(i))
+		query, ok := helperQueryCallWithVar(calleeFrame, sig.Params().At(i))
 		if !ok {
 			continue
 		}
@@ -2687,7 +2858,8 @@ func (a *Analyzer) queryParamFromModuleHelper(h handlerDecl, call *ast.CallExpr)
 	return facts.ParamFact{}, false
 }
 
-func helperQueryCallWithVar(h handlerDecl, keyVar *gotypes.Var) (*ast.CallExpr, bool) {
+func helperQueryCallWithVar(frame helperFrame, keyVar *gotypes.Var) (*ast.CallExpr, bool) {
+	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil || keyVar == nil {
 		return nil, false
 	}
@@ -2701,7 +2873,7 @@ func helperQueryCallWithVar(h handlerDecl, keyVar *gotypes.Var) (*ast.CallExpr, 
 			return true
 		}
 		name, recvPkg, ok := routes.GinMethod(h.info, call)
-		if !ok || recvPkg != routes.GinPkgPath || !isGinQueryMethod(name) || len(call.Args) == 0 {
+		if !ok || recvPkg != routes.GinPkgPath || !isRoutedGinContextCall(frame, call) || !isGinQueryMethod(name) || len(call.Args) == 0 {
 			return true
 		}
 		id, ok := call.Args[0].(*ast.Ident)
@@ -2715,12 +2887,13 @@ func helperQueryCallWithVar(h handlerDecl, keyVar *gotypes.Var) (*ast.CallExpr, 
 }
 
 func (a *Analyzer) analyzePathHelperCall(
-	h handlerDecl,
+	frame helperFrame,
 	call *ast.CallExpr,
 	cf *CodeFacts,
 	seenParam map[string]bool,
 ) {
-	pname, schema, ok := a.pathParamFromHelper(h, call)
+	h := frame.decl
+	pname, schema, ok := a.pathParamFromHelper(frame, call)
 	if !ok || seenParam["path/"+pname] {
 		return
 	}
@@ -2735,9 +2908,13 @@ func (a *Analyzer) analyzePathHelperCall(
 }
 
 func (a *Analyzer) pathParamFromHelper(
-	h handlerDecl,
+	frame helperFrame,
 	call *ast.CallExpr,
 ) (string, facts.Type, bool) {
+	h := frame.decl
+	if !frameCallPassesGinContext(frame, call) {
+		return "", facts.Type{}, false
+	}
 	fn := calledFuncObject(h.info, call.Fun)
 	callee, ok := a.moduleOwnedCallee(fn)
 	if !ok {
@@ -2751,19 +2928,21 @@ func (a *Analyzer) pathParamFromHelper(
 	if !ok {
 		return "", facts.Type{}, false
 	}
+	calleeFrame := helperFrame{decl: callee, bindings: helperCallBindings(frame, call, fn)}
 	for i := 0; i < len(call.Args) && i < sig.Params().Len(); i++ {
 		name, ok := stringArg(call, i)
 		if !ok {
 			continue
 		}
-		if helperReadsGinParamWithVar(callee, sig.Params().At(i)) {
+		if helperReadsGinParamWithVar(calleeFrame, sig.Params().At(i)) {
 			return name, schema, true
 		}
 	}
 	return "", facts.Type{}, false
 }
 
-func helperReadsGinParamWithVar(h handlerDecl, keyVar *gotypes.Var) bool {
+func helperReadsGinParamWithVar(frame helperFrame, keyVar *gotypes.Var) bool {
+	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil || keyVar == nil {
 		return false
 	}
@@ -2777,7 +2956,7 @@ func helperReadsGinParamWithVar(h handlerDecl, keyVar *gotypes.Var) bool {
 			return true
 		}
 		name, recvPkg, ok := routes.GinMethod(h.info, call)
-		if !ok || recvPkg != routes.GinPkgPath || name != "Param" || len(call.Args) == 0 {
+		if !ok || recvPkg != routes.GinPkgPath || !isRoutedGinContextCall(frame, call) || name != "Param" || len(call.Args) == 0 {
 			return true
 		}
 		id, ok := call.Args[0].(*ast.Ident)
@@ -2801,7 +2980,7 @@ func (a *Analyzer) analyzeDelegatedResponses(
 	seenHelpers map[string]bool,
 	inheritedContentTypeHint string,
 ) {
-	if !frameCallPassesGinContext(caller, call) {
+	if !frameCallPassesResponseContext(caller, call) {
 		return
 	}
 	fn := calledFuncObject(caller.decl.info, call.Fun)
@@ -2823,137 +3002,67 @@ func (a *Analyzer) analyzeDelegatedResponses(
 			return true
 		}
 		name, recvPkg, ok := routes.GinMethod(callee.info, nested)
-		if !ok || recvPkg != routes.GinPkgPath {
-			if isHTTPRedirectCall(callee.info, nested) {
+		if !ok || recvPkg != routes.GinPkgPath || !isRoutedGinContextCall(frame, nested) {
+			if isGinResponseWriterCall(frame, nested, "WriteHeader") {
+				a.analyzeStatusInFrame(frame, nested, route, cf, seenStatus, provisionalStatus, true, diags)
+			}
+			if isHTTPRedirectCall(frame, nested) {
 				a.analyzeRedirectInFrame(frame, nested, 3, route, cf, seenStatus, provisionalStatus, diags)
 			}
 			a.analyzeDelegatedResponses(frame, nested, route, cf, seenStatus, provisionalStatus, diags, seenHelpers, contentTypeHint)
 			return true
 		}
 		switch name {
-		case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
-			a.analyzeJSON(callee, nested, route, cf, seenStatus, provisionalStatus, diags)
-		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf":
-			a.analyzeOpaqueResponse(callee, nested, name, route, cf, seenStatus, provisionalStatus, diags)
+		case "JSON", "AbortWithStatusJSON", "AbortWithStatusPureJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
+			a.analyzeJSONInFrame(frame, nested, route, cf, seenStatus, provisionalStatus, diags)
+		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf", "BSON":
+			a.analyzeOpaqueResponseInFrame(frame, nested, name, route, cf, seenStatus, provisionalStatus, diags)
 		case "Status":
-			a.analyzeStatus(callee, nested, route, cf, seenStatus, provisionalStatus, true, diags)
-		case "AbortWithStatus":
-			a.analyzeStatus(callee, nested, route, cf, seenStatus, provisionalStatus, false, diags)
+			a.analyzeStatusInFrame(frame, nested, route, cf, seenStatus, provisionalStatus, true, diags)
+		case "AbortWithStatus", "AbortWithError":
+			a.analyzeStatusInFrame(frame, nested, route, cf, seenStatus, provisionalStatus, false, diags)
 		case "Header":
 			if key, ok := stringArg(nested, 0); ok && strings.EqualFold(key, "Content-Type") {
 				if value, ok := frameStringValue(frame, nested.Args[1]); ok {
 					contentTypeHint = value
 				}
 			}
-		case "File", "FileAttachment":
+		case "File", "FileFromFS", "FileAttachment":
 			a.analyzeBinaryStatus(cf, seenStatus, provisionalStatus, 200, contentTypeHint)
 		case "Data":
-			a.analyzeData(callee, nested, route, cf, seenStatus, provisionalStatus, diags)
+			a.analyzeDataInFrame(frame, nested, route, cf, seenStatus, provisionalStatus, diags)
 		case "DataFromReader":
-			a.analyzeDataFromReader(callee, nested, route, cf, seenStatus, provisionalStatus, diags)
+			a.analyzeDataFromReaderInFrame(frame, nested, route, cf, seenStatus, provisionalStatus, diags)
 		case "Redirect":
 			a.analyzeRedirectInFrame(frame, nested, 0, route, cf, seenStatus, provisionalStatus, diags)
 		case "SSEvent":
 			a.addSSEResponse(cf, seenStatus, provisionalStatus)
 		case "Stream":
-			if streamCallContainsSSEvent(callee.info, nested) {
+			if streamCallContainsSSEvent(frame, nested) {
 				a.addSSEResponse(cf, seenStatus, provisionalStatus)
 			}
+		case "Render", "Negotiate":
+			a.reportUnresolvedGinResponse(frame, nested, name, route, diags)
 		}
 		return true
 	})
-}
-
-func (a *Analyzer) analyzeDelegatedRequestBodies(
-	h handlerDecl,
-	call *ast.CallExpr,
-	cf *CodeFacts,
-	seenHelpers map[string]bool,
-	hasBodyBind *bool,
-	allBodyBindsOptional *bool,
-) {
-	if callUsesTypeArgs(call) {
-		return
-	}
-	callee, ok := a.delegatedGinContextHelper(h, call)
-	if !ok {
-		return
-	}
-	key := callee.identityKey()
-	if seenHelpers[key] {
-		return
-	}
-	seenHelpers[key] = true
-
-	optionalBindPositions := collectOptionalBindPositions(callee)
-	ast.Inspect(callee.decl.Body, func(n ast.Node) bool {
-		nested, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		name, recvPkg, ok := routes.GinMethod(callee.info, nested)
-		if !ok || recvPkg != routes.GinPkgPath {
-			a.analyzeDelegatedRequestBodies(callee, nested, cf, seenHelpers, hasBodyBind, allBodyBindsOptional)
-			return true
-		}
-		switch name {
-		case "ShouldBindJSON", "BindJSON":
-			if ref, _, ok := a.bindRequestType(callee.info, nested); ok {
-				cf.RequestBody = ref
-				cf.RequestBodyContentType = "application/json"
-				*hasBodyBind = true
-				if !optionalBindPositions[nested.Pos()] {
-					*allBodyBindsOptional = false
-				}
-			}
-		case "ShouldBind", "Bind", "ShouldBindWith", "BindWith":
-			if ref, bound, ok := a.bindRequestType(callee.info, nested); ok {
-				cf.RequestBody = ref
-				cf.RequestBodyContentType = bindContentType(name, callee.info, nested, bound)
-				*hasBodyBind = true
-				if !optionalBindPositions[nested.Pos()] {
-					*allBodyBindsOptional = false
-				}
-			}
-		}
-		return true
-	})
-}
-
-func callUsesTypeArgs(call *ast.CallExpr) bool {
-	if call == nil {
-		return false
-	}
-	switch call.Fun.(type) {
-	case *ast.IndexExpr, *ast.IndexListExpr:
-		return true
-	default:
-		return false
-	}
-}
-
-func (a *Analyzer) delegatedGinContextHelper(h handlerDecl, call *ast.CallExpr) (handlerDecl, bool) {
-	if !callPassesGinContext(h.info, call) {
-		return handlerDecl{}, false
-	}
-	fn := calledFuncObject(h.info, call.Fun)
-	callee, ok := a.moduleOwnedCallee(fn)
-	if !ok {
-		return handlerDecl{}, false
-	}
-	return callee, true
 }
 
 func (a *Analyzer) bodyFromGenericJSONHelper(
-	h handlerDecl,
+	caller helperFrame,
 	call *ast.CallExpr,
 ) (*facts.TypeRef, []facts.SchemaFact, bool) {
-	if !callPassesGinContext(h.info, call) {
+	h := caller.decl
+	if !frameCallPassesGinContext(caller, call) {
 		return nil, nil, false
 	}
 	fn := calledFuncObject(h.info, call.Fun)
 	callee, ok := a.moduleOwnedCallee(fn)
-	if !ok || !helperBindsJSONTypeParam(callee) {
+	if !ok {
+		return nil, nil, false
+	}
+	calleeFrame := helperFrame{decl: callee, bindings: helperCallBindings(caller, call, fn)}
+	if !helperBindsJSONTypeParam(calleeFrame) {
 		return nil, nil, false
 	}
 	typeArgs := callTypeArgs(h.info, call)
@@ -2967,7 +3076,8 @@ func (a *Analyzer) bodyFromGenericJSONHelper(
 	return &facts.TypeRef{RefID: id}, nil, true
 }
 
-func helperBindsJSONTypeParam(h handlerDecl) bool {
+func helperBindsJSONTypeParam(frame helperFrame) bool {
+	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil {
 		return false
 	}
@@ -2981,13 +3091,25 @@ func helperBindsJSONTypeParam(h handlerDecl) bool {
 			return true
 		}
 		name, recvPkg, ok := routes.GinMethod(h.info, call)
-		if ok && recvPkg == routes.GinPkgPath && (name == "ShouldBindJSON" || name == "BindJSON") && bindArgIsTypeParam(h.info, call) {
+		if ok && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) &&
+			ginCallBindsJSON(h.info, call, name) && bindArgIsTypeParam(h.info, call) {
 			found = true
 			return false
 		}
 		return true
 	})
 	return found
+}
+
+func ginCallBindsJSON(info *gotypes.Info, call *ast.CallExpr, method string) bool {
+	switch method {
+	case "ShouldBindJSON", "BindJSON", "ShouldBindBodyWithJSON":
+		return true
+	case "ShouldBindWith", "BindWith", "MustBindWith", "ShouldBindBodyWith":
+		return explicitBindingName(info, call) == "JSON"
+	default:
+		return false
+	}
 }
 
 func bindArgIsTypeParam(info *gotypes.Info, call *ast.CallExpr) bool {
@@ -3026,18 +3148,9 @@ func callTypeArgs(info *gotypes.Info, call *ast.CallExpr) []gotypes.Type {
 	return out
 }
 
-func callPassesGinContext(info *gotypes.Info, call *ast.CallExpr) bool {
-	for _, arg := range call.Args {
-		if isGinContextType(info.TypeOf(arg)) {
-			return true
-		}
-	}
-	return false
-}
-
-func nestedQueryHelperOutranks(info *gotypes.Info, helper *ast.CallExpr, query *ast.CallExpr) bool {
+func nestedQueryHelperOutranks(frame helperFrame, helper *ast.CallExpr, query *ast.CallExpr) bool {
 	found := false
-	currentPriority := queryHelperPriority(info, helper, query)
+	currentPriority := queryHelperPriority(frame.decl.info, helper, query)
 	ast.Inspect(helper, func(n ast.Node) bool {
 		if found {
 			return false
@@ -3046,11 +3159,12 @@ func nestedQueryHelperOutranks(info *gotypes.Info, helper *ast.CallExpr, query *
 		if !ok || call == helper || call == query {
 			return true
 		}
-		if nestedQuery, ok := firstQueryCall(info, call); ok && nestedQuery == query {
-			if name, recvPkg, ok := routes.GinMethod(info, call); ok && recvPkg == routes.GinPkgPath && isGinQueryMethod(name) {
+		if nestedQuery, ok := firstQueryCall(frame, call); ok && nestedQuery == query {
+			if name, recvPkg, ok := routes.GinMethod(frame.decl.info, call); ok && recvPkg == routes.GinPkgPath &&
+				isRoutedGinContextCall(frame, call) && isGinQueryMethod(name) {
 				return true
 			}
-			if queryHelperPriority(info, call, query) > currentPriority {
+			if queryHelperPriority(frame.decl.info, call, query) > currentPriority {
 				found = true
 				return false
 			}
@@ -3101,7 +3215,7 @@ func helperReturnsError(info *gotypes.Info, helper *ast.CallExpr) bool {
 	return false
 }
 
-func firstQueryCall(info *gotypes.Info, root ast.Expr) (*ast.CallExpr, bool) {
+func firstQueryCall(frame helperFrame, root ast.Expr) (*ast.CallExpr, bool) {
 	var found *ast.CallExpr
 	ast.Inspect(root, func(n ast.Node) bool {
 		if found != nil {
@@ -3111,8 +3225,8 @@ func firstQueryCall(info *gotypes.Info, root ast.Expr) (*ast.CallExpr, bool) {
 		if !ok {
 			return true
 		}
-		name, recvPkg, ok := routes.GinMethod(info, call)
-		if ok && recvPkg == routes.GinPkgPath && isGinQueryMethod(name) {
+		name, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
+		if ok && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) && isGinQueryMethod(name) {
 			found = call
 			return false
 		}
@@ -3600,21 +3714,31 @@ func bindContentType(method string, info *gotypes.Info, call *ast.CallExpr, boun
 }
 
 func explicitBindingName(info *gotypes.Info, call *ast.CallExpr) string {
-	if len(call.Args) < 2 {
+	if info == nil || len(call.Args) < 2 {
 		return ""
 	}
 	switch arg := call.Args[1].(type) {
 	case *ast.SelectorExpr:
-		return arg.Sel.Name
-	case *ast.Ident:
-		if obj := info.ObjectOf(arg); obj != nil {
-			return obj.Name()
+		object := info.ObjectOf(arg.Sel)
+		if object == nil || object.Pkg() == nil || object.Pkg().Path() != routes.GinPkgPath+"/binding" {
+			return ""
 		}
-		return arg.Name
+		return object.Name()
+	case *ast.Ident:
+		if object := info.ObjectOf(arg); object != nil && object.Pkg() != nil && object.Pkg().Path() == routes.GinPkgPath+"/binding" {
+			return object.Name()
+		}
+		return ""
 	default:
 		return ""
 	}
 }
+
+func unsupportedGinBodyBindingReason(method string) string {
+	return method + " uses a non-JSON wire format whose field naming cannot be derived from gnr8's JSON/form schema"
+}
+
+const rawGinBodyReason = "raw request bytes do not state a media type or schema"
 
 func formField(name string, schema facts.Type, required bool) facts.FieldFact {
 	return facts.FieldFact{
@@ -3830,10 +3954,23 @@ func (a *Analyzer) analyzeJSON(
 	provisionalStatus map[uint16]bool,
 	diags *diag.Accumulator,
 ) {
+	a.analyzeJSONInFrame(helperFrame{decl: h}, call, route, cf, seenStatus, provisionalStatus, diags)
+}
+
+func (a *Analyzer) analyzeJSONInFrame(
+	frame helperFrame,
+	call *ast.CallExpr,
+	route routes.Route,
+	cf *CodeFacts,
+	seenStatus map[uint16]bool,
+	provisionalStatus map[uint16]bool,
+	diags *diag.Accumulator,
+) {
+	h := frame.decl
 	if len(call.Args) < 2 {
 		return
 	}
-	status, ok := statusOf(h.info, call.Args[0])
+	status, ok := responseStatusInFrame(frame, call, 0)
 	if !ok {
 		file, line := positionOf(h.fset, call.Pos())
 		diags.DynamicResponse(route.Method, untypedRouteLabel(route), route.Handler, "non-constant HTTP status", file, line)
@@ -3844,7 +3981,7 @@ func (a *Analyzer) analyzeJSON(
 	if id, schema, ok := a.syntheticJSONResponse(h, call.Args[1], route.Handler, status); ok {
 		body = &facts.TypeRef{RefID: id}
 		cf.Schemas = append(cf.Schemas, schema)
-	} else if id, ok := a.namedTypeID(h.info.TypeOf(call.Args[1])); ok {
+	} else if id, ok := a.namedTypeID(frameTypeOf(frame, call.Args[1])); ok {
 		body = &facts.TypeRef{RefID: id}
 	} else {
 		file, line := positionOf(h.fset, call.Pos())
@@ -3868,10 +4005,24 @@ func (a *Analyzer) analyzeStatus(
 	provisional bool,
 	diags *diag.Accumulator,
 ) {
+	a.analyzeStatusInFrame(helperFrame{decl: h}, call, route, cf, seenStatus, provisionalStatus, provisional, diags)
+}
+
+func (a *Analyzer) analyzeStatusInFrame(
+	frame helperFrame,
+	call *ast.CallExpr,
+	route routes.Route,
+	cf *CodeFacts,
+	seenStatus map[uint16]bool,
+	provisionalStatus map[uint16]bool,
+	provisional bool,
+	diags *diag.Accumulator,
+) {
+	h := frame.decl
 	if len(call.Args) < 1 {
 		return
 	}
-	status, ok := statusOf(h.info, call.Args[0])
+	status, ok := responseStatusInFrame(frame, call, 0)
 	if !ok {
 		file, line := positionOf(h.fset, call.Pos())
 		diags.DynamicResponse(route.Method, untypedRouteLabel(route), route.Handler, "non-constant HTTP status", file, line)
@@ -3880,7 +4031,7 @@ func (a *Analyzer) analyzeStatus(
 	a.addResponse(cf, seenStatus, provisionalStatus, facts.ResponseFact{Status: status}, provisional)
 }
 
-// ginOpaqueRendererMediaType names the media type each opaque renderer writes
+// ginOpaqueRendererMediaTypes names the media types each opaque renderer writes
 // in the selected Gin release.
 //
 // One table serves the handler body and the bounded-helper traversal, so a renderer
@@ -3889,28 +4040,37 @@ func (a *Analyzer) analyzeStatus(
 // the selected Gin release states from one gnr8 cannot determine.
 //
 // Render and Negotiate are deliberately absent: they choose their serializer from a
-// value or from the request's Accept header, so no media type is stated in the source
-// and the operation keeps `response.missing` rather than being given a guessed one.
-func ginOpaqueRendererMediaType(method, ginVersion string) (string, bool) {
+// value or from the request's Accept header, so no media type is stated in the source.
+// Their callers emit an unresolved diagnostic rather than giving the operation a
+// guessed response.
+func ginOpaqueRendererMediaTypes(method, ginVersion string) ([]string, bool) {
 	switch method {
 	case "String":
-		return "text/plain", true
+		return []string{"text/plain"}, true
 	case "HTML":
-		return "text/html", true
+		return []string{"text/html"}, true
 	case "SecureJSON":
-		return "application/json", true
+		return []string{"application/json"}, true
 	case "JSONP":
-		return "application/javascript", true
+		// Context.JSONP renders ordinary JSON when callback is absent and
+		// padded JavaScript when it is present.
+		return []string{"application/json", "application/javascript"}, true
 	case "XML":
-		return "application/xml", true
+		return []string{"application/xml"}, true
 	case "YAML":
-		return ginYAMLRendererMediaType(ginVersion)
+		contentType, ok := ginYAMLRendererMediaType(ginVersion)
+		if !ok {
+			return nil, false
+		}
+		return []string{contentType}, true
 	case "TOML":
-		return "application/toml", true
+		return []string{"application/toml"}, true
 	case "ProtoBuf":
-		return "application/x-protobuf", true
+		return []string{"application/x-protobuf"}, true
+	case "BSON":
+		return []string{"application/bson"}, true
 	}
-	return "", false
+	return nil, false
 }
 
 // ginYAMLRendererMediaType follows the selected Gin module's one versioned
@@ -3951,10 +4111,24 @@ func (a *Analyzer) analyzeOpaqueResponse(
 	provisionalStatus map[uint16]bool,
 	diags *diag.Accumulator,
 ) {
+	a.analyzeOpaqueResponseInFrame(helperFrame{decl: h}, call, method, route, cf, seenStatus, provisionalStatus, diags)
+}
+
+func (a *Analyzer) analyzeOpaqueResponseInFrame(
+	frame helperFrame,
+	call *ast.CallExpr,
+	method string,
+	route routes.Route,
+	cf *CodeFacts,
+	seenStatus map[uint16]bool,
+	provisionalStatus map[uint16]bool,
+	diags *diag.Accumulator,
+) {
+	h := frame.decl
 	if len(call.Args) < 1 {
 		return
 	}
-	contentType, mediaTypeKnown := ginOpaqueRendererMediaType(method, a.ginVersion)
+	contentTypes, mediaTypeKnown := ginOpaqueRendererMediaTypes(method, a.ginVersion)
 	if !mediaTypeKnown {
 		if diags != nil {
 			file, line := positionOf(h.fset, call.Pos())
@@ -3969,13 +4143,39 @@ func (a *Analyzer) analyzeOpaqueResponse(
 		}
 		return
 	}
-	status, ok := statusOf(h.info, call.Args[0])
+	status, ok := responseStatusInFrame(frame, call, 0)
 	if !ok {
 		file, line := positionOf(h.fset, call.Pos())
 		diags.DynamicResponse(route.Method, untypedRouteLabel(route), route.Handler, "non-constant HTTP status", file, line)
 		return
 	}
-	a.analyzeBinaryStatus(cf, seenStatus, provisionalStatus, status, contentType)
+	a.addResponse(cf, seenStatus, provisionalStatus, facts.ResponseFact{
+		Status:       status,
+		BodyKind:     "binary",
+		ContentType:  contentTypes[0],
+		ContentTypes: contentTypes,
+	}, false)
+}
+
+func (a *Analyzer) reportUnresolvedGinResponse(
+	frame helperFrame,
+	call *ast.CallExpr,
+	method string,
+	route routes.Route,
+	diags *diag.Accumulator,
+) {
+	if diags == nil {
+		return
+	}
+	file, line := positionOf(frame.decl.fset, call.Pos())
+	diags.ResponseSchemaUnresolved(
+		route.Method,
+		untypedRouteLabel(route),
+		route.Handler,
+		method+" selects its renderer or media type at runtime; response omitted rather than guessed",
+		file,
+		line,
+	)
 }
 
 func (a *Analyzer) analyzeBinaryStatus(
@@ -4006,7 +4206,7 @@ func (a *Analyzer) addSSEResponse(
 	}, false)
 }
 
-func streamCallContainsSSEvent(info *gotypes.Info, stream *ast.CallExpr) bool {
+func streamCallContainsSSEvent(frame helperFrame, stream *ast.CallExpr) bool {
 	found := false
 	for _, arg := range stream.Args {
 		ast.Inspect(arg, func(n ast.Node) bool {
@@ -4017,8 +4217,8 @@ func streamCallContainsSSEvent(info *gotypes.Info, stream *ast.CallExpr) bool {
 			if !ok {
 				return true
 			}
-			name, recvPkg, ok := routes.GinMethod(info, call)
-			if ok && recvPkg == routes.GinPkgPath && name == "SSEvent" {
+			name, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
+			if ok && recvPkg == routes.GinPkgPath && name == "SSEvent" && isRoutedGinContextCall(frame, call) {
 				found = true
 				return false
 			}
@@ -4037,22 +4237,35 @@ func (a *Analyzer) analyzeData(
 	provisionalStatus map[uint16]bool,
 	diags *diag.Accumulator,
 ) {
+	a.analyzeDataInFrame(helperFrame{decl: h}, call, route, cf, seenStatus, provisionalStatus, diags)
+}
+
+func (a *Analyzer) analyzeDataInFrame(
+	frame helperFrame,
+	call *ast.CallExpr,
+	route routes.Route,
+	cf *CodeFacts,
+	seenStatus map[uint16]bool,
+	provisionalStatus map[uint16]bool,
+	diags *diag.Accumulator,
+) {
+	h := frame.decl
 	if len(call.Args) < 3 {
 		return
 	}
-	status, ok := statusOf(h.info, call.Args[0])
+	status, ok := responseStatusInFrame(frame, call, 0)
 	if !ok {
 		file, line := positionOf(h.fset, call.Pos())
 		diags.DynamicResponse(route.Method, untypedRouteLabel(route), route.Handler, "non-constant HTTP status", file, line)
 		return
 	}
-	if !isByteSlice(h.info.TypeOf(call.Args[2])) {
+	if !isByteSlice(frameTypeOf(frame, call.Args[2])) {
 		file, line := positionOf(h.fset, call.Pos())
 		diags.ResponseSchemaUnresolved(route.Method, untypedRouteLabel(route), route.Handler, "unsupported binary response pattern: Gin Data payload is not []byte (GO-05)", file, line)
 		return
 	}
 	contentType := "application/octet-stream"
-	if value, ok := a.stringValueOf(h, call.Args[1]); ok {
+	if value, ok := a.stringValueInFrame(frame, call.Args[1]); ok {
 		contentType = responseContentType(value)
 	} else {
 		file, line := positionOf(h.fset, call.Pos())
@@ -4075,17 +4288,30 @@ func (a *Analyzer) analyzeDataFromReader(
 	provisionalStatus map[uint16]bool,
 	diags *diag.Accumulator,
 ) {
+	a.analyzeDataFromReaderInFrame(helperFrame{decl: h}, call, route, cf, seenStatus, provisionalStatus, diags)
+}
+
+func (a *Analyzer) analyzeDataFromReaderInFrame(
+	frame helperFrame,
+	call *ast.CallExpr,
+	route routes.Route,
+	cf *CodeFacts,
+	seenStatus map[uint16]bool,
+	provisionalStatus map[uint16]bool,
+	diags *diag.Accumulator,
+) {
+	h := frame.decl
 	if len(call.Args) < 3 {
 		return
 	}
-	status, ok := statusOf(h.info, call.Args[0])
+	status, ok := responseStatusInFrame(frame, call, 0)
 	if !ok {
 		file, line := positionOf(h.fset, call.Pos())
 		diags.DynamicResponse(route.Method, untypedRouteLabel(route), route.Handler, "non-constant HTTP status", file, line)
 		return
 	}
 	contentType := "application/octet-stream"
-	if value, ok := a.stringValueOf(h, call.Args[2]); ok {
+	if value, ok := a.stringValueInFrame(frame, call.Args[2]); ok {
 		contentType = responseContentType(value)
 	} else {
 		file, line := positionOf(h.fset, call.Pos())
@@ -4185,8 +4411,11 @@ func statusFromLiteral(value *facts.LiteralValue) (uint16, bool) {
 	return httpStatusInRange(integer)
 }
 
-func isHTTPRedirectCall(info *gotypes.Info, call *ast.CallExpr) bool {
-	function := calledFuncObject(info, call.Fun)
+func isHTTPRedirectCall(frame helperFrame, call *ast.CallExpr) bool {
+	if call == nil || len(call.Args) < 1 || !isGinResponseWriterExpr(frame, call.Args[0]) {
+		return false
+	}
+	function := calledFuncObject(frame.decl.info, call.Fun)
 	return function != nil && function.Pkg() != nil &&
 		function.Pkg().Path() == "net/http" && function.Name() == "Redirect"
 }
@@ -4453,19 +4682,33 @@ func (c *responseHeaderCollector) analyzeNodeCalls(
 			return true
 		}
 		name, recvPkg, ginCall := routes.GinMethod(frame.decl.info, call)
-		if ginCall && recvPkg == routes.GinPkgPath {
-			if name == "Header" {
+		if ginCall && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) {
+			switch name {
+			case "Header":
 				if header, ok := frameCallStringArg(frame, call, 0); ok {
 					addResponseHeader(headers, header)
 				} else {
 					c.reportUnresolvedHeaderName(frame, call.Pos(), "Header")
 				}
 				return true
+			case "SetCookie", "SetCookieData":
+				addResponseHeader(headers, "Set-Cookie")
+				return true
 			}
 			c.recordGinResponse(frame, call, name, headers)
 			return true
 		}
-		if isHTTPRedirectCall(frame.decl.info, call) {
+		if isHTTPSetCookieCall(frame, call) {
+			addResponseHeader(headers, "Set-Cookie")
+			return true
+		}
+		if isGinResponseWriterCall(frame, call, "WriteHeader") {
+			if status, ok := responseStatusInFrame(frame, call, 0); ok {
+				c.record(status, cloneResponseHeaderSet(headers))
+			}
+			return true
+		}
+		if isHTTPRedirectCall(frame, call) {
 			if status, ok := responseStatusInFrame(frame, call, 3); ok && status >= 300 && status < 400 {
 				responseHeaders := cloneResponseHeaderSet(headers)
 				addResponseHeader(responseHeaders, "Location")
@@ -4501,14 +4744,14 @@ func (c *responseHeaderCollector) recordGinResponse(
 	status := uint16(0)
 	ok := false
 	switch name {
-	case "JSON", "AbortWithStatusJSON", "IndentedJSON", "PureJSON", "AsciiJSON",
-		"String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf",
-		"Status", "AbortWithStatus", "Data", "DataFromReader", "Redirect":
+	case "JSON", "AbortWithStatusJSON", "AbortWithStatusPureJSON", "IndentedJSON", "PureJSON", "AsciiJSON",
+		"String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf", "BSON",
+		"Status", "AbortWithStatus", "AbortWithError", "Data", "DataFromReader", "Redirect":
 		status, ok = responseStatusInFrame(frame, call, 0)
-	case "File", "FileAttachment", "SSEvent":
+	case "File", "FileFromFS", "FileAttachment", "SSEvent":
 		status, ok = 200, true
 	case "Stream":
-		status, ok = 200, streamCallContainsSSEvent(frame.decl.info, call)
+		status, ok = 200, streamCallContainsSSEvent(frame, call)
 	}
 	if !ok {
 		return
@@ -4520,7 +4763,7 @@ func (c *responseHeaderCollector) recordGinResponse(
 			return
 		}
 		addResponseHeader(responseHeaders, "Location")
-	case "Data", "File":
+	case "Data", "File", "FileFromFS":
 		addResponseHeader(responseHeaders, "Content-Type")
 	case "FileAttachment":
 		addResponseHeader(responseHeaders, "Content-Type")
@@ -4669,21 +4912,9 @@ func responseHeaderMutation(frame helperFrame, call *ast.CallExpr) bool {
 }
 
 // responseWriterHeaderExpr reports whether expr is a response writer's own header
-// map: either `<writer>.Header()` directly, or a variable bound to one.
+// map: `<writer>.Header()` directly, or a local that provably holds one.
 func responseWriterHeaderExpr(frame helperFrame, expr ast.Expr) bool {
-	switch node := expr.(type) {
-	case *ast.ParenExpr:
-		return responseWriterHeaderExpr(frame, node.X)
-	case *ast.CallExpr:
-		return isResponseWriterHeaderCall(frame, node)
-	case *ast.Ident:
-		if frame.decl.info == nil {
-			return false
-		}
-		object := frame.decl.info.ObjectOf(node)
-		return object != nil && responseWriterHeaderVars(frame)[object]
-	}
-	return false
+	return ginResponseWriterHeader.proves(frame, expr)
 }
 
 func isResponseWriterHeaderCall(frame helperFrame, call *ast.CallExpr) bool {
@@ -4691,36 +4922,279 @@ func isResponseWriterHeaderCall(frame helperFrame, call *ast.CallExpr) bool {
 	if !ok || selector.Sel == nil || selector.Sel.Name != "Header" || len(call.Args) != 0 {
 		return false
 	}
-	writer := frameTypeOf(frame, selector.X)
-	return isNamedType(writer, "net/http", "ResponseWriter") ||
-		isNamedType(writer, routes.GinPkgPath, "ResponseWriter")
+	return isResponseWriterType(frameTypeOf(frame, selector.X)) &&
+		isGinResponseWriterExpr(frame, selector.X)
 }
 
-// responseWriterHeaderVars collects the variables bound to a response writer's
-// header map, so the `h := c.Writer.Header(); h.Set(…)` idiom stays a response
-// fact while an unrelated `http.Header` value does not.
-func responseWriterHeaderVars(frame helperFrame) map[gotypes.Object]bool {
-	vars := map[gotypes.Object]bool{}
+// isResponseWriterType states the necessary condition every writer check shares:
+// the receiver is a response writer at all. It is never sufficient on its own,
+// which is exactly what isGinResponseWriterExpr adds.
+func isResponseWriterType(t gotypes.Type) bool {
+	return isNamedType(t, "net/http", "ResponseWriter") ||
+		isNamedType(t, routes.GinPkgPath, "ResponseWriter")
+}
+
+// valueProvenance proves that an expression denotes one specific value the routed
+// operation owns. Three values are tracked — the routed Gin context, its response
+// writer, and that writer's own header map — and all need the same answer to the same Go
+// question: does this local provably hold it? Deriving that twice is how one
+// spelling ends up recognized in one place and dropped in the other, so the
+// dataflow lives here once and each value states only what makes it that value.
+type valueProvenance struct {
+	// root reports whether expr denotes the value without following any local. It
+	// never sees a bare identifier; proves handles those.
+	root func(frame helperFrame, expr ast.Expr) bool
+	// carries reports whether a type could hold the value at all. It is a filter that
+	// keeps the body walk off unrelated identifiers; it never proves anything.
+	carries func(gotypes.Type) bool
+	// bound reports whether a caller bound this parameter to the value.
+	bound func(helperBinding) bool
+	// initial reports whether an unbound parameter begins with the value. Only the
+	// routed handler's own Gin-context parameter has such an initial value.
+	initial func(frame helperFrame, object gotypes.Object) bool
+}
+
+func (p valueProvenance) proves(frame helperFrame, expr ast.Expr) bool {
+	return p.provesWith(frame, expr, nil)
+}
+
+// provesWith carries the function's assignment map once it has been built, so an
+// alias chain resolves without rebuilding it at every hop. locals stays nil until an
+// identifier actually needs it.
+func (p valueProvenance) provesWith(frame helperFrame, expr ast.Expr, locals *assignedLocals) bool {
+	if paren, ok := expr.(*ast.ParenExpr); ok {
+		return p.provesWith(frame, paren.X, locals)
+	}
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return expr != nil && p.root(frame, expr)
+	}
+	if frame.decl.info == nil {
+		return false
+	}
+	object := frame.decl.info.ObjectOf(ident)
+	// The type is a filter, never the answer: it keeps the body walk below off the
+	// identifiers that cannot hold the value, and provenance still decides.
+	if object == nil || !p.carries(frameTypeOf(frame, ident)) {
+		return false
+	}
+	if locals == nil {
+		locals = assignedLocalsOf(frame)
+	}
+	initiallyProven := p.initial != nil && p.initial(frame, object)
+	if binding, exists := frame.bindings[object]; exists {
+		// The argument is the parameter's initial value. It must hold the proved
+		// value, and every assignment inside the helper must keep holding it.
+		if !p.bound(binding) {
+			return false
+		}
+		initiallyProven = true
+	}
+	return p.provesAssignedValue(frame, object, locals, initiallyProven)
+}
+
+// provesAssignedValue reports whether object provably holds the value: its initial
+// value is proved by the caller, or it has at least one assignment; every assignment
+// holds the value; and the chain that establishes it is acyclic.
+//
+// Requiring every assignment is what makes an alias safe to follow. `v := w` inherits
+// w's answer, so it inherits w's disqualification too: one assignment this analysis
+// cannot read as the value drops the local and every alias reading from it. The cost
+// of dropping one is a fact gnr8 does not state, while the cost of keeping one is a
+// fact attributed to an operation that never had it.
+func (p valueProvenance) provesAssignedValue(
+	frame helperFrame,
+	object gotypes.Object,
+	locals *assignedLocals,
+	initiallyProven bool,
+) bool {
+	values := locals.values[object]
+	if locals.rebound[object] || (!initiallyProven && len(values) == 0) || locals.visiting[object] {
+		return false
+	}
+	locals.visiting[object] = true
+	defer delete(locals.visiting, object)
+	for _, value := range values {
+		if !p.provesWith(frame, value, locals) {
+			return false
+		}
+	}
+	return true
+}
+
+// assignedLocals is one function's assignment map, read for whichever value is being
+// proved. values holds paired assignments and declaration initializers for locals or
+// parameters; rebound marks an assignment this analysis cannot pair with a value
+// (`w, err := f()`, a range assignment, an increment/decrement, or an address
+// escape), which can never prove anything. visiting is the chain currently being
+// resolved, so an alias that reads from itself terminates instead of vouching for
+// itself.
+type assignedLocals struct {
+	values   map[gotypes.Object][]ast.Expr
+	rebound  map[gotypes.Object]bool
+	visiting map[gotypes.Object]bool
+}
+
+func assignedLocalsOf(frame helperFrame) *assignedLocals {
+	locals := &assignedLocals{
+		values:   map[gotypes.Object][]ast.Expr{},
+		rebound:  map[gotypes.Object]bool{},
+		visiting: map[gotypes.Object]bool{},
+	}
 	if frame.decl.decl == nil || frame.decl.decl.Body == nil || frame.decl.info == nil {
-		return vars
+		return locals
+	}
+	record := func(target ast.Expr, value ast.Expr, resolved bool) {
+		for {
+			paren, ok := target.(*ast.ParenExpr)
+			if !ok {
+				break
+			}
+			target = paren.X
+		}
+		ident, ok := target.(*ast.Ident)
+		if !ok || ident.Name == "_" {
+			return
+		}
+		object := frame.decl.info.ObjectOf(ident)
+		if object == nil {
+			return
+		}
+		if !resolved {
+			locals.rebound[object] = true
+			return
+		}
+		locals.values[object] = append(locals.values[object], value)
 	}
 	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
-		assign, ok := node.(*ast.AssignStmt)
-		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) != 1 {
-			return true
-		}
-		call, ok := assign.Rhs[0].(*ast.CallExpr)
-		if !ok || !isResponseWriterHeaderCall(frame, call) {
-			return true
-		}
-		if ident, ok := assign.Lhs[0].(*ast.Ident); ok && ident.Name != "_" {
-			if object := frame.decl.info.ObjectOf(ident); object != nil {
-				vars[object] = true
+		switch statement := node.(type) {
+		case *ast.AssignStmt:
+			paired := len(statement.Lhs) == len(statement.Rhs)
+			for index, target := range statement.Lhs {
+				if paired {
+					record(target, statement.Rhs[index], true)
+				} else {
+					record(target, nil, false)
+				}
+			}
+		case *ast.ValueSpec:
+			if len(statement.Values) == 0 {
+				return true
+			}
+			paired := len(statement.Names) == len(statement.Values)
+			for index, name := range statement.Names {
+				if paired {
+					record(name, statement.Values[index], true)
+				} else {
+					record(name, nil, false)
+				}
+			}
+		case *ast.RangeStmt:
+			// Range values are selected at runtime, so assigning one to a
+			// writer/header local cannot prove the operation-owned value.
+			if statement.Key != nil {
+				record(statement.Key, nil, false)
+			}
+			if statement.Value != nil {
+				record(statement.Value, nil, false)
+			}
+		case *ast.IncDecStmt:
+			record(statement.X, nil, false)
+		case *ast.UnaryExpr:
+			// Once a local's address escapes, another call or closure may replace
+			// it without an assignment that is visible in this function.
+			if statement.Op == token.AND {
+				record(statement.X, nil, false)
 			}
 		}
 		return true
 	})
-	return vars
+	return locals
+}
+
+// ginResponseWriter is the routed Gin context's own response writer: `c.Writer`
+// itself, a parameter a caller bound to it, or a local holding one. An unrelated
+// `http.ResponseWriter` says nothing about this operation, so provenance is proved
+// rather than assumed from the type.
+var ginResponseWriter = valueProvenance{
+	root: func(frame helperFrame, expr ast.Expr) bool {
+		selector, ok := expr.(*ast.SelectorExpr)
+		return ok && selector.Sel != nil && selector.Sel.Name == "Writer" &&
+			isRoutedGinContextExpr(frame, selector.X)
+	},
+	carries: isResponseWriterType,
+	bound:   func(binding helperBinding) bool { return binding.responseWriter },
+}
+
+// ginResponseWriterHeader is that writer's own header map. `c.Request.Header` and a
+// scratch `http.Header` have the same type, so the map has to be provably the
+// writer's. No caller binds a header map to a parameter, so no binding proves one.
+var ginResponseWriterHeader = valueProvenance{
+	root: func(frame helperFrame, expr ast.Expr) bool {
+		call, ok := expr.(*ast.CallExpr)
+		return ok && isResponseWriterHeaderCall(frame, call)
+	},
+	carries: func(t gotypes.Type) bool { return isNamedType(t, "net/http", "Header") },
+	bound:   func(helperBinding) bool { return false },
+}
+
+// routedGinContext is the context value supplied to the registered handler. A
+// second value of the same *gin.Context type is unrelated to the operation, just
+// as a second http.ResponseWriter is. Helpers inherit this value only through a
+// proved call argument, and reassignments obey the same all-assignments rule as
+// writer and header aliases.
+var routedGinContext = valueProvenance{
+	root:    func(helperFrame, ast.Expr) bool { return false },
+	carries: isGinContextType,
+	bound:   func(binding helperBinding) bool { return binding.ginContext },
+	initial: func(frame helperFrame, object gotypes.Object) bool {
+		if len(frame.bindings) != 0 || frame.decl.decl == nil || frame.decl.decl.Type == nil || frame.decl.info == nil {
+			return false
+		}
+		params := frame.decl.decl.Type.Params
+		if params == nil {
+			return false
+		}
+		for _, field := range params.List {
+			for _, name := range field.Names {
+				if frame.decl.info.ObjectOf(name) == object {
+					return isGinContextType(object.Type())
+				}
+			}
+		}
+		return false
+	},
+}
+
+func isRoutedGinContextExpr(frame helperFrame, expr ast.Expr) bool {
+	return routedGinContext.proves(frame, expr)
+}
+
+func isRoutedGinContextCall(frame helperFrame, call *ast.CallExpr) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && isRoutedGinContextExpr(frame, selector.X)
+}
+
+func isGinResponseWriterExpr(frame helperFrame, expr ast.Expr) bool {
+	return ginResponseWriter.proves(frame, expr)
+}
+
+func isGinResponseWriterCall(frame helperFrame, call *ast.CallExpr, method string) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel == nil || selector.Sel.Name != method {
+		return false
+	}
+	return isResponseWriterType(frameTypeOf(frame, selector.X)) &&
+		isGinResponseWriterExpr(frame, selector.X)
+}
+
+func isHTTPSetCookieCall(frame helperFrame, call *ast.CallExpr) bool {
+	if call == nil || len(call.Args) < 2 || !isGinResponseWriterExpr(frame, call.Args[0]) {
+		return false
+	}
+	function := calledFuncObject(frame.decl.info, call.Fun)
+	return function != nil && function.Pkg() != nil &&
+		function.Pkg().Path() == "net/http" && function.Name() == "SetCookie"
 }
 
 func frameCallPassesResponseContext(frame helperFrame, call *ast.CallExpr) bool {
@@ -4728,9 +5202,7 @@ func frameCallPassesResponseContext(frame helperFrame, call *ast.CallExpr) bool 
 		return true
 	}
 	for _, argument := range call.Args {
-		argumentType := frameTypeOf(frame, argument)
-		if isNamedType(argumentType, "net/http", "Request") ||
-			isNamedType(argumentType, "net/http", "ResponseWriter") {
+		if isGinResponseWriterExpr(frame, argument) {
 			return true
 		}
 	}
@@ -4744,6 +5216,7 @@ func (a *Analyzer) addResponse(
 	response facts.ResponseFact,
 	provisional bool,
 ) {
+	response = responsePermittedByStatus(response)
 	if seenStatus[response.Status] {
 		if provisionalStatus[response.Status] && !provisional {
 			for i := range cf.Responses {
@@ -4771,6 +5244,7 @@ func (a *Analyzer) addJSONResponse(
 	file string,
 	line uint32,
 ) {
+	response = responsePermittedByStatus(response)
 	if !seenStatus[response.Status] {
 		a.addResponse(cf, seenStatus, provisionalStatus, response, false)
 		return
@@ -4798,6 +5272,20 @@ func (a *Analyzer) addJSONResponse(
 			diags.ResponseSchemaUnresolved(route.Method, untypedRouteLabel(route), route.Handler, "conflicting typed success responses for "+route.Handler+" status "+strconv.FormatUint(uint64(response.Status), 10)+"; keeping first response body "+existing.Body.RefID+" (GO-05)", file, line)
 		}
 	}
+}
+
+// responsePermittedByStatus mirrors the HTTP rule Gin applies before invoking a
+// renderer. Informational, 204, and 304 responses never carry a message body, so
+// a JSON/XML/binary argument at one of those statuses is not a body contract.
+func responsePermittedByStatus(response facts.ResponseFact) facts.ResponseFact {
+	status := response.Status
+	if (status >= 100 && status < 200) || status == http.StatusNoContent || status == http.StatusNotModified {
+		response.Body = nil
+		response.BodyKind = ""
+		response.ContentType = ""
+		response.ContentTypes = nil
+	}
+	return response
 }
 
 func responseIndex(responses []facts.ResponseFact, status uint16) int {
@@ -4844,6 +5332,13 @@ func responseContentTypes(contentType string) []string {
 
 func (a *Analyzer) stringValueOf(h handlerDecl, expr ast.Expr) (string, bool) {
 	return a.stringValueOfSeen(h, expr, map[string]bool{})
+}
+
+func (a *Analyzer) stringValueInFrame(frame helperFrame, expr ast.Expr) (string, bool) {
+	if value, ok := frameStringValue(frame, expr); ok {
+		return value, true
+	}
+	return a.stringValueOf(frame.decl, expr)
 }
 
 func (a *Analyzer) callStringArg(h handlerDecl, call *ast.CallExpr, index int) (string, bool) {
@@ -4920,8 +5415,9 @@ func calledFuncObject(info *gotypes.Info, fun ast.Expr) *gotypes.Func {
 	}
 }
 
-func (a *Analyzer) rawJSONRequestSchema(h handlerDecl, handler string) *facts.SchemaFact {
-	if !handlerUsesRawJSONBody(h) {
+func (a *Analyzer) rawJSONRequestSchema(frame helperFrame, handler string) *facts.SchemaFact {
+	h := frame.decl
+	if !handlerUsesRawJSONBody(frame) {
 		return nil
 	}
 	id, name := syntheticRawJSONRequestSchemaIdentity(handler)
@@ -4933,27 +5429,29 @@ func (a *Analyzer) rawJSONRequestSchema(h handlerDecl, handler string) *facts.Sc
 	}
 }
 
-func handlerUsesRawJSONBody(h handlerDecl) bool {
+func handlerUsesRawJSONBody(frame helperFrame) bool {
+	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil {
 		return false
 	}
-	rawVars := rawDataVars(h)
+	rawVars := rawDataVars(frame)
 	if len(rawVars) == 0 {
 		return false
 	}
 	if rawDataUsedByEncodingJSON(h, rawVars) {
 		return true
 	}
-	return hasJSONContentTypeEvidence(h)
+	return hasJSONContentTypeEvidence(frame)
 }
 
-func rawDataVars(h handlerDecl) map[gotypes.Object]bool {
+func rawDataVars(frame helperFrame) map[gotypes.Object]bool {
+	h := frame.decl
 	out := map[gotypes.Object]bool{}
 	ast.Inspect(h.decl.Body, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.AssignStmt:
 			for i, rhs := range node.Rhs {
-				if i >= len(node.Lhs) || !isGinGetRawDataCall(h.info, rhs) {
+				if i >= len(node.Lhs) || !isGinGetRawDataCall(frame, rhs) {
 					continue
 				}
 				if id, ok := node.Lhs[i].(*ast.Ident); ok {
@@ -4964,7 +5462,7 @@ func rawDataVars(h handlerDecl) map[gotypes.Object]bool {
 			}
 		case *ast.ValueSpec:
 			for i, rhs := range node.Values {
-				if i >= len(node.Names) || !isGinGetRawDataCall(h.info, rhs) {
+				if i >= len(node.Names) || !isGinGetRawDataCall(frame, rhs) {
 					continue
 				}
 				if obj := h.info.ObjectOf(node.Names[i]); obj != nil {
@@ -4977,13 +5475,13 @@ func rawDataVars(h handlerDecl) map[gotypes.Object]bool {
 	return out
 }
 
-func isGinGetRawDataCall(info *gotypes.Info, expr ast.Expr) bool {
+func isGinGetRawDataCall(frame helperFrame, expr ast.Expr) bool {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
-	name, recvPkg, ok := routes.GinMethod(info, call)
-	return ok && recvPkg == routes.GinPkgPath && name == "GetRawData"
+	name, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
+	return ok && recvPkg == routes.GinPkgPath && name == "GetRawData" && isRoutedGinContextCall(frame, call)
 }
 
 func rawDataUsedByEncodingJSON(h handlerDecl, rawVars map[gotypes.Object]bool) bool {
@@ -5036,14 +5534,15 @@ func exprUsesObject(info *gotypes.Info, expr ast.Expr, targets map[gotypes.Objec
 	return found
 }
 
-func hasJSONContentTypeEvidence(h handlerDecl) bool {
+func hasJSONContentTypeEvidence(frame helperFrame) bool {
+	h := frame.decl
 	found := false
 	ast.Inspect(h.decl.Body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
 		if expr, ok := n.(*ast.BinaryExpr); ok {
-			if exprMentionsGinContentType(h.info, expr) && exprHasStringLiteral(expr, "application/json") {
+			if exprMentionsGinContentType(frame, expr) && exprHasStringLiteral(expr, "application/json") {
 				found = true
 				return false
 			}
@@ -5052,7 +5551,7 @@ func hasJSONContentTypeEvidence(h handlerDecl) bool {
 		if !ok {
 			return true
 		}
-		if callSubtreeHasStringLiteral(call, "application/json") && exprMentionsGinContentType(h.info, call) {
+		if callSubtreeHasStringLiteral(call, "application/json") && exprMentionsGinContentType(frame, call) {
 			found = true
 			return false
 		}
@@ -5061,7 +5560,7 @@ func hasJSONContentTypeEvidence(h handlerDecl) bool {
 	return found
 }
 
-func exprMentionsGinContentType(info *gotypes.Info, expr ast.Expr) bool {
+func exprMentionsGinContentType(frame helperFrame, expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
 		if found {
@@ -5071,12 +5570,12 @@ func exprMentionsGinContentType(info *gotypes.Info, expr ast.Expr) bool {
 		if !ok {
 			return true
 		}
-		name, recvPkg, ok := routes.GinMethod(info, call)
-		if ok && recvPkg == routes.GinPkgPath && name == "ContentType" {
+		name, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
+		if ok && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) && name == "ContentType" {
 			found = true
 			return false
 		}
-		if ok && recvPkg == routes.GinPkgPath && name == "GetHeader" {
+		if ok && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) && name == "GetHeader" {
 			key, ok := stringArg(call, 0)
 			if ok && strings.EqualFold(key, "Content-Type") {
 				found = true

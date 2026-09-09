@@ -6,7 +6,7 @@ members = ["crates/gnr8-sdk", "crates/gnr8-core", "crates/gnr8"]
 resolver = "2"
 
 [workspace.package]
-version = "0.13.0"
+version = "0.13.1"
 edition = "2021"        # D-08
 rust-version = "1.85"   # MSRV floor: clap 4.6 requires 1.85
 license = "MIT"         # matches repo LICENSE
@@ -75,6 +75,6 @@ ctrlc = "3.5"                   # graceful Ctrl-C → AtomicBool for the watch l
                                 # the FSEvents backend suppresses the default SIGINT disposition, so the
                                 # std-only approach proved insufficient — RESEARCH A5 sanctioned fallback)
 # The published thin SDK a project's `.gnr8/` worker links.
-gnr8 = { path = "crates/gnr8-sdk", version = "0.13.0" }
+gnr8 = { path = "crates/gnr8-sdk", version = "0.13.1" }
 # The host engine: extraction, lowering, SDK emission, lifecycle. Never a `.gnr8/` dependency.
-gnr8-engine = { path = "crates/gnr8-core", version = "0.13.0" }
+gnr8-engine = { path = "crates/gnr8-core", version = "0.13.1" }

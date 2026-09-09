@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gnr8/goextract/internal/diag"
@@ -325,6 +326,117 @@ func assertRouteMiddleware(t *testing.T, route routes.Route, want []string) {
 	}
 	if !route.Secured {
 		t.Fatalf("%s %s should be marked secured when middleware is present", route.Method, route.Path)
+	}
+}
+
+func TestGinGenericRouteRegistrationsAreEitherExactOrDiagnosed(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteRouteTestFile(t, filepath.Join(dir, "go.mod"), `module example.com/genericroutes
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWriteRouteTestFile(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWriteRouteTestFile(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Context struct{}
+type Engine struct{}
+
+func (e *Engine) Handle(string, string, ...HandlerFunc) {}
+func (e *Engine) Match([]string, string, ...HandlerFunc) {}
+func (e *Engine) Any(string, ...HandlerFunc) {}
+func (e *Engine) StaticFile(string, string) {}
+func (e *Engine) StaticFileFS(string, string, any) {}
+func (e *Engine) Static(string, string) {}
+func (e *Engine) StaticFS(string, any) {}
+`)
+	mustWriteRouteTestFile(t, filepath.Join(dir, "app.go"), `package genericroutes
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct{ R *gin.Engine }
+
+func (s Server) Register(dynamic string, dynamicMethods []string) {
+	s.R.Handle(http.MethodTrace, "/trace/:id", guard, s.trace)
+	s.R.Match([]string{http.MethodPatch}, "/single", s.single)
+	s.R.Handle(dynamic, "/dynamic", s.dynamic)
+	s.R.Handle(http.MethodConnect, "/connect", s.connect)
+	s.R.Handle("get", "/lowercase", s.lowercase)
+	s.R.Match([]string{http.MethodGet, http.MethodPost}, "/multi", s.multi)
+	s.R.Match(dynamicMethods, "/dynamic-methods", s.dynamicMethods)
+	s.R.Any("/any", s.any)
+	s.R.StaticFile("/favicon.ico", "./favicon.ico")
+	s.R.StaticFileFS("/robots.txt", "./robots.txt", nil)
+	s.R.Static("/assets", "./assets")
+	s.R.StaticFS("/public", nil)
+}
+
+func guard(c *gin.Context) {}
+func (s Server) trace(c *gin.Context) {}
+func (s Server) single(c *gin.Context) {}
+func (s Server) dynamic(c *gin.Context) {}
+func (s Server) connect(c *gin.Context) {}
+func (s Server) lowercase(c *gin.Context) {}
+func (s Server) multi(c *gin.Context) {}
+func (s Server) dynamicMethods(c *gin.Context) {}
+func (s Server) any(c *gin.Context) {}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load generic routes: %v", err)
+	}
+	for _, loadErr := range res.Errors {
+		t.Fatalf("generic route fixture must type-check: %+v", loadErr)
+	}
+	diagnostics := diag.New()
+	recognized := routes.RecognizeWithDiagnostics(res, diagnostics)
+	got := index(recognized)
+	if len(recognized) != 2 {
+		t.Fatalf("expected two exactly representable generic routes, got %+v", recognized)
+	}
+	trace := got[routeKey{"TRACE", "/trace/{id}"}]
+	if trace.Handler != "trace" {
+		t.Fatalf("Handle must resolve its constant method, path, and handler: %+v", trace)
+	}
+	assertRouteMiddleware(t, trace, []string{"guard"})
+	if single := got[routeKey{"PATCH", "/single"}]; single.Handler != "single" {
+		t.Fatalf("one-method Match must remain one exact operation: %+v", single)
+	}
+
+	reasons := map[string]bool{}
+	for _, item := range diagnostics.Items() {
+		if item.Code == "source.route.unresolved" {
+			reasons[item.Message] = true
+		}
+	}
+	for _, fragment := range []string{
+		"dynamic HTTP method for Handle", "dynamic HTTP method list for Match",
+		`"CONNECT"`, `"get"`, "Match registers zero or multiple", "Any registers multiple",
+		"StaticFile registers framework-generated", "StaticFileFS registers framework-generated",
+		"Static registers framework-generated", "StaticFS registers framework-generated",
+	} {
+		found := false
+		for message := range reasons {
+			if strings.Contains(message, fragment) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing diagnostic containing %q: %+v", fragment, diagnostics.Items())
+		}
 	}
 }
 

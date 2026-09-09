@@ -42,7 +42,52 @@ must move the minor version.
   called again.** Those schemas are emitted as type aliases, which have no `model_validate` or
   `from_dict`, so decoding one raised `AttributeError` at runtime: the SDK compiled and the operation
   was unusable. The decoded JSON is now the value, which is what the TypeScript target already
-  answers for the same graph. Found by the generated contract tests above.
+
+## 0.13.1 — 2026-09-08
+
+### Fixed
+
+- **Go/Gin route extraction covers the framework's exact single-operation registration forms.**
+  `Handle` now resolves constant standard methods (including `TRACE`), and a `Match` containing one
+  constant standard method is equivalent to its named-verb form. `Any`, multi-method `Match`,
+  dynamic methods, and methods such as `CONNECT` are reported as `source.route.unresolved` instead
+  of silently disappearing: they cannot be expanded without assigning several operations the one
+  handler-derived operation identity or emitting a method OpenAPI cannot represent. Gin's `Static*`
+  registrations are likewise diagnosed because their GET/HEAD handlers are framework-generated and
+  have no source handler identity.
+- **Go/Gin request extraction keeps Gin shortcuts, explicit binders, and the underlying request in
+  one contract.** `ShouldBindBodyWithJSON`, the `ShouldBindWith`/`BindWith`/`MustBindWith` forms, and
+  `ShouldBindBodyWith(..., binding.JSON)` now produce the same JSON body as `ShouldBindJSON`,
+  including typed generic helpers and optional-body guards. Explicit `binding.Query` and `binding.Header`
+  produce parameters rather than malformed bodies. Binder identity is resolved from Gin's own
+  package, and XML, YAML, TOML, plain-text, dynamic, or unsupported binders are diagnosed rather
+  than publishing a JSON-shaped schema under an unproved wire format. A cookie read through
+  `c.Request.Cookie` now matches `c.Cookie`, including bounded Gin-context helpers. `GetRawData` is
+  explicitly unresolved when nothing else states the body; raw bytes that reach `encoding/json`
+  keep resolving into the free-form JSON body they always did.
+- **A response header is proved from the writer it was written to, not from its type.** The writer
+  and its header map now answer one dataflow rule with the routed Gin context itself: a local holds
+  one only when every assignment to it holds it. A second or reassigned `*gin.Context`, writer, or
+  header map contributes no request or response facts, while a proved alias still contributes the
+  facts it states. Helper parameters use their caller argument as the initial value, and a nested
+  helper cannot restore provenance that an outer helper lost through reassignment or address escape.
+- **Go/Gin response extraction covers additional statically knowable context and writer
+  surfaces.** `AbortWithStatusPureJSON`, `AbortWithError`, `BSON`, and `FileFromFS` now preserve
+  their response facts. Constant response arguments passed through bounded helpers are propagated
+  only while the parameter remains unmodified; reassignment, increment/decrement, or address escape
+  makes the argument unresolved rather than retaining a stale caller value. `c.Writer.WriteHeader`
+  (including a module-owned `http.ResponseWriter` helper reached from
+  that writer, and a local `w := c.Writer` alias or an alias of it) records the same status and
+  requiredness evidence as `c.Status`. Response-writer provenance follows the value rather than the
+  type, so an unrelated `http.ResponseWriter` contributes no facts. `SetCookie`, `SetCookieData`,
+  and `http.SetCookie(c.Writer, ...)` preserve the `Set-Cookie` response header; runtime-selected
+  `Render` and `Negotiate` calls now carry an explicit unresolved diagnostic.
+- **Go/Gin JSONP responses preserve both runtime branches.** `c.JSONP` now records
+  `application/json` when Gin's implicit `callback` query parameter is absent and
+  `application/javascript` when it is present, and exposes that optional parameter through direct
+  and bounded-helper calls.
+- **Gin renderer arguments no longer become impossible HTTP bodies.** Informational, `204`, and
+  `304` statuses are recorded as bodyless even when the handler calls a JSON, XML, or opaque
 
 ## 0.13.0 — 2026-09-08
 
