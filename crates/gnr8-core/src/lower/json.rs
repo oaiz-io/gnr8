@@ -434,6 +434,12 @@ fn write_schema(schema: &SchemaObject) -> Value {
     if let Some(max_length) = schema.max_length {
         out.insert("maxLength".to_string(), Value::from(max_length));
     }
+    if let Some(min_items) = schema.min_items {
+        out.insert("minItems".to_string(), Value::from(min_items));
+    }
+    if let Some(max_items) = schema.max_items {
+        out.insert("maxItems".to_string(), Value::from(max_items));
+    }
     if let Some(minimum) = &schema.minimum {
         out.insert("minimum".to_string(), number_or_string(minimum));
     }

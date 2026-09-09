@@ -2625,6 +2625,12 @@ fn apply_openapi_field_patch(
     if let Some(value) = patch.constraints.max_length {
         prop.max_length = Some(value);
     }
+    if let Some(value) = patch.constraints.min_items {
+        prop.min_items = Some(value);
+    }
+    if let Some(value) = patch.constraints.max_items {
+        prop.max_items = Some(value);
+    }
     if let Some(value) = &patch.constraints.minimum {
         prop.minimum = Some(value.clone());
     }

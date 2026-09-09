@@ -152,11 +152,13 @@ type helperFrame struct {
 }
 
 type parameterHint struct {
-	schema        *facts.Type
-	schemaKnown   bool
-	required      bool
-	requiredKnown bool
-	defaultValue  *facts.LiteralValue
+	schema                 *facts.Type
+	schemaKnown            bool
+	required               bool
+	requiredKnown          bool
+	cookieRequired         queryPresenceProof
+	cookieRequiredAnalyzed bool
+	defaultValue           *facts.LiteralValue
 }
 
 type queryPresenceProof uint8
@@ -533,10 +535,17 @@ func (a *Analyzer) analyzeContextHelperCall(
 		}
 		if pname, matched, resolved := requestCookieInFrame(next, nested); matched {
 			if resolved {
+				required := requestAccessRequired(next, nested, "Cookie")
+				if !required && hint.cookieRequiredAnalyzed {
+					required = hint.cookieRequired == queryPresenceRequired
+					if hint.cookieRequired == queryPresenceUnresolved {
+						a.reportCookieRequirednessUnresolved(next, nested, pname, traversal)
+					}
+				}
 				a.addTraversedParameter(traversal, requestParameter(
 					pname,
 					"cookie",
-					requestAccessRequired(next, nested, "Cookie"),
+					required,
 					facts.PrimitiveType(facts.StringPrim()),
 					callee.fset,
 					nested.Pos(),
@@ -698,6 +707,10 @@ func helperCallHint(frame helperFrame, call *ast.CallExpr, inherited parameterHi
 			hint.required = true
 		}
 	}
+	if !hint.cookieRequiredAnalyzed && helperReturnsError(frame.decl.info, call) {
+		hint.cookieRequired = cookieRequirednessFromCaller(frame, call)
+		hint.cookieRequiredAnalyzed = true
+	}
 	return hint
 }
 
@@ -764,8 +777,11 @@ func (a *Analyzer) analyzeTraversedGinCall(
 				schema = *hint.schema
 			}
 			required := requestAccessRequired(frame, call, method)
-			if hint.requiredKnown {
-				required = hint.required
+			if !required && hint.cookieRequiredAnalyzed {
+				required = hint.cookieRequired == queryPresenceRequired
+				if hint.cookieRequired == queryPresenceUnresolved {
+					a.reportCookieRequirednessUnresolved(frame, call, name, traversal)
+				}
 			}
 			a.addTraversedParameter(traversal, requestParameter(name, "cookie", required, schema, frame.decl.fset, call.Pos()), true)
 		} else {
@@ -866,6 +882,26 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		"BindPlain", "ShouldBindPlain", "ShouldBindBodyWithPlain":
 		a.reportTraversedUnresolvedBody(frame, call, traversal, method, unsupportedGinBodyBindingReason(method))
 	}
+}
+
+func (a *Analyzer) reportCookieRequirednessUnresolved(
+	frame helperFrame,
+	call *ast.CallExpr,
+	name string,
+	traversal *contextTraversal,
+) {
+	if traversal == nil || traversal.diagnostics == nil || traversal.reportedUnresolvedCall[call.Pos()] {
+		return
+	}
+	traversal.reportedUnresolvedCall[call.Pos()] = true
+	file, line := positionOf(frame.decl.fset, call.Pos())
+	traversal.diagnostics.CookieRequirednessUnresolved(
+		name,
+		traversal.route.Method,
+		untypedRouteLabel(traversal.route),
+		file,
+		line,
+	)
 }
 
 func addTraversedMultipartFileField(name string, traversal *contextTraversal) {
@@ -1726,6 +1762,115 @@ func mergeQueryResponse(state *queryPathState, incoming queryResponseState) {
 		return
 	}
 	state.response = queryResponseUncertain
+}
+
+// cookieRequirednessFromCaller classifies one error-returning cookie helper at
+// its operation-specific call site. The helper's signature only says that a
+// missing cookie can be reported; it does not say whether this caller rejects,
+// substitutes a value, or returns a successful empty result.
+//
+// The proof is deliberately narrow. The helper call and its absence check must
+// be consecutive top-level statements, and both the missing branch and the
+// present continuation must end in response outcomes gnr8 already recognizes.
+// Anything more involved stays optional and is diagnosed by the caller. This
+// keeps an uncertain helper use from acquiring requiredness merely because a
+// different operation rejects the same helper's error.
+func cookieRequirednessFromCaller(frame helperFrame, target *ast.CallExpr) queryPresenceProof {
+	h := frame.decl
+	if h.decl == nil || h.decl.Body == nil || h.info == nil || target == nil {
+		return queryPresenceUnresolved
+	}
+	resultIndex, ok := callErrorResultIndex(h.info, target)
+	if !ok {
+		return queryPresenceUnresolved
+	}
+	targetIndex := topLevelCallStatement(h.decl.Body.List, target)
+	if targetIndex < 0 {
+		return queryPresenceUnresolved
+	}
+	if _, ok := h.decl.Body.List[targetIndex].(*ast.AssignStmt); !ok {
+		return queryPresenceUnresolved
+	}
+	errors := callResultVars(h, target, resultIndex)
+	if len(errors) == 0 {
+		if responseStateForStatements(frame, h.decl.Body.List[targetIndex+1:]) == queryResponseSuccess {
+			return queryPresenceOptional
+		}
+		return queryPresenceUnresolved
+	}
+	if targetIndex+1 >= len(h.decl.Body.List) {
+		return queryPresenceUnresolved
+	}
+	missing, ok := h.decl.Body.List[targetIndex+1].(*ast.IfStmt)
+	if !ok || missing.Else != nil || !exprChecksNonNil(h.info, missing.Cond, errors) {
+		return queryPresenceUnresolved
+	}
+	missingResponse := responseStateForStatements(frame, missing.Body.List)
+	continuationResponse := responseStateForStatements(frame, h.decl.Body.List[targetIndex+2:])
+	if continuationResponse != queryResponseSuccess {
+		return queryPresenceUnresolved
+	}
+	terminates := blockEndsWithReturn(missing.Body)
+	switch {
+	case terminates && missingResponse == queryResponseClientError:
+		return queryPresenceRequired
+	case terminates && missingResponse == queryResponseSuccess:
+		return queryPresenceOptional
+	case !terminates && (missingResponse == queryResponseNone || missingResponse == queryResponseSuccess):
+		return queryPresenceOptional
+	default:
+		return queryPresenceUnresolved
+	}
+}
+
+func callErrorResultIndex(info *gotypes.Info, call *ast.CallExpr) (int, bool) {
+	if info == nil || call == nil {
+		return 0, false
+	}
+	tuple, ok := gotypes.Unalias(info.TypeOf(call)).(*gotypes.Tuple)
+	if !ok || tuple.Len() == 0 {
+		return 0, false
+	}
+	index := tuple.Len() - 1
+	result := tuple.At(index)
+	return index, result != nil && isErrorType(result.Type())
+}
+
+func topLevelCallStatement(statements []ast.Stmt, target *ast.CallExpr) int {
+	for index, statement := range statements {
+		found := false
+		ast.Inspect(statement, func(node ast.Node) bool {
+			if found {
+				return false
+			}
+			call, ok := node.(*ast.CallExpr)
+			if ok && call == target {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return index
+		}
+	}
+	return -1
+}
+
+func responseStateForStatements(frame helperFrame, statements []ast.Stmt) queryResponseState {
+	state := queryPathState{}
+	for _, statement := range statements {
+		updateQueryResponse(frame, statement, &state)
+	}
+	return state.response
+}
+
+func blockEndsWithReturn(block *ast.BlockStmt) bool {
+	if block == nil || len(block.List) == 0 {
+		return false
+	}
+	_, ok := block.List[len(block.List)-1].(*ast.ReturnStmt)
+	return ok
 }
 
 // requestAccessRequired answers requiredness from the handler's behavior. A

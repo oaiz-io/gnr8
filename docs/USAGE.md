@@ -446,11 +446,16 @@ the first `dive`** describe the field:
 ```go
 Headers  map[string]string `json:"headers,omitzero" binding:"omitempty,dive,keys,required,endkeys,required"`
 Segments []string          `json:"segments" validate:"required,dive,min=1,max=100"`
+Groups   []Group           `json:"groups" binding:"required,min=1,dive"`
+Slots    [3]int            `json:"slots" validate:"required,max=100,dive"`
 ```
 
 `headers` is **optional** — the tag forbids empty map keys and values, it does not demand the key.
 `segments` is **required** because that `required` precedes the `dive`, and its `min`/`max` bound
 each string rather than the slice, so they are not published as the array's constraints.
+`groups` publishes `minItems: 1`, and `slots` publishes `maxItems: 100`: on a slice or array,
+field-scope `min`/`max` state collection cardinality. The same spellings retain length semantics on
+strings and numeric bound semantics on numbers.
 
 The same rule applies to bound query, header, and form parameters: `binding:"omitempty,dive,required"`
 on a repeated parameter forbids empty entries, it does not make the parameter itself required.

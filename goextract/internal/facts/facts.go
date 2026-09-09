@@ -153,6 +153,8 @@ type FieldMeta struct {
 type Constraints struct {
 	MinLength        *uint64  `json:"min_length,omitempty"`
 	MaxLength        *uint64  `json:"max_length,omitempty"`
+	MinItems         *uint64  `json:"min_items,omitempty"`
+	MaxItems         *uint64  `json:"max_items,omitempty"`
 	Minimum          *string  `json:"minimum,omitempty"`
 	Maximum          *string  `json:"maximum,omitempty"`
 	ExclusiveMinimum *string  `json:"exclusive_minimum,omitempty"`

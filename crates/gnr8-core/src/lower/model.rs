@@ -266,6 +266,10 @@ pub(crate) struct SchemaObject {
     pub min_length: Option<u64>,
     /// String maximum length (`maxLength`).
     pub max_length: Option<u64>,
+    /// Array minimum cardinality (`minItems`).
+    pub min_items: Option<u64>,
+    /// Array maximum cardinality (`maxItems`).
+    pub max_items: Option<u64>,
     /// Inclusive numeric minimum (`minimum`).
     pub minimum: Option<String>,
     /// Inclusive numeric maximum (`maximum`).

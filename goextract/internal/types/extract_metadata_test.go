@@ -82,6 +82,104 @@ func TestFieldMetaFromTagsParsesNumericBindingsAndUnsupportedDiagnostics(t *test
 	}
 }
 
+func TestFieldMetaFromTagsLowersCollectionCardinalityWithoutChangingScalarRules(t *testing.T) {
+	tests := []struct {
+		name     string
+		tag      string
+		schema   facts.Type
+		minItems *uint64
+		maxItems *uint64
+	}{
+		{
+			name:     "binding minimum before dive",
+			tag:      `json:"names" binding:"required,min=1,dive"`,
+			schema:   facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+			minItems: uint64Ptr(1),
+		},
+		{
+			name:     "validate minimum without dive",
+			tag:      `json:"codes" validate:"required,min=1"`,
+			schema:   facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+			minItems: uint64Ptr(1),
+		},
+		{
+			name:     "binding maximum before dive",
+			tag:      `json:"slots" binding:"required,max=100,dive"`,
+			schema:   facts.ArrayType(facts.PrimitiveType(facts.IntPrim(64, true))),
+			maxItems: uint64Ptr(100),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tag := reflect.StructTag(tc.tag)
+			diags := diag.New()
+			meta := fieldMetaFromTags(
+				"CollectionRules",
+				"Values",
+				tag,
+				string(tag),
+				tc.schema,
+				"dto.go",
+				12,
+				diags,
+			)
+
+			if meta == nil || meta.Constraints == nil {
+				t.Fatalf("expected collection constraints, got %#v", meta)
+			}
+			if !equalUint64Ptr(meta.Constraints.MinItems, tc.minItems) ||
+				!equalUint64Ptr(meta.Constraints.MaxItems, tc.maxItems) {
+				t.Fatalf("collection bounds mismatch: %#v", meta.Constraints)
+			}
+			if meta.Constraints.MinLength != nil || meta.Constraints.MaxLength != nil ||
+				meta.Constraints.Minimum != nil || meta.Constraints.Maximum != nil {
+				t.Fatalf("collection bounds must not become string or numeric bounds: %#v", meta.Constraints)
+			}
+			if len(diags.Items()) != 0 {
+				t.Fatalf("supported collection bounds must not be unresolved: %#v", diags.Items())
+			}
+		})
+	}
+
+	dived := reflect.StructTag(`json:"values" validate:"min=1,dive,min=2,max=8"`)
+	divedDiags := diag.New()
+	divedMeta := fieldMetaFromTags(
+		"CollectionRules",
+		"Values",
+		dived,
+		string(dived),
+		facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+		"dto.go",
+		13,
+		divedDiags,
+	)
+	if divedMeta == nil || divedMeta.Constraints == nil ||
+		divedMeta.Constraints.MinItems == nil || *divedMeta.Constraints.MinItems != 1 ||
+		divedMeta.Constraints.MaxItems != nil {
+		t.Fatalf("post-dive bounds must not overwrite collection cardinality: %#v", divedMeta)
+	}
+	if len(divedDiags.Items()) != 0 {
+		t.Fatalf("post-dive item rules remain understood: %#v", divedDiags.Items())
+	}
+
+	unknown := reflect.StructTag(`json:"values" validate:"min=1,dive,email"`)
+	unknownDiags := diag.New()
+	_ = fieldMetaFromTags(
+		"CollectionRules",
+		"Values",
+		unknown,
+		string(unknown),
+		facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+		"dto.go",
+		14,
+		unknownDiags,
+	)
+	if !hasMetadataDiag(unknownDiags.Items(), "unsupported validate tag", "email") {
+		t.Fatalf("unrelated unsupported item rule must remain diagnosed: %#v", unknownDiags.Items())
+	}
+}
+
 func TestFieldMetaFromTagsScopesConstraintsToTheFieldItself(t *testing.T) {
 	// `min=3` bounds the field; everything past `dive` bounds each element. Before
 	// scope-awareness the trailing pair overwrote the field's own bound.
@@ -277,4 +375,12 @@ func hasMetadataDiag(diags []facts.DiagnosticFact, rule string, token string) bo
 		}
 	}
 	return false
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
+}
+
+func equalUint64Ptr(left, right *uint64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }

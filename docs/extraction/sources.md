@@ -51,7 +51,11 @@ Recognized route facts include:
 - `GetHeader` and `Request.Header.Get` headers; `Cookie` and `Request.Cookie` cookies. Both access
   paths resolve constant arguments through the same handler-scoped rules. A read is optional unless
   the handler or a bounded helper rejects an absent value, and a rejection is any known 4xx written
-  through the same `gin.Context` response surface the query proof below reads.
+  through the same `gin.Context` response surface the query proof below reads. When several
+  operations call one error-returning cookie helper, each call site's absence branch decides its own
+  requiredness. A caller that substitutes a value or answers successfully stays optional; a caller
+  that returns a known 4xx is required. If caller flow cannot prove either result, the cookie stays
+  optional and gets `request.parameter.unresolved`.
 - `PostForm`, `DefaultPostForm`, `GetPostForm`, `PostFormArray`, `GetPostFormArray`, and file reads
   through either `FormFile` or `Request.FormFile` form values. `PostFormArray`/`GetPostFormArray`
   state a repeated string part. A string part becomes required when an empty value is explicitly

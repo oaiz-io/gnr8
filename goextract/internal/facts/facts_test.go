@@ -141,7 +141,7 @@ var canonicalFieldNames = []string{
 	"validator_requires_presence", "validator_rejects_null",
 	"description", "example", "meta",
 	// FieldMeta / Constraints / Extension / LiteralValue
-	"constraints", "default", "format", "extensions", "min_length", "max_length", "minimum", "maximum",
+	"constraints", "default", "format", "extensions", "min_length", "max_length", "min_items", "max_items", "minimum", "maximum",
 	"exclusive_minimum", "exclusive_maximum", "pattern", "enum_values",
 	// Type (adjacent tag/content)
 	"type", "of",
@@ -165,6 +165,7 @@ func fullyPopulatedDoc() facts.GoFacts {
 	desc, ex := "a description", "an example"
 	format := "uuid"
 	minLen, maxLen := uint64(1), uint64(120)
+	minItems, maxItems := uint64(1), uint64(25)
 	minimum, maximum := "0", "100"
 	exclusiveMinimum, exclusiveMaximum := "-1", "101"
 	pattern := "^[a-z]+$"
@@ -177,6 +178,8 @@ func fullyPopulatedDoc() facts.GoFacts {
 				Constraints: &facts.Constraints{
 					MinLength:        &minLen,
 					MaxLength:        &maxLen,
+					MinItems:         &minItems,
+					MaxItems:         &maxItems,
 					Minimum:          &minimum,
 					Maximum:          &maximum,
 					ExclusiveMinimum: &exclusiveMinimum,

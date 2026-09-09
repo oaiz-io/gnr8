@@ -3240,6 +3240,144 @@ func (s Server) data(c *gin.Context) {
 	}
 }
 
+func TestSharedCookieHelperRequirednessComesFromEachCaller(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/cookierequiredness
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Cookie(string) (string, error) { return "", nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package cookierequiredness
+
+import (
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct{ R *gin.Engine }
+type Response struct { Value string `+"`"+`json:"value"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/accepted", s.accepted)
+	s.R.GET("/default", s.defaultValue)
+	s.R.GET("/rejected", s.rejected)
+	s.R.GET("/unresolved", s.unresolved)
+	s.R.GET("/direct-optional", s.directOptional)
+	s.R.GET("/direct-required", s.directRequired)
+}
+
+func readCookie(c *gin.Context) (string, error) {
+	return c.Cookie("shared-cookie")
+}
+
+func (s Server) accepted(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil {
+		value = "anonymous"
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) defaultValue(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil {
+		c.JSON(200, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) rejected(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) unresolved(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil && time.Now().Unix()%2 == 0 {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) directOptional(c *gin.Context) {
+	_, _ = c.Cookie("direct-optional")
+	c.JSON(200, Response{})
+}
+
+func (s Server) directRequired(c *gin.Context) {
+	_, err := c.Cookie("direct-required")
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load shared cookie fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/cookierequiredness", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for handler, expected := range map[string]struct {
+		name     string
+		required bool
+	}{
+		"accepted":       {name: "shared-cookie"},
+		"defaultValue":   {name: "shared-cookie"},
+		"rejected":       {name: "shared-cookie", required: true},
+		"unresolved":     {name: "shared-cookie"},
+		"directOptional": {name: "direct-optional"},
+		"directRequired": {name: "direct-required", required: true},
+	} {
+		name := expected.name
+		param, ok := paramByName(got[handler].Params, name)
+		if !ok || param.Location != "cookie" || param.Required != expected.required {
+			t.Fatalf("%s cookie requiredness mismatch: %+v", handler, param)
+		}
+	}
+
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.parameter.unresolved" && item.Subject == "shared-cookie" {
+			if item.Operation != "GET /unresolved" || !strings.Contains(item.Message, "requiredness") {
+				t.Fatalf("cookie requiredness diagnostic must be scoped to the unresolved caller: %+v", item)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing unresolved shared-cookie requiredness diagnostic: %+v", diagnostics.Items())
+}
+
 func TestFormCollectionsAndGetQueryMapAreExtracted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/formcollections

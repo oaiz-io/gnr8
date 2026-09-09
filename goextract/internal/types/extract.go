@@ -417,6 +417,18 @@ func constraintsFromTag(
 }
 
 func applyMinMaxConstraint(c *facts.Constraints, name string, value string, schema facts.Type) bool {
+	if schema.Type == facts.TypeArray {
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return false
+		}
+		if name == "min" {
+			c.MinItems = &parsed
+		} else {
+			c.MaxItems = &parsed
+		}
+		return true
+	}
 	if schemaIsStringLike(schema) {
 		parsed, err := strconv.ParseUint(value, 10, 64)
 		if err != nil {
@@ -452,6 +464,12 @@ func mergeConstraints(dst, src *facts.Constraints) {
 	}
 	if src.MaxLength != nil {
 		dst.MaxLength = src.MaxLength
+	}
+	if src.MinItems != nil {
+		dst.MinItems = src.MinItems
+	}
+	if src.MaxItems != nil {
+		dst.MaxItems = src.MaxItems
 	}
 	if src.Minimum != nil {
 		dst.Minimum = src.Minimum
@@ -517,6 +535,8 @@ func constraintsEmpty(c *facts.Constraints) bool {
 	return c == nil ||
 		(c.MinLength == nil &&
 			c.MaxLength == nil &&
+			c.MinItems == nil &&
+			c.MaxItems == nil &&
 			c.Minimum == nil &&
 			c.Maximum == nil &&
 			c.ExclusiveMinimum == nil &&
