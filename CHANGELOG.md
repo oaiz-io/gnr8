@@ -9,6 +9,9 @@ must move the minor version.
 
 ## Unreleased
 
+
+## 0.14.0 — 2026-09-09
+
 ### Breaking
 
 - **A cookie read reached through a helper now states requiredness from the operation caller's own
