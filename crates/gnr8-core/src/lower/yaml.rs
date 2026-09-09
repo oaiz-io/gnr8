@@ -454,6 +454,48 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
     if !schema.enum_values.is_empty() {
         let _ = writeln!(out, "{pad}enum: {}", flow_seq(&schema.enum_values));
     }
+    write_schema_constraints(out, schema, &pad);
+    if let Some(default_value) = &schema.default_value {
+        let _ = writeln!(out, "{pad}default: {}", literal(default_value));
+    }
+    if let Some(example) = &schema.example {
+        let _ = writeln!(out, "{pad}example: {}", literal(example));
+    }
+    for extension in &schema.extensions {
+        let _ = writeln!(
+            out,
+            "{pad}{}: {}",
+            map_key(&extension.name),
+            literal(&extension.value)
+        );
+    }
+    if !schema.required.is_empty() {
+        let _ = writeln!(out, "{pad}required: {}", flow_seq(&schema.required));
+    }
+    if !schema.properties.is_empty() {
+        let _ = writeln!(out, "{pad}properties:");
+        for (prop_name, prop) in &schema.properties {
+            let _ = writeln!(out, "{pad}{INDENT}{}:", map_key(prop_name));
+            write_schema(out, prop, depth + 2);
+        }
+    }
+    if let Some(items) = &schema.items {
+        let _ = writeln!(out, "{pad}items:");
+        write_schema(out, items, depth + 1);
+    }
+    if let Some(value_schema) = &schema.additional_properties_schema {
+        // A typed map: `additionalProperties:` carries the value schema on indented lines.
+        let _ = writeln!(out, "{pad}additionalProperties:");
+        write_schema(out, value_schema, depth + 1);
+    } else if schema.additional_properties == Some(true) {
+        let _ = writeln!(out, "{pad}additionalProperties: true");
+    }
+}
+
+/// Emit the JSON Schema validation keywords in one fixed order. They travel together on
+/// [`SchemaObject`] and the JSON writer emits the same group, so keeping them in one place is what
+/// keeps the two writers from drifting apart on ordering.
+fn write_schema_constraints(out: &mut String, schema: &SchemaObject, pad: &str) {
     if let Some(min_length) = schema.min_length {
         let _ = writeln!(out, "{pad}minLength: {min_length}");
     }
@@ -494,41 +536,6 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
     }
     if let Some(pattern) = &schema.pattern {
         let _ = writeln!(out, "{pad}pattern: {}", scalar(pattern));
-    }
-    if let Some(default_value) = &schema.default_value {
-        let _ = writeln!(out, "{pad}default: {}", literal(default_value));
-    }
-    if let Some(example) = &schema.example {
-        let _ = writeln!(out, "{pad}example: {}", literal(example));
-    }
-    for extension in &schema.extensions {
-        let _ = writeln!(
-            out,
-            "{pad}{}: {}",
-            map_key(&extension.name),
-            literal(&extension.value)
-        );
-    }
-    if !schema.required.is_empty() {
-        let _ = writeln!(out, "{pad}required: {}", flow_seq(&schema.required));
-    }
-    if !schema.properties.is_empty() {
-        let _ = writeln!(out, "{pad}properties:");
-        for (prop_name, prop) in &schema.properties {
-            let _ = writeln!(out, "{pad}{INDENT}{}:", map_key(prop_name));
-            write_schema(out, prop, depth + 2);
-        }
-    }
-    if let Some(items) = &schema.items {
-        let _ = writeln!(out, "{pad}items:");
-        write_schema(out, items, depth + 1);
-    }
-    if let Some(value_schema) = &schema.additional_properties_schema {
-        // A typed map: `additionalProperties:` carries the value schema on indented lines.
-        let _ = writeln!(out, "{pad}additionalProperties:");
-        write_schema(out, value_schema, depth + 1);
-    } else if schema.additional_properties == Some(true) {
-        let _ = writeln!(out, "{pad}additionalProperties: true");
     }
 }
 
