@@ -3280,12 +3280,18 @@ func (s Server) Register() {
 	s.R.GET("/default", s.defaultValue)
 	s.R.GET("/rejected", s.rejected)
 	s.R.GET("/unresolved", s.unresolved)
+	s.R.GET("/rejected-then-not-found", s.rejectedThenNotFound)
+	s.R.GET("/discarded-then-not-found", s.discardedThenNotFound)
 	s.R.GET("/direct-optional", s.directOptional)
 	s.R.GET("/direct-required", s.directRequired)
 }
 
 func readCookie(c *gin.Context) (string, error) {
 	return c.Cookie("shared-cookie")
+}
+
+func lookup(id string) (string, error) {
+	return id, nil
 }
 
 func (s Server) accepted(c *gin.Context) {
@@ -3323,6 +3329,30 @@ func (s Server) unresolved(c *gin.Context) {
 	c.JSON(200, Response{Value: value})
 }
 
+func (s Server) rejectedThenNotFound(c *gin.Context) {
+	value, err := readCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	item, err := lookup(value)
+	if err != nil {
+		c.JSON(404, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: item})
+}
+
+func (s Server) discardedThenNotFound(c *gin.Context) {
+	value, _ := readCookie(c)
+	item, err := lookup(value)
+	if err != nil {
+		c.JSON(404, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: item})
+}
+
 func (s Server) directOptional(c *gin.Context) {
 	_, _ = c.Cookie("direct-optional")
 	c.JSON(200, Response{})
@@ -3353,12 +3383,16 @@ func (s Server) directRequired(c *gin.Context) {
 		name     string
 		required bool
 	}{
-		"accepted":       {name: "shared-cookie"},
-		"defaultValue":   {name: "shared-cookie"},
-		"rejected":       {name: "shared-cookie", required: true},
-		"unresolved":     {name: "shared-cookie"},
-		"directOptional": {name: "direct-optional"},
-		"directRequired": {name: "direct-required", required: true},
+		"accepted":     {name: "shared-cookie"},
+		"defaultValue": {name: "shared-cookie"},
+		"rejected":     {name: "shared-cookie", required: true},
+		"unresolved":   {name: "shared-cookie"},
+		// A second response path after the absence branch belongs to the present
+		// cookie, so it cannot unsettle what the absent one proved.
+		"rejectedThenNotFound":  {name: "shared-cookie", required: true},
+		"discardedThenNotFound": {name: "shared-cookie"},
+		"directOptional":        {name: "direct-optional"},
+		"directRequired":        {name: "direct-required", required: true},
 	} {
 		name := expected.name
 		param, ok := paramByName(got[handler].Params, name)
@@ -3367,15 +3401,21 @@ func (s Server) directRequired(c *gin.Context) {
 		}
 	}
 
+	// Exactly one caller leaves requiredness open, so exactly one operation may be
+	// diagnosed: a proof that reads past the absence branch would also report the
+	// callers that answer twice, which are settled.
+	var reported []facts.DiagnosticFact
 	for _, item := range diagnostics.Items() {
 		if item.Code == "request.parameter.unresolved" && item.Subject == "shared-cookie" {
-			if item.Operation != "GET /unresolved" || !strings.Contains(item.Message, "requiredness") {
-				t.Fatalf("cookie requiredness diagnostic must be scoped to the unresolved caller: %+v", item)
-			}
-			return
+			reported = append(reported, item)
 		}
 	}
-	t.Fatalf("missing unresolved shared-cookie requiredness diagnostic: %+v", diagnostics.Items())
+	if len(reported) != 1 {
+		t.Fatalf("expected one unresolved shared-cookie requiredness diagnostic, got: %+v", reported)
+	}
+	if reported[0].Operation != "GET /unresolved" || !strings.Contains(reported[0].Message, "requiredness") {
+		t.Fatalf("cookie requiredness diagnostic must be scoped to the unresolved caller: %+v", reported[0])
+	}
 }
 
 func TestFormCollectionsAndGetQueryMapAreExtracted(t *testing.T) {

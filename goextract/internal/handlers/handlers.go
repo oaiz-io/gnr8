@@ -1769,12 +1769,20 @@ func mergeQueryResponse(state *queryPathState, incoming queryResponseState) {
 // missing cookie can be reported; it does not say whether this caller rejects,
 // substitutes a value, or returns a successful empty result.
 //
-// The proof is deliberately narrow. The helper call and its absence check must
-// be consecutive top-level statements, and both the missing branch and the
-// present continuation must end in response outcomes gnr8 already recognizes.
-// Anything more involved stays optional and is diagnosed by the caller. This
-// keeps an uncertain helper use from acquiring requiredness merely because a
-// different operation rejects the same helper's error.
+// The proof reads the absence branch and nothing else, which is the same fact
+// requestAccessRequired reads for a direct c.Cookie call: what the handler does
+// once the cookie is present is a disjoint path, so a later not-found or
+// delegated answer cannot make the absent branch any more or less of a
+// rejection. Reading it would only make one operation's requiredness depend on
+// unrelated statements, which is how the direct and helper-wrapped spellings of
+// the same handler drift apart.
+//
+// The proof is still deliberately narrow. The helper call and its absence check
+// must be consecutive top-level statements, and the branch must end in a
+// response outcome gnr8 already recognizes. Anything more involved stays
+// optional and is diagnosed by the caller. This keeps an uncertain helper use
+// from acquiring requiredness merely because a different operation rejects the
+// same helper's error.
 func cookieRequirednessFromCaller(frame helperFrame, target *ast.CallExpr) queryPresenceProof {
 	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil || h.info == nil || target == nil {
@@ -1791,12 +1799,12 @@ func cookieRequirednessFromCaller(frame helperFrame, target *ast.CallExpr) query
 	if _, ok := h.decl.Body.List[targetIndex].(*ast.AssignStmt); !ok {
 		return queryPresenceUnresolved
 	}
+	// A discarded error leaves this caller nothing to branch on, so it cannot
+	// reject an absent cookie and the read stays observational. That is the same
+	// answer requestAccessRequired gives a direct read whose error is dropped.
 	errors := callResultVars(h, target, resultIndex)
 	if len(errors) == 0 {
-		if responseStateForStatements(frame, h.decl.Body.List[targetIndex+1:]) == queryResponseSuccess {
-			return queryPresenceOptional
-		}
-		return queryPresenceUnresolved
+		return queryPresenceOptional
 	}
 	if targetIndex+1 >= len(h.decl.Body.List) {
 		return queryPresenceUnresolved
@@ -1806,10 +1814,6 @@ func cookieRequirednessFromCaller(frame helperFrame, target *ast.CallExpr) query
 		return queryPresenceUnresolved
 	}
 	missingResponse := responseStateForStatements(frame, missing.Body.List)
-	continuationResponse := responseStateForStatements(frame, h.decl.Body.List[targetIndex+2:])
-	if continuationResponse != queryResponseSuccess {
-		return queryPresenceUnresolved
-	}
 	terminates := blockEndsWithReturn(missing.Body)
 	switch {
 	case terminates && missingResponse == queryResponseClientError:

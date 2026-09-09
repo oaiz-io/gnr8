@@ -53,9 +53,12 @@ Recognized route facts include:
   the handler or a bounded helper rejects an absent value, and a rejection is any known 4xx written
   through the same `gin.Context` response surface the query proof below reads. When several
   operations call one error-returning cookie helper, each call site's absence branch decides its own
-  requiredness. A caller that substitutes a value or answers successfully stays optional; a caller
-  that returns a known 4xx is required. If caller flow cannot prove either result, the cookie stays
-  optional and gets `request.parameter.unresolved`.
+  requiredness, and only that branch: a caller that substitutes a value or answers successfully stays
+  optional, a caller that returns a known 4xx is required, and a caller that discards the error states
+  nothing and stays optional. What the caller does once the cookie is present — a later not-found
+  answer, a delegated render — belongs to the other path and never changes that verdict, so moving a
+  read into a helper gives the same answer as writing it inline. If the absence branch itself cannot
+  prove either result, the cookie stays optional and gets `request.parameter.unresolved`.
 - `PostForm`, `DefaultPostForm`, `GetPostForm`, `PostFormArray`, `GetPostFormArray`, and file reads
   through either `FormFile` or `Request.FormFile` form values. `PostFormArray`/`GetPostFormArray`
   state a repeated string part. A string part becomes required when an empty value is explicitly
