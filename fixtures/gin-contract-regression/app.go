@@ -85,11 +85,13 @@ type SharedPayload struct {
 }
 
 type CollectionRules struct {
-	Names []string `json:"names" binding:"required,min=1,dive"`
-	Codes []string `json:"codes" validate:"required,min=1"`
-	Slots [3]int   `json:"slots" binding:"required,max=100,dive"`
-	Label string   `json:"label" validate:"min=2,max=24"`
-	Rank  int      `json:"rank" binding:"min=1,max=9"`
+	Names  []string          `json:"names" binding:"required,min=1,dive"`
+	Codes  []string          `json:"codes" validate:"required,min=1"`
+	Slots  [3]int            `json:"slots" binding:"required,max=100,dive"`
+	Sizes  []int             `json:"sizes" validate:"gte=2,lte=6"`
+	Labels map[string]string `json:"labels" binding:"min=1,max=4"`
+	Label  string            `json:"label" validate:"min=2,max=24"`
+	Rank   int               `json:"rank" binding:"min=1,max=9"`
 }
 
 type CollectionPayload struct {

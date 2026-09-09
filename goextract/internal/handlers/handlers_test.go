@@ -3418,6 +3418,190 @@ func (s Server) directRequired(c *gin.Context) {
 	}
 }
 
+// The absence branch is one fact, so every spelling Go offers for it must reach
+// the same answer, and a branch that is not about this read must reach none.
+func TestCookieAbsenceBranchIsReadInEveryGoSpelling(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/cookiespellings
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) Cookie(string) (string, error) { return "", nil }
+func (c *Context) GetHeader(string) string       { return "" }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package cookiespellings
+
+import (
+	"errors"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct{ R *gin.Engine }
+type Response struct { Value string `+"`"+`json:"value"`+"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/if-with-init", s.ifWithInit)
+	s.R.GET("/errors-is", s.errorsIs)
+	s.R.GET("/statement-between", s.statementBetween)
+	s.R.GET("/direct-errors-is", s.directErrorsIs)
+	s.R.GET("/rebound-error", s.reboundError)
+	s.R.GET("/swallowed", s.swallowed)
+	s.R.GET("/header-helper", s.headerHelper)
+}
+
+func readCookie(c *gin.Context) (string, error) { return c.Cookie("shared") }
+
+// Reads a cookie, then answers with a failure of its own: the caller rejecting
+// that failure says nothing about the cookie.
+func swallowingHelper(c *gin.Context) (string, error) {
+	value, _ := c.Cookie("swallowed")
+	if value == "" {
+		return "", errors.New("unrelated failure")
+	}
+	return value, nil
+}
+
+// GetHeader answers absence with an empty string, so this error is unrelated to
+// the header it happens to read.
+func headerAndError(c *gin.Context) (string, error) {
+	_ = c.GetHeader("X-Trace")
+	return "", errors.New("unrelated failure")
+}
+
+func nextValue() (string, error) { return "", nil }
+
+func (s Server) ifWithInit(c *gin.Context) {
+	if value, err := readCookie(c); err != nil {
+		c.JSON(401, Response{})
+		return
+	} else {
+		c.JSON(200, Response{Value: value})
+	}
+}
+
+func (s Server) errorsIs(c *gin.Context) {
+	value, err := readCookie(c)
+	if errors.Is(err, http.ErrNoCookie) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) statementBetween(c *gin.Context) {
+	value, err := readCookie(c)
+	trace := "cookie-read"
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value + trace})
+}
+
+func (s Server) directErrorsIs(c *gin.Context) {
+	value, err := c.Cookie("direct")
+	if errors.Is(err, http.ErrNoCookie) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+// The same object is rebound by the second read, so this branch tests that
+// read's failure and proves nothing about the cookie.
+func (s Server) reboundError(c *gin.Context) {
+	value, err := readCookie(c)
+	other, err := nextValue()
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value + other})
+}
+
+func (s Server) swallowed(c *gin.Context) {
+	value, err := swallowingHelper(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) headerHelper(c *gin.Context) {
+	value, err := headerAndError(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load cookie spelling fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/cookiespellings", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+
+	for handler, expected := range map[string]struct {
+		name     string
+		location string
+		required bool
+	}{
+		// Every spelling of "this read failed" proves the same rejection.
+		"ifWithInit":       {name: "shared", location: "cookie", required: true},
+		"errorsIs":         {name: "shared", location: "cookie", required: true},
+		"statementBetween": {name: "shared", location: "cookie", required: true},
+		"directErrorsIs":   {name: "direct", location: "cookie", required: true},
+		// A branch about a different failure proves nothing.
+		"reboundError": {name: "shared", location: "cookie"},
+		"swallowed":    {name: "swallowed", location: "cookie"},
+		"headerHelper": {name: "X-Trace", location: "header"},
+	} {
+		param, ok := paramByName(got[handler].Params, expected.name)
+		if !ok || param.Location != expected.location || param.Required != expected.required {
+			t.Fatalf("%s requiredness mismatch: %+v", handler, param)
+		}
+	}
+
+	// Only the rebound-error caller is ambiguous: it tests an error that could
+	// have been the cookie's. A helper that never hands its cookie error back
+	// states nothing to be uncertain about, so it is not diagnosed.
+	var reported []string
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.parameter.unresolved" {
+			reported = append(reported, item.Operation)
+		}
+	}
+	if len(reported) != 1 || reported[0] != "GET /rebound-error" {
+		t.Fatalf("unexpected unresolved parameter diagnostics: %+v", reported)
+	}
+}
+
 func TestFormCollectionsAndGetQueryMapAreExtracted(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/formcollections

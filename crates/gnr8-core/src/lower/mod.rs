@@ -951,6 +951,8 @@ fn apply_field_meta(field: &Field, prop: &mut SchemaObject) {
     prop.max_length = constraints.max_length;
     prop.min_items = constraints.min_items;
     prop.max_items = constraints.max_items;
+    prop.min_properties = constraints.min_properties;
+    prop.max_properties = constraints.max_properties;
     prop.minimum.clone_from(&constraints.minimum);
     prop.maximum.clone_from(&constraints.maximum);
     prop.exclusive_minimum

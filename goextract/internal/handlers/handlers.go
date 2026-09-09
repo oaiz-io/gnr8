@@ -536,7 +536,7 @@ func (a *Analyzer) analyzeContextHelperCall(
 		if pname, matched, resolved := requestCookieInFrame(next, nested); matched {
 			if resolved {
 				required := requestAccessRequired(next, nested, "Cookie")
-				if !required && hint.cookieRequiredAnalyzed {
+				if !required && hint.cookieRequiredAnalyzed && readErrorReachesCaller(next, nested) {
 					required = hint.cookieRequired == queryPresenceRequired
 					if hint.cookieRequired == queryPresenceUnresolved {
 						a.reportCookieRequirednessUnresolved(next, nested, pname, traversal)
@@ -707,7 +707,12 @@ func helperCallHint(frame helperFrame, call *ast.CallExpr, inherited parameterHi
 			hint.required = true
 		}
 	}
-	if !hint.cookieRequiredAnalyzed && helperReturnsError(frame.decl.info, call) {
+	// Recomputed at every error-returning hop rather than frozen at the first.
+	// The frame that consumes a failed read is the nearest one whose call can
+	// carry it, so an outer caller's branch must not outrank the branch actually
+	// beside the read. Where a hop returns no error the inherited answer stands,
+	// and readErrorReachesCaller then decides whether it may be applied at all.
+	if helperReturnsError(frame.decl.info, call) {
 		hint.cookieRequired = cookieRequirednessFromCaller(frame, call)
 		hint.cookieRequiredAnalyzed = true
 	}
@@ -762,10 +767,12 @@ func (a *Analyzer) analyzeTraversedGinCall(
 			if hint.schemaKnown && hint.schema != nil {
 				schema = *hint.schema
 			}
+			// Requiredness comes from the read's own frame, the same proof a direct
+			// GetHeader gets. The helper's signature is deliberately not consulted:
+			// GetHeader answers absence with an empty string, so an error-returning
+			// helper reports some other failure unless it converts that empty read
+			// itself — which requestAccessRequired already reads.
 			required := requestAccessRequired(frame, call, method)
-			if hint.requiredKnown {
-				required = hint.required
-			}
 			a.addTraversedParameter(traversal, requestParameter(name, "header", required, schema, frame.decl.fset, call.Pos()), true)
 		} else {
 			a.reportDynamicParameterName(frame, call, traversal, method)
@@ -777,7 +784,7 @@ func (a *Analyzer) analyzeTraversedGinCall(
 				schema = *hint.schema
 			}
 			required := requestAccessRequired(frame, call, method)
-			if !required && hint.cookieRequiredAnalyzed {
+			if !required && hint.cookieRequiredAnalyzed && readErrorReachesCaller(frame, call) {
 				required = hint.cookieRequired == queryPresenceRequired
 				if hint.cookieRequired == queryPresenceUnresolved {
 					a.reportCookieRequirednessUnresolved(frame, call, name, traversal)
@@ -1796,9 +1803,6 @@ func cookieRequirednessFromCaller(frame helperFrame, target *ast.CallExpr) query
 	if targetIndex < 0 {
 		return queryPresenceUnresolved
 	}
-	if _, ok := h.decl.Body.List[targetIndex].(*ast.AssignStmt); !ok {
-		return queryPresenceUnresolved
-	}
 	// A discarded error leaves this caller nothing to branch on, so it cannot
 	// reject an absent cookie and the read stays observational. That is the same
 	// answer requestAccessRequired gives a direct read whose error is dropped.
@@ -1806,11 +1810,8 @@ func cookieRequirednessFromCaller(frame helperFrame, target *ast.CallExpr) query
 	if len(errors) == 0 {
 		return queryPresenceOptional
 	}
-	if targetIndex+1 >= len(h.decl.Body.List) {
-		return queryPresenceUnresolved
-	}
-	missing, ok := h.decl.Body.List[targetIndex+1].(*ast.IfStmt)
-	if !ok || missing.Else != nil || !exprChecksNonNil(h.info, missing.Cond, errors) {
+	missing, ok := absenceBranch(frame, h.decl.Body.List, targetIndex, target, errors)
+	if !ok {
 		return queryPresenceUnresolved
 	}
 	missingResponse := responseStateForStatements(frame, missing.Body.List)
@@ -1842,23 +1843,147 @@ func callErrorResultIndex(info *gotypes.Info, call *ast.CallExpr) (int, bool) {
 
 func topLevelCallStatement(statements []ast.Stmt, target *ast.CallExpr) int {
 	for index, statement := range statements {
-		found := false
-		ast.Inspect(statement, func(node ast.Node) bool {
-			if found {
-				return false
-			}
-			call, ok := node.(*ast.CallExpr)
-			if ok && call == target {
-				found = true
-				return false
-			}
-			return true
-		})
-		if found {
+		if stmtContainsCall(statement, target) {
 			return index
 		}
 	}
 	return -1
+}
+
+func stmtContainsCall(statement ast.Stmt, target *ast.CallExpr) bool {
+	found := false
+	ast.Inspect(statement, func(node ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := node.(*ast.CallExpr)
+		if ok && call == target {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// absenceBranch finds the `if` this caller uses to answer a failed read.
+//
+// Go writes that pair two ways and both mean the same thing, so both are read:
+// the read as its own statement followed by the check, and the read in the
+// `if`'s own initializer. An `else` is not rejected — it is the present-value
+// path written inline, which is as disjoint from the absence branch as the
+// statements after the `if`.
+//
+// Between the read and its check the scan steps over ordinary book-keeping,
+// because a log line or a trace variable does not change what the branch
+// proves. It stops at two things. A statement that answers the request means
+// the handler already replied and a later branch is no longer its answer to
+// absence. A statement that assigns to the error means the value under test is
+// some other call's failure — `other, err := next()` reuses the same object, so
+// without this the check would be read as a proof about this read.
+func absenceBranch(
+	frame helperFrame,
+	statements []ast.Stmt,
+	targetIndex int,
+	target *ast.CallExpr,
+	errorVars map[gotypes.Object]bool,
+) (*ast.IfStmt, bool) {
+	h := frame.decl
+	switch statement := statements[targetIndex].(type) {
+	case *ast.IfStmt:
+		if statement.Init != nil &&
+			stmtContainsCall(statement.Init, target) &&
+			exprTestsError(h.info, statement.Cond, errorVars) {
+			return statement, true
+		}
+		return nil, false
+	case *ast.AssignStmt:
+	default:
+		return nil, false
+	}
+	for _, statement := range statements[targetIndex+1:] {
+		if candidate, ok := statement.(*ast.IfStmt); ok &&
+			exprTestsError(h.info, candidate.Cond, errorVars) {
+			return candidate, true
+		}
+		if responseStateForStatements(frame, []ast.Stmt{statement}) != queryResponseNone {
+			return nil, false
+		}
+		if statementAssignsAny(h.info, statement, errorVars) {
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
+func statementAssignsAny(info *gotypes.Info, statement ast.Stmt, objects map[gotypes.Object]bool) bool {
+	assigned := false
+	ast.Inspect(statement, func(node ast.Node) bool {
+		if assigned {
+			return false
+		}
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			if ident, ok := lhs.(*ast.Ident); ok && objects[info.ObjectOf(ident)] {
+				assigned = true
+				return false
+			}
+		}
+		return true
+	})
+	return assigned
+}
+
+// readErrorReachesCaller reports whether this frame hands the read's own error
+// back to its caller. A helper that reads a cookie but answers with some other
+// failure still fails for its own reasons: the caller's rejection is then about
+// that failure and states nothing about the cookie, so the call site's absence
+// branch is not a proof about this read and must not be consulted.
+func readErrorReachesCaller(frame helperFrame, read *ast.CallExpr) bool {
+	h := frame.decl
+	if h.decl == nil || h.decl.Body == nil || h.info == nil || read == nil {
+		return false
+	}
+	index, ok := callErrorResultIndex(h.info, read)
+	if !ok {
+		return false
+	}
+	errorVars := callResultVars(h, read, index)
+	forwarded := false
+	ast.Inspect(h.decl.Body, func(node ast.Node) bool {
+		if forwarded {
+			return false
+		}
+		ret, ok := node.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, result := range ret.Results {
+			// `return c.Cookie(name)` forwards the whole tuple; `return "", err`
+			// and `return "", fmt.Errorf("...: %w", err)` both carry the value.
+			if exprContainsCall(result, read) {
+				forwarded = true
+				return false
+			}
+			ast.Inspect(result, func(inner ast.Node) bool {
+				if forwarded {
+					return false
+				}
+				if ident, ok := inner.(*ast.Ident); ok && errorVars[h.info.ObjectOf(ident)] {
+					forwarded = true
+				}
+				return !forwarded
+			})
+			if forwarded {
+				return false
+			}
+		}
+		return true
+	})
+	return forwarded
 }
 
 func responseStateForStatements(frame helperFrame, statements []ast.Stmt) queryResponseState {
@@ -1897,7 +2022,7 @@ func requestAccessRequired(frame helperFrame, target *ast.CallExpr, method strin
 	case "Cookie":
 		errors := callResultVars(h, target, 1)
 		return len(errors) > 0 && anyMatchingIf(h, func(ifStmt *ast.IfStmt) bool {
-			return exprChecksNonNil(h.info, ifStmt.Cond, errors) &&
+			return exprTestsError(h.info, ifStmt.Cond, errors) &&
 				blockRejectsRequest(frame, ifStmt.Body)
 		})
 	default:
@@ -2025,13 +2150,48 @@ func isZeroInteger(expr ast.Expr) bool {
 	return ok && literal.Kind == token.INT && literal.Value == "0"
 }
 
-func exprChecksNonNil(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object]bool) bool {
-	binary, ok := expr.(*ast.BinaryExpr)
-	if !ok || binary.Op != token.NEQ {
+// exprTestsError reports whether a condition tests one of the values a read's
+// error was assigned to. Go itself offers two spellings for "this call failed",
+// and both are read here so one handler does not answer differently from the
+// next: `err != nil`, and `errors.Is(err, sentinel)` against the standard
+// library's own comparison. The sentinel form matters for cookies in
+// particular, because `Cookie` answers an absent one with `http.ErrNoCookie`
+// and testing that sentinel is the idiomatic way to ask.
+//
+// Which sentinel is named is deliberately not read. The condition's job here is
+// only to mark the branch as the one the failing read leads to; what makes that
+// branch a rejection is the response inside it.
+func exprTestsError(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object]bool) bool {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return exprTestsError(info, node.X, values)
+	case *ast.BinaryExpr:
+		if node.Op != token.NEQ {
+			return false
+		}
+		return (exprIsObject(info, node.X, values) && isNilIdent(node.Y)) ||
+			(isNilIdent(node.X) && exprIsObject(info, node.Y, values))
+	case *ast.CallExpr:
+		return isStdErrorsIsCall(info, node) &&
+			len(node.Args) > 0 &&
+			exprIsObject(info, node.Args[0], values)
+	}
+	return false
+}
+
+// isStdErrorsIsCall gates the sentinel spelling on the resolved standard-library
+// `errors` package, never the identifier text, so a local package named
+// `errors` cannot be mistaken for it.
+func isStdErrorsIsCall(info *gotypes.Info, call *ast.CallExpr) bool {
+	if info == nil {
 		return false
 	}
-	return (exprIsObject(info, binary.X, values) && isNilIdent(binary.Y)) ||
-		(isNilIdent(binary.X) && exprIsObject(info, binary.Y, values))
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel == nil || selector.Sel.Name != "Is" {
+		return false
+	}
+	fn, ok := info.Uses[selector.Sel].(*gotypes.Func)
+	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "errors"
 }
 
 func exprIsObject(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object]bool) bool {

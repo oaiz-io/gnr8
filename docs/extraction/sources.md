@@ -57,8 +57,19 @@ Recognized route facts include:
   optional, a caller that returns a known 4xx is required, and a caller that discards the error states
   nothing and stays optional. What the caller does once the cookie is present — a later not-found
   answer, a delegated render — belongs to the other path and never changes that verdict, so moving a
-  read into a helper gives the same answer as writing it inline. If the absence branch itself cannot
-  prove either result, the cookie stays optional and gets `request.parameter.unresolved`.
+  read into a helper gives the same answer as writing it inline.
+
+  The branch is recognized in either spelling Go offers for it — `value, err := read(c)` followed by
+  the check, or the read in the `if`'s own initializer — and in either spelling of the test, `err !=
+  nil` or `errors.Is(err, http.ErrNoCookie)`. Book-keeping between the read and its check is stepped
+  over; a statement that answers the request or reassigns the error is not, because the branch after
+  it is no longer this read's. A helper that never hands its own read error back to the caller is not
+  judged by the caller's branch at all. If the absence branch cannot prove either result, the cookie
+  stays optional and gets `request.parameter.unresolved`.
+
+  A header read is judged only in its own frame. `GetHeader` answers an absent header with an empty
+  string, so an enclosing helper's error reports some other failure unless that helper converts the
+  empty read itself.
 - `PostForm`, `DefaultPostForm`, `GetPostForm`, `PostFormArray`, `GetPostFormArray`, and file reads
   through either `FormFile` or `Request.FormFile` form values. `PostFormArray`/`GetPostFormArray`
   state a repeated string part. A string part becomes required when an empty value is explicitly

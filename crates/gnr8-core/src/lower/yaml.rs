@@ -466,6 +466,12 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
     if let Some(max_items) = schema.max_items {
         let _ = writeln!(out, "{pad}maxItems: {max_items}");
     }
+    if let Some(min_properties) = schema.min_properties {
+        let _ = writeln!(out, "{pad}minProperties: {min_properties}");
+    }
+    if let Some(max_properties) = schema.max_properties {
+        let _ = writeln!(out, "{pad}maxProperties: {max_properties}");
+    }
     if let Some(minimum) = &schema.minimum {
         let _ = writeln!(out, "{pad}minimum: {}", number_or_scalar(minimum));
     }

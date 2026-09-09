@@ -117,6 +117,7 @@ Patches are target-specific presentation policy. They do not mutate the graph or
 |---|---|
 | String bounds | `min_length`, `max_length` |
 | Array cardinality | `min_items`, `max_items` |
+| Object key count | `min_properties`, `max_properties` |
 | Numeric bounds | `minimum`, `maximum` |
 | Enum members | `enum_values` (sorted), `enum_values_in_order` |
 | Description | `description` |

@@ -448,14 +448,22 @@ Headers  map[string]string `json:"headers,omitzero" binding:"omitempty,dive,keys
 Segments []string          `json:"segments" validate:"required,dive,min=1,max=100"`
 Groups   []Group           `json:"groups" binding:"required,min=1,dive"`
 Slots    [3]int            `json:"slots" validate:"required,max=100,dive"`
+Sizes    []int             `json:"sizes" validate:"gte=2,lte=6"`
+Labels   map[string]string `json:"labels" binding:"min=1,max=4"`
 ```
 
 `headers` is **optional** — the tag forbids empty map keys and values, it does not demand the key.
 `segments` is **required** because that `required` precedes the `dive`, and its `min`/`max` bound
 each string rather than the slice, so they are not published as the array's constraints.
-`groups` publishes `minItems: 1`, and `slots` publishes `maxItems: 100`: on a slice or array,
-field-scope `min`/`max` state collection cardinality. The same spellings retain length semantics on
-strings and numeric bound semantics on numbers.
+
+Field-scope size rules are read against the field's own type. On a slice or array they state
+cardinality: `groups` publishes `minItems: 1` and `slots` publishes `maxItems: 100`. On a map they
+state key count: `labels` publishes `minProperties: 1` and `maxProperties: 4`. The validator reads
+`min`/`gte`, `max`/`lte`, `gt` and `lt` all as bounds on `len()` once the field is a collection, so
+every spelling publishes the same keyword pair — `sizes` publishes `minItems: 2` and `maxItems: 6`.
+A strict bound is exact as an inclusive one there, because a length is a whole number: `gt=0` is
+`minItems: 1`. On strings these spellings keep length semantics and on numbers numeric bound
+semantics.
 
 The same rule applies to bound query, header, and form parameters: `binding:"omitempty,dive,required"`
 on a repeated parameter forbids empty entries, it does not make the parameter itself required.

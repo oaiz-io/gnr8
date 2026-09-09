@@ -180,6 +180,66 @@ func TestFieldMetaFromTagsLowersCollectionCardinalityWithoutChangingScalarRules(
 	}
 }
 
+// go-playground reads min/gte, max/lte, gt and lt all as bounds on len() once
+// the field is a collection, so every spelling must reach the same keyword pair.
+// A numeric bound on an array or object states nothing a validator reads.
+func TestFieldMetaFromTagsLowersEverySizeSpellingOnCollections(t *testing.T) {
+	slice := facts.ArrayType(facts.PrimitiveType(facts.StringPrim()))
+	mapping := facts.MapTypeOf(facts.PrimitiveType(facts.StringPrim()), facts.PrimitiveType(facts.StringPrim()))
+
+	for _, tc := range []struct {
+		name          string
+		tag           string
+		schema        facts.Type
+		minItems      *uint64
+		maxItems      *uint64
+		minProperties *uint64
+		maxProperties *uint64
+	}{
+		{name: "slice gte", tag: `json:"v" validate:"gte=2"`, schema: slice, minItems: uint64Ptr(2)},
+		{name: "slice lte", tag: `json:"v" validate:"lte=7"`, schema: slice, maxItems: uint64Ptr(7)},
+		// A length is a whole number, so a strict bound is exactly an inclusive one.
+		{name: "slice gt", tag: `json:"v" validate:"gt=0"`, schema: slice, minItems: uint64Ptr(1)},
+		{name: "slice lt", tag: `json:"v" validate:"lt=5"`, schema: slice, maxItems: uint64Ptr(4)},
+		{name: "map min", tag: `json:"v" validate:"min=1"`, schema: mapping, minProperties: uint64Ptr(1)},
+		{name: "map max", tag: `json:"v" binding:"max=4"`, schema: mapping, maxProperties: uint64Ptr(4)},
+		{name: "map gte", tag: `json:"v" validate:"gte=3"`, schema: mapping, minProperties: uint64Ptr(3)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tag := reflect.StructTag(tc.tag)
+			diags := diag.New()
+			meta := fieldMetaFromTags("Rules", "V", tag, string(tag), tc.schema, "dto.go", 20, diags)
+			if meta == nil || meta.Constraints == nil {
+				t.Fatalf("expected collection constraints, got %#v", meta)
+			}
+			c := meta.Constraints
+			if !equalUint64Ptr(c.MinItems, tc.minItems) || !equalUint64Ptr(c.MaxItems, tc.maxItems) ||
+				!equalUint64Ptr(c.MinProperties, tc.minProperties) || !equalUint64Ptr(c.MaxProperties, tc.maxProperties) {
+				t.Fatalf("collection bounds mismatch: %#v", c)
+			}
+			if c.Minimum != nil || c.Maximum != nil || c.ExclusiveMinimum != nil || c.ExclusiveMaximum != nil ||
+				c.MinLength != nil || c.MaxLength != nil {
+				t.Fatalf("a collection size rule must not become a scalar bound: %#v", c)
+			}
+			if len(diags.Items()) != 0 {
+				t.Fatalf("supported collection bounds must not be unresolved: %#v", diags.Items())
+			}
+		})
+	}
+
+	// `lt=0` demands a negative length. Nothing satisfies it and no keyword
+	// states it, so it is reported rather than turned into maxItems.
+	tag := reflect.StructTag(`json:"v" validate:"lt=0"`)
+	diags := diag.New()
+	meta := fieldMetaFromTags("Rules", "V", tag, string(tag), slice, "dto.go", 21, diags)
+	if meta != nil && meta.Constraints != nil && meta.Constraints.MaxItems != nil {
+		t.Fatalf("unsatisfiable bound must not be published: %#v", meta.Constraints)
+	}
+	if !hasMetadataDiag(diags.Items(), "unsupported validate tag", "lt=0") {
+		t.Fatalf("unsatisfiable bound must be reported: %#v", diags.Items())
+	}
+}
+
 func TestFieldMetaFromTagsScopesConstraintsToTheFieldItself(t *testing.T) {
 	// `min=3` bounds the field; everything past `dive` bounds each element. Before
 	// scope-awareness the trailing pair overwrote the field's own bound.

@@ -12,6 +12,7 @@ package types
 import (
 	"go/token"
 	gotypes "go/types"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -384,6 +385,16 @@ func constraintsFromTag(
 			if !fieldScope {
 				continue
 			}
+			// On a collection these spell the rule `min`/`max` spell — how many
+			// elements or keys the field may hold — so they must publish the same
+			// keyword. A numeric bound on an array or object states nothing any
+			// validator reads.
+			if kind := collectionKindOf(schema); kind != collectionKindNone {
+				if !applyCollectionBound(constraints, name, value, kind) {
+					unsupportedConstraintTag(diags, tagKind, structName, fieldName, token, file, line)
+				}
+				continue
+			}
 			bound := stringPtr(value)
 			switch name {
 			case "gte":
@@ -416,18 +427,69 @@ func constraintsFromTag(
 	return constraints
 }
 
-func applyMinMaxConstraint(c *facts.Constraints, name string, value string, schema facts.Type) bool {
-	if schema.Type == facts.TypeArray {
-		parsed, err := strconv.ParseUint(value, 10, 64)
-		if err != nil {
+// collectionKind reports whether a field's own type makes a size rule a rule
+// about members, and which keyword states it. A slice or array is counted in
+// elements, a map in keys; anything else is not a collection.
+type collectionKind uint8
+
+const (
+	collectionKindNone collectionKind = iota
+	collectionKindItems
+	collectionKindProperties
+)
+
+func collectionKindOf(schema facts.Type) collectionKind {
+	switch schema.Type {
+	case facts.TypeArray:
+		return collectionKindItems
+	case facts.TypeMap:
+		return collectionKindProperties
+	}
+	return collectionKindNone
+}
+
+// applyCollectionBound carries one size rule onto a collection field. The
+// validator reads `min`/`gte`, `max`/`lte`, `gt` and `lt` all as bounds on
+// len(), so on a collection they state one fact and must publish one keyword
+// pair rather than the numeric bounds a scalar would take. A strict bound is
+// exactly an inclusive one here because a length is a whole number: `gt=0` is
+// `minItems: 1`.
+func applyCollectionBound(c *facts.Constraints, name string, value string, kind collectionKind) bool {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return false
+	}
+	switch name {
+	case "gt":
+		if parsed == math.MaxUint64 {
 			return false
 		}
-		if name == "min" {
-			c.MinItems = &parsed
-		} else {
-			c.MaxItems = &parsed
+		parsed++
+	case "lt":
+		if parsed == 0 {
+			// `lt=0` demands a negative length. Nothing satisfies it and no
+			// keyword states it, so the rule is reported rather than invented.
+			return false
 		}
-		return true
+		parsed--
+	}
+	lower := name == "min" || name == "gte" || name == "gt"
+	switch {
+	case kind == collectionKindItems && lower:
+		c.MinItems = &parsed
+	case kind == collectionKindItems:
+		c.MaxItems = &parsed
+	case lower:
+		c.MinProperties = &parsed
+	default:
+		c.MaxProperties = &parsed
+	}
+	return true
+}
+
+func applyMinMaxConstraint(c *facts.Constraints, name string, value string, schema facts.Type) bool {
+	if kind := collectionKindOf(schema); kind != collectionKindNone {
+		return applyCollectionBound(c, name, value, kind)
 	}
 	if schemaIsStringLike(schema) {
 		parsed, err := strconv.ParseUint(value, 10, 64)
@@ -470,6 +532,12 @@ func mergeConstraints(dst, src *facts.Constraints) {
 	}
 	if src.MaxItems != nil {
 		dst.MaxItems = src.MaxItems
+	}
+	if src.MinProperties != nil {
+		dst.MinProperties = src.MinProperties
+	}
+	if src.MaxProperties != nil {
+		dst.MaxProperties = src.MaxProperties
 	}
 	if src.Minimum != nil {
 		dst.Minimum = src.Minimum
@@ -537,6 +605,8 @@ func constraintsEmpty(c *facts.Constraints) bool {
 			c.MaxLength == nil &&
 			c.MinItems == nil &&
 			c.MaxItems == nil &&
+			c.MinProperties == nil &&
+			c.MaxProperties == nil &&
 			c.Minimum == nil &&
 			c.Maximum == nil &&
 			c.ExclusiveMinimum == nil &&

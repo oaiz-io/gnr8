@@ -236,10 +236,14 @@ fn assert_collection_constraints(graph: &ApiGraph) {
         let Type::Object(fields) = &collection.body else {
             panic!("CollectionRules must be an object: {collection:#?}");
         };
-        for (name, min_items, max_items) in [
-            ("names", Some(1), None),
-            ("codes", Some(1), None),
-            ("slots", None, Some(100)),
+        // `min`/`max` and `gte`/`lte` state one rule on a collection, and a map is
+        // counted in keys rather than elements.
+        for (name, min_items, max_items, min_properties, max_properties) in [
+            ("names", Some(1), None, None, None),
+            ("codes", Some(1), None, None, None),
+            ("slots", None, Some(100), None, None),
+            ("sizes", Some(2), Some(6), None, None),
+            ("labels", None, None, Some(1), Some(4)),
         ] {
             let field = fields
                 .iter()
@@ -247,10 +251,26 @@ fn assert_collection_constraints(graph: &ApiGraph) {
                 .unwrap_or_else(|| panic!("missing CollectionRules.{name}"));
             assert_eq!(field.meta.constraints.min_items, min_items, "{field:#?}");
             assert_eq!(field.meta.constraints.max_items, max_items, "{field:#?}");
+            assert_eq!(
+                field.meta.constraints.min_properties, min_properties,
+                "{field:#?}"
+            );
+            assert_eq!(
+                field.meta.constraints.max_properties, max_properties,
+                "{field:#?}"
+            );
             assert!(field.meta.constraints.min_length.is_none(), "{field:#?}");
             assert!(field.meta.constraints.max_length.is_none(), "{field:#?}");
             assert!(field.meta.constraints.minimum.is_none(), "{field:#?}");
             assert!(field.meta.constraints.maximum.is_none(), "{field:#?}");
+            assert!(
+                field.meta.constraints.exclusive_minimum.is_none(),
+                "{field:#?}"
+            );
+            assert!(
+                field.meta.constraints.exclusive_maximum.is_none(),
+                "{field:#?}"
+            );
         }
         let label = fields
             .iter()
@@ -269,7 +289,7 @@ fn assert_collection_constraints(graph: &ApiGraph) {
         if diagnostic.code == "schema.metadata.unresolved"
             && matches!(
                 diagnostic.subject.as_deref(),
-                Some("Names" | "Codes" | "Slots")
+                Some("Names" | "Codes" | "Slots" | "Sizes" | "Labels")
             )
         {
             panic!("collection cardinality must not remain unresolved: {diagnostic:#?}");
@@ -520,6 +540,10 @@ fn assert_openapi(openapi: &str) {
             ("names", "minItems: 1"),
             ("codes", "minItems: 1"),
             ("slots", "maxItems: 100"),
+            ("sizes", "minItems: 2"),
+            ("sizes", "maxItems: 6"),
+            ("labels", "minProperties: 1"),
+            ("labels", "maxProperties: 4"),
         ] {
             let property = property_section(rules, name);
             assert!(
