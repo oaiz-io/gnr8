@@ -270,6 +270,18 @@ pub struct Constraints {
     /// String maximum length (`maxLength`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u64>,
+    /// Array minimum cardinality (`minItems`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_items: Option<u64>,
+    /// Array maximum cardinality (`maxItems`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u64>,
+    /// Object minimum key count (`minProperties`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_properties: Option<u64>,
+    /// Object maximum key count (`maxProperties`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_properties: Option<u64>,
     /// Inclusive numeric minimum (`minimum`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum: Option<String>,
@@ -296,6 +308,10 @@ impl Constraints {
     pub fn is_empty(&self) -> bool {
         self.min_length.is_none()
             && self.max_length.is_none()
+            && self.min_items.is_none()
+            && self.max_items.is_none()
+            && self.min_properties.is_none()
+            && self.max_properties.is_none()
             && self.minimum.is_none()
             && self.maximum.is_none()
             && self.exclusive_minimum.is_none()
@@ -607,7 +623,8 @@ mod tests {
                   "of": { "type": "well_known", "of": "uuid" }
                 },
                 "description": null,
-                "example": null
+                "example": null,
+                "meta": { "constraints": { "min_items": 1, "max_items": 25, "min_properties": 2, "max_properties": 9 } }
               }
             ]
           },
@@ -657,6 +674,10 @@ mod tests {
 
             // An array of uuids -> Type::Array(Box<Type::WellKnown(Uuid)>).
             let chain = &fields[1];
+            assert_eq!(chain.meta.constraints.min_items, Some(1));
+            assert_eq!(chain.meta.constraints.max_items, Some(25));
+            assert_eq!(chain.meta.constraints.min_properties, Some(2));
+            assert_eq!(chain.meta.constraints.max_properties, Some(9));
             match &chain.schema {
                 Type::Array(inner) => {
                     assert!(matches!(**inner, Type::WellKnown(WellKnown::Uuid)));
