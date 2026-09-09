@@ -38,6 +38,16 @@ must move the minor version.
 
 ### Fixed
 
+- **A Go extraction no longer fails with `invalid GOTOOLCHAIN "1"` when `GOTOOLCHAIN` is unset.**
+  gnr8 pins the `goextract` helper build to the toolchain the analyzed module selects, reading it
+  from `go env GOVERSION GOOS GOARCH GOFLAGS CGO_ENABLED GOTOOLCHAIN`. That reading was interpreted
+  positionally — first line the version, last line the selection — but `go env` prints an EMPTY line
+  for an unset setting, so on any machine that leaves `GOTOOLCHAIN` unset the last line was
+  `CGO_ENABLED`'s default `1`, and the helper build was pinned to `GOTOOLCHAIN=1`, which `go build`
+  rejects outright. Every value is now matched to the setting that produced it by order, an unset
+  `GOTOOLCHAIN` reads as Go's own documented `auto` default (so the build pin still preserves the
+  caller's switching policy), and a reading that cannot be matched to the requested settings is a
+  typed error rather than a guess.
 - **A Python SDK operation whose success response is a named union, array, map or scalar can be
   called again.** Those schemas are emitted as type aliases, which have no `model_validate` or
   `from_dict`, so decoding one raised `AttributeError` at runtime: the SDK compiled and the operation
