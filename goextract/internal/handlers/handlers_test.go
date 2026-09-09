@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -3449,6 +3451,7 @@ func (c *Context) JSON(int, any) {}
 
 import (
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -3462,12 +3465,26 @@ func (s Server) Register() {
 	s.R.GET("/errors-is", s.errorsIs)
 	s.R.GET("/statement-between", s.statementBetween)
 	s.R.GET("/direct-errors-is", s.directErrorsIs)
+	s.R.GET("/direct-unrelated-sentinel", s.directUnrelatedSentinel)
 	s.R.GET("/rebound-error", s.reboundError)
 	s.R.GET("/swallowed", s.swallowed)
+	s.R.GET("/unrelated-sentinel", s.unrelatedSentinel)
+	s.R.GET("/normalized", s.normalized)
+	s.R.GET("/multi-hop", s.multiHop)
 	s.R.GET("/header-helper", s.headerHelper)
 }
 
 func readCookie(c *gin.Context) (string, error) { return c.Cookie("shared") }
+
+func forwardCookie(c *gin.Context) (string, error) { return readCookie(c) }
+
+func normalizedCookie(c *gin.Context) (string, error) {
+	value, err := c.Cookie("normalized")
+	if errors.Is(err, http.ErrNoCookie) {
+		return "anonymous", nil
+	}
+	return value, err
+}
 
 // Reads a cookie, then answers with a failure of its own: the caller rejecting
 // that failure says nothing about the cookie.
@@ -3525,6 +3542,15 @@ func (s Server) directErrorsIs(c *gin.Context) {
 	c.JSON(200, Response{Value: value})
 }
 
+func (s Server) directUnrelatedSentinel(c *gin.Context) {
+	value, err := c.Cookie("direct-unrelated")
+	if errors.Is(err, io.EOF) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
 // The same object is rebound by the second read, so this branch tests that
 // read's failure and proves nothing about the cookie.
 func (s Server) reboundError(c *gin.Context) {
@@ -3539,6 +3565,33 @@ func (s Server) reboundError(c *gin.Context) {
 
 func (s Server) swallowed(c *gin.Context) {
 	value, err := swallowingHelper(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) unrelatedSentinel(c *gin.Context) {
+	value, err := readCookie(c)
+	if errors.Is(err, io.EOF) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) normalized(c *gin.Context) {
+	value, err := normalizedCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) multiHop(c *gin.Context) {
+	value, err := forwardCookie(c)
 	if err != nil {
 		c.JSON(401, Response{})
 		return
@@ -3573,13 +3626,20 @@ func (s Server) headerHelper(c *gin.Context) {
 		required bool
 	}{
 		// Every spelling of "this read failed" proves the same rejection.
-		"ifWithInit":       {name: "shared", location: "cookie", required: true},
-		"errorsIs":         {name: "shared", location: "cookie", required: true},
-		"statementBetween": {name: "shared", location: "cookie", required: true},
-		"directErrorsIs":   {name: "direct", location: "cookie", required: true},
+		"ifWithInit":              {name: "shared", location: "cookie", required: true},
+		"errorsIs":                {name: "shared", location: "cookie", required: true},
+		"statementBetween":        {name: "shared", location: "cookie", required: true},
+		"directErrorsIs":          {name: "direct", location: "cookie", required: true},
+		"directUnrelatedSentinel": {name: "direct-unrelated", location: "cookie"},
 		// A branch about a different failure proves nothing.
 		"reboundError": {name: "shared", location: "cookie"},
 		"swallowed":    {name: "swallowed", location: "cookie"},
+		// An unrelated sentinel is not proof that absence is rejected, and a
+		// helper that converts ErrNoCookie to a successful default is optional.
+		"unrelatedSentinel": {name: "shared", location: "cookie"},
+		"normalized":        {name: "normalized", location: "cookie"},
+		// Transparent helper hops preserve the operation caller's proof.
+		"multiHop":     {name: "shared", location: "cookie", required: true},
 		"headerHelper": {name: "X-Trace", location: "header"},
 	} {
 		param, ok := paramByName(got[handler].Params, expected.name)
@@ -3588,16 +3648,19 @@ func (s Server) headerHelper(c *gin.Context) {
 		}
 	}
 
-	// Only the rebound-error caller is ambiguous: it tests an error that could
-	// have been the cookie's. A helper that never hands its cookie error back
-	// states nothing to be uncertain about, so it is not diagnosed.
+	// Rebinding loses the read identity, and comparing with an unrelated
+	// sentinel does not prove how ErrNoCookie flows. A helper that handles
+	// ErrNoCookie itself is settled optional and a transparent hop is settled
+	// required, so neither is diagnosed.
 	var reported []string
 	for _, item := range diagnostics.Items() {
 		if item.Code == "request.parameter.unresolved" {
 			reported = append(reported, item.Operation)
 		}
 	}
-	if len(reported) != 1 || reported[0] != "GET /rebound-error" {
+	sort.Strings(reported)
+	wantReported := []string{"GET /rebound-error", "GET /unrelated-sentinel"}
+	if !reflect.DeepEqual(reported, wantReported) {
 		t.Fatalf("unexpected unresolved parameter diagnostics: %+v", reported)
 	}
 }

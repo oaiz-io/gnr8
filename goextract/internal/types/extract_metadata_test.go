@@ -240,6 +240,48 @@ func TestFieldMetaFromTagsLowersEverySizeSpellingOnCollections(t *testing.T) {
 	}
 }
 
+func TestFieldMetaFromTagsKeepsStringSizeSpellingsAsLengths(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		tag       string
+		minLength *uint64
+		maxLength *uint64
+	}{
+		{name: "gte", tag: `json:"v" validate:"gte=2"`, minLength: uint64Ptr(2)},
+		{name: "lte", tag: `json:"v" validate:"lte=7"`, maxLength: uint64Ptr(7)},
+		{name: "gt", tag: `json:"v" validate:"gt=0"`, minLength: uint64Ptr(1)},
+		{name: "lt", tag: `json:"v" validate:"lt=5"`, maxLength: uint64Ptr(4)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tag := reflect.StructTag(tc.tag)
+			diags := diag.New()
+			meta := fieldMetaFromTags(
+				"Rules",
+				"V",
+				tag,
+				string(tag),
+				facts.PrimitiveType(facts.StringPrim()),
+				"dto.go",
+				22,
+				diags,
+			)
+			if meta == nil || meta.Constraints == nil {
+				t.Fatalf("expected string constraints, got %#v", meta)
+			}
+			c := meta.Constraints
+			if !equalUint64Ptr(c.MinLength, tc.minLength) || !equalUint64Ptr(c.MaxLength, tc.maxLength) {
+				t.Fatalf("string length bounds mismatch: %#v", c)
+			}
+			if c.Minimum != nil || c.Maximum != nil || c.ExclusiveMinimum != nil || c.ExclusiveMaximum != nil {
+				t.Fatalf("string size rule must not become a numeric bound: %#v", c)
+			}
+			if len(diags.Items()) != 0 {
+				t.Fatalf("supported string length must not be unresolved: %#v", diags.Items())
+			}
+		})
+	}
+}
+
 func TestFieldMetaFromTagsScopesConstraintsToTheFieldItself(t *testing.T) {
 	// `min=3` bounds the field; everything past `dive` bounds each element. Before
 	// scope-awareness the trailing pair overwrote the field's own bound.

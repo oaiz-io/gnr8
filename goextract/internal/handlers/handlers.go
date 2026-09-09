@@ -536,9 +536,12 @@ func (a *Analyzer) analyzeContextHelperCall(
 		if pname, matched, resolved := requestCookieInFrame(next, nested); matched {
 			if resolved {
 				required := requestAccessRequired(next, nested, "Cookie")
-				if !required && hint.cookieRequiredAnalyzed && readErrorReachesCaller(next, nested) {
-					required = hint.cookieRequired == queryPresenceRequired
-					if hint.cookieRequired == queryPresenceUnresolved {
+				if !required && hint.cookieRequiredAnalyzed {
+					reachesCaller, known := readErrorReachesCaller(next, nested)
+					if reachesCaller {
+						required = hint.cookieRequired == queryPresenceRequired
+					}
+					if !known || (reachesCaller && hint.cookieRequired == queryPresenceUnresolved) {
 						a.reportCookieRequirednessUnresolved(next, nested, pname, traversal)
 					}
 				}
@@ -713,8 +716,10 @@ func helperCallHint(frame helperFrame, call *ast.CallExpr, inherited parameterHi
 	// beside the read. Where a hop returns no error the inherited answer stands,
 	// and readErrorReachesCaller then decides whether it may be applied at all.
 	if helperReturnsError(frame.decl.info, call) {
-		hint.cookieRequired = cookieRequirednessFromCaller(frame, call)
-		hint.cookieRequiredAnalyzed = true
+		if requiredness, consumed := cookieRequirednessFromCaller(frame, call); consumed {
+			hint.cookieRequired = requiredness
+			hint.cookieRequiredAnalyzed = true
+		}
 	}
 	return hint
 }
@@ -784,9 +789,12 @@ func (a *Analyzer) analyzeTraversedGinCall(
 				schema = *hint.schema
 			}
 			required := requestAccessRequired(frame, call, method)
-			if !required && hint.cookieRequiredAnalyzed && readErrorReachesCaller(frame, call) {
-				required = hint.cookieRequired == queryPresenceRequired
-				if hint.cookieRequired == queryPresenceUnresolved {
+			if !required && hint.cookieRequiredAnalyzed {
+				reachesCaller, known := readErrorReachesCaller(frame, call)
+				if reachesCaller {
+					required = hint.cookieRequired == queryPresenceRequired
+				}
+				if !known || (reachesCaller && hint.cookieRequired == queryPresenceUnresolved) {
 					a.reportCookieRequirednessUnresolved(frame, call, name, traversal)
 				}
 			}
@@ -1785,47 +1793,64 @@ func mergeQueryResponse(state *queryPathState, incoming queryResponseState) {
 // the same handler drift apart.
 //
 // The proof is still deliberately narrow. The helper call and its absence check
-// must be consecutive top-level statements, and the branch must end in a
-// response outcome gnr8 already recognizes. Anything more involved stays
+// must be top-level statements separated only by book-keeping, and the branch
+// must end in an outcome gnr8 already recognizes. Anything more involved stays
 // optional and is diagnosed by the caller. This keeps an uncertain helper use
 // from acquiring requiredness merely because a different operation rejects the
 // same helper's error.
-func cookieRequirednessFromCaller(frame helperFrame, target *ast.CallExpr) queryPresenceProof {
+func cookieRequirednessFromCaller(frame helperFrame, target *ast.CallExpr) (queryPresenceProof, bool) {
 	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil || h.info == nil || target == nil {
-		return queryPresenceUnresolved
+		return queryPresenceUnresolved, true
 	}
 	resultIndex, ok := callErrorResultIndex(h.info, target)
 	if !ok {
-		return queryPresenceUnresolved
+		return queryPresenceUnresolved, true
 	}
 	targetIndex := topLevelCallStatement(h.decl.Body.List, target)
 	if targetIndex < 0 {
-		return queryPresenceUnresolved
+		return queryPresenceUnresolved, true
 	}
 	// A discarded error leaves this caller nothing to branch on, so it cannot
 	// reject an absent cookie and the read stays observational. That is the same
 	// answer requestAccessRequired gives a direct read whose error is dropped.
 	errors := callResultVars(h, target, resultIndex)
 	if len(errors) == 0 {
-		return queryPresenceOptional
+		if reachesCaller, known := readErrorReachesCaller(frame, target); known && reachesCaller {
+			return queryPresenceUnresolved, false
+		}
+		return queryPresenceOptional, true
 	}
 	missing, ok := absenceBranch(frame, h.decl.Body.List, targetIndex, target, errors)
 	if !ok {
-		return queryPresenceUnresolved
+		reachesCaller, known := readErrorReachesCaller(frame, target)
+		switch {
+		case known && reachesCaller:
+			return queryPresenceUnresolved, false
+		case known:
+			return queryPresenceOptional, true
+		default:
+			return queryPresenceUnresolved, true
+		}
 	}
 	missingResponse := responseStateForStatements(frame, missing.Body.List)
 	terminates := blockEndsWithReturn(missing.Body)
 	switch {
 	case terminates && missingResponse == queryResponseClientError:
-		return queryPresenceRequired
+		return queryPresenceRequired, true
 	case terminates && missingResponse == queryResponseSuccess:
-		return queryPresenceOptional
+		return queryPresenceOptional, true
 	case !terminates && (missingResponse == queryResponseNone || missingResponse == queryResponseSuccess):
-		return queryPresenceOptional
-	default:
-		return queryPresenceUnresolved
+		return queryPresenceOptional, true
 	}
+	reachesCaller, known := readErrorReachesCaller(frame, target)
+	if known && reachesCaller {
+		return queryPresenceUnresolved, false
+	}
+	if known {
+		return queryPresenceOptional, true
+	}
+	return queryPresenceUnresolved, true
 }
 
 func callErrorResultIndex(info *gotypes.Info, call *ast.CallExpr) (int, bool) {
@@ -1938,52 +1963,93 @@ func statementAssignsAny(info *gotypes.Info, statement ast.Stmt, objects map[got
 }
 
 // readErrorReachesCaller reports whether this frame hands the read's own error
-// back to its caller. A helper that reads a cookie but answers with some other
-// failure still fails for its own reasons: the caller's rejection is then about
-// that failure and states nothing about the cookie, so the call site's absence
-// branch is not a proof about this read and must not be consulted.
-func readErrorReachesCaller(frame helperFrame, read *ast.CallExpr) bool {
+// back to its caller and whether that answer is known. A helper that reads a
+// cookie but handles ErrNoCookie or answers with some other failure does not
+// forward absence: the caller's rejection then says nothing about the cookie.
+func readErrorReachesCaller(frame helperFrame, read *ast.CallExpr) (bool, bool) {
 	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil || h.info == nil || read == nil {
-		return false
+		return false, false
 	}
 	index, ok := callErrorResultIndex(h.info, read)
 	if !ok {
-		return false
+		return false, false
+	}
+	targetIndex := topLevelCallStatement(h.decl.Body.List, read)
+	if targetIndex < 0 {
+		return false, false
+	}
+	if ret, ok := h.decl.Body.List[targetIndex].(*ast.ReturnStmt); ok {
+		for _, result := range ret.Results {
+			if result == read {
+				return true, true
+			}
+		}
+		return false, false
 	}
 	errorVars := callResultVars(h, read, index)
-	forwarded := false
-	ast.Inspect(h.decl.Body, func(node ast.Node) bool {
-		if forwarded {
-			return false
+	if len(errorVars) == 0 {
+		return false, true
+	}
+	if missing, ok := absenceBranch(frame, h.decl.Body.List, targetIndex, read, errorVars); ok {
+		return blockErrorFlow(h, missing.Body, errorVars)
+	}
+	for _, statement := range h.decl.Body.List[targetIndex+1:] {
+		if statementAssignsAny(h.info, statement, errorVars) {
+			return false, false
 		}
-		ret, ok := node.(*ast.ReturnStmt)
-		if !ok {
-			return true
+		if ret, ok := statement.(*ast.ReturnStmt); ok {
+			return returnErrorFlow(h, ret, errorVars)
 		}
-		for _, result := range ret.Results {
-			// `return c.Cookie(name)` forwards the whole tuple; `return "", err`
-			// and `return "", fmt.Errorf("...: %w", err)` both carry the value.
-			if exprContainsCall(result, read) {
-				forwarded = true
-				return false
-			}
-			ast.Inspect(result, func(inner ast.Node) bool {
-				if forwarded {
-					return false
-				}
-				if ident, ok := inner.(*ast.Ident); ok && errorVars[h.info.ObjectOf(ident)] {
-					forwarded = true
-				}
-				return !forwarded
-			})
-			if forwarded {
-				return false
-			}
+		switch statement.(type) {
+		case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+			return false, false
 		}
-		return true
-	})
-	return forwarded
+	}
+	return false, false
+}
+
+func blockErrorFlow(h handlerDecl, block *ast.BlockStmt, errorVars map[gotypes.Object]bool) (bool, bool) {
+	if block == nil || len(block.List) == 0 {
+		return false, false
+	}
+	ret, ok := block.List[len(block.List)-1].(*ast.ReturnStmt)
+	if !ok {
+		return false, false
+	}
+	return returnErrorFlow(h, ret, errorVars)
+}
+
+func returnErrorFlow(h handlerDecl, ret *ast.ReturnStmt, errorVars map[gotypes.Object]bool) (bool, bool) {
+	resultIndex, ok := functionErrorResultIndex(h)
+	if !ok || ret == nil || len(ret.Results) <= resultIndex {
+		return false, false
+	}
+	result := ret.Results[resultIndex]
+	if isNilIdent(result) {
+		return false, true
+	}
+	ident, ok := result.(*ast.Ident)
+	if !ok || !errorVars[h.info.ObjectOf(ident)] {
+		return false, false
+	}
+	return true, true
+}
+
+func functionErrorResultIndex(h handlerDecl) (int, bool) {
+	if h.decl == nil || h.decl.Name == nil || h.info == nil {
+		return 0, false
+	}
+	fn, ok := h.info.Defs[h.decl.Name].(*gotypes.Func)
+	if !ok {
+		return 0, false
+	}
+	signature, ok := gotypes.Unalias(fn.Type()).(*gotypes.Signature)
+	if !ok || signature.Results() == nil || signature.Results().Len() == 0 {
+		return 0, false
+	}
+	index := signature.Results().Len() - 1
+	return index, isErrorType(signature.Results().At(index).Type())
 }
 
 func responseStateForStatements(frame helperFrame, statements []ast.Stmt) queryResponseState {
@@ -2158,9 +2224,9 @@ func isZeroInteger(expr ast.Expr) bool {
 // particular, because `Cookie` answers an absent one with `http.ErrNoCookie`
 // and testing that sentinel is the idiomatic way to ask.
 //
-// Which sentinel is named is deliberately not read. The condition's job here is
-// only to mark the branch as the one the failing read leads to; what makes that
-// branch a rejection is the response inside it.
+// The sentinel spelling proves absence only when the comparison is specifically
+// against net/http.ErrNoCookie. Another error may share the same helper result,
+// but rejecting it says nothing about a missing cookie.
 func exprTestsError(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object]bool) bool {
 	switch node := expr.(type) {
 	case *ast.ParenExpr:
@@ -2173,10 +2239,20 @@ func exprTestsError(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object
 			(isNilIdent(node.X) && exprIsObject(info, node.Y, values))
 	case *ast.CallExpr:
 		return isStdErrorsIsCall(info, node) &&
-			len(node.Args) > 0 &&
-			exprIsObject(info, node.Args[0], values)
+			len(node.Args) == 2 &&
+			exprIsObject(info, node.Args[0], values) &&
+			isHTTPNoCookie(info, node.Args[1])
 	}
 	return false
+}
+
+func isHTTPNoCookie(info *gotypes.Info, expr ast.Expr) bool {
+	selector, ok := expr.(*ast.SelectorExpr)
+	if !ok || selector.Sel == nil || selector.Sel.Name != "ErrNoCookie" {
+		return false
+	}
+	object, ok := info.Uses[selector.Sel].(*gotypes.Var)
+	return ok && object.Pkg() != nil && object.Pkg().Path() == "net/http"
 }
 
 // isStdErrorsIsCall gates the sentinel spelling on the resolved standard-library

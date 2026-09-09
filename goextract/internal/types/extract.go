@@ -395,6 +395,12 @@ func constraintsFromTag(
 				}
 				continue
 			}
+			if schemaIsStringLike(schema) {
+				if !applyStringLengthBound(constraints, name, value) {
+					unsupportedConstraintTag(diags, tagKind, structName, fieldName, token, file, line)
+				}
+				continue
+			}
 			bound := stringPtr(value)
 			switch name {
 			case "gte":
@@ -455,23 +461,9 @@ func collectionKindOf(schema facts.Type) collectionKind {
 // exactly an inclusive one here because a length is a whole number: `gt=0` is
 // `minItems: 1`.
 func applyCollectionBound(c *facts.Constraints, name string, value string, kind collectionKind) bool {
-	parsed, err := strconv.ParseUint(value, 10, 64)
-	if err != nil {
+	parsed, ok := discreteSizeBound(name, value)
+	if !ok {
 		return false
-	}
-	switch name {
-	case "gt":
-		if parsed == math.MaxUint64 {
-			return false
-		}
-		parsed++
-	case "lt":
-		if parsed == 0 {
-			// `lt=0` demands a negative length. Nothing satisfies it and no
-			// keyword states it, so the rule is reported rather than invented.
-			return false
-		}
-		parsed--
 	}
 	lower := name == "min" || name == "gte" || name == "gt"
 	switch {
@@ -485,6 +477,41 @@ func applyCollectionBound(c *facts.Constraints, name string, value string, kind 
 		c.MaxProperties = &parsed
 	}
 	return true
+}
+
+func applyStringLengthBound(c *facts.Constraints, name string, value string) bool {
+	parsed, ok := discreteSizeBound(name, value)
+	if !ok {
+		return false
+	}
+	if name == "gte" || name == "gt" {
+		c.MinLength = &parsed
+	} else {
+		c.MaxLength = &parsed
+	}
+	return true
+}
+
+func discreteSizeBound(name string, value string) (uint64, bool) {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	switch name {
+	case "gt":
+		if parsed == math.MaxUint64 {
+			return 0, false
+		}
+		parsed++
+	case "lt":
+		if parsed == 0 {
+			// `lt=0` demands a negative size. Nothing satisfies it and no
+			// keyword states it, so the rule is reported rather than invented.
+			return 0, false
+		}
+		parsed--
+	}
+	return parsed, true
 }
 
 func applyMinMaxConstraint(c *facts.Constraints, name string, value string, schema facts.Type) bool {
