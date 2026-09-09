@@ -11,8 +11,9 @@ must move the minor version.
 
 ### Breaking
 
-- **A cookie or header read reached through a helper now states requiredness from the operation
-  caller's own absence branch, and the helper-signature heuristic that used to answer it is gone.**
+- **A cookie read reached through a helper now states requiredness from the operation caller's own
+  absence branch, while a header read keeps requiredness in its own frame; the helper-signature
+  heuristic that used to answer both is gone.**
   A cookie read inside a helper returning `(T, error)` was required for every operation that called
   it, whatever those operations did with the failure. Each call site now answers for itself: a caller
   that returns a known 4xx is required, one that substitutes a value or answers 2xx is optional, and
