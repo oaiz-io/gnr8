@@ -9,7 +9,37 @@ use crate::graph::{
     ApiGraph, Field, OpenApiMetadataPolicy, Operation, Param, Response, Schema, SecurityScheme,
     SourceSpan, Type,
 };
+use crate::graph_artifact::GraphArtifact;
 use crate::CoreError;
+
+/// Required textual shape for exact effective-operation selectors.
+pub const GATE_OPERATION_SHAPE: &str =
+    "expected `METHOD /path` using the effective route shown in reports";
+
+/// Typed syntax error for an exact effective-operation selector.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GateOperationParseError {
+    /// The selector omitted its method or path.
+    #[error("{GATE_OPERATION_SHAPE}")]
+    Shape,
+    /// The selector carried whitespace or control characters outside its two tokens.
+    #[error("{GATE_OPERATION_SHAPE}, with no surrounding whitespace or control characters")]
+    Whitespace,
+    /// The selector carried more than the method and path tokens.
+    #[error("expected exactly one HTTP method and one effective route path")]
+    ExtraToken,
+    /// The method is not one `OpenAPI` can represent.
+    #[error("unsupported HTTP method `{method}`")]
+    Method {
+        /// Uppercase rejected method.
+        method: String,
+    },
+    /// The effective route is not an absolute path without query or fragment text.
+    #[error(
+        "effective route must be an absolute path beginning with `/`, without a query or fragment"
+    )]
+    Path,
+}
 
 /// Classification of one observable API change.
 #[derive(
@@ -73,6 +103,37 @@ impl std::fmt::Display for GateOperation {
     }
 }
 
+impl std::str::FromStr for GateOperation {
+    type Err = GateOperationParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim() != value || value.chars().any(char::is_control) {
+            return Err(GateOperationParseError::Whitespace);
+        }
+        let mut parts = value.split_ascii_whitespace();
+        let Some(method) = parts.next() else {
+            return Err(GateOperationParseError::Shape);
+        };
+        let Some(path) = parts.next() else {
+            return Err(GateOperationParseError::Shape);
+        };
+        if parts.next().is_some() {
+            return Err(GateOperationParseError::ExtraToken);
+        }
+        let method = method.to_ascii_uppercase();
+        if !matches!(
+            method.as_str(),
+            "GET" | "PUT" | "POST" | "DELETE" | "PATCH" | "OPTIONS" | "HEAD" | "TRACE"
+        ) {
+            return Err(GateOperationParseError::Method { method });
+        }
+        if !path.starts_with('/') || path.contains(['?', '#']) {
+            return Err(GateOperationParseError::Path);
+        }
+        Ok(Self::new(method, path))
+    }
+}
+
 /// Invocation policy recorded in the machine report.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChangePolicy {
@@ -81,6 +142,10 @@ pub struct ChangePolicy {
     /// Exact effective method/path selectors included in the gate, or empty for every operation.
     #[serde(default)]
     pub gate_operations: Vec<String>,
+    /// Acceptance list consulted by this invocation, as it was configured; absent when there was
+    /// none. Present with no accepted finding means the list was found and accepted nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_file: Option<String>,
 }
 
 /// Aggregate counts for a change report.
@@ -92,6 +157,9 @@ pub struct ChangeSummary {
     pub additive: usize,
     /// Number of documentation-only findings.
     pub doc_only: usize,
+    /// Number of breaking findings covered by exact reviewed acceptances.
+    #[serde(default)]
+    pub accepted: usize,
     /// Number of breaking findings that gate this invocation.
     pub gating: usize,
 }
@@ -121,6 +189,12 @@ pub struct Change {
     /// Parameter, field, status, schema, or other narrow subject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Exact base/current contract delta identity for one-time reviewed acceptance.
+    ///
+    /// Present only on breaking findings scoped to one operation, because those are the only
+    /// findings narrow enough to accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
     /// All generated SDK operations affected on each extant graph side.
     pub affected_operations: Sides<Vec<AffectedOperation>>,
     /// Effective standard operation tags on each extant side.
@@ -132,6 +206,9 @@ pub struct Change {
     pub protected: Sides<bool>,
     /// Whether this breaking finding contributes to exit status 1.
     pub gating: bool,
+    /// Reviewed acceptance metadata, present only for an exactly matched breaking finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<super::AcceptedChange>,
     /// Human-readable explanation.
     pub message: String,
     /// Current source file, when a current fact exists.
@@ -351,11 +428,13 @@ impl Collector {
             operation: scope.operation.clone(),
             operation_id: scope.operation_id.clone(),
             subject,
+            fingerprint: None,
             affected_operations: scope.affected_operations.clone(),
             tags: scope.tags.clone(),
             exempt: scope.exempt.clone(),
             protected: scope.protected.clone(),
             gating: kind == ChangeKind::Breaking && scope.checked,
+            accepted: None,
             message,
             file: span.as_ref().map(|span| span.file.clone()),
             line: span.as_ref().map(|span| span.start_line),
@@ -364,9 +443,9 @@ impl Collector {
     }
 }
 
-/// Compare two projected graphs and derive compatibility plus tag-based gating.
-#[must_use]
-pub fn diff_graphs(
+/// Test-only shorthand for comparison without exact operation selectors.
+#[cfg(test)]
+fn diff_graphs(
     base: &ApiGraph,
     current: &ApiGraph,
     exempt_tags: &BTreeSet<String>,
@@ -382,7 +461,8 @@ pub fn diff_graphs(
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::Config`] when a selector matches neither graph side.
+/// Returns [`CoreError::Config`] when a selector matches neither graph side, or a graph-artifact
+/// error if the exact comparison identity cannot be serialized.
 pub fn diff_graphs_with_gate_operations(
     base: &ApiGraph,
     current: &ApiGraph,
@@ -410,13 +490,170 @@ pub fn diff_graphs_with_gate_operations(
     }
     labels.sort();
     labels.dedup();
-    Ok(diff_graphs_inner(
-        base,
-        current,
-        exempt_tags,
-        gate_operations,
-        labels,
-    ))
+    let mut report = diff_graphs_inner(base, current, exempt_tags, gate_operations, labels);
+    assign_acceptance_fingerprints(&mut report, base, current)?;
+    Ok(report)
+}
+
+/// Bind every acceptable finding to this exact base/current graph comparison.
+///
+/// The stable finding key keeps acceptances narrow within a report. Including the affected
+/// operation and every schema it transitively reaches on both graph sides makes the key one-time:
+/// changing that contract scope produces a new fingerprint, even when the later finding has the
+/// same code, operation, and subject. Unrelated operation scopes do not churn the key.
+fn assign_acceptance_fingerprints(
+    report: &mut ChangeReport,
+    base: &ApiGraph,
+    current: &ApiGraph,
+) -> Result<(), CoreError> {
+    let mut base_digests = BTreeMap::new();
+    let mut current_digests = BTreeMap::new();
+
+    for finding in &mut report.changes {
+        if finding.kind != ChangeKind::Breaking {
+            continue;
+        }
+        let Some(operation) = finding.operation.as_deref() else {
+            continue;
+        };
+        let base_digest = acceptance_scope_digest(
+            base,
+            finding.affected_operations.base.as_deref(),
+            &mut base_digests,
+        )?;
+        let current_digest = acceptance_scope_digest(
+            current,
+            finding.affected_operations.current.as_deref(),
+            &mut current_digests,
+        )?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"gnr8-change-acceptance-v1\0");
+        hash_optional_digest(&mut hasher, base_digest);
+        hash_optional_digest(&mut hasher, current_digest);
+        hash_fingerprint_part(&mut hasher, finding.code.as_bytes());
+        hash_fingerprint_part(&mut hasher, operation.as_bytes());
+        match &finding.subject {
+            Some(subject) => {
+                hasher.update(&[1]);
+                hash_fingerprint_part(&mut hasher, subject.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        finding.fingerprint = Some(hasher.finalize().to_hex().to_string());
+    }
+    Ok(())
+}
+
+fn acceptance_scope_digest(
+    graph: &ApiGraph,
+    affected: Option<&[AffectedOperation]>,
+    cache: &mut BTreeMap<Vec<AffectedOperation>, blake3::Hash>,
+) -> Result<Option<blake3::Hash>, CoreError> {
+    let Some(affected) = affected else {
+        return Ok(None);
+    };
+    if let Some(digest) = cache.get(affected) {
+        return Ok(Some(*digest));
+    }
+
+    let selected_indexes = graph
+        .operations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            affected
+                .iter()
+                .any(|selected| {
+                    selected.operation_id == operation.id
+                        && selected.operation == operation_label(graph, operation)
+                })
+                .then_some(index)
+        })
+        .collect::<BTreeSet<_>>();
+    let selected_ids = selected_indexes
+        .iter()
+        .filter_map(|index| graph.operations.get(*index))
+        .map(|operation| operation.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let consumers = schema_consumers(graph);
+    let selected_schemas = graph
+        .schemas
+        .iter()
+        .filter(|schema| {
+            consumers
+                .operations
+                .get(schema.id.as_str())
+                .is_some_and(|indexes| indexes.iter().any(|index| selected_indexes.contains(index)))
+        })
+        .map(|schema| schema.id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    let mut graph = graph.clone();
+    graph.operations = graph
+        .operations
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, operation)| selected_indexes.contains(&index).then_some(operation))
+        .collect();
+    graph
+        .schemas
+        .retain(|schema| selected_schemas.contains(schema.id.as_str()));
+    graph
+        .operation_security
+        .retain(|policy| selected_ids.contains(policy.operation_id.as_str()));
+    graph
+        .operation_runtime
+        .retain(|policy| selected_ids.contains(policy.operation_id.as_str()));
+    graph
+        .pagination
+        .retain(|policy| selected_ids.contains(policy.operation_id.as_str()));
+    graph
+        .operation_docs
+        .retain(|policy| selected_ids.contains(policy.operation_id.as_str()));
+    graph
+        .schema_uses
+        .retain(|use_| selected_schemas.contains(use_.schema_id.as_str()));
+    // Provenance and diagnostics explain where the contract came from; they are not contract
+    // content. Moving an unchanged declaration must not invalidate review of an unchanged delta.
+    graph.diagnostics.clear();
+    for operation in &mut graph.operations {
+        clear_source_span(&mut operation.provenance);
+        for parameter in &mut operation.params {
+            clear_source_span(&mut parameter.provenance);
+        }
+    }
+    for schema in &mut graph.schemas {
+        clear_source_span(&mut schema.provenance);
+    }
+    let json = GraphArtifact::new(graph).to_json()?;
+    let digest = blake3::hash(json.as_bytes());
+    cache.insert(affected.to_vec(), digest);
+    Ok(Some(digest))
+}
+
+fn clear_source_span(span: &mut SourceSpan) {
+    span.file.clear();
+    span.start_line = 0;
+    span.end_line = 0;
+}
+
+fn hash_optional_digest(hasher: &mut blake3::Hasher, digest: Option<blake3::Hash>) {
+    match digest {
+        Some(digest) => {
+            hasher.update(&[1]);
+            hasher.update(digest.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_fingerprint_part(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 fn diff_graphs_inner(
@@ -459,6 +696,8 @@ fn diff_graphs_inner(
         policy: ChangePolicy {
             exempt_tags: exempt_tags.iter().cloned().collect(),
             gate_operations: gate_operation_labels,
+            // A comparison has no acceptance policy of its own; applying one records it.
+            acceptance_file: None,
         },
         summary,
         changes: collector.changes,
@@ -2414,6 +2653,64 @@ mod tests {
             .iter()
             .find(|change| change.code == code)
             .unwrap_or_else(|| panic!("missing {code}: {:?}", report.changes))
+    }
+
+    #[test]
+    fn acceptance_fingerprints_ignore_source_location_changes() {
+        let base = graph_with_tags(&[]);
+        let first =
+            diff_graphs_with_gate_operations(&base, &ApiGraph::default(), &BTreeSet::new(), &[])
+                .expect("valid comparison");
+
+        let mut relocated = base;
+        relocated.operations[0].provenance = SourceSpan {
+            file: "moved/handlers.rs".to_string(),
+            start_line: 200,
+            end_line: 202,
+        };
+        let second = diff_graphs_with_gate_operations(
+            &relocated,
+            &ApiGraph::default(),
+            &BTreeSet::new(),
+            &[],
+        )
+        .expect("valid relocated comparison");
+
+        assert_eq!(
+            change(&first, "operation.removed").fingerprint,
+            change(&second, "operation.removed").fingerprint
+        );
+    }
+
+    #[test]
+    fn acceptance_fingerprints_ignore_unrelated_operation_scopes() {
+        let base = graph_with_tags(&[]);
+        let first =
+            diff_graphs_with_gate_operations(&base, &ApiGraph::default(), &BTreeSet::new(), &[])
+                .expect("valid comparison");
+
+        let mut unrelated = operation();
+        unrelated.id = "listReports".to_string();
+        unrelated.handler = "listReports".to_string();
+        unrelated.path = "/reports".to_string();
+        let mut expanded_base = base;
+        expanded_base.operations.push(unrelated.clone());
+        let expanded_current = ApiGraph {
+            operations: vec![unrelated],
+            ..ApiGraph::default()
+        };
+        let second = diff_graphs_with_gate_operations(
+            &expanded_base,
+            &expanded_current,
+            &BTreeSet::new(),
+            &[],
+        )
+        .expect("valid expanded comparison");
+
+        assert_eq!(
+            change(&first, "operation.removed").fingerprint,
+            change(&second, "operation.removed").fingerprint
+        );
     }
 
     #[test]

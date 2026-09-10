@@ -96,6 +96,10 @@ fi
 # `set -u` is an unbound-variable error in bash 3.2, the bash GitHub's macOS runners provide, and the
 # default configuration (no exempt-tags) appends nothing to it.
 change_args=(changes --base "$BASE_REF")
+if [[ -n "${ACCEPTANCE_FILE:-}" ]]; then
+  # Preserve the configured path byte-for-byte and let the CLI resolve it from each project root.
+  change_args+=(--acceptance-file "$ACCEPTANCE_FILE")
+fi
 while IFS= read -r tag || [[ -n "$tag" ]]; do
   # Tag matching is exact. Empty lines separate values; every byte on a non-empty line belongs to
   # the OpenAPI tag, including leading/trailing spaces and a leading '#'. The CLI performs the one

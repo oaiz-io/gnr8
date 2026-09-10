@@ -45,7 +45,9 @@ Exempt tags: <code>internal</code>
 
 Protected operations: <code>POST /books</code>
 
-Summary: 1 breaking changes detected; 1 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.
+Acceptance list: <code>reviewed-api-changes.json</code>
+
+Summary: 1 breaking changes detected; 0 accepted after review; 1 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.
 
 Breaking — protected surface (1)
 
@@ -63,12 +65,14 @@ cat <<'JSON'
   "base": {"ref": "HEAD", "resolved": "0123456789012345678901234567890123456789"},
   "policy": {
     "exempt_tags": ["internal"],
-    "gate_operations": ["POST /books"]
+    "gate_operations": ["POST /books"],
+    "acceptance_file": "reviewed-api-changes.json"
   },
   "summary": {
     "breaking": 1,
     "additive": 0,
     "doc_only": 0,
+    "accepted": 0,
     "gating": 1
   },
   "changes": [{
@@ -105,6 +109,7 @@ log="$tmp/args"
 
 GNR8_BIN="$fake" \
 BASE_REF=HEAD \
+ACCEPTANCE_FILE=reviewed-api-changes.json \
 EXEMPT_TAGS=$'internal\ninternal\n#partner\n partner APIs ' \
 GATE_OPERATIONS=$'POST /books\nGET /reports' \
 WORKING_DIRECTORIES="$repo_root/examples/bookstore" \
@@ -139,6 +144,7 @@ grep -F -- '--exempt-tag internal --exempt-tag internal' "$log" >/dev/null
 grep -F -- '--exempt-tag \#partner' "$log" >/dev/null
 grep -F -- '--exempt-tag \ partner\ APIs\ ' "$log" >/dev/null
 grep -F -- '--gate-operation POST\ /books --gate-operation GET\ /reports' "$log" >/dev/null
+grep -F -- '--acceptance-file reviewed-api-changes.json' "$log" >/dev/null
 report_root="$(sed -n 's/^report-root=//p' "$output")"
 test -s "$report_root/001/report.json"
 test -s "$report_root/001/report.md"
@@ -173,6 +179,10 @@ if grep -F -- '--exempt-tag' "$empty_log" >/dev/null; then
 fi
 if grep -F -- '--gate-operation' "$empty_log" >/dev/null; then
   echo "empty gate-operations must not pass --gate-operation" >&2
+  exit 1
+fi
+if grep -F -- '--acceptance-file' "$empty_log" >/dev/null; then
+  echo "empty acceptance-file must not pass --acceptance-file" >&2
   exit 1
 fi
 # The heading is the one value this script renders, so it escapes it.
@@ -350,7 +360,7 @@ inputs = action.split('\noutputs:\n', 1)[0].split('\ninputs:\n', 1)[1]
 outputs = action.split('\noutputs:\n', 1)[1].split('\nruns:\n', 1)[0]
 input_names = set(re.findall(r'^  ([a-z][a-z0-9-]*):$', inputs, re.M))
 output_names = set(re.findall(r'^  ([a-z][a-z0-9-]*):$', outputs, re.M))
-for name in ('fail-on-breaking', 'gate-operations'):
+for name in ('fail-on-breaking', 'gate-operations', 'acceptance-file'):
     assert name in input_names
     assert f'| `{name}` |' in docs
 for name in ('breaking-changes', 'breaking-count', 'gating-count', 'report-artifact',

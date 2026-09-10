@@ -89,8 +89,11 @@ SDK outputs include `README.md` and `reference.md` with operation/schema summari
   (`go test`, `unittest`, `tsc` + `node --test`) against a fake transport; exits 1 if any suite fails.
 - `gnr8 changes --base <ref>`: compares the current projected graph with the committed
   `generated/gnr8.graph.json` at that revision; exits 1 only for checked breaking findings. Repeat
-  `--exempt-tag <name>` to exempt exact standard operation tags on every extant side. `--markdown`
-  prints the report for a job summary or pull-request comment instead of the terminal.
+  `--exempt-tag <name>` to exempt exact standard operation tags on every extant side. Exact reviewed
+  findings can be recorded with their report fingerprint in `gnr8-accepted-changes.json`; they stay
+  breaking in reports, a later delta on the same field gates again, and records fail stale after the
+  base contains the change. `--markdown` prints the report for a job
+  summary or pull-request comment instead of the terminal.
 - `gnr8 doctor`: reports initialization, source toolchain, pipeline health, diagnostics, and drift.
 - `gnr8 inspect routes|schemas|graph`: inspect source facts directly.
 

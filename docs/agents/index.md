@@ -41,7 +41,10 @@ gnr8 verify
    generated SDK's wire behaviour matters.
 6. On API-shape PRs, add `gnr8 changes --base <ref>` (repeat `--exempt-tag <name>` for
    non-contract operations carrying that standard OpenAPI tag). Exit `1` means a checked breaking
-   change; see [CLI command reference](../cli/commands.md).
+   change. An exact reviewed finding and its report fingerprint can be recorded in
+   `gnr8-accepted-changes.json`; it stays breaking in the report, a later delta on the same field
+   gates again, and the record becomes a hard error when stale. See
+   [CLI command reference](../cli/commands.md).
 
 ## Mental model
 

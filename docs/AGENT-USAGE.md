@@ -51,7 +51,10 @@ part a compile check cannot answer. It exits `1` when any suite fails.
 Before merging API-shape changes, gate them: `gnr8 changes --base <ref>` classifies every graph
 change as `BREAKING`/`ADDITIVE`/`DOC-ONLY` and exits `1` on a checked breaking change. Repeat
 `--exempt-tag <name>` to keep operations tagged with that standard OpenAPI tag (for example
-`internal`) out of the gate. See [CLI command reference](docs/cli/commands.md).
+`internal`) out of the gate. An exact reviewed breaking finding can be recorded in
+`gnr8-accepted-changes.json` with its report fingerprint; it stays `BREAKING`, includes its reason
+in reports, and becomes a hard stale-entry error when the delta changes or the base contains it. See
+[CLI command reference](cli/commands.md).
 
 ## Scenario Guides
 

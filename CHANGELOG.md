@@ -9,6 +9,29 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **`gnr8 changes` accepts exact, reviewed breaking findings through a checked-in acceptance
+  list.** `--acceptance-file <path>` reads a versioned JSON list, while
+  `gnr8-accepted-changes.json` is discovered automatically when present. Each entry must name
+  one breaking finding by its exact code, effective operation, subject — omitted for an
+  operation-wide finding such as `operation.removed` — and report fingerprint, and include a human
+  reason. The fingerprint binds the acceptance to that exact base/current affected-operation
+  contract, so another change to the same field and finding code gates again without coupling the
+  acceptance to unrelated operation scopes. Only a finding that currently gates under the
+  invocation's operation and tag policy can be accepted, so an advisory finding cannot leave a
+  dormant acceptance behind. A finding the report
+  does not scope to one operation has no key at all, and naming one reports that directly rather
+  than as a stale entry. Matched findings remain `BREAKING` in human, JSON, and Markdown reports, but
+  move to an `Accepted` section and no longer fail the gate. An unmatched, changed, ambiguous,
+  duplicate, malformed, misplaced, or unjustified entry is a hard configuration error, so a record
+  becomes stale as soon as its delta changes or reaches the base revision. Acceptance-list paths
+  are restricted to one regular, non-symlink file at the project root, keeping invocation policy
+  outside the `.gnr8/` pipeline crate. The report's policy records the
+  `acceptance_file` it consulted, so a published artifact distinguishes "no list" from "a list that
+  accepted nothing". The GitHub Action exposes the same path as `acceptance-file` without changing
+  `report-api-changes` or `fail-on-breaking`.
+
 ### Fixed
 
 - **A cookie helper that wraps its read error still proves the caller's rejection.** Requiredness

@@ -105,13 +105,20 @@ pub(crate) fn render_human(report: &ChangeReport) -> String {
             report.policy.gate_operations.join(", ")
         );
     }
+    if let Some(acceptance_file) = &report.policy.acceptance_file {
+        let _ = writeln!(
+            text,
+            "changes: acceptance list: {}",
+            one_line(acceptance_file)
+        );
+    }
     if report.changes.is_empty() {
         text.push_str("No API changes.\n");
         return text;
     }
     for change in &report.changes {
         let operation = change.operation.as_deref().unwrap_or("-");
-        let suffix = exemption_suffix(change);
+        let suffix = finding_suffix(change);
         let location = location_suffix(change);
         let _ = writeln!(
             text,
@@ -148,8 +155,9 @@ pub(crate) fn render_markdown(base: &BaseGraph, report: &ChangeReport) -> String
     render_markdown_policy(&mut text, report);
     let _ = writeln!(
         text,
-        "Summary: {} breaking changes detected; {} protected-surface breaking changes; {} additive changes; {} documentation-only changes.\n",
+        "Summary: {} breaking changes detected; {} accepted after review; {} protected-surface breaking changes; {} additive changes; {} documentation-only changes.\n",
         report.summary.breaking,
+        report.summary.accepted,
         report.summary.gating,
         report.summary.additive,
         report.summary.doc_only
@@ -160,66 +168,98 @@ pub(crate) fn render_markdown(base: &BaseGraph, report: &ChangeReport) -> String
     }
     // Partition without re-sorting: retain the machine report's order within every group.
     // Headings are static text plus counts, never values drawn from analyzed source.
-    for (heading, kind, gating) in [
-        ("Breaking — protected surface", ChangeKind::Breaking, true),
-        ("Breaking — advisory or exempt", ChangeKind::Breaking, false),
-        ("Additive", ChangeKind::Additive, false),
-        ("Documentation-only", ChangeKind::DocOnly, false),
+    for (heading, kind, gating, accepted) in [
+        ("Accepted", ChangeKind::Breaking, false, true),
+        (
+            "Breaking — protected surface",
+            ChangeKind::Breaking,
+            true,
+            false,
+        ),
+        (
+            "Breaking — advisory or exempt",
+            ChangeKind::Breaking,
+            false,
+            false,
+        ),
+        ("Additive", ChangeKind::Additive, false, false),
+        ("Documentation-only", ChangeKind::DocOnly, false, false),
     ] {
-        let group: Vec<_> = report
-            .changes
-            .iter()
-            .filter(|change| {
-                change.kind == kind && (kind != ChangeKind::Breaking || change.gating == gating)
-            })
-            .collect();
-        if group.is_empty() {
-            continue;
+        render_markdown_group(&mut text, report, heading, kind, gating, accepted);
+    }
+    text
+}
+
+fn render_markdown_group(
+    text: &mut String,
+    report: &ChangeReport,
+    heading: &str,
+    kind: ChangeKind,
+    gating: bool,
+    accepted: bool,
+) {
+    let group: Vec<_> = report
+        .changes
+        .iter()
+        .filter(|change| {
+            change.kind == kind
+                && change.accepted.is_some() == accepted
+                && (kind != ChangeKind::Breaking || change.gating == gating)
+        })
+        .collect();
+    if group.is_empty() {
+        return;
+    }
+    let _ = writeln!(text, "{heading} ({})\n", group.len());
+    for change in &group {
+        let operation = one_line(change.operation.as_deref().unwrap_or("-"));
+        let suffix = if accepted {
+            String::new()
+        } else {
+            exemption_suffix(change).to_string()
+        };
+        let _ = writeln!(
+            text,
+            "    {:<9} {:<19} {}{}",
+            kind_label(change.kind),
+            operation,
+            one_line(&change.message),
+            suffix
+        );
+        let _ = writeln!(text, "        Code: {}", one_line(&change.code));
+        if let Some(acceptance) = &change.accepted {
+            let _ = writeln!(text, "        Reason: {}", one_line(&acceptance.reason));
         }
-        let _ = writeln!(text, "{heading} ({})\n", group.len());
-        for change in &group {
-            let operation = one_line(change.operation.as_deref().unwrap_or("-"));
-            let _ = writeln!(
-                text,
-                "    {:<9} {:<19} {}{}",
-                kind_label(change.kind),
-                operation,
-                one_line(&change.message),
-                exemption_suffix(change)
-            );
-            let _ = writeln!(text, "        Code: {}", one_line(&change.code));
-            let affected: BTreeSet<(String, String)> = [
-                change.affected_operations.base.as_ref(),
-                change.affected_operations.current.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|item| (one_line(&item.operation_id), one_line(&item.operation)))
-            .collect();
-            if !affected.is_empty() {
-                let rendered = affected
-                    .iter()
-                    .map(|(operation_id, operation)| format!("{operation_id} ({operation})"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let _ = writeln!(text, "        SDK operations: {rendered}");
-            }
-            if let Some(file) = change.file.as_deref().filter(|file| !file.is_empty()) {
-                let location = one_line(file);
-                match change.line {
-                    Some(line) => {
-                        let _ = writeln!(text, "        Source: {location}:{line}");
-                    }
-                    None => {
-                        let _ = writeln!(text, "        Source: {location}");
-                    }
+        let affected: BTreeSet<(String, String)> = [
+            change.affected_operations.base.as_ref(),
+            change.affected_operations.current.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|item| (one_line(&item.operation_id), one_line(&item.operation)))
+        .collect();
+        if !affected.is_empty() {
+            let rendered = affected
+                .iter()
+                .map(|(operation_id, operation)| format!("{operation_id} ({operation})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(text, "        SDK operations: {rendered}");
+        }
+        if let Some(file) = change.file.as_deref().filter(|file| !file.is_empty()) {
+            let location = one_line(file);
+            match change.line {
+                Some(line) => {
+                    let _ = writeln!(text, "        Source: {location}:{line}");
+                }
+                None => {
+                    let _ = writeln!(text, "        Source: {location}");
                 }
             }
         }
-        text.push('\n');
     }
-    text
+    text.push('\n');
 }
 
 fn render_markdown_policy(text: &mut String, report: &ChangeReport) {
@@ -250,6 +290,14 @@ fn render_markdown_policy(text: &mut String, report: &ChangeReport) {
         } else {
             &operations
         }
+    );
+    let _ = writeln!(
+        text,
+        "Acceptance list: {}\n",
+        report.policy.acceptance_file.as_ref().map_or_else(
+            || "none".to_string(),
+            |file| format!("<code>{}</code>", escape_html(file)),
+        )
     );
 }
 
@@ -316,6 +364,13 @@ fn exemption_suffix(change: &Change) -> &'static str {
     }
 }
 
+fn finding_suffix(change: &Change) -> String {
+    change.accepted.as_ref().map_or_else(
+        || exemption_suffix(change).to_string(),
+        |acceptance| format!("  (accepted: {})", one_line(&acceptance.reason)),
+    )
+}
+
 fn location_suffix(change: &Change) -> String {
     let Some(file) = change.file.as_deref().filter(|file| !file.is_empty()) else {
         return String::new();
@@ -331,8 +386,8 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use gnr8_engine::changes::{
-        AffectedOperation, BaseGraph, Change, ChangeKind, ChangePolicy, ChangeReport,
-        ChangeSummary, Sides,
+        AcceptedChange, AffectedOperation, BaseGraph, Change, ChangeKind, ChangePolicy,
+        ChangeReport, ChangeSummary, Sides,
     };
 
     use super::{render_human, render_json, render_markdown, ReportFormat};
@@ -348,6 +403,9 @@ mod tests {
             operation: Some("DELETE /books/{id}".to_string()),
             operation_id: Some("deleteBook".to_string()),
             subject: None,
+            fingerprint: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ),
             affected_operations: Sides {
                 base: Some(vec![AffectedOperation {
                     operation: "DELETE /books/{id}".to_string(),
@@ -362,6 +420,7 @@ mod tests {
             exempt,
             protected,
             gating,
+            accepted: None,
             message: "operation removed".to_string(),
             file: None,
             line: None,
@@ -375,12 +434,14 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 2,
                 additive: 0,
                 doc_only: 0,
                 gating: 1,
+                accepted: 0,
             },
             changes: vec![
                 finding(
@@ -445,12 +506,14 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 2,
                 additive: 0,
                 doc_only: 0,
                 gating: 1,
+                accepted: 0,
             },
             changes: vec![located, exempt_located, file_only, empty_file],
         };
@@ -478,12 +541,14 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
                 gate_operations: vec!["POST /events".to_string()],
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 1,
                 additive: 0,
                 doc_only: 0,
                 gating: 0,
+                accepted: 0,
             },
             changes: vec![finding(
                 ChangeKind::Breaking,
@@ -503,6 +568,10 @@ mod tests {
         assert_eq!(value["policy"]["gate_operations"][0], "POST /events");
         assert_eq!(value["changes"][0]["exempt"]["base"], true);
         assert_eq!(value["changes"][0]["protected"]["base"], true);
+        assert_eq!(
+            value["changes"][0]["fingerprint"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         // Machine consumers must handle omitted current locations, not just explicit nulls.
         for field in ["file", "line", "span"] {
             assert!(value["changes"][0].get(field).is_none());
@@ -520,12 +589,14 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: vec!["GET /books".to_string()],
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 1,
                 additive: 0,
                 doc_only: 0,
                 gating: 1,
+                accepted: 0,
             },
             changes: vec![finding(
                 ChangeKind::Breaking,
@@ -545,11 +616,22 @@ mod tests {
             .as_object_mut()
             .expect("change object")
             .remove("protected");
+        value["changes"][0]
+            .as_object_mut()
+            .expect("change object")
+            .remove("fingerprint");
+        value["summary"]
+            .as_object_mut()
+            .expect("summary object")
+            .remove("accepted");
 
         let earlier: ChangeReport =
             serde_json::from_value(value).expect("read earlier schema-one fields");
         assert!(earlier.policy.gate_operations.is_empty());
         assert_eq!(earlier.changes[0].protected, Sides::default());
+        assert_eq!(earlier.changes[0].fingerprint, None);
+        assert_eq!(earlier.summary.accepted, 0);
+        assert!(earlier.changes[0].accepted.is_none());
     }
 
     #[test]
@@ -602,12 +684,14 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
                 gate_operations: vec!["POST /events".to_string()],
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 1,
                 additive: 0,
                 doc_only: 0,
                 gating: 0,
+                accepted: 0,
             },
             changes: vec![change],
         };
@@ -622,7 +706,9 @@ mod tests {
                 "\n",
                 "Protected operations: <code>POST /events</code>\n",
                 "\n",
-                "Summary: 1 breaking changes detected; 0 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.\n",
+                "Acceptance list: none\n",
+                "\n",
+                "Summary: 1 breaking changes detected; 0 accepted after review; 0 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.\n",
                 "\n",
                 "Breaking — advisory or exempt (1)\n\n",
                 "    BREAKING  DELETE /books/{id}  operation removed",
@@ -658,12 +744,14 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["a & b".to_string()],
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 1,
                 additive: 0,
                 doc_only: 0,
                 gating: 1,
+                accepted: 0,
             },
             changes: vec![change],
         };
@@ -710,6 +798,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary::default(),
             changes: Vec::new(),
@@ -757,19 +846,22 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 3,
                 additive: 1,
                 doc_only: 1,
                 gating: 2,
+                accepted: 0,
             },
             changes,
         };
         let rendered = render_markdown(&base, &report);
         let headings: Vec<_> = rendered
             .lines()
-            .skip(8)
+            .skip_while(|line| !line.starts_with("Summary:"))
+            .skip(1)
             .filter(|line| !line.is_empty() && !line.starts_with("    "))
             .collect();
         assert_eq!(
@@ -794,11 +886,112 @@ mod tests {
     }
 
     #[test]
+    fn accepted_breaking_finding_has_its_own_markdown_group_and_reason() {
+        let base = BaseGraph {
+            reference: "HEAD".to_string(),
+            commit: "0123456789012345678901234567890123456789".to_string(),
+            graph: gnr8_engine::graph::ApiGraph::default(),
+        };
+        let mut change = finding(
+            ChangeKind::Breaking,
+            false,
+            Sides {
+                base: Some(false),
+                current: Some(false),
+            },
+        );
+        change.code = "request.property.constraints.changed".to_string();
+        change.operation = Some("POST /ingest/logs/write".to_string());
+        change.subject = Some("WriteLogsRequest.logs".to_string());
+        change.message = "request field `logs` constraints changed".to_string();
+        change.accepted = Some(AcceptedChange {
+            reason: "The backend already enforces max=100.".to_string(),
+        });
+        let report = ChangeReport {
+            policy: ChangePolicy {
+                exempt_tags: Vec::new(),
+                gate_operations: vec!["POST /ingest/logs/write".to_string()],
+                acceptance_file: Some("gnr8-accepted-changes.json".to_string()),
+            },
+            summary: ChangeSummary {
+                breaking: 1,
+                additive: 0,
+                doc_only: 0,
+                gating: 0,
+                accepted: 1,
+            },
+            changes: vec![change],
+        };
+
+        let markdown = render_markdown(&base, &report);
+        assert!(markdown.contains("Accepted (1)\n"), "{markdown}");
+        assert!(
+            markdown.contains("    BREAKING  POST /ingest/logs/write"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("        Reason: The backend already enforces max=100.\n"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("Acceptance list: <code>gnr8-accepted-changes.json</code>\n"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("Breaking — advisory or exempt"));
+
+        let human = render_human(&report);
+        assert!(
+            human.contains("(accepted: The backend already enforces max=100.)"),
+            "{human}"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&render_json(&base, &report).expect("JSON")).expect("parse JSON");
+        assert_eq!(json["changes"][0]["kind"], "breaking");
+        assert_eq!(json["changes"][0]["gating"], false);
+        assert_eq!(
+            json["changes"][0]["accepted"]["reason"],
+            "The backend already enforces max=100."
+        );
+        assert_eq!(json["summary"]["accepted"], 1);
+    }
+
+    #[test]
+    fn acceptance_policy_path_cannot_escape_rendered_headers() {
+        let report = ChangeReport {
+            policy: ChangePolicy {
+                exempt_tags: Vec::new(),
+                gate_operations: Vec::new(),
+                acceptance_file: Some("reviewed\n<&>.json".to_string()),
+            },
+            summary: ChangeSummary::default(),
+            changes: Vec::new(),
+        };
+        let human = render_human(&report);
+        assert_eq!(
+            human,
+            "changes: acceptance list: reviewed <&>.json\nNo API changes.\n"
+        );
+
+        let base = BaseGraph {
+            reference: "HEAD".to_string(),
+            commit: "0123456789012345678901234567890123456789".to_string(),
+            graph: gnr8_engine::graph::ApiGraph::default(),
+        };
+        let markdown = render_markdown(&base, &report);
+        assert!(
+            markdown.contains("Acceptance list: <code>reviewed &lt;&amp;&gt;.json</code>\n"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("reviewed\n"), "{markdown}");
+    }
+
+    #[test]
     fn empty_human_report_is_explicit() {
         let report = ChangeReport {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary::default(),
             changes: Vec::new(),

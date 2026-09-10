@@ -68,7 +68,7 @@ executes every built-in stage itself and asks the worker only for the stages you
 | `gnr8 init` | `--source go-gin\|fastapi\|flask\|nestjs`, `--sdk go\|python\|typescript` | — | `.gnr8/Cargo.toml`, `.gnr8/src/main.rs`, `.gnr8/README.md`, `.gnr8/.gitignore` (skips existing — idempotent) | 0; 2 on error |
 | `gnr8 generate` | `--force` | `.gnr8/` crate, the source dirs its `Source` reads | target paths, `generated/gnr8.graph.json`, `.gnr8/cache/manifest.json` | 0 reconciled; 1 protected output; 2 on error |
 | `gnr8 check` | — | `.gnr8/` crate, src, manifest | — (dry run) | **0 up-to-date; 1 stale/drifted**; 2 on error |
-| `gnr8 changes` | `--base <ref>`, repeatable `--exempt-tag <name>`, repeatable `--gate-operation "METHOD /path"`, `--markdown` | current pipeline plus the base commit's `generated/gnr8.graph.json` | — | **0 gate passed; 1 checked breaking finding**; 2 on error |
+| `gnr8 changes` | `--base <ref>`, repeatable `--exempt-tag <name>`, repeatable `--gate-operation "METHOD /path"`, `--acceptance-file <path>`, `--markdown` | current pipeline, the base commit's `generated/gnr8.graph.json`, and an optional exact-finding acceptance list | — | **0 gate passed; 1 checked breaking finding**; 2 on error or stale acceptance |
 | `gnr8 watch` | `--debounce-ms N` (def 200) | `.gnr8/` crate (incl. `.gnr8/src/`), src | same as generate, on each change | 0 on Ctrl-C; 2 on error |
 | `gnr8 doctor` | — | `.gnr8/` crate, src, manifest | — | **0 healthy; 1 actionable problem**; 2 on error |
 | `gnr8 inspect routes\|schemas\|graph` | `[<dir>]` (positional, defaults to bundled fixture) | the `<dir>` Go module | — (prints) | 0; 2 on error |
@@ -92,8 +92,8 @@ Notes:
 - No command panics on bad input/missing toolchain — typed error → clean stderr + non-zero. A `.gnr8/`
   that is missing, won't compile, or whose `cargo` is absent surfaces as an actionable error.
 
-## Config: the `.gnr8/` crate (code, not TOML)
-**There is no config file.** Configuration is a small Rust **binary crate** at `.gnr8/` that depends on
+## Pipeline config: the `.gnr8/` crate (code, not TOML)
+**There is no pipeline config file.** Generation configuration is a small Rust **binary crate** at `.gnr8/` that depends on
 `gnr8` and drives the lifecycle. `gnr8 init` scaffolds it; `gnr8 generate` compiles + runs it. The
 crate's `src/main.rs` builds a `Pipeline` and hands it to the runner — that pipeline IS the config.
 Every knob that used to be TOML is now a method call; anything the knobs couldn't express, you write as
