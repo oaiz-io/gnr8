@@ -334,8 +334,9 @@ special files are rejected. When the input is empty, each project automatically 
 `gnr8-accepted-changes.json` if present. The file accepts only the exact breaking finding named
 by `code`, effective `operation`, the `subject` the report shows (omitted for an operation-wide
 finding such as `operation.removed`), and its report `fingerprint`, with a required reason. The
-fingerprint binds the record to that exact base/current projected-contract comparison, so a later
-change to the same field and finding code gates again. Accepted findings remain breaking in JSON and
+fingerprint binds the record to that exact base/current affected-operation contract, so a later
+change to the same field and finding code gates again without coupling it to unrelated operations.
+Accepted findings remain breaking in JSON and
 Markdown, while their exact match stops contributing to the gate. An unmatched entry is a status-2
 stale configuration error, so the Action fails until the record is updated for a changed delta or
 removed after the change reaches the base. This does not alter `report-api-changes`,

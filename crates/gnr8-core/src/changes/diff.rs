@@ -497,18 +497,17 @@ pub fn diff_graphs_with_gate_operations(
 
 /// Bind every acceptable finding to this exact base/current graph comparison.
 ///
-/// The stable finding key keeps acceptances narrow within a report. Including both complete graph
-/// artifacts makes the key one-time: changing the compared contract on either side produces a new
-/// fingerprint, even when the later finding has the same code, operation, and subject.
+/// The stable finding key keeps acceptances narrow within a report. Including the affected
+/// operation and every schema it transitively reaches on both graph sides makes the key one-time:
+/// changing that contract scope produces a new fingerprint, even when the later finding has the
+/// same code, operation, and subject. Unrelated operation scopes do not churn the key.
 fn assign_acceptance_fingerprints(
     report: &mut ChangeReport,
     base: &ApiGraph,
     current: &ApiGraph,
 ) -> Result<(), CoreError> {
-    let base_json = acceptance_graph_json(base)?;
-    let current_json = acceptance_graph_json(current)?;
-    let base_digest = blake3::hash(base_json.as_bytes());
-    let current_digest = blake3::hash(current_json.as_bytes());
+    let mut base_digests = BTreeMap::new();
+    let mut current_digests = BTreeMap::new();
 
     for finding in &mut report.changes {
         if finding.kind != ChangeKind::Breaking {
@@ -517,10 +516,20 @@ fn assign_acceptance_fingerprints(
         let Some(operation) = finding.operation.as_deref() else {
             continue;
         };
+        let base_digest = acceptance_scope_digest(
+            base,
+            finding.affected_operations.base.as_deref(),
+            &mut base_digests,
+        )?;
+        let current_digest = acceptance_scope_digest(
+            current,
+            finding.affected_operations.current.as_deref(),
+            &mut current_digests,
+        )?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"gnr8-change-acceptance-v1\0");
-        hasher.update(base_digest.as_bytes());
-        hasher.update(current_digest.as_bytes());
+        hash_optional_digest(&mut hasher, base_digest);
+        hash_optional_digest(&mut hasher, current_digest);
         hash_fingerprint_part(&mut hasher, finding.code.as_bytes());
         hash_fingerprint_part(&mut hasher, operation.as_bytes());
         match &finding.subject {
@@ -537,8 +546,75 @@ fn assign_acceptance_fingerprints(
     Ok(())
 }
 
-fn acceptance_graph_json(graph: &ApiGraph) -> Result<String, CoreError> {
+fn acceptance_scope_digest(
+    graph: &ApiGraph,
+    affected: Option<&[AffectedOperation]>,
+    cache: &mut BTreeMap<Vec<AffectedOperation>, blake3::Hash>,
+) -> Result<Option<blake3::Hash>, CoreError> {
+    let Some(affected) = affected else {
+        return Ok(None);
+    };
+    if let Some(digest) = cache.get(affected) {
+        return Ok(Some(*digest));
+    }
+
+    let selected_indexes = graph
+        .operations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            affected
+                .iter()
+                .any(|selected| {
+                    selected.operation_id == operation.id
+                        && selected.operation == operation_label(graph, operation)
+                })
+                .then_some(index)
+        })
+        .collect::<BTreeSet<_>>();
+    let selected_ids = selected_indexes
+        .iter()
+        .filter_map(|index| graph.operations.get(*index))
+        .map(|operation| operation.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let consumers = schema_consumers(graph);
+    let selected_schemas = graph
+        .schemas
+        .iter()
+        .filter(|schema| {
+            consumers
+                .operations
+                .get(schema.id.as_str())
+                .is_some_and(|indexes| indexes.iter().any(|index| selected_indexes.contains(index)))
+        })
+        .map(|schema| schema.id.as_str())
+        .collect::<BTreeSet<_>>();
+
     let mut graph = graph.clone();
+    graph.operations = graph
+        .operations
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, operation)| selected_indexes.contains(&index).then_some(operation))
+        .collect();
+    graph
+        .schemas
+        .retain(|schema| selected_schemas.contains(schema.id.as_str()));
+    graph
+        .operation_security
+        .retain(|policy| selected_ids.contains(policy.operation_id.as_str()));
+    graph
+        .operation_runtime
+        .retain(|policy| selected_ids.contains(policy.operation_id.as_str()));
+    graph
+        .pagination
+        .retain(|policy| selected_ids.contains(policy.operation_id.as_str()));
+    graph
+        .operation_docs
+        .retain(|policy| selected_ids.contains(policy.operation_id.as_str()));
+    graph
+        .schema_uses
+        .retain(|use_| selected_schemas.contains(use_.schema_id.as_str()));
     // Provenance and diagnostics explain where the contract came from; they are not contract
     // content. Moving an unchanged declaration must not invalidate review of an unchanged delta.
     graph.diagnostics.clear();
@@ -551,13 +627,28 @@ fn acceptance_graph_json(graph: &ApiGraph) -> Result<String, CoreError> {
     for schema in &mut graph.schemas {
         clear_source_span(&mut schema.provenance);
     }
-    GraphArtifact::new(graph).to_json()
+    let json = GraphArtifact::new(graph).to_json()?;
+    let digest = blake3::hash(json.as_bytes());
+    cache.insert(affected.to_vec(), digest);
+    Ok(Some(digest))
 }
 
 fn clear_source_span(span: &mut SourceSpan) {
     span.file.clear();
     span.start_line = 0;
     span.end_line = 0;
+}
+
+fn hash_optional_digest(hasher: &mut blake3::Hasher, digest: Option<blake3::Hash>) {
+    match digest {
+        Some(digest) => {
+            hasher.update(&[1]);
+            hasher.update(digest.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
 }
 
 fn hash_fingerprint_part(hasher: &mut blake3::Hasher, bytes: &[u8]) {
@@ -2584,6 +2675,37 @@ mod tests {
             &[],
         )
         .expect("valid relocated comparison");
+
+        assert_eq!(
+            change(&first, "operation.removed").fingerprint,
+            change(&second, "operation.removed").fingerprint
+        );
+    }
+
+    #[test]
+    fn acceptance_fingerprints_ignore_unrelated_operation_scopes() {
+        let base = graph_with_tags(&[]);
+        let first =
+            diff_graphs_with_gate_operations(&base, &ApiGraph::default(), &BTreeSet::new(), &[])
+                .expect("valid comparison");
+
+        let mut unrelated = operation();
+        unrelated.id = "listReports".to_string();
+        unrelated.handler = "listReports".to_string();
+        unrelated.path = "/reports".to_string();
+        let mut expanded_base = base;
+        expanded_base.operations.push(unrelated.clone());
+        let expanded_current = ApiGraph {
+            operations: vec![unrelated],
+            ..ApiGraph::default()
+        };
+        let second = diff_graphs_with_gate_operations(
+            &expanded_base,
+            &expanded_current,
+            &BTreeSet::new(),
+            &[],
+        )
+        .expect("valid expanded comparison");
 
         assert_eq!(
             change(&first, "operation.removed").fingerprint,

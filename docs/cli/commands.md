@@ -228,12 +228,13 @@ missing file is an error. The versioned JSON document is:
 An entry is the finding's own identity as the JSON report prints it. Copy `code`, `operation`,
 `subject`, and `fingerprint` exactly from that report; omit `subject` for a finding the report prints
 without one, such as `operation.removed` or `request.body.removed`. The fingerprint binds the record
-to the exact base/current projected-contract comparison that produced that finding. A later change
-to the same field with the same finding code therefore gets a different fingerprint and gates again.
-Every field present participates in the key, and an absent `subject` is part of the key rather than a
-wildcard: it never stands for a finding that has one, and a subject can never be invented for a
-finding that has none. Accepting one field does not accept a sibling field or a different finding
-code on the same field.
+to the exact base/current contract of the affected operation and every schema it transitively
+reaches. A later change to the same field with the same finding code therefore gets a different
+fingerprint and gates again, while a change to an unrelated operation does not churn it. Every field
+present participates in the key, and an absent `subject` is part of the key rather than a wildcard:
+it never stands for a finding that has one, and a subject can never be invented for a finding that
+has none. Accepting one field does not accept a sibling field or a different finding code on the same
+field.
 
 `operation` is always required, so a breaking finding the report does not scope to a single operation
 — a document-wide finding, or a shared-schema finding with several consumers — has no key and cannot

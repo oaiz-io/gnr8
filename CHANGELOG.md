@@ -16,8 +16,9 @@ must move the minor version.
   `gnr8-accepted-changes.json` is discovered automatically when present. Each entry must name
   one breaking finding by its exact code, effective operation, subject — omitted for an
   operation-wide finding such as `operation.removed` — and report fingerprint, and include a human
-  reason. The fingerprint binds the acceptance to that exact base/current projected-contract
-  comparison, so another change to the same field and finding code gates again. A finding the report
+  reason. The fingerprint binds the acceptance to that exact base/current affected-operation
+  contract, so another change to the same field and finding code gates again without coupling the
+  acceptance to unrelated operation scopes. A finding the report
   does not scope to one operation has no key at all, and naming one reports that directly rather
   than as a stale entry. Matched findings remain `BREAKING` in human, JSON, and Markdown reports, but
   move to an `Accepted` section and no longer fail the gate. An unmatched, changed, ambiguous,
