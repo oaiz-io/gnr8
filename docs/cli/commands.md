@@ -211,16 +211,27 @@ file is an error. The versioned JSON document is:
       "operation": "POST /ingest/logs/write",
       "subject": "WriteLogsRequest.logs",
       "reason": "The backend already enforced max=100; the published contract is catching up."
+    },
+    {
+      "code": "operation.removed",
+      "operation": "DELETE /ingest/logs/{id}",
+      "reason": "Deprecated for two releases; no caller remains on it."
     }
   ]
 }
 ```
 
-Copy `code`, `operation`, and `subject` exactly from the JSON report. All three participate in the
-key: accepting one field does not accept a sibling field or a different finding code on the same
-field. Only a breaking finding whose report contains both `operation` and `subject` is eligible; a
-document-wide finding, a multi-operation shared-schema finding, or another finding without either
-value cannot be widened into an acceptance. Duplicate or ambiguous keys are errors.
+An entry is the finding's own identity as the JSON report prints it. Copy `code`, `operation`, and
+`subject` exactly from that report; omit `subject` for a finding the report prints without one, such
+as `operation.removed` or `request.body.removed`. Every field present participates in the key, and an
+absent `subject` is part of the key rather than a wildcard: it never stands for a finding that has
+one, and a subject can never be invented for a finding that has none. Accepting one field does not
+accept a sibling field or a different finding code on the same field.
+
+`operation` is always required, so a breaking finding the report does not scope to a single operation
+— a document-wide finding, or a shared-schema finding with several consumers — has no key and cannot
+be accepted; accepting it would accept every operation it spans. Naming one is its own error rather
+than a stale-entry error, because the delta is still there. Duplicate or ambiguous keys are errors.
 
 Every entry must match exactly one breaking finding in the current run. No match is a status-2 stale
 configuration error naming the entry. This is what makes the list self-removing: after the change

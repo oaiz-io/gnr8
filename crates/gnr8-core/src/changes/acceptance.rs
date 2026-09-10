@@ -11,7 +11,15 @@ pub const DEFAULT_ACCEPTANCE_PATH: &str = ".gnr8/accepted-api-changes.json";
 /// Current schema version for the acceptance-list document.
 pub const ACCEPTANCE_SCHEMA_VERSION: u32 = 1;
 
+/// How a finding with no narrow subject is spelled in a diagnostic.
+const NO_SUBJECT: &str = "(no subject)";
+
 /// One exact breaking finding a human reviewed and accepted.
+///
+/// The key is the finding's own identity as the JSON report prints it, which is why `subject` is
+/// optional: an operation-wide finding such as `operation.removed` has no narrower subject, so its
+/// entry omits the field exactly as the report omits it. Absence is part of the exact key, never a
+/// wildcard — an entry without a subject never matches a finding that has one, or the reverse.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeAcceptance {
@@ -19,10 +27,16 @@ pub struct ChangeAcceptance {
     pub code: String,
     /// Exact effective `METHOD /path` shown in the report.
     pub operation: String,
-    /// Exact narrow subject shown in the JSON report.
-    pub subject: String,
+    /// Exact narrow subject shown in the JSON report, absent when the finding has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     /// Human-written justification displayed beside the accepted finding.
     pub reason: String,
+}
+
+/// Render an optional subject for a diagnostic.
+fn subject_label(subject: Option<&String>) -> &str {
+    subject.map_or(NO_SUBJECT, String::as_str)
 }
 
 /// Acceptance metadata attached to a finding in machine and rendered reports.
@@ -124,9 +138,10 @@ pub enum AcceptanceError {
     },
     /// Two entries name the same exact finding.
     #[error(
-        "API change acceptance file `{}` entry {} duplicates `{code}` / `{operation}` / `{subject}`",
+        "API change acceptance file `{}` entry {} duplicates `{code}` / `{operation}` / `{}`",
         path.display(),
-        index + 1
+        index + 1,
+        subject_label(subject.as_ref())
     )]
     DuplicateEntry {
         /// Resolved file path.
@@ -137,13 +152,14 @@ pub enum AcceptanceError {
         code: String,
         /// Effective operation label.
         operation: String,
-        /// Narrow subject.
-        subject: String,
+        /// Narrow subject, absent for an operation-wide finding.
+        subject: Option<String>,
     },
     /// A checked-in record no longer identifies a current breaking finding.
     #[error(
-        "stale API change acceptance in `{}`: `{code}` / `{operation}` / `{subject}` did not match a breaking finding in the current report; remove or update the entry",
-        path.display()
+        "stale API change acceptance in `{}`: `{code}` / `{operation}` / `{}` did not match a breaking finding in the current report; remove or update the entry",
+        path.display(),
+        subject_label(subject.as_ref())
     )]
     Stale {
         /// Resolved file path.
@@ -152,13 +168,28 @@ pub enum AcceptanceError {
         code: String,
         /// Effective operation label.
         operation: String,
-        /// Narrow subject.
-        subject: String,
+        /// Narrow subject, absent for an operation-wide finding.
+        subject: Option<String>,
+    },
+    /// The named finding is in the report but spans more than one operation, so it has no key.
+    #[error(
+        "API change acceptance in `{}` names `{code}` / `{}`, which is a current breaking finding that is not scoped to one operation; a document-wide or multi-operation finding cannot be accepted",
+        path.display(),
+        subject_label(subject.as_ref())
+    )]
+    NotOperationScoped {
+        /// Resolved file path.
+        path: PathBuf,
+        /// Finding code.
+        code: String,
+        /// Narrow subject, absent for a document-wide finding.
+        subject: Option<String>,
     },
     /// An allegedly exact key identified more than one finding.
     #[error(
-        "ambiguous API change acceptance in `{}`: `{code}` / `{operation}` / `{subject}` matched {matches} breaking findings; this finding cannot be accepted with that key",
-        path.display()
+        "ambiguous API change acceptance in `{}`: `{code}` / `{operation}` / `{}` matched {matches} breaking findings; this finding cannot be accepted with that key",
+        path.display(),
+        subject_label(subject.as_ref())
     )]
     Ambiguous {
         /// Resolved file path.
@@ -167,8 +198,8 @@ pub enum AcceptanceError {
         code: String,
         /// Effective operation label.
         operation: String,
-        /// Narrow subject.
-        subject: String,
+        /// Narrow subject, absent for an operation-wide finding.
+        subject: Option<String>,
         /// Number of report findings selected.
         matches: usize,
     },
@@ -233,7 +264,7 @@ fn parse_change_acceptances(
         let entry = ChangeAcceptance {
             code: required_entry_value(&path, index, "code", raw.code)?,
             operation: required_entry_value(&path, index, "operation", raw.operation)?,
-            subject: required_entry_value(&path, index, "subject", raw.subject)?,
+            subject: raw.subject,
             reason: required_entry_value(&path, index, "reason", raw.reason)?,
         };
         validate_entry(&path, index, &entry)?;
@@ -300,15 +331,17 @@ fn validate_entry(
             "`operation` must be the exact uppercase `METHOD /path` value from the report",
         );
     }
-    if entry.subject.is_empty()
-        || entry.subject.trim() != entry.subject
-        || entry.subject.chars().any(char::is_control)
-    {
-        return invalid_entry(
-            path,
-            index,
-            "`subject` must be the exact non-empty single-line value from the JSON report",
-        );
+    // An omitted subject is the key for a finding the report prints without one; a present subject
+    // is compared byte-for-byte, so it must carry exactly what the report shows and nothing else.
+    if let Some(subject) = &entry.subject {
+        if subject.is_empty() || subject.trim() != subject || subject.chars().any(char::is_control)
+        {
+            return invalid_entry(
+                path,
+                index,
+                "`subject` must be the exact non-empty single-line value from the JSON report, or omitted when the finding has none",
+            );
+        }
     }
     if entry.reason.trim().is_empty() {
         return invalid_entry(
@@ -343,32 +376,38 @@ fn valid_operation(operation: &str) -> bool {
 
 /// Apply exact acceptance records to an already classified report.
 ///
-/// A record matches only a breaking finding with the same code, operation, and subject. The finding
-/// remains breaking, but no longer contributes to the gate and carries its reason in the report.
-/// Every record must match exactly once, so records become hard errors as soon as their delta is no
-/// longer present.
+/// A record matches only a breaking finding with the same code, operation, and subject, where an
+/// absent subject on both sides is itself an exact match — that is how an operation-wide finding
+/// such as `operation.removed` is named. The finding remains breaking, but no longer contributes to
+/// the gate and carries its reason in the report. Every record must match exactly once, so records
+/// become hard errors as soon as their delta is no longer present.
+///
+/// A finding the report does not scope to a single operation has no key at all, because accepting it
+/// would accept every operation it spans. Those are indexed separately so that naming one reports
+/// what it is rather than claiming the delta is gone; that index never resolves an acceptance.
 ///
 /// # Errors
 ///
-/// Returns [`AcceptanceError::Stale`] for no match, [`AcceptanceError::Ambiguous`] for more than one
-/// match, and [`AcceptanceError::DuplicateEntry`] if callers constructed duplicate entries without
-/// loading the validated document format.
+/// Returns [`AcceptanceError::Stale`] for no match, [`AcceptanceError::NotOperationScoped`] when the
+/// named finding is present but spans more than one operation, [`AcceptanceError::Ambiguous`] for
+/// more than one match, and [`AcceptanceError::DuplicateEntry`] if callers constructed duplicate
+/// entries without loading the validated document format.
 pub fn apply_change_acceptances(
     report: &mut ChangeReport,
     acceptances: &ChangeAcceptances,
 ) -> Result<(), AcceptanceError> {
-    let mut finding_indexes: BTreeMap<(&str, &str, &str), Vec<usize>> = BTreeMap::new();
+    let mut finding_indexes: BTreeMap<(&str, &str, Option<&str>), Vec<usize>> = BTreeMap::new();
+    let mut unscoped_findings: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
     for (index, finding) in report.changes.iter().enumerate() {
         if finding.kind != ChangeKind::Breaking {
             continue;
         }
-        let (Some(operation), Some(subject)) =
-            (finding.operation.as_deref(), finding.subject.as_deref())
-        else {
+        let Some(operation) = finding.operation.as_deref() else {
+            unscoped_findings.insert((finding.code.as_str(), finding.subject.as_deref()));
             continue;
         };
         finding_indexes
-            .entry((finding.code.as_str(), operation, subject))
+            .entry((finding.code.as_str(), operation, finding.subject.as_deref()))
             .or_default()
             .push(index);
     }
@@ -393,9 +432,18 @@ pub fn apply_change_acceptances(
         let key = (
             entry.code.as_str(),
             entry.operation.as_str(),
-            entry.subject.as_str(),
+            entry.subject.as_deref(),
         );
         let Some(matches) = finding_indexes.get(&key) else {
+            // The entry resolved to nothing. Say which of the two reasons it is instead of always
+            // reporting a vanished delta: an unscoped finding is present and simply has no key.
+            if unscoped_findings.contains(&(entry.code.as_str(), entry.subject.as_deref())) {
+                return Err(AcceptanceError::NotOperationScoped {
+                    path: acceptances.path.clone(),
+                    code: entry.code.clone(),
+                    subject: entry.subject.clone(),
+                });
+            }
             return Err(AcceptanceError::Stale {
                 path: acceptances.path.clone(),
                 code: entry.code.clone(),
@@ -508,6 +556,24 @@ mod tests {
         }
     }
 
+    /// An operation-wide finding, the shape `operation.removed` and `request.body.removed` take.
+    fn operation_wide_finding(code: &str, operation: &str) -> Change {
+        Change {
+            subject: None,
+            message: "operation removed".to_string(),
+            ..finding(code, operation, "unused")
+        }
+    }
+
+    /// A finding the report cannot scope to one operation, the shape a shared schema takes.
+    fn unscoped_finding(code: &str, subject: &str) -> Change {
+        Change {
+            operation: None,
+            operation_id: None,
+            ..finding(code, "POST /ingest/logs/write", subject)
+        }
+    }
+
     #[test]
     fn exact_match_remains_breaking_but_no_longer_gates() {
         let mut report = report();
@@ -516,7 +582,7 @@ mod tests {
             &acceptances(vec![ChangeAcceptance {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
-                subject: "WriteLogsRequest.logs".to_string(),
+                subject: Some("WriteLogsRequest.logs".to_string()),
                 reason: "The server already enforced max=100.".to_string(),
             }]),
         )
@@ -557,7 +623,7 @@ mod tests {
             &acceptances(vec![ChangeAcceptance {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
-                subject: "WriteLogsRequest.logs".to_string(),
+                subject: Some("WriteLogsRequest.logs".to_string()),
                 reason: "The server already enforced max=100.".to_string(),
             }]),
         )
@@ -588,7 +654,7 @@ mod tests {
             &acceptances(vec![ChangeAcceptance {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
-                subject: "WriteLogsRequest.missing".to_string(),
+                subject: Some("WriteLogsRequest.missing".to_string()),
                 reason: "Reviewed.".to_string(),
             }]),
         )
@@ -597,6 +663,107 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("stale API change acceptance"));
         assert!(message.contains("WriteLogsRequest.missing"));
+    }
+
+    #[test]
+    fn an_operation_wide_finding_is_accepted_by_omitting_the_subject() {
+        let mut report = report();
+        report.changes.push(operation_wide_finding(
+            "operation.removed",
+            "DELETE /ingest/logs/{id}",
+        ));
+        report.summary.breaking += 1;
+        report.summary.gating += 1;
+
+        apply_change_acceptances(
+            &mut report,
+            &acceptances(vec![ChangeAcceptance {
+                code: "operation.removed".to_string(),
+                operation: "DELETE /ingest/logs/{id}".to_string(),
+                subject: None,
+                reason: "The endpoint was deprecated for two releases.".to_string(),
+            }]),
+        )
+        .expect("operation-wide acceptance");
+
+        assert_eq!(report.summary.accepted, 1);
+        assert_eq!(report.summary.gating, 3);
+        assert_eq!(report.changes[3].kind, ChangeKind::Breaking);
+        assert!(!report.changes[3].gating);
+        assert_eq!(
+            report.changes[3].accepted,
+            Some(AcceptedChange {
+                reason: "The endpoint was deprecated for two releases.".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn an_absent_subject_is_part_of_the_key_rather_than_a_wildcard() {
+        let mut wrongly_narrowed = report();
+        wrongly_narrowed.changes.push(operation_wide_finding(
+            "operation.removed",
+            "DELETE /ingest/logs/{id}",
+        ));
+        let narrowed = apply_change_acceptances(
+            &mut wrongly_narrowed,
+            &acceptances(vec![ChangeAcceptance {
+                code: "operation.removed".to_string(),
+                operation: "DELETE /ingest/logs/{id}".to_string(),
+                subject: Some("WriteLogsRequest.logs".to_string()),
+                reason: "Reviewed.".to_string(),
+            }]),
+        )
+        .expect_err("a subject cannot be invented for a finding that has none");
+        assert!(matches!(narrowed, AcceptanceError::Stale { .. }));
+
+        let mut wrongly_widened = report();
+        let widened = apply_change_acceptances(
+            &mut wrongly_widened,
+            &acceptances(vec![ChangeAcceptance {
+                code: "request.property.constraints.changed".to_string(),
+                operation: "POST /ingest/logs/write".to_string(),
+                subject: None,
+                reason: "Reviewed.".to_string(),
+            }]),
+        )
+        .expect_err("an omitted subject does not stand for every subject");
+        assert!(matches!(widened, AcceptanceError::Stale { .. }));
+        assert!(widened.to_string().contains("(no subject)"));
+        assert!(wrongly_widened
+            .changes
+            .iter()
+            .all(|finding| finding.accepted.is_none()));
+    }
+
+    #[test]
+    fn a_finding_outside_one_operation_says_so_instead_of_claiming_the_delta_is_gone() {
+        let mut report = report();
+        report.changes.push(unscoped_finding(
+            "schema.property.removed",
+            "SharedPage.cursor",
+        ));
+        report.summary.breaking += 1;
+        report.summary.gating += 1;
+
+        let error = apply_change_acceptances(
+            &mut report,
+            &acceptances(vec![ChangeAcceptance {
+                code: "schema.property.removed".to_string(),
+                operation: "POST /ingest/logs/write".to_string(),
+                subject: Some("SharedPage.cursor".to_string()),
+                reason: "Reviewed.".to_string(),
+            }]),
+        )
+        .expect_err("a finding spanning several operations has no key");
+        assert!(matches!(error, AcceptanceError::NotOperationScoped { .. }));
+        let message = error.to_string();
+        assert!(message.contains("not scoped to one operation"), "{message}");
+        assert!(message.contains("SharedPage.cursor"), "{message}");
+        assert!(
+            !message.contains("stale"),
+            "the delta is present, so the entry is not stale: {message}"
+        );
     }
 
     #[test]
@@ -610,7 +777,7 @@ mod tests {
             &acceptances(vec![ChangeAcceptance {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
-                subject: "WriteLogsRequest.logs".to_string(),
+                subject: Some("WriteLogsRequest.logs".to_string()),
                 reason: "Reviewed.".to_string(),
             }]),
         )
@@ -666,6 +833,49 @@ mod tests {
             malformed_entry,
             AcceptanceError::InvalidEntry { .. }
         ));
+
+        let blank_subject = parse_change_acceptances(
+            PathBuf::from("accept.json"),
+            r#"{
+                "schema_version": 1,
+                "acceptances": [{
+                    "code": "operation.removed",
+                    "operation": "DELETE /ingest/logs/{id}",
+                    "subject": "",
+                    "reason": "Reviewed."
+                }]
+            }"#,
+        )
+        .expect_err("an empty subject is not how a finding without one is written");
+        assert!(matches!(
+            blank_subject,
+            AcceptanceError::InvalidEntry { .. }
+        ));
+    }
+
+    #[test]
+    fn an_entry_without_a_subject_is_a_valid_document() {
+        let parsed = parse_change_acceptances(
+            PathBuf::from("accept.json"),
+            r#"{
+                "schema_version": 1,
+                "acceptances": [{
+                    "code": "operation.removed",
+                    "operation": "DELETE /ingest/logs/{id}",
+                    "reason": "The endpoint was deprecated for two releases."
+                }]
+            }"#,
+        )
+        .expect("an operation-wide entry omits its subject");
+        assert_eq!(
+            parsed.entries(),
+            [ChangeAcceptance {
+                code: "operation.removed".to_string(),
+                operation: "DELETE /ingest/logs/{id}".to_string(),
+                subject: None,
+                reason: "The endpoint was deprecated for two releases.".to_string(),
+            }]
+        );
     }
 
     #[test]
