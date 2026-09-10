@@ -212,23 +212,28 @@ missing file is an error. The versioned JSON document is:
       "code": "request.property.constraints.changed",
       "operation": "POST /ingest/logs/write",
       "subject": "WriteLogsRequest.logs",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "reason": "The backend already enforced max=100; the published contract is catching up."
     },
     {
       "code": "operation.removed",
       "operation": "DELETE /ingest/logs/{id}",
+      "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "reason": "Deprecated for two releases; no caller remains on it."
     }
   ]
 }
 ```
 
-An entry is the finding's own identity as the JSON report prints it. Copy `code`, `operation`, and
-`subject` exactly from that report; omit `subject` for a finding the report prints without one, such
-as `operation.removed` or `request.body.removed`. Every field present participates in the key, and an
-absent `subject` is part of the key rather than a wildcard: it never stands for a finding that has
-one, and a subject can never be invented for a finding that has none. Accepting one field does not
-accept a sibling field or a different finding code on the same field.
+An entry is the finding's own identity as the JSON report prints it. Copy `code`, `operation`,
+`subject`, and `fingerprint` exactly from that report; omit `subject` for a finding the report prints
+without one, such as `operation.removed` or `request.body.removed`. The fingerprint binds the record
+to the exact base/current projected-contract comparison that produced that finding. A later change
+to the same field with the same finding code therefore gets a different fingerprint and gates again.
+Every field present participates in the key, and an absent `subject` is part of the key rather than a
+wildcard: it never stands for a finding that has one, and a subject can never be invented for a
+finding that has none. Accepting one field does not accept a sibling field or a different finding
+code on the same field.
 
 `operation` is always required, so a breaking finding the report does not scope to a single operation
 — a document-wide finding, or a shared-schema finding with several consumers — has no key and cannot
@@ -239,12 +244,13 @@ The list this run consulted is recorded in the report's policy as `acceptance_fi
 as configured rather than as resolved on the running machine, so two runners analyzing identical
 input still produce byte-identical reports.
 
-Every entry must match exactly one breaking finding in the current run. No match is a status-2 stale
-configuration error naming the entry. This is what makes the list self-removing: after the change
-lands on the base revision, delete its now-stale entry. A match remains classified `BREAKING`, keeps
-its protected/exempt state, appears in the report's `Accepted` section with the required reason, and
-is removed only from the exit-status count. Other findings and all operation/tag policy are
-unchanged. This is an exact reviewed exception, not a way to switch off the gate.
+Every entry must match exactly one breaking finding in the current run. No match—including a changed
+comparison fingerprint—is a status-2 stale configuration error naming the entry. This is what makes
+the list self-removing: after the change lands on the base revision, delete its now-stale entry. A
+match remains classified `BREAKING`, keeps its protected/exempt state, appears in the report's
+`Accepted` section with the required reason, and is removed only from the exit-status count. Other
+findings and all operation/tag policy are unchanged. This is an exact reviewed exception, not a way
+to switch off the gate.
 
 Acceptance entries have no separate date expiry. The mandatory exact-match check expires them on the
 first run whose base already contains the change, without introducing a second lifecycle rule that
@@ -268,8 +274,9 @@ publishes this output rather than formatting one of its own.
 JSON contains the requested and resolved base revision, sorted exempt-tag policy, summary counts
 (including `accepted`), sorted exact operation policy, the `acceptance_file` this run consulted (as
 it was configured, absent when there was none), and deterministically sorted changes with
-stable dotted codes, effective tags, exemption state, and protected-selection state for both graph
-sides, the derived `gating` result, optional `accepted.reason`, affected SDK operations on both
+stable dotted codes, exact-comparison fingerprints for acceptable findings, effective tags,
+exemption state, and protected-selection state for both graph sides, the derived `gating` result,
+optional `accepted.reason`, affected SDK operations on both
 extant sides, and current source locations where available. The JSON envelope starts with
 `schema_version: 1`;
 `report.json` is a documented, versioned artifact for machine consumers. Consumers should check

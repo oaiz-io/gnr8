@@ -52,8 +52,9 @@ Before merging API-shape changes, gate them: `gnr8 changes --base <ref>` classif
 change as `BREAKING`/`ADDITIVE`/`DOC-ONLY` and exits `1` on a checked breaking change. Repeat
 `--exempt-tag <name>` to keep operations tagged with that standard OpenAPI tag (for example
 `internal`) out of the gate. An exact reviewed breaking finding can be recorded in
-`gnr8-accepted-changes.json`; it stays `BREAKING`, includes its reason in reports, and becomes a
-hard stale-entry error after the base contains the change. See [CLI command reference](cli/commands.md).
+`gnr8-accepted-changes.json` with its report fingerprint; it stays `BREAKING`, includes its reason
+in reports, and becomes a hard stale-entry error when the delta changes or the base contains it. See
+[CLI command reference](cli/commands.md).
 
 ## Scenario Guides
 

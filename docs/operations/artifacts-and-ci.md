@@ -332,12 +332,15 @@ With no operation filter, all non-exempt breaking findings retain the existing g
 configured project's root; absolute paths, directory components (including `.gnr8/`), symlinks, and
 special files are rejected. When the input is empty, each project automatically uses
 `gnr8-accepted-changes.json` if present. The file accepts only the exact breaking finding named
-by `code`, effective `operation`, and the `subject` the report shows (omitted for an operation-wide
-finding such as `operation.removed`), with a required reason. Accepted findings remain
-breaking in JSON and Markdown, while their exact match stops contributing to the gate. An unmatched
-entry is a status-2 stale configuration error, so the Action fails until the record is removed after
-the change reaches the base. This does not alter `report-api-changes`, `fail-on-breaking`, operation
-selection, or tag exemptions; see [`gnr8 changes`](../cli/commands.md#changes) for the file schema.
+by `code`, effective `operation`, the `subject` the report shows (omitted for an operation-wide
+finding such as `operation.removed`), and its report `fingerprint`, with a required reason. The
+fingerprint binds the record to that exact base/current projected-contract comparison, so a later
+change to the same field and finding code gates again. Accepted findings remain breaking in JSON and
+Markdown, while their exact match stops contributing to the gate. An unmatched entry is a status-2
+stale configuration error, so the Action fails until the record is updated for a changed delta or
+removed after the change reaches the base. This does not alter `report-api-changes`,
+`fail-on-breaking`, operation selection, or tag exemptions; see
+[`gnr8 changes`](../cli/commands.md#changes) for the file schema.
 
 The checked-in list trusts the repository's ordinary review and branch-protection process. It is not
 cryptographic proof that a separately authorized reviewer approved the current head. Repositories

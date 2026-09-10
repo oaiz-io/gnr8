@@ -9,6 +9,7 @@ use crate::graph::{
     ApiGraph, Field, OpenApiMetadataPolicy, Operation, Param, Response, Schema, SecurityScheme,
     SourceSpan, Type,
 };
+use crate::graph_artifact::GraphArtifact;
 use crate::CoreError;
 
 /// Required textual shape for exact effective-operation selectors.
@@ -188,6 +189,12 @@ pub struct Change {
     /// Parameter, field, status, schema, or other narrow subject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Exact base/current contract delta identity for one-time reviewed acceptance.
+    ///
+    /// Present only on breaking findings scoped to one operation, because those are the only
+    /// findings narrow enough to accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
     /// All generated SDK operations affected on each extant graph side.
     pub affected_operations: Sides<Vec<AffectedOperation>>,
     /// Effective standard operation tags on each extant side.
@@ -421,6 +428,7 @@ impl Collector {
             operation: scope.operation.clone(),
             operation_id: scope.operation_id.clone(),
             subject,
+            fingerprint: None,
             affected_operations: scope.affected_operations.clone(),
             tags: scope.tags.clone(),
             exempt: scope.exempt.clone(),
@@ -453,7 +461,8 @@ pub fn diff_graphs(
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::Config`] when a selector matches neither graph side.
+/// Returns [`CoreError::Config`] when a selector matches neither graph side, or a graph-artifact
+/// error if the exact comparison identity cannot be serialized.
 pub fn diff_graphs_with_gate_operations(
     base: &ApiGraph,
     current: &ApiGraph,
@@ -481,13 +490,79 @@ pub fn diff_graphs_with_gate_operations(
     }
     labels.sort();
     labels.dedup();
-    Ok(diff_graphs_inner(
-        base,
-        current,
-        exempt_tags,
-        gate_operations,
-        labels,
-    ))
+    let mut report = diff_graphs_inner(base, current, exempt_tags, gate_operations, labels);
+    assign_acceptance_fingerprints(&mut report, base, current)?;
+    Ok(report)
+}
+
+/// Bind every acceptable finding to this exact base/current graph comparison.
+///
+/// The stable finding key keeps acceptances narrow within a report. Including both complete graph
+/// artifacts makes the key one-time: changing the compared contract on either side produces a new
+/// fingerprint, even when the later finding has the same code, operation, and subject.
+fn assign_acceptance_fingerprints(
+    report: &mut ChangeReport,
+    base: &ApiGraph,
+    current: &ApiGraph,
+) -> Result<(), CoreError> {
+    let base_json = acceptance_graph_json(base)?;
+    let current_json = acceptance_graph_json(current)?;
+    let base_digest = blake3::hash(base_json.as_bytes());
+    let current_digest = blake3::hash(current_json.as_bytes());
+
+    for finding in &mut report.changes {
+        if finding.kind != ChangeKind::Breaking {
+            continue;
+        }
+        let Some(operation) = finding.operation.as_deref() else {
+            continue;
+        };
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"gnr8-change-acceptance-v1\0");
+        hasher.update(base_digest.as_bytes());
+        hasher.update(current_digest.as_bytes());
+        hash_fingerprint_part(&mut hasher, finding.code.as_bytes());
+        hash_fingerprint_part(&mut hasher, operation.as_bytes());
+        match &finding.subject {
+            Some(subject) => {
+                hasher.update(&[1]);
+                hash_fingerprint_part(&mut hasher, subject.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        finding.fingerprint = Some(hasher.finalize().to_hex().to_string());
+    }
+    Ok(())
+}
+
+fn acceptance_graph_json(graph: &ApiGraph) -> Result<String, CoreError> {
+    let mut graph = graph.clone();
+    // Provenance and diagnostics explain where the contract came from; they are not contract
+    // content. Moving an unchanged declaration must not invalidate review of an unchanged delta.
+    graph.diagnostics.clear();
+    for operation in &mut graph.operations {
+        clear_source_span(&mut operation.provenance);
+        for parameter in &mut operation.params {
+            clear_source_span(&mut parameter.provenance);
+        }
+    }
+    for schema in &mut graph.schemas {
+        clear_source_span(&mut schema.provenance);
+    }
+    GraphArtifact::new(graph).to_json()
+}
+
+fn clear_source_span(span: &mut SourceSpan) {
+    span.file.clear();
+    span.start_line = 0;
+    span.end_line = 0;
+}
+
+fn hash_fingerprint_part(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 fn diff_graphs_inner(
@@ -2487,6 +2562,33 @@ mod tests {
             .iter()
             .find(|change| change.code == code)
             .unwrap_or_else(|| panic!("missing {code}: {:?}", report.changes))
+    }
+
+    #[test]
+    fn acceptance_fingerprints_ignore_source_location_changes() {
+        let base = graph_with_tags(&[]);
+        let first =
+            diff_graphs_with_gate_operations(&base, &ApiGraph::default(), &BTreeSet::new(), &[])
+                .expect("valid comparison");
+
+        let mut relocated = base;
+        relocated.operations[0].provenance = SourceSpan {
+            file: "moved/handlers.rs".to_string(),
+            start_line: 200,
+            end_line: 202,
+        };
+        let second = diff_graphs_with_gate_operations(
+            &relocated,
+            &ApiGraph::default(),
+            &BTreeSet::new(),
+            &[],
+        )
+        .expect("valid relocated comparison");
+
+        assert_eq!(
+            change(&first, "operation.removed").fingerprint,
+            change(&second, "operation.removed").fingerprint
+        );
     }
 
     #[test]

@@ -8,8 +8,9 @@ Permit an intentional protected-surface break only after a trusted reviewer appr
 finding set at the exact pull-request head. A new commit, a changed base, a policy change, or any
 added/removed/changed protected finding must invalidate that approval.
 
-The checked-in exact-finding acceptance list deliberately trusts normal repository review and fails
-when its graph delta becomes stale. It does not prove that a separately authorized reviewer approved
+The checked-in exact-finding acceptance list deliberately trusts normal repository review, binds
+each record to the report's exact graph-delta fingerprint, and fails when that delta becomes stale.
+It does not prove that a separately authorized reviewer approved
 the current head. Pull-request labels, branch-committed records, and unsigned comment commands are
 insufficient for that stronger trust boundary: the pull-request author can change or replay them,
 and none inherently binds the decision to report content and the current head.

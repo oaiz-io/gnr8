@@ -16,10 +16,11 @@ const NO_SUBJECT: &str = "(no subject)";
 
 /// One exact breaking finding a human reviewed and accepted.
 ///
-/// The key is the finding's own identity as the JSON report prints it, which is why `subject` is
-/// optional: an operation-wide finding such as `operation.removed` has no narrower subject, so its
-/// entry omits the field exactly as the report omits it. Absence is part of the exact key, never a
-/// wildcard — an entry without a subject never matches a finding that has one, or the reverse.
+/// The key is the finding's own identity and exact-comparison fingerprint as the JSON report prints
+/// them. `subject` is optional because an operation-wide finding such as `operation.removed` has no
+/// narrower subject, so its entry omits the field exactly as the report omits it. Absence is part of
+/// the exact key, never a wildcard — an entry without a subject never matches a finding that has
+/// one, or the reverse.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeAcceptance {
@@ -30,6 +31,8 @@ pub struct ChangeAcceptance {
     /// Exact narrow subject shown in the JSON report, absent when the finding has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Exact base/current contract delta fingerprint printed by the JSON report.
+    pub fingerprint: String,
     /// Human-written justification displayed beside the accepted finding.
     pub reason: String,
 }
@@ -63,6 +66,8 @@ struct RawChangeAcceptance {
     operation: Option<String>,
     #[serde(default)]
     subject: Option<String>,
+    #[serde(default)]
+    fingerprint: Option<String>,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -321,6 +326,7 @@ fn parse_change_acceptances(
             code: required_entry_value(&path, index, "code", raw.code)?,
             operation: required_entry_value(&path, index, "operation", raw.operation)?,
             subject: raw.subject,
+            fingerprint: required_entry_value(&path, index, "fingerprint", raw.fingerprint)?,
             reason: required_entry_value(&path, index, "reason", raw.reason)?,
         };
         validate_entry(&path, index, &entry)?;
@@ -328,6 +334,7 @@ fn parse_change_acceptances(
             entry.code.clone(),
             entry.operation.clone(),
             entry.subject.clone(),
+            entry.fingerprint.clone(),
         );
         if !keys.insert(key) {
             return Err(AcceptanceError::DuplicateEntry {
@@ -399,6 +406,18 @@ fn validate_entry(
             );
         }
     }
+    if entry.fingerprint.len() != 64
+        || !entry
+            .fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return invalid_entry(
+            path,
+            index,
+            "`fingerprint` must be the exact 64-character lowercase value from the JSON report",
+        );
+    }
     if entry.reason.trim().is_empty() {
         return invalid_entry(
             path,
@@ -432,11 +451,12 @@ fn valid_operation(operation: &str) -> bool {
 
 /// Apply exact acceptance records to an already classified report.
 ///
-/// A record matches only a breaking finding with the same code, operation, and subject, where an
-/// absent subject on both sides is itself an exact match — that is how an operation-wide finding
-/// such as `operation.removed` is named. The finding remains breaking, but no longer contributes to
-/// the gate and carries its reason in the report. Every record must match exactly once, so records
-/// become hard errors as soon as their delta is no longer present.
+/// A record matches only a breaking finding with the same code, operation, subject, and exact
+/// base/current contract fingerprint. An absent subject on both sides is itself an exact match —
+/// that is how an operation-wide finding such as `operation.removed` is named. The finding remains
+/// breaking, but no longer contributes to the gate and carries its reason in the report. Every
+/// record must match exactly once, so records become hard errors as soon as their delta changes or
+/// is no longer present.
 ///
 /// A finding the report does not scope to a single operation has no key at all, because accepting it
 /// would accept every operation it spans. Those are indexed separately so that naming one reports
@@ -452,7 +472,8 @@ pub fn apply_change_acceptances(
     report: &mut ChangeReport,
     acceptances: &ChangeAcceptances,
 ) -> Result<(), AcceptanceError> {
-    let mut finding_indexes: BTreeMap<(&str, &str, Option<&str>), Vec<usize>> = BTreeMap::new();
+    let mut finding_indexes: BTreeMap<(&str, &str, Option<&str>, &str), Vec<usize>> =
+        BTreeMap::new();
     let mut unscoped_findings: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
     for (index, finding) in report.changes.iter().enumerate() {
         if finding.kind != ChangeKind::Breaking {
@@ -462,8 +483,16 @@ pub fn apply_change_acceptances(
             unscoped_findings.insert((finding.code.as_str(), finding.subject.as_deref()));
             continue;
         };
+        let Some(fingerprint) = finding.fingerprint.as_deref() else {
+            continue;
+        };
         finding_indexes
-            .entry((finding.code.as_str(), operation, finding.subject.as_deref()))
+            .entry((
+                finding.code.as_str(),
+                operation,
+                finding.subject.as_deref(),
+                fingerprint,
+            ))
             .or_default()
             .push(index);
     }
@@ -475,6 +504,7 @@ pub fn apply_change_acceptances(
             entry.code.clone(),
             entry.operation.clone(),
             entry.subject.clone(),
+            entry.fingerprint.clone(),
         );
         if !seen.insert(owned_key) {
             return Err(AcceptanceError::DuplicateEntry {
@@ -489,6 +519,7 @@ pub fn apply_change_acceptances(
             entry.code.as_str(),
             entry.operation.as_str(),
             entry.subject.as_deref(),
+            entry.fingerprint.as_str(),
         );
         let Some(matches) = finding_indexes.get(&key) else {
             // The entry resolved to nothing. Say which of the two reasons it is instead of always
@@ -552,8 +583,12 @@ mod tests {
         DEFAULT_ACCEPTANCE_PATH,
     };
     use crate::changes::{
-        diff_graphs, Change, ChangeKind, ChangePolicy, ChangeReport, ChangeSummary, Sides,
+        diff_graphs_with_gate_operations, Change, ChangeKind, ChangePolicy, ChangeReport,
+        ChangeSummary, Sides,
     };
+
+    const TEST_FINGERPRINT: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn finding(code: &str, operation: &str, subject: &str) -> Change {
         Change {
@@ -562,6 +597,7 @@ mod tests {
             operation: Some(operation.to_string()),
             operation_id: Some("writeLogs".to_string()),
             subject: Some(subject.to_string()),
+            fingerprint: Some(TEST_FINGERPRINT.to_string()),
             affected_operations: Sides::default(),
             tags: Sides::default(),
             exempt: Sides::default(),
@@ -646,6 +682,7 @@ mod tests {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
                 subject: Some("WriteLogsRequest.logs".to_string()),
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "The server already enforced max=100.".to_string(),
             }]),
         )
@@ -664,6 +701,28 @@ mod tests {
         );
         assert!(report.changes[1].gating, "sibling field remains gated");
         assert!(report.changes[2].gating, "different code remains gated");
+    }
+
+    #[test]
+    fn a_later_delta_on_the_same_field_and_code_gates_again() {
+        let mut report = report();
+        report.changes[0].fingerprint =
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string());
+        let error = apply_change_acceptances(
+            &mut report,
+            &acceptances(vec![ChangeAcceptance {
+                code: "request.property.constraints.changed".to_string(),
+                operation: "POST /ingest/logs/write".to_string(),
+                subject: Some("WriteLogsRequest.logs".to_string()),
+                fingerprint: TEST_FINGERPRINT.to_string(),
+                reason: "The earlier max=100 delta was reviewed.".to_string(),
+            }]),
+        )
+        .expect_err("an acceptance cannot cover a later delta on the same field");
+
+        assert!(matches!(error, AcceptanceError::Stale { .. }));
+        assert!(report.changes[0].gating);
+        assert!(report.changes[0].accepted.is_none());
     }
 
     #[test]
@@ -687,6 +746,7 @@ mod tests {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
                 subject: Some("WriteLogsRequest.logs".to_string()),
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "The server already enforced max=100.".to_string(),
             }]),
         )
@@ -718,6 +778,7 @@ mod tests {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
                 subject: Some("WriteLogsRequest.missing".to_string()),
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "Reviewed.".to_string(),
             }]),
         )
@@ -744,6 +805,7 @@ mod tests {
                 code: "operation.removed".to_string(),
                 operation: "DELETE /ingest/logs/{id}".to_string(),
                 subject: None,
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "The endpoint was deprecated for two releases.".to_string(),
             }]),
         )
@@ -795,7 +857,9 @@ mod tests {
             operations: vec![operation],
             ..ApiGraph::default()
         };
-        let mut report = diff_graphs(&base, &ApiGraph::default(), &BTreeSet::new());
+        let mut report =
+            diff_graphs_with_gate_operations(&base, &ApiGraph::default(), &BTreeSet::new(), &[])
+                .expect("valid graph comparison");
         let removal = report
             .changes
             .iter()
@@ -810,6 +874,10 @@ mod tests {
             "an operation-wide finding has no subject"
         );
         assert!(removal.gating);
+        let fingerprint = removal
+            .fingerprint
+            .clone()
+            .expect("an operation-scoped breaking finding has a fingerprint");
 
         apply_change_acceptances(
             &mut report,
@@ -817,6 +885,7 @@ mod tests {
                 code: "operation.removed".to_string(),
                 operation: "DELETE /ingest/logs/{id}".to_string(),
                 subject: None,
+                fingerprint,
                 reason: "Deprecated for two releases; no caller remains on it.".to_string(),
             }]),
         )
@@ -838,6 +907,7 @@ mod tests {
                 code: "operation.removed".to_string(),
                 operation: "DELETE /ingest/logs/{id}".to_string(),
                 subject: Some("WriteLogsRequest.logs".to_string()),
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "Reviewed.".to_string(),
             }]),
         )
@@ -851,6 +921,7 @@ mod tests {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
                 subject: None,
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "Reviewed.".to_string(),
             }]),
         )
@@ -879,6 +950,7 @@ mod tests {
                 code: "schema.property.removed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
                 subject: Some("SharedPage.cursor".to_string()),
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "Reviewed.".to_string(),
             }]),
         )
@@ -905,6 +977,7 @@ mod tests {
                 code: "request.property.constraints.changed".to_string(),
                 operation: "POST /ingest/logs/write".to_string(),
                 subject: Some("WriteLogsRequest.logs".to_string()),
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "Reviewed.".to_string(),
             }]),
         )
@@ -932,7 +1005,8 @@ mod tests {
                 "acceptances": [{
                     "code": "request.property.constraints.changed",
                     "operation": "POST /ingest/logs/write",
-                    "subject": "WriteLogsRequest.logs"
+                    "subject": "WriteLogsRequest.logs",
+                    "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 }]
             }"#,
         )
@@ -951,6 +1025,7 @@ mod tests {
                     "code": "request.property.constraints.changed",
                     "operation": "post /ingest/logs/write",
                     "subject": "WriteLogsRequest.logs",
+                    "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "reason": "Reviewed."
                 }]
             }"#,
@@ -961,6 +1036,28 @@ mod tests {
             AcceptanceError::InvalidEntry { .. }
         ));
 
+        let malformed_fingerprint = parse_change_acceptances(
+            PathBuf::from("accept.json"),
+            r#"{
+                "schema_version": 1,
+                "acceptances": [{
+                    "code": "request.property.constraints.changed",
+                    "operation": "POST /ingest/logs/write",
+                    "subject": "WriteLogsRequest.logs",
+                    "fingerprint": "standing-exemption",
+                    "reason": "Reviewed."
+                }]
+            }"#,
+        )
+        .expect_err("a fingerprint must be copied exactly from the report");
+        assert!(matches!(
+            malformed_fingerprint,
+            AcceptanceError::InvalidEntry { .. }
+        ));
+        assert!(malformed_fingerprint
+            .to_string()
+            .contains("64-character lowercase"));
+
         let blank_subject = parse_change_acceptances(
             PathBuf::from("accept.json"),
             r#"{
@@ -969,6 +1066,7 @@ mod tests {
                     "code": "operation.removed",
                     "operation": "DELETE /ingest/logs/{id}",
                     "subject": "",
+                    "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "reason": "Reviewed."
                 }]
             }"#,
@@ -989,6 +1087,7 @@ mod tests {
                 "acceptances": [{
                     "code": "operation.removed",
                     "operation": "DELETE /ingest/logs/{id}",
+                    "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "reason": "The endpoint was deprecated for two releases."
                 }]
             }"#,
@@ -1000,6 +1099,7 @@ mod tests {
                 code: "operation.removed".to_string(),
                 operation: "DELETE /ingest/logs/{id}".to_string(),
                 subject: None,
+                fingerprint: TEST_FINGERPRINT.to_string(),
                 reason: "The endpoint was deprecated for two releases.".to_string(),
             }]
         );

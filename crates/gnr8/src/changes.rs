@@ -403,6 +403,9 @@ mod tests {
             operation: Some("DELETE /books/{id}".to_string()),
             operation_id: Some("deleteBook".to_string()),
             subject: None,
+            fingerprint: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ),
             affected_operations: Sides {
                 base: Some(vec![AffectedOperation {
                     operation: "DELETE /books/{id}".to_string(),
@@ -565,6 +568,10 @@ mod tests {
         assert_eq!(value["policy"]["gate_operations"][0], "POST /events");
         assert_eq!(value["changes"][0]["exempt"]["base"], true);
         assert_eq!(value["changes"][0]["protected"]["base"], true);
+        assert_eq!(
+            value["changes"][0]["fingerprint"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         // Machine consumers must handle omitted current locations, not just explicit nulls.
         for field in ["file", "line", "span"] {
             assert!(value["changes"][0].get(field).is_none());
@@ -609,6 +616,10 @@ mod tests {
             .as_object_mut()
             .expect("change object")
             .remove("protected");
+        value["changes"][0]
+            .as_object_mut()
+            .expect("change object")
+            .remove("fingerprint");
         value["summary"]
             .as_object_mut()
             .expect("summary object")
@@ -618,6 +629,7 @@ mod tests {
             serde_json::from_value(value).expect("read earlier schema-one fields");
         assert!(earlier.policy.gate_operations.is_empty());
         assert_eq!(earlier.changes[0].protected, Sides::default());
+        assert_eq!(earlier.changes[0].fingerprint, None);
         assert_eq!(earlier.summary.accepted, 0);
         assert!(earlier.changes[0].accepted.is_none());
     }

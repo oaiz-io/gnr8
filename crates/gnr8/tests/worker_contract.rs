@@ -1214,7 +1214,11 @@ components:
     let findings = gated_report["changes"].as_array().expect("changes");
     assert_eq!(findings.len(), 2);
     assert!(findings.iter().all(|finding| {
-        finding["code"] == "request.property.constraints.changed" && finding["gating"] == true
+        finding["code"] == "request.property.constraints.changed"
+            && finding["gating"] == true
+            && finding["fingerprint"]
+                .as_str()
+                .is_some_and(|fingerprint| fingerprint.len() == 64)
     }));
     assert!(findings.iter().any(|finding| {
         finding["operation"] == "POST /ingest/llm/generate"
@@ -1225,26 +1229,35 @@ components:
             && finding["subject"] == "WriteLogsRequest.logs"
     }));
 
-    let acceptance = r#"{
-  "schema_version": 1,
-  "acceptances": [
-    {
-      "code": "request.property.constraints.changed",
-      "operation": "POST /ingest/llm/generate",
-      "subject": "GenerateRequest.messages",
-      "reason": "The service already rejects an empty messages collection."
-    },
-    {
-      "code": "request.property.constraints.changed",
-      "operation": "POST /ingest/logs/write",
-      "subject": "WriteLogsRequest.logs",
-      "reason": "The service already rejects more than 100 logs."
-    }
-  ]
-}
-"#;
+    let finding_fingerprint = |operation: &str| {
+        findings
+            .iter()
+            .find(|finding| finding["operation"] == operation)
+            .and_then(|finding| finding["fingerprint"].as_str())
+            .expect("operation-scoped breaking finding fingerprint")
+    };
+    let acceptance = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "acceptances": [
+            {
+                "code": "request.property.constraints.changed",
+                "operation": "POST /ingest/llm/generate",
+                "subject": "GenerateRequest.messages",
+                "fingerprint": finding_fingerprint("POST /ingest/llm/generate"),
+                "reason": "The service already rejects an empty messages collection."
+            },
+            {
+                "code": "request.property.constraints.changed",
+                "operation": "POST /ingest/logs/write",
+                "subject": "WriteLogsRequest.logs",
+                "fingerprint": finding_fingerprint("POST /ingest/logs/write"),
+                "reason": "The service already rejects more than 100 logs."
+            }
+        ]
+    }))
+    .expect("serialize acceptance fixture");
     let acceptance_path = root.join("gnr8-accepted-changes.json");
-    std::fs::write(&acceptance_path, acceptance).unwrap();
+    std::fs::write(&acceptance_path, &acceptance).unwrap();
     let accepted = gnr8(
         &root,
         &[
@@ -1275,18 +1288,38 @@ components:
                 && finding["accepted"]["reason"].is_string()
         }));
 
-    let one_acceptance = r#"{
-  "schema_version": 1,
-  "acceptances": [
-    {
-      "code": "request.property.constraints.changed",
-      "operation": "POST /ingest/llm/generate",
-      "subject": "GenerateRequest.messages",
-      "reason": "The service already rejects an empty messages collection."
-    }
-  ]
-}
-"#;
+    std::fs::write(
+        root.join("openapi.yaml"),
+        CURRENT.replace("maxItems: 100", "maxItems: 101"),
+    )
+    .unwrap();
+    let later_delta = gnr8(&root, &["changes", "--base", "HEAD"], None);
+    assert_eq!(
+        later_delta.status.code(),
+        Some(2),
+        "a later constraint change on the same operation and field must not reuse the earlier acceptance: {}",
+        combined(&later_delta)
+    );
+    assert!(
+        combined(&later_delta).contains("stale API change acceptance"),
+        "{}",
+        combined(&later_delta)
+    );
+    std::fs::write(root.join("openapi.yaml"), CURRENT).unwrap();
+
+    let one_acceptance = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "acceptances": [
+            {
+                "code": "request.property.constraints.changed",
+                "operation": "POST /ingest/llm/generate",
+                "subject": "GenerateRequest.messages",
+                "fingerprint": finding_fingerprint("POST /ingest/llm/generate"),
+                "reason": "The service already rejects an empty messages collection."
+            }
+        ]
+    }))
+    .expect("serialize partial acceptance fixture");
     std::fs::write(&acceptance_path, one_acceptance).unwrap();
     let unaccepted = gnr8(&root, &["--json", "changes", "--base", "HEAD"], None);
     assert_eq!(
