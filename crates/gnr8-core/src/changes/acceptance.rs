@@ -491,7 +491,9 @@ mod tests {
         apply_change_acceptances, load_change_acceptances, parse_change_acceptances,
         AcceptanceError, AcceptedChange, ChangeAcceptance, ChangeAcceptances,
     };
-    use crate::changes::{Change, ChangeKind, ChangePolicy, ChangeReport, ChangeSummary, Sides};
+    use crate::changes::{
+        diff_graphs, Change, ChangeKind, ChangePolicy, ChangeReport, ChangeSummary, Sides,
+    };
 
     fn finding(code: &str, operation: &str, subject: &str) -> Change {
         Change {
@@ -696,6 +698,70 @@ mod tests {
                 reason: "The endpoint was deprecated for two releases.".to_string()
             })
         );
+    }
+
+    /// The differ, not a hand-built fixture, decides which findings carry a subject. Accept a real
+    /// `operation.removed` so the entry shape stays tied to what the report actually prints.
+    #[test]
+    fn a_removed_operation_from_the_real_differ_is_accepted_without_a_subject() {
+        use crate::graph::{ApiGraph, Operation, SourceSpan};
+        use std::collections::BTreeSet;
+
+        let operation = Operation {
+            id: "deleteLog".to_string(),
+            method: "DELETE".to_string(),
+            path: "/ingest/logs/{id}".to_string(),
+            handler: "deleteLog".to_string(),
+            summary: None,
+            description: None,
+            group: None,
+            middleware: Vec::new(),
+            params: Vec::new(),
+            request_body: None,
+            request_body_required: true,
+            request_body_content_type: None,
+            request_body_variants: Vec::new(),
+            responses: Vec::new(),
+            security: Vec::new(),
+            security_overrides_global: false,
+            provenance: SourceSpan {
+                file: "handlers.rs".to_string(),
+                start_line: 10,
+                end_line: 12,
+            },
+        };
+        let base = ApiGraph {
+            operations: vec![operation],
+            ..ApiGraph::default()
+        };
+        let mut report = diff_graphs(&base, &ApiGraph::default(), &BTreeSet::new());
+        let removal = report
+            .changes
+            .iter()
+            .find(|change| change.code == "operation.removed")
+            .expect("the differ reports the removal");
+        assert_eq!(
+            removal.operation.as_deref(),
+            Some("DELETE /ingest/logs/{id}")
+        );
+        assert_eq!(
+            removal.subject, None,
+            "an operation-wide finding has no subject"
+        );
+        assert!(removal.gating);
+
+        apply_change_acceptances(
+            &mut report,
+            &acceptances(vec![ChangeAcceptance {
+                code: "operation.removed".to_string(),
+                operation: "DELETE /ingest/logs/{id}".to_string(),
+                subject: None,
+                reason: "Deprecated for two releases; no caller remains on it.".to_string(),
+            }]),
+        )
+        .expect("a removed operation is acceptable");
+        assert_eq!(report.summary.gating, 0);
+        assert_eq!(report.summary.accepted, 1);
     }
 
     #[test]
