@@ -65,11 +65,13 @@ Recognized route facts include:
   over; a statement that answers the request or reassigns the error is not, because the branch after
   it is no longer this read's. A helper that never hands its own read error back to the caller is not
   judged by the caller's branch at all. It hands it back by returning it bare, or by building a new
-  error out of it: `fmt.Errorf("cookie: %w", err)` and `&apiError{cause: err}` are both non-nil by
-  construction, so the caller's branch runs exactly when the bare return would have made it run. An
-  arbitrary call over the error — a helper that maps `http.ErrNoCookie` back to `nil` — proves
-  nothing, because the caller may never see a failure at all. If the absence branch cannot prove
-  either result, the cookie stays optional and gets `request.parameter.unresolved`.
+  error out of it. `fmt.Errorf("cookie: %w", err)` and `&apiError{cause: err}` are both non-nil by
+  construction, so both preserve an `err != nil` check. Only the `%w` spelling also proves the
+  `http.ErrNoCookie` identity observed by `errors.Is`; storing an error in a composite says nothing
+  about that type's `Unwrap` or `Is` behavior. An arbitrary call over the error — a helper that maps
+  `http.ErrNoCookie` back to `nil` — proves nothing, because the caller may never see a failure at
+  all. If the absence branch cannot prove either result, the cookie stays optional and gets
+  `request.parameter.unresolved`.
 
   A header read is judged only in its own frame. `GetHeader` answers an absent header with an empty
   string, so an enclosing helper's error reports some other failure unless that helper converts the
