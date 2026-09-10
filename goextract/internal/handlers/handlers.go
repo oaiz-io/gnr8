@@ -2029,11 +2029,71 @@ func returnErrorFlow(h handlerDecl, ret *ast.ReturnStmt, errorVars map[gotypes.O
 	if isNilIdent(result) {
 		return false, true
 	}
-	ident, ok := result.(*ast.Ident)
-	if !ok || !errorVars[h.info.ObjectOf(ident)] {
+	if ident, ok := result.(*ast.Ident); ok {
+		if errorVars[h.info.ObjectOf(ident)] {
+			return true, true
+		}
 		return false, false
 	}
-	return true, true
+	// A new error built out of this read's failure hands the caller the same
+	// answer as returning it bare. Wrapping is how Go propagates one, so
+	// `return "", fmt.Errorf("cookie: %w", err)` states what `return "", err`
+	// states and must reach the same answer — the caller's branch runs in both.
+	//
+	// The proof is construction, not mention. An arbitrary call that merely takes
+	// the value may hand back nil — a helper that maps ErrNoCookie to a successful
+	// absence does exactly that — and then the caller's branch is not this read's
+	// answer at all. Such an expression stays unknown rather than settling either
+	// way, which is the same answer an unrelated sentinel gets.
+	if buildsErrorFrom(h.info, result, errorVars) {
+		return true, true
+	}
+	return false, false
+}
+
+// buildsErrorFrom reports whether expr builds a provably non-nil error out of
+// one of the values this read's error was assigned to.
+//
+// Two spellings prove it. `fmt.Errorf` is documented to return a non-nil error,
+// and a composite literal is a non-nil interface value once boxed, so
+// `&apiError{cause: err}` states the failure as surely as `err` does. Anything
+// else is an unproved claim about what the caller sees.
+func buildsErrorFrom(info *gotypes.Info, expr ast.Expr, values map[gotypes.Object]bool) bool {
+	switch node := expr.(type) {
+	case *ast.ParenExpr:
+		return buildsErrorFrom(info, node.X, values)
+	case *ast.UnaryExpr:
+		return node.Op == token.AND && buildsErrorFrom(info, node.X, values)
+	case *ast.CompositeLit:
+		return exprUsesObject(info, node, values)
+	case *ast.CallExpr:
+		if !isStdFmtErrorfCall(info, node) {
+			return false
+		}
+		for _, arg := range node.Args {
+			if exprUsesObject(info, arg, values) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// isStdFmtErrorfCall gates the wrapped spelling on the resolved standard-library
+// `fmt` package, never the identifier text, so a local package named `fmt`
+// cannot be mistaken for it. This is the gate isStdErrorsIsCall applies to the
+// sentinel spelling.
+func isStdFmtErrorfCall(info *gotypes.Info, call *ast.CallExpr) bool {
+	if info == nil {
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel == nil || selector.Sel.Name != "Errorf" {
+		return false
+	}
+	fn, ok := info.Uses[selector.Sel].(*gotypes.Func)
+	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "fmt"
 }
 
 func functionErrorResultIndex(h handlerDecl) (int, bool) {

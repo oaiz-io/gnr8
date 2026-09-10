@@ -9,6 +9,17 @@ must move the minor version.
 
 ## Unreleased
 
+### Fixed
+
+- **A cookie helper that wraps its read error still proves the caller's rejection.** Requiredness
+  through an error-returning cookie helper was proved only when the helper returned that error bare,
+  so the idiomatic `return "", fmt.Errorf("read cookie: %w", err)` published an optional parameter
+  and a `request.parameter.unresolved` diagnostic where `return "", err` published a required one.
+  Building a new error out of the read's failure now reaches the same answer, for `fmt.Errorf` and
+  for a composite literal such as `&apiError{cause: err}` — both are non-nil by construction, so the
+  caller's branch runs exactly when the bare return would have made it run. An arbitrary call over
+  the error stays unresolved, because a helper that maps `http.ErrNoCookie` back to `nil` means the
+  caller may never see a failure at all.
 
 ## 0.14.0 — 2026-09-09
 
