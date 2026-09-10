@@ -1243,7 +1243,7 @@ components:
   ]
 }
 "#;
-    let acceptance_path = root.join(".gnr8/accepted-api-changes.json");
+    let acceptance_path = root.join("gnr8-accepted-changes.json");
     std::fs::write(&acceptance_path, acceptance).unwrap();
     let accepted = gnr8(
         &root,

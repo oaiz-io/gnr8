@@ -330,7 +330,7 @@ With no operation filter, all non-exempt breaking findings retain the existing g
 
 `acceptance-file` maps to the CLI's `--acceptance-file`. A relative path is resolved independently
 from each configured working directory; when the input is empty, each project automatically uses
-`.gnr8/accepted-api-changes.json` if present. The file accepts only the exact breaking finding named
+`gnr8-accepted-changes.json` if present. The file accepts only the exact breaking finding named
 by `code`, effective `operation`, and the `subject` the report shows (omitted for an operation-wide
 finding such as `operation.removed`), with a required reason. Accepted findings remain
 breaking in JSON and Markdown, while their exact match stops contributing to the gate. An unmatched

@@ -105,6 +105,9 @@ pub(crate) fn render_human(report: &ChangeReport) -> String {
             report.policy.gate_operations.join(", ")
         );
     }
+    if let Some(acceptance_file) = &report.policy.acceptance_file {
+        let _ = writeln!(text, "changes: acceptance list: {acceptance_file}");
+    }
     if report.changes.is_empty() {
         text.push_str("No API changes.\n");
         return text;
@@ -284,6 +287,14 @@ fn render_markdown_policy(text: &mut String, report: &ChangeReport) {
             &operations
         }
     );
+    let _ = writeln!(
+        text,
+        "Acceptance list: {}\n",
+        report.policy.acceptance_file.as_ref().map_or_else(
+            || "none".to_string(),
+            |file| format!("<code>{}</code>", escape_html(file)),
+        )
+    );
 }
 
 /// Collapse a value onto a single line so it cannot escape the structure it is rendered into.
@@ -416,6 +427,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 2,
@@ -487,6 +499,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 2,
@@ -521,6 +534,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
                 gate_operations: vec!["POST /events".to_string()],
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 1,
@@ -564,6 +578,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: vec!["GET /books".to_string()],
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 1,
@@ -653,6 +668,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["internal".to_string()],
                 gate_operations: vec!["POST /events".to_string()],
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 1,
@@ -673,6 +689,8 @@ mod tests {
                 "Exempt tags: <code>internal</code>\n",
                 "\n",
                 "Protected operations: <code>POST /events</code>\n",
+                "\n",
+                "Acceptance list: none\n",
                 "\n",
                 "Summary: 1 breaking changes detected; 0 accepted after review; 0 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.\n",
                 "\n",
@@ -710,6 +728,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: vec!["a & b".to_string()],
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 1,
@@ -763,6 +782,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary::default(),
             changes: Vec::new(),
@@ -810,6 +830,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 3,
@@ -823,7 +844,8 @@ mod tests {
         let rendered = render_markdown(&base, &report);
         let headings: Vec<_> = rendered
             .lines()
-            .skip(8)
+            .skip_while(|line| !line.starts_with("Summary:"))
+            .skip(1)
             .filter(|line| !line.is_empty() && !line.starts_with("    "))
             .collect();
         assert_eq!(
@@ -873,6 +895,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: vec!["POST /ingest/logs/write".to_string()],
+                acceptance_file: Some("gnr8-accepted-changes.json".to_string()),
             },
             summary: ChangeSummary {
                 breaking: 1,
@@ -892,6 +915,10 @@ mod tests {
         );
         assert!(
             markdown.contains("        Reason: The backend already enforces max=100.\n"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("Acceptance list: <code>gnr8-accepted-changes.json</code>\n"),
             "{markdown}"
         );
         assert!(!markdown.contains("Breaking — advisory or exempt"));
@@ -918,6 +945,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: Vec::new(),
+                acceptance_file: None,
             },
             summary: ChangeSummary::default(),
             changes: Vec::new(),

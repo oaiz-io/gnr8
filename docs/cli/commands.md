@@ -174,7 +174,7 @@ gnr8 changes --base origin/main
 gnr8 changes --base origin/main --exempt-tag internal --exempt-tag beta
 gnr8 changes --base origin/main --gate-operation "POST /events" \
   --gate-operation "POST /events/integration/{provider}"
-gnr8 changes --base origin/main --acceptance-file .gnr8/accepted-api-changes.json
+gnr8 changes --base origin/main --acceptance-file gnr8-accepted-changes.json
 gnr8 --json changes --base origin/main
 gnr8 changes --base origin/main --markdown
 ```
@@ -199,7 +199,7 @@ both graph sides, so a shared schema is enforced when any protected, non-exempt 
 
 `--acceptance-file <path>` records human review of individual breaking findings without weakening
 the surrounding gate. Relative paths resolve from the project root. When the flag is omitted,
-`.gnr8/accepted-api-changes.json` is loaded automatically if it exists; an explicitly named missing
+`gnr8-accepted-changes.json` is loaded automatically if it exists; an explicitly named missing
 file is an error. The versioned JSON document is:
 
 ```json
@@ -233,6 +233,10 @@ accept a sibling field or a different finding code on the same field.
 be accepted; accepting it would accept every operation it spans. Naming one is its own error rather
 than a stale-entry error, because the delta is still there. Duplicate or ambiguous keys are errors.
 
+The list this run consulted is recorded in the report's policy as `acceptance_file`, using the path
+as configured rather than as resolved on the running machine, so two runners analyzing identical
+input still produce byte-identical reports.
+
 Every entry must match exactly one breaking finding in the current run. No match is a status-2 stale
 configuration error naming the entry. This is what makes the list self-removing: after the change
 lands on the base revision, delete its now-stale entry. A match remains classified `BREAKING`, keeps
@@ -255,11 +259,13 @@ comment: the base revision, operation and tag policy, the summary counts, and th
 indented code block with a `Code:` line, their affected SDK operations, and source locations.
 Non-empty groups appear in this order: `Accepted`, `Breaking — protected surface`, `Breaking —
 advisory or exempt`, `Additive`, and `Documentation-only`, each with its count. Empty groups are
-omitted. It selects the report format, so it cannot be combined with `--json`. The GitHub Action
+omitted. The policy block names the acceptance list this run consulted, or `none`, so a published
+report distinguishes "no list" from "a list that accepted nothing". It selects the report format, so it cannot be combined with `--json`. The GitHub Action
 publishes this output rather than formatting one of its own.
 
 JSON contains the requested and resolved base revision, sorted exempt-tag policy, summary counts
-(including `accepted`), sorted exact operation policy, and deterministically sorted changes with
+(including `accepted`), sorted exact operation policy, the `acceptance_file` this run consulted (as
+it was configured, absent when there was none), and deterministically sorted changes with
 stable dotted codes, effective tags, exemption state, and protected-selection state for both graph
 sides, the derived `gating` result, optional `accepted.reason`, affected SDK operations on both
 extant sides, and current source locations where available. The JSON envelope starts with

@@ -141,6 +141,10 @@ pub struct ChangePolicy {
     /// Exact effective method/path selectors included in the gate, or empty for every operation.
     #[serde(default)]
     pub gate_operations: Vec<String>,
+    /// Acceptance list consulted by this invocation, as it was configured; absent when there was
+    /// none. Present with no accepted finding means the list was found and accepted nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_file: Option<String>,
 }
 
 /// Aggregate counts for a change report.
@@ -526,6 +530,8 @@ fn diff_graphs_inner(
         policy: ChangePolicy {
             exempt_tags: exempt_tags.iter().cloned().collect(),
             gate_operations: gate_operation_labels,
+            // A comparison has no acceptance policy of its own; applying one records it.
+            acceptance_file: None,
         },
         summary,
         changes: collector.changes,

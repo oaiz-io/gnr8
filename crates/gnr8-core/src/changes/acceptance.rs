@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use super::{ChangeKind, ChangeReport, GateOperation};
 
 /// Default project-relative acceptance-list path.
-pub const DEFAULT_ACCEPTANCE_PATH: &str = ".gnr8/accepted-api-changes.json";
+pub const DEFAULT_ACCEPTANCE_PATH: &str = "gnr8-accepted-changes.json";
 
 /// Current schema version for the acceptance-list document.
 pub const ACCEPTANCE_SCHEMA_VERSION: u32 = 1;
@@ -208,7 +208,7 @@ pub enum AcceptanceError {
 /// Resolve and load an explicit acceptance list, or the default list when it exists.
 ///
 /// Relative explicit paths are resolved from the project root. With no explicit path,
-/// [`.gnr8/accepted-api-changes.json`](DEFAULT_ACCEPTANCE_PATH) is consumed only when present.
+/// [`gnr8-accepted-changes.json`](DEFAULT_ACCEPTANCE_PATH) is consumed only when present.
 ///
 /// # Errors
 ///
@@ -218,18 +218,19 @@ pub fn load_change_acceptances(
     project_root: &Path,
     explicit_path: Option<&Path>,
 ) -> Result<Option<ChangeAcceptances>, AcceptanceError> {
+    // Records keep the path as it was configured, not as it resolves on this machine: the report
+    // carries it as provenance, and an absolute checkout prefix would make that report differ
+    // between two runners analyzing identical input.
     let (path, required) = match explicit_path {
-        Some(path) => (
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                project_root.join(path)
-            },
-            true,
-        ),
-        None => (project_root.join(DEFAULT_ACCEPTANCE_PATH), false),
+        Some(path) => (path.to_path_buf(), true),
+        None => (PathBuf::from(DEFAULT_ACCEPTANCE_PATH), false),
     };
-    let text = match std::fs::read_to_string(&path) {
+    let resolved = if path.is_absolute() {
+        path.clone()
+    } else {
+        project_root.join(&path)
+    };
+    let text = match std::fs::read_to_string(&resolved) {
         Ok(text) => text,
         Err(source) if !required && source.kind() == std::io::ErrorKind::NotFound => {
             return Ok(None)
@@ -468,6 +469,9 @@ pub fn apply_change_acceptances(
         finding.gating = false;
         finding.accepted = Some(AcceptedChange { reason });
     }
+    // Record the list even when it accepted nothing: "consulted and matched none" and "no list at
+    // all" are different invocations, and only the report can tell a later reader which one ran.
+    report.policy.acceptance_file = Some(acceptances.path.display().to_string());
     report.summary.gating = report
         .changes
         .iter()
@@ -523,6 +527,7 @@ mod tests {
             policy: ChangePolicy {
                 exempt_tags: Vec::new(),
                 gate_operations: vec!["POST /ingest/logs/write".to_string()],
+                acceptance_file: None,
             },
             summary: ChangeSummary {
                 breaking: 3,
@@ -553,7 +558,7 @@ mod tests {
 
     fn acceptances(entries: Vec<ChangeAcceptance>) -> ChangeAcceptances {
         ChangeAcceptances {
-            path: PathBuf::from(".gnr8/accepted-api-changes.json"),
+            path: PathBuf::from("gnr8-accepted-changes.json"),
             entries,
         }
     }

@@ -266,6 +266,26 @@ scaffolds this crate; the tool does not run without it — adapting that code *i
 is **compile-time** (the host `cargo run`s the user's crate, which links `gnr8-core`); there is no
 dynamic plugin runtime, FFI, or macro-heavy config DSL.
 
+**Invocation policy is not the config surface.** What one *run* of a command enforces — which base
+revision to compare against, which operations or tags the gate covers, which reviewed findings a
+human already accepted — is supplied by the caller (usually CI), not by the pipeline. It has always
+lived on the command line: `--base`, `--exempt-tag`, `--gate-operation`. A caller may name a file for
+the parts of it too large or too churn-prone for argv, such as `gnr8 changes --acceptance-file`,
+whose entries are added and deleted per pull request.
+
+That is not a loophole in the rule above, and it does not travel:
+
+- It never describes **how artifacts are generated.** The moment a file would carry a `Source`,
+  `Transform`, `Target`, `PostProcess`, or any setting that changes generated output, it is the config
+  surface and rule 4 applies absolutely — that file must not exist.
+- It states only **what this invocation enforces**, and every fact in it is one the caller already
+  passes today as a flag.
+- It stays **out of `.gnr8/`.** That directory is the pipeline crate; a data file inside it reads as
+  configuration no matter what this section says, so invocation-policy files live at the project root.
+
+The test is: could this fact be a CLI flag on one command? If yes, it is invocation policy. If it
+would have to become a `Pipeline` method to mean anything, it is config, and it is code.
+
 ---
 
 ## Dependency review boundary
@@ -285,7 +305,8 @@ over broadening the dependency surface, and keep product semantics in repository
 - Internal API graph is the source of truth; OpenAPI/SDK are **artifacts** generated from it.
 - Code-first extraction; the user's engine config — the `.gnr8/` Rust crate, never a data file — is the
   escape hatch for facts the source cannot express (see rule 4). Human prose about one operation is not
-  such a fact: it lives in that handler's own doc comment (rule 0.1, category 2).
+  such a fact: it lives in that handler's own doc comment (rule 0.1, category 2). What one invocation
+  of a command enforces is not engine config at all (see rule 4, "Invocation policy").
 - No dynamic plugin runtime, no macro-heavy config API, no graph database; extension is compile-time only.
 - Typed library errors; no production `unwrap`/`expect`/`panic`; deterministic, sorted output
   (identical input ⇒ byte-identical output).

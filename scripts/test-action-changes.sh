@@ -45,6 +45,8 @@ Exempt tags: <code>internal</code>
 
 Protected operations: <code>POST /books</code>
 
+Acceptance list: <code>.gnr8/reviewed.json</code>
+
 Summary: 1 breaking changes detected; 0 accepted after review; 1 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.
 
 Breaking — protected surface (1)
@@ -63,7 +65,8 @@ cat <<'JSON'
   "base": {"ref": "HEAD", "resolved": "0123456789012345678901234567890123456789"},
   "policy": {
     "exempt_tags": ["internal"],
-    "gate_operations": ["POST /books"]
+    "gate_operations": ["POST /books"],
+    "acceptance_file": ".gnr8/reviewed.json"
   },
   "summary": {
     "breaking": 1,

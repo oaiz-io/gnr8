@@ -107,7 +107,7 @@ pub(crate) enum Commands {
 
         /// JSON file containing exact reviewed breaking findings to accept.
         ///
-        /// When omitted, .gnr8/accepted-api-changes.json is used if it exists.
+        /// When omitted, gnr8-accepted-changes.json is used if it exists.
         #[arg(long, value_name = "PATH")]
         acceptance_file: Option<PathBuf>,
 
