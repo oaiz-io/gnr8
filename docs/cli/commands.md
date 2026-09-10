@@ -245,10 +245,12 @@ The list this run consulted is recorded in the report's policy as `acceptance_fi
 as configured rather than as resolved on the running machine, so two runners analyzing identical
 input still produce byte-identical reports.
 
-Every entry must match exactly one breaking finding in the current run. No match—including a changed
-comparison fingerprint—is a status-2 stale configuration error naming the entry. This is what makes
-the list self-removing: after the change lands on the base revision, delete its now-stale entry. A
-match remains classified `BREAKING`, keeps its protected/exempt state, appears in the report's
+Every entry must match exactly one breaking finding that is currently gating under the invocation's
+operation and tag policy. Naming an already advisory or exempt finding is a status-2 configuration
+error, which prevents an unnecessary entry from becoming a dormant acceptance if those filters later
+change. No match—including a changed comparison fingerprint—is a status-2 stale configuration error
+naming the entry. This is what makes the list self-removing: after the change lands on the base
+revision, delete its now-stale entry. A match remains classified `BREAKING`, appears in the report's
 `Accepted` section with the required reason, and is removed only from the exit-status count. Other
 findings and all operation/tag policy are unchanged. This is an exact reviewed exception, not a way
 to switch off the gate.

@@ -14,6 +14,10 @@ pub const ACCEPTANCE_SCHEMA_VERSION: u32 = 1;
 /// How a finding with no narrow subject is spelled in a diagnostic.
 const NO_SUBJECT: &str = "(no subject)";
 
+type FindingKey<'a> = (&'a str, &'a str, Option<&'a str>, &'a str);
+type FindingIndexes<'a> = BTreeMap<FindingKey<'a>, Vec<usize>>;
+type UnscopedFindingKey<'a> = (&'a str, Option<&'a str>);
+
 /// One exact breaking finding a human reviewed and accepted.
 ///
 /// The key is the finding's own identity and exact-comparison fingerprint as the JSON report prints
@@ -205,6 +209,22 @@ pub enum AcceptanceError {
         /// Finding code.
         code: String,
         /// Narrow subject, absent for a document-wide finding.
+        subject: Option<String>,
+    },
+    /// The named finding exists but the current operation/tag policy already makes it advisory.
+    #[error(
+        "API change acceptance in `{}` names `{code}` / `{operation}` / `{}`, but that finding does not gate under the current operation and tag policy; remove the unnecessary entry",
+        path.display(),
+        subject_label(subject.as_ref())
+    )]
+    NotGating {
+        /// Configured file path.
+        path: PathBuf,
+        /// Finding code.
+        code: String,
+        /// Effective operation label.
+        operation: String,
+        /// Narrow subject, absent for an operation-wide finding.
         subject: Option<String>,
     },
     /// An allegedly exact key identified more than one finding.
@@ -451,12 +471,13 @@ fn valid_operation(operation: &str) -> bool {
 
 /// Apply exact acceptance records to an already classified report.
 ///
-/// A record matches only a breaking finding with the same code, operation, subject, and exact
-/// base/current contract fingerprint. An absent subject on both sides is itself an exact match —
-/// that is how an operation-wide finding such as `operation.removed` is named. The finding remains
-/// breaking, but no longer contributes to the gate and carries its reason in the report. Every
-/// record must match exactly once, so records become hard errors as soon as their delta changes or
-/// is no longer present.
+/// A record matches only a currently gating breaking finding with the same code, operation, subject,
+/// and exact base/current contract fingerprint. An absent subject on both sides is itself an exact
+/// match — that is how an operation-wide finding such as `operation.removed` is named. The finding
+/// remains breaking, but no longer contributes to the gate and carries its reason in the report.
+/// Every record must match exactly once, so records become hard errors as soon as their delta
+/// changes, is no longer present, or is already advisory under the invocation's operation/tag
+/// policy.
 ///
 /// A finding the report does not scope to a single operation has no key at all, because accepting it
 /// would accept every operation it spans. Those are indexed separately so that naming one reports
@@ -464,38 +485,18 @@ fn valid_operation(operation: &str) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`AcceptanceError::Stale`] for no match, [`AcceptanceError::NotOperationScoped`] when the
-/// named finding is present but spans more than one operation, [`AcceptanceError::Ambiguous`] for
-/// more than one match, and [`AcceptanceError::DuplicateEntry`] if callers constructed duplicate
-/// entries without loading the validated document format.
+/// Returns [`AcceptanceError::Stale`] for no match, [`AcceptanceError::NotGating`] when the exact
+/// finding is already advisory under current invocation policy,
+/// [`AcceptanceError::NotOperationScoped`] when the named finding is present but spans more than one
+/// operation, [`AcceptanceError::Ambiguous`] for more than one match, and
+/// [`AcceptanceError::DuplicateEntry`] if callers constructed duplicate entries without loading the
+/// validated document format.
 pub fn apply_change_acceptances(
     report: &mut ChangeReport,
     acceptances: &ChangeAcceptances,
 ) -> Result<(), AcceptanceError> {
-    let mut finding_indexes: BTreeMap<(&str, &str, Option<&str>, &str), Vec<usize>> =
-        BTreeMap::new();
-    let mut unscoped_findings: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
-    for (index, finding) in report.changes.iter().enumerate() {
-        if finding.kind != ChangeKind::Breaking {
-            continue;
-        }
-        let Some(operation) = finding.operation.as_deref() else {
-            unscoped_findings.insert((finding.code.as_str(), finding.subject.as_deref()));
-            continue;
-        };
-        let Some(fingerprint) = finding.fingerprint.as_deref() else {
-            continue;
-        };
-        finding_indexes
-            .entry((
-                finding.code.as_str(),
-                operation,
-                finding.subject.as_deref(),
-                fingerprint,
-            ))
-            .or_default()
-            .push(index);
-    }
+    let (finding_indexes, nongating_findings, unscoped_findings) =
+        index_acceptance_findings(report);
 
     let mut seen = BTreeSet::new();
     let mut resolved = Vec::with_capacity(acceptances.entries.len());
@@ -522,6 +523,14 @@ pub fn apply_change_acceptances(
             entry.fingerprint.as_str(),
         );
         let Some(matches) = finding_indexes.get(&key) else {
+            if nongating_findings.contains(&key) {
+                return Err(AcceptanceError::NotGating {
+                    path: acceptances.path.clone(),
+                    code: entry.code.clone(),
+                    operation: entry.operation.clone(),
+                    subject: entry.subject.clone(),
+                });
+            }
             // The entry resolved to nothing. Say which of the two reasons it is instead of always
             // reporting a vanished delta: an unscoped finding is present and simply has no key.
             if unscoped_findings.contains(&(entry.code.as_str(), entry.subject.as_deref())) {
@@ -569,6 +578,42 @@ pub fn apply_change_acceptances(
         .filter(|finding| finding.accepted.is_some())
         .count();
     Ok(())
+}
+
+fn index_acceptance_findings(
+    report: &ChangeReport,
+) -> (
+    FindingIndexes<'_>,
+    BTreeSet<FindingKey<'_>>,
+    BTreeSet<UnscopedFindingKey<'_>>,
+) {
+    let mut finding_indexes: FindingIndexes<'_> = BTreeMap::new();
+    let mut nongating_findings = BTreeSet::new();
+    let mut unscoped_findings = BTreeSet::new();
+    for (index, finding) in report.changes.iter().enumerate() {
+        if finding.kind != ChangeKind::Breaking {
+            continue;
+        }
+        let Some(operation) = finding.operation.as_deref() else {
+            unscoped_findings.insert((finding.code.as_str(), finding.subject.as_deref()));
+            continue;
+        };
+        let Some(fingerprint) = finding.fingerprint.as_deref() else {
+            continue;
+        };
+        let key = (
+            finding.code.as_str(),
+            operation,
+            finding.subject.as_deref(),
+            fingerprint,
+        );
+        if !finding.gating {
+            nongating_findings.insert(key);
+            continue;
+        }
+        finding_indexes.entry(key).or_default().push(index);
+    }
+    (finding_indexes, nongating_findings, unscoped_findings)
 }
 
 #[cfg(test)]
@@ -767,6 +812,42 @@ mod tests {
             }
         );
         assert!(report.changes[2].gating, "unaccepted finding still gates");
+    }
+
+    #[test]
+    fn an_advisory_or_exempt_finding_cannot_create_a_dormant_acceptance() {
+        let mut report = report();
+        report.changes[0].gating = false;
+        report.changes[0].protected = Sides {
+            base: Some(false),
+            current: Some(false),
+        };
+        report.summary.gating = 2;
+
+        let error = apply_change_acceptances(
+            &mut report,
+            &acceptances(vec![ChangeAcceptance {
+                code: "request.property.constraints.changed".to_string(),
+                operation: "POST /ingest/logs/write".to_string(),
+                subject: Some("WriteLogsRequest.logs".to_string()),
+                fingerprint: TEST_FINGERPRINT.to_string(),
+                reason: "Reviewed while outside the protected surface.".to_string(),
+            }]),
+        )
+        .expect_err("only a currently gating finding needs an acceptance");
+
+        assert!(matches!(error, AcceptanceError::NotGating { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("does not gate under the current operation and tag policy"),
+            "{error}"
+        );
+        assert!(report
+            .changes
+            .iter()
+            .all(|finding| finding.accepted.is_none()));
+        assert_eq!(report.summary.gating, 2);
     }
 
     #[test]

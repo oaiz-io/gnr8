@@ -1288,6 +1288,30 @@ components:
                 && finding["accepted"]["reason"].is_string()
         }));
 
+    let narrowed_policy = gnr8(
+        &root,
+        &[
+            "changes",
+            "--base",
+            "HEAD",
+            "--gate-operation",
+            "POST /ingest/llm/generate",
+        ],
+        None,
+    );
+    assert_eq!(
+        narrowed_policy.status.code(),
+        Some(2),
+        "an acceptance for an operation outside the current protected surface must not lie dormant: {}",
+        combined(&narrowed_policy)
+    );
+    assert!(
+        combined(&narrowed_policy)
+            .contains("does not gate under the current operation and tag policy"),
+        "{}",
+        combined(&narrowed_policy)
+    );
+
     std::fs::write(
         root.join("openapi.yaml"),
         CURRENT.replace("maxItems: 100", "maxItems: 101"),

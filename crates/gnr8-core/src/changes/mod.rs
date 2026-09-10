@@ -10,7 +10,7 @@ pub use acceptance::{
 };
 pub use base::{load_base_graph, BaseGraph};
 pub use diff::{
-    diff_graphs, diff_graphs_with_gate_operations, AffectedOperation, Change, ChangeKind,
-    ChangePolicy, ChangeReport, ChangeSummary, GateOperation, GateOperationParseError, Sides,
+    diff_graphs_with_gate_operations, AffectedOperation, Change, ChangeKind, ChangePolicy,
+    ChangeReport, ChangeSummary, GateOperation, GateOperationParseError, Sides,
     GATE_OPERATION_SHAPE,
 };

@@ -443,9 +443,9 @@ impl Collector {
     }
 }
 
-/// Compare two projected graphs and derive compatibility plus tag-based gating.
-#[must_use]
-pub fn diff_graphs(
+/// Test-only shorthand for comparison without exact operation selectors.
+#[cfg(test)]
+fn diff_graphs(
     base: &ApiGraph,
     current: &ApiGraph,
     exempt_tags: &BTreeSet<String>,

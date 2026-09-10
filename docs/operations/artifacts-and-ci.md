@@ -336,11 +336,12 @@ by `code`, effective `operation`, the `subject` the report shows (omitted for an
 finding such as `operation.removed`), and its report `fingerprint`, with a required reason. The
 fingerprint binds the record to that exact base/current affected-operation contract, so a later
 change to the same field and finding code gates again without coupling it to unrelated operations.
-Accepted findings remain breaking in JSON and
-Markdown, while their exact match stops contributing to the gate. An unmatched entry is a status-2
-stale configuration error, so the Action fails until the record is updated for a changed delta or
-removed after the change reaches the base. This does not alter `report-api-changes`,
-`fail-on-breaking`, operation selection, or tag exemptions; see
+Only findings that currently gate under `gate-operations` and `exempt-tags` can be accepted; naming
+an already advisory finding is a status-2 configuration error rather than a dormant acceptance.
+Accepted findings remain breaking in JSON and Markdown, while their exact match stops contributing
+to the gate. An unmatched entry is a status-2 stale configuration error, so the Action fails until
+the record is updated for a changed delta or removed after the change reaches the base. This does
+not alter `report-api-changes`, `fail-on-breaking`, operation selection, or tag exemptions; see
 [`gnr8 changes`](../cli/commands.md#changes) for the file schema.
 
 The checked-in list trusts the repository's ordinary review and branch-protection process. It is not
