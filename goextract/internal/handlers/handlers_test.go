@@ -3451,6 +3451,7 @@ func (c *Context) JSON(int, any) {}
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -3471,12 +3472,88 @@ func (s Server) Register() {
 	s.R.GET("/unrelated-sentinel", s.unrelatedSentinel)
 	s.R.GET("/normalized", s.normalized)
 	s.R.GET("/multi-hop", s.multiHop)
+	s.R.GET("/wrapped", s.wrapped)
+	s.R.GET("/wrapped-sentinel", s.wrappedSentinel)
+	s.R.GET("/constructed", s.constructed)
+	s.R.GET("/constructed-sentinel", s.constructedSentinel)
+	s.R.GET("/flattened-sentinel", s.flattenedSentinel)
+	s.R.GET("/multi-test-wrapped", s.multiTestWrapped)
+	s.R.GET("/multi-test-flattened", s.multiTestFlattened)
+	s.R.GET("/mapped", s.mapped)
 	s.R.GET("/header-helper", s.headerHelper)
 }
 
 func readCookie(c *gin.Context) (string, error) { return c.Cookie("shared") }
 
 func forwardCookie(c *gin.Context) (string, error) { return readCookie(c) }
+
+// %w wrapping is how Go propagates a failure: this states what a bare
+// "return \"\", err" states.
+func wrappedCookie(c *gin.Context) (string, error) {
+	value, err := c.Cookie("wrapped")
+	if err != nil {
+		return "", fmt.Errorf("read cookie: %w", err)
+	}
+	return value, nil
+}
+
+type cookieError struct{ cause error }
+
+func (e *cookieError) Error() string { return "cookie: " + e.cause.Error() }
+
+// A composite literal is non-nil once boxed into the error interface, so this
+// states the failure as surely as a bare "return \"\", err".
+func constructedCookie(c *gin.Context) (string, error) {
+	value, err := c.Cookie("constructed")
+	if err != nil {
+		return "", &cookieError{cause: err}
+	}
+	return value, nil
+}
+
+// %v constructs a non-nil error but does not preserve ErrNoCookie identity.
+func flattenedCookie(c *gin.Context) (string, error) {
+	value, err := c.Cookie("flattened")
+	if err != nil {
+		return "", fmt.Errorf("read cookie: %v", err)
+	}
+	return value, nil
+}
+
+// The inner sentinel test and outer non-nil test prove different properties
+// across the two helper boundaries.
+func sentinelThenConstructWrapped(c *gin.Context) (string, error) {
+	value, err := wrappedCookie(c)
+	if errors.Is(err, http.ErrNoCookie) {
+		return "", &cookieError{cause: err}
+	}
+	return value, nil
+}
+
+func sentinelThenConstructFlattened(c *gin.Context) (string, error) {
+	value, err := flattenedCookie(c)
+	if errors.Is(err, http.ErrNoCookie) {
+		return "", &cookieError{cause: err}
+	}
+	return value, nil
+}
+
+// An arbitrary call that takes the error may hand back nil for an absent
+// cookie, so the caller's rejection is not this read's answer.
+func ignoreMissing(err error) error {
+	if errors.Is(err, http.ErrNoCookie) {
+		return nil
+	}
+	return err
+}
+
+func mappedCookie(c *gin.Context) (string, error) {
+	value, err := c.Cookie("mapped")
+	if err != nil {
+		return "", ignoreMissing(err)
+	}
+	return value, nil
+}
 
 func normalizedCookie(c *gin.Context) (string, error) {
 	value, err := c.Cookie("normalized")
@@ -3590,6 +3667,78 @@ func (s Server) normalized(c *gin.Context) {
 	c.JSON(200, Response{Value: value})
 }
 
+func (s Server) wrapped(c *gin.Context) {
+	value, err := wrappedCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) wrappedSentinel(c *gin.Context) {
+	value, err := wrappedCookie(c)
+	if errors.Is(err, http.ErrNoCookie) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) constructed(c *gin.Context) {
+	value, err := constructedCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) constructedSentinel(c *gin.Context) {
+	value, err := constructedCookie(c)
+	if errors.Is(err, http.ErrNoCookie) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) flattenedSentinel(c *gin.Context) {
+	value, err := flattenedCookie(c)
+	if errors.Is(err, http.ErrNoCookie) {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) multiTestWrapped(c *gin.Context) {
+	value, err := sentinelThenConstructWrapped(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) multiTestFlattened(c *gin.Context) {
+	value, err := sentinelThenConstructFlattened(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
+func (s Server) mapped(c *gin.Context) {
+	value, err := mappedCookie(c)
+	if err != nil {
+		c.JSON(401, Response{})
+		return
+	}
+	c.JSON(200, Response{Value: value})
+}
+
 func (s Server) multiHop(c *gin.Context) {
 	value, err := forwardCookie(c)
 	if err != nil {
@@ -3639,7 +3788,25 @@ func (s Server) headerHelper(c *gin.Context) {
 		"unrelatedSentinel": {name: "shared", location: "cookie"},
 		"normalized":        {name: "normalized", location: "cookie"},
 		// Transparent helper hops preserve the operation caller's proof.
-		"multiHop":     {name: "shared", location: "cookie", required: true},
+		"multiHop": {name: "shared", location: "cookie", required: true},
+		// A new error built out of the read's failure states what a bare error
+		// return states for a non-nil check. A %w wrapper also preserves the
+		// sentinel identity tested by errors.Is.
+		"wrapped":         {name: "wrapped", location: "cookie", required: true},
+		"wrappedSentinel": {name: "wrapped", location: "cookie", required: true},
+		"constructed":     {name: "constructed", location: "cookie", required: true},
+		// A composite without Unwrap and a %v-formatted error are non-nil but do
+		// not prove that the caller's ErrNoCookie sentinel branch runs.
+		"constructedSentinel": {name: "constructed", location: "cookie"},
+		"flattenedSentinel":   {name: "flattened", location: "cookie"},
+		// Every helper boundary carries the property its own caller tests: the
+		// intermediate errors.Is check accepts %w but not %v, while its composite
+		// return satisfies the operation's outer non-nil check.
+		"multiTestWrapped":   {name: "wrapped", location: "cookie", required: true},
+		"multiTestFlattened": {name: "flattened", location: "cookie"},
+		// An arbitrary call may map absence back to nil, so it proves neither
+		// result.
+		"mapped":       {name: "mapped", location: "cookie"},
 		"headerHelper": {name: "X-Trace", location: "header"},
 	} {
 		param, ok := paramByName(got[handler].Params, expected.name)
@@ -3648,10 +3815,12 @@ func (s Server) headerHelper(c *gin.Context) {
 		}
 	}
 
-	// Rebinding loses the read identity, and comparing with an unrelated
-	// sentinel does not prove how ErrNoCookie flows. A helper that handles
-	// ErrNoCookie itself is settled optional and a transparent hop is settled
-	// required, so neither is diagnosed.
+	// Rebinding loses the read identity, comparing with an unrelated sentinel
+	// does not prove how ErrNoCookie flows, and an arbitrary call over the error
+	// may hand back nil. A construction whose non-nilness is known but whose
+	// sentinel identity is not is unresolved for an errors.Is caller. A helper
+	// that handles ErrNoCookie itself is settled optional and a transparent or
+	// verified %w hop is settled required, so none of those is diagnosed.
 	var reported []string
 	for _, item := range diagnostics.Items() {
 		if item.Code == "request.parameter.unresolved" {
@@ -3659,7 +3828,14 @@ func (s Server) headerHelper(c *gin.Context) {
 		}
 	}
 	sort.Strings(reported)
-	wantReported := []string{"GET /rebound-error", "GET /unrelated-sentinel"}
+	wantReported := []string{
+		"GET /constructed-sentinel",
+		"GET /flattened-sentinel",
+		"GET /mapped",
+		"GET /multi-test-flattened",
+		"GET /rebound-error",
+		"GET /unrelated-sentinel",
+	}
 	if !reflect.DeepEqual(reported, wantReported) {
 		t.Fatalf("unexpected unresolved parameter diagnostics: %+v", reported)
 	}
