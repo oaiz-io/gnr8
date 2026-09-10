@@ -106,7 +106,11 @@ pub(crate) fn render_human(report: &ChangeReport) -> String {
         );
     }
     if let Some(acceptance_file) = &report.policy.acceptance_file {
-        let _ = writeln!(text, "changes: acceptance list: {acceptance_file}");
+        let _ = writeln!(
+            text,
+            "changes: acceptance list: {}",
+            one_line(acceptance_file)
+        );
     }
     if report.changes.is_empty() {
         text.push_str("No API changes.\n");
@@ -292,7 +296,7 @@ fn render_markdown_policy(text: &mut String, report: &ChangeReport) {
         "Acceptance list: {}\n",
         report.policy.acceptance_file.as_ref().map_or_else(
             || "none".to_string(),
-            |file| format!("<code>{}</code>", escape_html(file)),
+            |file| format!("<code>{}</code>", escape_html(&one_line(file))),
         )
     );
 }
@@ -937,6 +941,36 @@ mod tests {
             "The backend already enforces max=100."
         );
         assert_eq!(json["summary"]["accepted"], 1);
+    }
+
+    #[test]
+    fn acceptance_policy_path_cannot_escape_rendered_headers() {
+        let report = ChangeReport {
+            policy: ChangePolicy {
+                exempt_tags: Vec::new(),
+                gate_operations: Vec::new(),
+                acceptance_file: Some("reviewed\n<&>.json".to_string()),
+            },
+            summary: ChangeSummary::default(),
+            changes: Vec::new(),
+        };
+        let human = render_human(&report);
+        assert_eq!(
+            human,
+            "changes: acceptance list: reviewed <&>.json\nNo API changes.\n"
+        );
+
+        let base = BaseGraph {
+            reference: "HEAD".to_string(),
+            commit: "0123456789012345678901234567890123456789".to_string(),
+            graph: gnr8_engine::graph::ApiGraph::default(),
+        };
+        let markdown = render_markdown(&base, &report);
+        assert!(
+            markdown.contains("Acceptance list: <code>reviewed &lt;&amp;&gt;.json</code>\n"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("reviewed\n"), "{markdown}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Exact, fail-closed acceptance records for reviewed breaking findings.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::{ChangeKind, ChangeReport, GateOperation};
 
@@ -91,10 +91,18 @@ impl ChangeAcceptances {
 /// Typed failures while reading, validating, or applying reviewed acceptances.
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptanceError {
+    /// The configured path is not a single safe file name at the project root.
+    #[error("API change acceptance file path `{}` is invalid: {message}", path.display())]
+    InvalidPath {
+        /// Configured file path.
+        path: PathBuf,
+        /// Actionable validation detail.
+        message: String,
+    },
     /// The configured file could not be read.
     #[error("cannot read API change acceptance file `{}`: {source}", path.display())]
     Read {
-        /// Resolved file path.
+        /// Configured file path.
         path: PathBuf,
         /// Underlying filesystem error.
         #[source]
@@ -103,7 +111,7 @@ pub enum AcceptanceError {
     /// The file was not valid JSON or did not match the closed document shape.
     #[error("cannot parse API change acceptance file `{}`: {source}", path.display())]
     Parse {
-        /// Resolved file path.
+        /// Configured file path.
         path: PathBuf,
         /// Underlying JSON error.
         #[source]
@@ -115,7 +123,7 @@ pub enum AcceptanceError {
         path.display()
     )]
     SchemaVersion {
-        /// Resolved file path.
+        /// Configured file path.
         path: PathBuf,
         /// Version found in the document.
         found: u32,
@@ -129,7 +137,7 @@ pub enum AcceptanceError {
         index + 1
     )]
     InvalidEntry {
-        /// Resolved file path.
+        /// Configured file path.
         path: PathBuf,
         /// Zero-based entry index.
         index: usize,
@@ -144,7 +152,7 @@ pub enum AcceptanceError {
         subject_label(subject.as_ref())
     )]
     DuplicateEntry {
-        /// Resolved file path.
+        /// Configured file path.
         path: PathBuf,
         /// Zero-based duplicate entry index.
         index: usize,
@@ -162,7 +170,7 @@ pub enum AcceptanceError {
         subject_label(subject.as_ref())
     )]
     Stale {
-        /// Resolved file path.
+        /// Configured file path.
         path: PathBuf,
         /// Finding code.
         code: String,
@@ -178,7 +186,7 @@ pub enum AcceptanceError {
         subject_label(subject.as_ref())
     )]
     NotOperationScoped {
-        /// Resolved file path.
+        /// Configured file path.
         path: PathBuf,
         /// Finding code.
         code: String,
@@ -192,7 +200,7 @@ pub enum AcceptanceError {
         subject_label(subject.as_ref())
     )]
     Ambiguous {
-        /// Resolved file path.
+        /// Configured file path.
         path: PathBuf,
         /// Finding code.
         code: String,
@@ -207,13 +215,16 @@ pub enum AcceptanceError {
 
 /// Resolve and load an explicit acceptance list, or the default list when it exists.
 ///
-/// Relative explicit paths are resolved from the project root. With no explicit path,
-/// [`gnr8-accepted-changes.json`](DEFAULT_ACCEPTANCE_PATH) is consumed only when present.
+/// The path must name one relative file in the project root; nested, parent-traversing, and absolute
+/// paths are rejected so invocation policy cannot enter the `.gnr8/` pipeline crate or come from
+/// outside the project. With no explicit path, [`gnr8-accepted-changes.json`](DEFAULT_ACCEPTANCE_PATH)
+/// is consumed only when present.
 ///
 /// # Errors
 ///
-/// Returns a typed read, parse, schema, or entry-validation error. An explicitly configured missing
-/// file is a read error; an absent default file means that no acceptance policy was configured.
+/// Returns a typed path, read, parse, schema, or entry-validation error. An explicitly configured
+/// missing file is a read error; an absent default file means that no acceptance policy was
+/// configured.
 pub fn load_change_acceptances(
     project_root: &Path,
     explicit_path: Option<&Path>,
@@ -225,11 +236,8 @@ pub fn load_change_acceptances(
         Some(path) => (path.to_path_buf(), true),
         None => (PathBuf::from(DEFAULT_ACCEPTANCE_PATH), false),
     };
-    let resolved = if path.is_absolute() {
-        path.clone()
-    } else {
-        project_root.join(&path)
-    };
+    validate_acceptance_path(&path)?;
+    let resolved = project_root.join(&path);
     let text = match std::fs::read_to_string(&resolved) {
         Ok(text) => text,
         Err(source) if !required && source.kind() == std::io::ErrorKind::NotFound => {
@@ -240,6 +248,36 @@ pub fn load_change_acceptances(
         }
     };
     parse_change_acceptances(path, &text).map(Some)
+}
+
+fn validate_acceptance_path(path: &Path) -> Result<(), AcceptanceError> {
+    let Some(text) = path.to_str() else {
+        return invalid_path(
+            path,
+            "must be valid UTF-8 so the configured name can be recorded in reports",
+        );
+    };
+    if text.chars().any(char::is_control) {
+        return invalid_path(path, "must not contain control characters");
+    }
+
+    let mut components = path
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir));
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return invalid_path(
+            path,
+            "must name one relative file in the project root, outside `.gnr8/`",
+        );
+    }
+    Ok(())
+}
+
+fn invalid_path<T>(path: &Path, message: &str) -> Result<T, AcceptanceError> {
+    Err(AcceptanceError::InvalidPath {
+        path: path.to_path_buf(),
+        message: message.to_string(),
+    })
 }
 
 fn parse_change_acceptances(
@@ -489,7 +527,7 @@ pub fn apply_change_acceptances(
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{
         apply_change_acceptances, load_change_acceptances, parse_change_acceptances,
@@ -962,9 +1000,44 @@ mod tests {
         assert!(load_change_acceptances(&root, None)
             .expect("missing default is optional")
             .is_none());
-        let explicit = root.join("reviewed.json");
-        let error = load_change_acceptances(&root, Some(&explicit))
+        let error = load_change_acceptances(&root, Some(Path::new("reviewed.json")))
             .expect_err("explicit missing file is required");
         assert!(matches!(error, AcceptanceError::Read { .. }));
+    }
+
+    #[test]
+    fn an_explicit_path_must_name_one_project_root_file() {
+        let root = std::env::temp_dir().join("gnr8-acceptance-path-test");
+        for path in [
+            Path::new(".gnr8/reviewed.json"),
+            Path::new("policy/reviewed.json"),
+            Path::new("../reviewed.json"),
+            Path::new("reviewed\nchanges.json"),
+        ] {
+            let error = load_change_acceptances(&root, Some(path))
+                .expect_err("non-root acceptance path must fail");
+            assert!(matches!(error, AcceptanceError::InvalidPath { .. }));
+        }
+
+        let absolute = root.join("reviewed.json");
+        let error = load_change_acceptances(&root, Some(&absolute))
+            .expect_err("absolute acceptance path must fail");
+        assert!(matches!(error, AcceptanceError::InvalidPath { .. }));
+        assert!(error.to_string().contains("project root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_acceptance_path_is_a_typed_error() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = PathBuf::from(OsString::from_vec(vec![
+            b'r', 0xff, b'.', b'j', b's', b'o', b'n',
+        ]));
+        let error = load_change_acceptances(Path::new("."), Some(&path))
+            .expect_err("non-UTF-8 acceptance path must fail");
+        assert!(matches!(error, AcceptanceError::InvalidPath { .. }));
+        assert!(error.to_string().contains("valid UTF-8"));
     }
 }

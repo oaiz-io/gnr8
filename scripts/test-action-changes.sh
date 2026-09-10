@@ -45,7 +45,7 @@ Exempt tags: <code>internal</code>
 
 Protected operations: <code>POST /books</code>
 
-Acceptance list: <code>.gnr8/reviewed.json</code>
+Acceptance list: <code>reviewed-api-changes.json</code>
 
 Summary: 1 breaking changes detected; 0 accepted after review; 1 protected-surface breaking changes; 0 additive changes; 0 documentation-only changes.
 
@@ -66,7 +66,7 @@ cat <<'JSON'
   "policy": {
     "exempt_tags": ["internal"],
     "gate_operations": ["POST /books"],
-    "acceptance_file": ".gnr8/reviewed.json"
+    "acceptance_file": "reviewed-api-changes.json"
   },
   "summary": {
     "breaking": 1,
@@ -109,7 +109,7 @@ log="$tmp/args"
 
 GNR8_BIN="$fake" \
 BASE_REF=HEAD \
-ACCEPTANCE_FILE=.gnr8/reviewed.json \
+ACCEPTANCE_FILE=reviewed-api-changes.json \
 EXEMPT_TAGS=$'internal\ninternal\n#partner\n partner APIs ' \
 GATE_OPERATIONS=$'POST /books\nGET /reports' \
 WORKING_DIRECTORIES="$repo_root/examples/bookstore" \
@@ -144,7 +144,7 @@ grep -F -- '--exempt-tag internal --exempt-tag internal' "$log" >/dev/null
 grep -F -- '--exempt-tag \#partner' "$log" >/dev/null
 grep -F -- '--exempt-tag \ partner\ APIs\ ' "$log" >/dev/null
 grep -F -- '--gate-operation POST\ /books --gate-operation GET\ /reports' "$log" >/dev/null
-grep -F -- '--acceptance-file .gnr8/reviewed.json' "$log" >/dev/null
+grep -F -- '--acceptance-file reviewed-api-changes.json' "$log" >/dev/null
 report_root="$(sed -n 's/^report-root=//p' "$output")"
 test -s "$report_root/001/report.json"
 test -s "$report_root/001/report.md"

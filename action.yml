@@ -39,7 +39,7 @@ inputs:
     required: false
     default: "origin/main"
   acceptance-file:
-    description: Project-relative JSON file containing exact reviewed breaking findings to accept.
+    description: Project-root JSON file containing exact reviewed breaking findings to accept.
     required: false
     default: ""
   exempt-tags:

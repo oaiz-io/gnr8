@@ -105,9 +105,10 @@ pub(crate) enum Commands {
         #[arg(long, value_parser = parse_gate_operation)]
         gate_operation: Vec<GateOperation>,
 
-        /// JSON file containing exact reviewed breaking findings to accept.
+        /// Project-root JSON file containing exact reviewed breaking findings to accept.
         ///
-        /// When omitted, gnr8-accepted-changes.json is used if it exists.
+        /// Must be a relative file name with no directory components. When omitted,
+        /// gnr8-accepted-changes.json is used if it exists.
         #[arg(long, value_name = "PATH")]
         acceptance_file: Option<PathBuf>,
 
@@ -403,13 +404,13 @@ mod tests {
             "--base",
             "main",
             "--acceptance-file",
-            ".gnr8/reviewed.json",
+            "reviewed.json",
         ])
         .expect("acceptance file path");
         assert!(matches!(
             cli.command,
             Commands::Changes { acceptance_file: Some(path), .. }
-                if path == Path::new(".gnr8/reviewed.json")
+                if path == Path::new("reviewed.json")
         ));
     }
 

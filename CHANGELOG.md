@@ -19,8 +19,10 @@ must move the minor version.
   finding the report does not scope to one operation has no key at all, and naming one reports that
   directly rather than as a stale entry. Matched findings remain `BREAKING` in human, JSON, and
   Markdown reports, but move to an `Accepted` section and no longer fail the gate. An unmatched,
-  ambiguous, duplicate, malformed, or unjustified entry is a hard configuration error, so a record
-  becomes stale as soon as its change reaches the base revision. The report's policy records the
+  ambiguous, duplicate, malformed, misplaced, or unjustified entry is a hard configuration error,
+  so a record becomes stale as soon as its change reaches the base revision. Acceptance-list paths
+  are restricted to one file name at the project root, keeping invocation policy outside the
+  `.gnr8/` pipeline crate. The report's policy records the
   `acceptance_file` it consulted, so a published artifact distinguishes "no list" from "a list that
   accepted nothing". The GitHub Action exposes the same path as `acceptance-file` without changing
   `report-api-changes` or `fail-on-breaking`.
