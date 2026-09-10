@@ -1,6 +1,6 @@
 //! gnr8 binary entry point — the orchestrator + trusted writer (D-09).
 //!
-//! gnr8 is configured ONLY by code: `gnr8 init` scaffolds a `.gnr8/` Rust crate (the pipeline), and
+//! gnr8's generation pipeline is configured ONLY by code: `gnr8 init` scaffolds a `.gnr8/` Rust crate, and
 //! every generating command builds that crate once, runs the resulting worker, and drives a framed
 //! protocol over its stdio. The host executes every built-in stage itself and asks the worker only
 //! for the stages the user wrote; then it owns the writes (the ownership manifest, no-op skip, edit
@@ -60,8 +60,17 @@ fn run() -> Result<()> {
             base,
             exempt_tag,
             gate_operation,
+            acceptance_file,
             markdown,
-        } => run_changes(base, exempt_tag, gate_operation, *markdown, policy, output),
+        } => run_changes(
+            base,
+            exempt_tag,
+            gate_operation,
+            acceptance_file.as_deref(),
+            *markdown,
+            policy,
+            output,
+        ),
         Commands::Watch { debounce_ms } => run_watch(*debounce_ms, policy, output),
         Commands::Doctor => run_doctor(policy, output),
     }
@@ -73,6 +82,7 @@ fn run_changes(
     base_reference: &str,
     exempt_tags: &[String],
     gate_operations: &[cli::GateOperation],
+    acceptance_file: Option<&Path>,
     markdown: bool,
     policy: WorkerPolicy,
     output: Output,
@@ -86,6 +96,7 @@ fn run_changes(
         output
     };
     let root = project_root()?;
+    let acceptances = gnr8_engine::changes::load_change_acceptances(&root, acceptance_file)?;
     let total_start = Instant::now();
     output.verbose(format!("changes: loading base {base_reference}"));
     let base = gnr8_engine::changes::load_base_graph(&root, base_reference)?;
@@ -109,12 +120,15 @@ fn run_changes(
     }
 
     let exempt_tags: std::collections::BTreeSet<String> = exempt_tags.iter().cloned().collect();
-    let report = gnr8_engine::changes::diff_graphs_with_gate_operations(
+    let mut report = gnr8_engine::changes::diff_graphs_with_gate_operations(
         &base.graph,
         &current.graph,
         &exempt_tags,
         gate_operations,
     )?;
+    if let Some(acceptances) = &acceptances {
+        gnr8_engine::changes::apply_change_acceptances(&mut report, acceptances)?;
+    }
     print_diagnostics(output, &run.outcome.diagnostics);
     match format {
         changes::ReportFormat::Markdown => print!("{}", changes::render_markdown(&base, &report)),

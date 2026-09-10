@@ -9,6 +9,18 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **`gnr8 changes` accepts exact, reviewed breaking findings through a checked-in acceptance
+  list.** `--acceptance-file <path>` reads a versioned JSON list, while
+  `.gnr8/accepted-api-changes.json` is discovered automatically when present. Each entry must name
+  one breaking finding by its exact code, effective operation, and subject and include a human
+  reason. Matched findings remain `BREAKING` in human, JSON, and Markdown reports, but move to an
+  `Accepted` section and no longer fail the gate. An unmatched, ambiguous, duplicate, malformed, or
+  unjustified entry is a hard configuration error, so a record becomes stale as soon as its change
+  reaches the base revision. The GitHub Action exposes the same path as `acceptance-file` without
+  changing `report-api-changes` or `fail-on-breaking`.
+
 ### Fixed
 
 - **A cookie helper that wraps its read error still proves the caller's rejection.** Requiredness

@@ -6,6 +6,7 @@
 //! The global `--json` flag gives agents machine-readable output where useful.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 pub(crate) use gnr8_engine::changes::GateOperation;
 
@@ -104,6 +105,12 @@ pub(crate) enum Commands {
         #[arg(long, value_parser = parse_gate_operation)]
         gate_operation: Vec<GateOperation>,
 
+        /// JSON file containing exact reviewed breaking findings to accept.
+        ///
+        /// When omitted, .gnr8/accepted-api-changes.json is used if it exists.
+        #[arg(long, value_name = "PATH")]
+        acceptance_file: Option<PathBuf>,
+
         /// Print the report as Markdown for a job summary or pull-request comment.
         ///
         /// Selects the report format, so it cannot be combined with the global --json.
@@ -182,39 +189,13 @@ fn non_empty_tag(value: &str) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-const GATE_OPERATION_SHAPE: &str =
-    "expected `METHOD /path` using the effective route shown in reports";
+#[cfg(test)]
+const GATE_OPERATION_SHAPE: &str = gnr8_engine::changes::GATE_OPERATION_SHAPE;
 
 fn parse_gate_operation(value: &str) -> Result<GateOperation, String> {
-    if value.trim() != value || value.chars().any(char::is_control) {
-        return Err(format!(
-            "{GATE_OPERATION_SHAPE}, with no surrounding whitespace or control characters"
-        ));
-    }
-    let mut parts = value.split_ascii_whitespace();
-    let Some(method) = parts.next() else {
-        return Err(GATE_OPERATION_SHAPE.to_string());
-    };
-    let Some(path) = parts.next() else {
-        return Err(GATE_OPERATION_SHAPE.to_string());
-    };
-    if parts.next().is_some() {
-        return Err("expected exactly one HTTP method and one effective route path".to_string());
-    }
-    let method = method.to_ascii_uppercase();
-    if !matches!(
-        method.as_str(),
-        "GET" | "PUT" | "POST" | "DELETE" | "PATCH" | "OPTIONS" | "HEAD" | "TRACE"
-    ) {
-        return Err(format!("unsupported HTTP method `{method}`"));
-    }
-    if !path.starts_with('/') || path.contains(['?', '#']) {
-        return Err(
-            "effective route must be an absolute path beginning with `/`, without a query or fragment"
-                .to_string(),
-        );
-    }
-    Ok(GateOperation::new(method, path))
+    value
+        .parse::<GateOperation>()
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -228,6 +209,7 @@ mod tests {
         SourcePreset, GATE_OPERATION_SHAPE,
     };
     use clap::Parser;
+    use std::path::Path;
 
     #[test]
     fn cli_parses_all_top_level_commands() {
@@ -306,6 +288,7 @@ mod tests {
                 base,
                 exempt_tag,
                 gate_operation,
+                acceptance_file: None,
                 markdown: false
             } if base == "origin/main"
                 && exempt_tag == ["internal", "beta"]
@@ -409,6 +392,24 @@ mod tests {
             cli.command,
             Commands::Changes { gate_operation, .. }
                 if gate_operation[0].to_string() == "POST /events/{provider}"
+        ));
+    }
+
+    #[test]
+    fn changes_parses_an_explicit_acceptance_file() {
+        let cli = Cli::try_parse_from([
+            "gnr8",
+            "changes",
+            "--base",
+            "main",
+            "--acceptance-file",
+            ".gnr8/reviewed.json",
+        ])
+        .expect("acceptance file path");
+        assert!(matches!(
+            cli.command,
+            Commands::Changes { acceptance_file: Some(path), .. }
+                if path == Path::new(".gnr8/reviewed.json")
         ));
     }
 

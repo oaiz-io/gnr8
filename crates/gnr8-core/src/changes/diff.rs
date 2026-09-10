@@ -11,6 +11,35 @@ use crate::graph::{
 };
 use crate::CoreError;
 
+/// Required textual shape for exact effective-operation selectors.
+pub const GATE_OPERATION_SHAPE: &str =
+    "expected `METHOD /path` using the effective route shown in reports";
+
+/// Typed syntax error for an exact effective-operation selector.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GateOperationParseError {
+    /// The selector omitted its method or path.
+    #[error("{GATE_OPERATION_SHAPE}")]
+    Shape,
+    /// The selector carried whitespace or control characters outside its two tokens.
+    #[error("{GATE_OPERATION_SHAPE}, with no surrounding whitespace or control characters")]
+    Whitespace,
+    /// The selector carried more than the method and path tokens.
+    #[error("expected exactly one HTTP method and one effective route path")]
+    ExtraToken,
+    /// The method is not one `OpenAPI` can represent.
+    #[error("unsupported HTTP method `{method}`")]
+    Method {
+        /// Uppercase rejected method.
+        method: String,
+    },
+    /// The effective route is not an absolute path without query or fragment text.
+    #[error(
+        "effective route must be an absolute path beginning with `/`, without a query or fragment"
+    )]
+    Path,
+}
+
 /// Classification of one observable API change.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -73,6 +102,37 @@ impl std::fmt::Display for GateOperation {
     }
 }
 
+impl std::str::FromStr for GateOperation {
+    type Err = GateOperationParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim() != value || value.chars().any(char::is_control) {
+            return Err(GateOperationParseError::Whitespace);
+        }
+        let mut parts = value.split_ascii_whitespace();
+        let Some(method) = parts.next() else {
+            return Err(GateOperationParseError::Shape);
+        };
+        let Some(path) = parts.next() else {
+            return Err(GateOperationParseError::Shape);
+        };
+        if parts.next().is_some() {
+            return Err(GateOperationParseError::ExtraToken);
+        }
+        let method = method.to_ascii_uppercase();
+        if !matches!(
+            method.as_str(),
+            "GET" | "PUT" | "POST" | "DELETE" | "PATCH" | "OPTIONS" | "HEAD" | "TRACE"
+        ) {
+            return Err(GateOperationParseError::Method { method });
+        }
+        if !path.starts_with('/') || path.contains(['?', '#']) {
+            return Err(GateOperationParseError::Path);
+        }
+        Ok(Self::new(method, path))
+    }
+}
+
 /// Invocation policy recorded in the machine report.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChangePolicy {
@@ -92,6 +152,9 @@ pub struct ChangeSummary {
     pub additive: usize,
     /// Number of documentation-only findings.
     pub doc_only: usize,
+    /// Number of breaking findings covered by exact reviewed acceptances.
+    #[serde(default)]
+    pub accepted: usize,
     /// Number of breaking findings that gate this invocation.
     pub gating: usize,
 }
@@ -132,6 +195,9 @@ pub struct Change {
     pub protected: Sides<bool>,
     /// Whether this breaking finding contributes to exit status 1.
     pub gating: bool,
+    /// Reviewed acceptance metadata, present only for an exactly matched breaking finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<super::AcceptedChange>,
     /// Human-readable explanation.
     pub message: String,
     /// Current source file, when a current fact exists.
@@ -356,6 +422,7 @@ impl Collector {
             exempt: scope.exempt.clone(),
             protected: scope.protected.clone(),
             gating: kind == ChangeKind::Breaking && scope.checked,
+            accepted: None,
             message,
             file: span.as_ref().map(|span| span.file.clone()),
             line: span.as_ref().map(|span| span.start_line),

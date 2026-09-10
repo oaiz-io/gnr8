@@ -174,6 +174,7 @@ gnr8 changes --base origin/main
 gnr8 changes --base origin/main --exempt-tag internal --exempt-tag beta
 gnr8 changes --base origin/main --gate-operation "POST /events" \
   --gate-operation "POST /events/integration/{provider}"
+gnr8 changes --base origin/main --acceptance-file .gnr8/accepted-api-changes.json
 gnr8 --json changes --base origin/main
 gnr8 changes --base origin/main --markdown
 ```
@@ -196,6 +197,43 @@ The include filter is applied first and `--exempt-tag` subtracts from it. Findin
 reported, including unselected and exempt ones. Schema findings follow all transitive consumers on
 both graph sides, so a shared schema is enforced when any protected, non-exempt operation uses it.
 
+`--acceptance-file <path>` records human review of individual breaking findings without weakening
+the surrounding gate. Relative paths resolve from the project root. When the flag is omitted,
+`.gnr8/accepted-api-changes.json` is loaded automatically if it exists; an explicitly named missing
+file is an error. The versioned JSON document is:
+
+```json
+{
+  "schema_version": 1,
+  "acceptances": [
+    {
+      "code": "request.property.constraints.changed",
+      "operation": "POST /ingest/logs/write",
+      "subject": "WriteLogsRequest.logs",
+      "reason": "The backend already enforced max=100; the published contract is catching up."
+    }
+  ]
+}
+```
+
+Copy `code`, `operation`, and `subject` exactly from the JSON report. All three participate in the
+key: accepting one field does not accept a sibling field or a different finding code on the same
+field. Only a breaking finding whose report contains both `operation` and `subject` is eligible; a
+document-wide finding, a multi-operation shared-schema finding, or another finding without either
+value cannot be widened into an acceptance. Duplicate or ambiguous keys are errors.
+
+Every entry must match exactly one breaking finding in the current run. No match is a status-2 stale
+configuration error naming the entry. This is what makes the list self-removing: after the change
+lands on the base revision, delete its now-stale entry. A match remains classified `BREAKING`, keeps
+its protected/exempt state, appears in the report's `Accepted` section with the required reason, and
+is removed only from the exit-status count. Other findings and all operation/tag policy are
+unchanged. This is an exact reviewed exception, not a way to switch off the gate.
+
+Acceptance entries have no separate date expiry. The mandatory exact-match check expires them on the
+first run whose base already contains the change, without introducing a second lifecycle rule that
+could disagree with the graph delta. A record remains visible with its reason for as long as its
+unlanded delta remains under review.
+
 `ConfigurePagination` and `ConfigureSdkRuntime` policy is not yet compared, so a change to
 pagination, retry, or timeout configuration alters generated SDK methods without producing a
 finding. Response headers and the schemas of additional request-body variants are likewise outside
@@ -204,22 +242,23 @@ this comparison; their media types still participate in `request.body.media_type
 `--markdown` prints the same report as a Markdown block for a job summary or a pull-request
 comment: the base revision, operation and tag policy, the summary counts, and the findings in an
 indented code block with a `Code:` line, their affected SDK operations, and source locations.
-Non-empty groups appear in this order: `Breaking — protected surface`, `Breaking — advisory or
-exempt`, `Additive`, and `Documentation-only`, each with its count. Empty groups are omitted. It
-selects the report format, so it cannot be combined with `--json`. The GitHub Action publishes this
-output rather than formatting one of its own.
+Non-empty groups appear in this order: `Accepted`, `Breaking — protected surface`, `Breaking —
+advisory or exempt`, `Additive`, and `Documentation-only`, each with its count. Empty groups are
+omitted. It selects the report format, so it cannot be combined with `--json`. The GitHub Action
+publishes this output rather than formatting one of its own.
 
-JSON contains the requested and resolved base revision, sorted exempt-tag policy, summary counts,
-sorted exact operation policy, and deterministically sorted changes with stable dotted codes,
-effective tags, exemption state, and protected-selection state for both graph sides, the derived
-`gating` result, affected SDK operations on both extant sides, and current source locations where
-available. The JSON envelope starts with `schema_version: 1`;
+JSON contains the requested and resolved base revision, sorted exempt-tag policy, summary counts
+(including `accepted`), sorted exact operation policy, and deterministically sorted changes with
+stable dotted codes, effective tags, exemption state, and protected-selection state for both graph
+sides, the derived `gating` result, optional `accepted.reason`, affected SDK operations on both
+extant sides, and current source locations where available. The JSON envelope starts with
+`schema_version: 1`;
 `report.json` is a documented, versioned artifact for machine consumers. Consumers should check
 that version before interpreting the payload.
 
-Human output keeps the three columns — kind, operation, message — and appends an advisory/exemption
-suffix when a breaking finding is outside the enforced surface. When a current source location exists, it also appends
-`file:line` (or `file` when the line is unknown):
+Human output keeps the three columns — kind, operation, message — and appends either the accepted
+reason or an advisory/exemption suffix when applicable. When a current source location exists, it
+also appends `file:line` (or `file` when the line is unknown):
 
 ```text
 BREAKING  POST /books         request field `title` became required  handlers.go:42

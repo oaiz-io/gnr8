@@ -290,6 +290,7 @@ Action inputs:
 | `fail-on-breaking` | `true` | fail on protected-surface breaking findings; `false` keeps reports but treats status 1 as advisory |
 | `annotate-api-changes` | `true` | emit current-source workflow annotations when change reporting is enabled; requires `python3` |
 | `base-ref` | `origin/main` | revision containing each project's committed graph artifact |
+| `acceptance-file` | empty | project-relative exact-finding acceptance list; the CLI default is used when empty |
 | `gate-operations` | empty | newline-separated exact `METHOD /effective-path` operations forming an include-only protected surface |
 | `exempt-tags` | empty | newline-separated exact operation tags exempted from the change gate |
 | `cache` | `true` | cache `.gnr8/cache` and `.gnr8/target` |
@@ -327,10 +328,19 @@ Schema findings inherit all transitive operation consumers from both sides. Incl
 before `exempt-tags`, so an exempt tag removes even an explicitly selected operation from enforcement.
 With no operation filter, all non-exempt breaking findings retain the existing gate behavior.
 
-A future exact-finding approval flow requires a trusted signed record rather than a pull-request label
-or branch-owned allow list. The issue-ready threat model, payload, and acceptance criteria are in
-[Protected-change attestations](protected-change-attestations.md); it is deliberately not implemented
-until the repository has an external authorization and signing boundary.
+`acceptance-file` maps to the CLI's `--acceptance-file`. A relative path is resolved independently
+from each configured working directory; when the input is empty, each project automatically uses
+`.gnr8/accepted-api-changes.json` if present. The file accepts only the exact breaking finding named
+by `code`, effective `operation`, and `subject`, with a required reason. Accepted findings remain
+breaking in JSON and Markdown, while their exact match stops contributing to the gate. An unmatched
+entry is a status-2 stale configuration error, so the Action fails until the record is removed after
+the change reaches the base. This does not alter `report-api-changes`, `fail-on-breaking`, operation
+selection, or tag exemptions; see [`gnr8 changes`](../cli/commands.md#changes) for the file schema.
+
+The checked-in list trusts the repository's ordinary review and branch-protection process. It is not
+cryptographic proof that a separately authorized reviewer approved the current head. Repositories
+that require that stronger separation still need the future signed design in
+[Protected-change attestations](protected-change-attestations.md).
 
 Both reports are rendered by `gnr8 changes` itself — `--json` and `--markdown` — so the published
 Markdown is the CLI's own output rather than a second rendering of the JSON.
@@ -365,9 +375,10 @@ without changing the API gate.
 
 The Action reads each project's versioned `report.json` to emit
 [workflow annotations](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-error-message)
-associated with current source files. Protected-surface breaking findings are errors when enforcement
-is enabled; all breaking findings are warnings in advisory mode. Other advisory or exempt breaking
-findings are warnings, and additive findings are notices. Documentation-only findings remain in the reports
+associated with current source files. Protected-surface breaking findings are errors when
+enforcement is enabled; all breaking findings are warnings in advisory mode. Other advisory or
+exempt breaking findings, including accepted ones, are warnings, and additive findings are notices.
+Documentation-only findings remain in the reports
 and emit no annotations. Titles carry the stable dotted change code. gnr8 caps located annotations
 at **50 per project**, retaining the JSON report's order, and reports how many further findings were
 omitted, including those with no current location. This is our cap, not a GitHub platform limit.

@@ -1050,3 +1050,280 @@ fn changes_uses_exit_one_only_for_a_gating_break() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn changes_accepts_exact_reviewed_findings_and_rejects_them_when_stale() {
+    const BASE: &str = r"openapi: 3.0.3
+info:
+  title: Fixture
+  version: 1.0.0
+paths:
+  /ingest/llm/generate:
+    post:
+      operationId: generateLlm
+      tags: [protected]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '204':
+          description: written
+  /ingest/logs/write:
+    post:
+      operationId: writeLogs
+      tags: [protected]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WriteLogsRequest'
+      responses:
+        '204':
+          description: written
+components:
+  schemas:
+    GenerateRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            type: string
+    WriteLogsRequest:
+      type: object
+      required: [logs]
+      properties:
+        logs:
+          type: array
+          items:
+            type: string
+";
+    const CURRENT: &str = r"openapi: 3.0.3
+info:
+  title: Fixture
+  version: 1.0.0
+paths:
+  /ingest/llm/generate:
+    post:
+      operationId: generateLlm
+      tags: [protected]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '204':
+          description: written
+  /ingest/logs/write:
+    post:
+      operationId: writeLogs
+      tags: [protected]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WriteLogsRequest'
+      responses:
+        '204':
+          description: written
+components:
+  schemas:
+    GenerateRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          items:
+            type: string
+    WriteLogsRequest:
+      type: object
+      required: [logs]
+      properties:
+        logs:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+";
+
+    if !cargo_available() || !git_available() {
+        eprintln!("skipping worker_contract: cargo or git unavailable");
+        return;
+    }
+
+    let root = unique_dir("change-acceptance");
+    write_project(&root, "", OPENAPI_PIPELINE);
+    std::fs::write(root.join("openapi.yaml"), BASE).unwrap();
+    assert!(gnr8(&root, &["generate"], None).status.success());
+
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_AUTHOR_NAME", "gnr8 test")
+            .env("GIT_AUTHOR_EMAIL", "gnr8-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "gnr8 test")
+            .env("GIT_COMMITTER_EMAIL", "gnr8-test@example.invalid")
+            .output()
+            .expect("run git fixture command")
+    };
+    assert!(git(&["init", "--quiet"]).status.success());
+    assert!(git(&["add", ".gnr8", "openapi.yaml", "generated"])
+        .status
+        .success());
+    assert!(git(&[
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "base",
+    ])
+    .status
+    .success());
+
+    std::fs::write(root.join("openapi.yaml"), CURRENT).unwrap();
+    let gated = gnr8(
+        &root,
+        &[
+            "--json",
+            "changes",
+            "--base",
+            "HEAD",
+            "--gate-operation",
+            "POST /ingest/llm/generate",
+            "--gate-operation",
+            "POST /ingest/logs/write",
+        ],
+        None,
+    );
+    assert_eq!(gated.status.code(), Some(1), "{}", combined(&gated));
+    let gated_report: serde_json::Value =
+        serde_json::from_slice(&gated.stdout).expect("gating report is JSON");
+    let findings = gated_report["changes"].as_array().expect("changes");
+    assert_eq!(findings.len(), 2);
+    assert!(findings.iter().all(|finding| {
+        finding["code"] == "request.property.constraints.changed" && finding["gating"] == true
+    }));
+    assert!(findings.iter().any(|finding| {
+        finding["operation"] == "POST /ingest/llm/generate"
+            && finding["subject"] == "GenerateRequest.messages"
+    }));
+    assert!(findings.iter().any(|finding| {
+        finding["operation"] == "POST /ingest/logs/write"
+            && finding["subject"] == "WriteLogsRequest.logs"
+    }));
+
+    let acceptance = r#"{
+  "schema_version": 1,
+  "acceptances": [
+    {
+      "code": "request.property.constraints.changed",
+      "operation": "POST /ingest/llm/generate",
+      "subject": "GenerateRequest.messages",
+      "reason": "The service already rejects an empty messages collection."
+    },
+    {
+      "code": "request.property.constraints.changed",
+      "operation": "POST /ingest/logs/write",
+      "subject": "WriteLogsRequest.logs",
+      "reason": "The service already rejects more than 100 logs."
+    }
+  ]
+}
+"#;
+    let acceptance_path = root.join(".gnr8/accepted-api-changes.json");
+    std::fs::write(&acceptance_path, acceptance).unwrap();
+    let accepted = gnr8(
+        &root,
+        &[
+            "--json",
+            "changes",
+            "--base",
+            "HEAD",
+            "--gate-operation",
+            "POST /ingest/llm/generate",
+            "--gate-operation",
+            "POST /ingest/logs/write",
+        ],
+        None,
+    );
+    assert!(accepted.status.success(), "{}", combined(&accepted));
+    let accepted_report: serde_json::Value =
+        serde_json::from_slice(&accepted.stdout).expect("accepted report is JSON");
+    assert_eq!(accepted_report["summary"]["breaking"], 2);
+    assert_eq!(accepted_report["summary"]["accepted"], 2);
+    assert_eq!(accepted_report["summary"]["gating"], 0);
+    assert!(accepted_report["changes"]
+        .as_array()
+        .expect("accepted changes")
+        .iter()
+        .all(|finding| {
+            finding["kind"] == "breaking"
+                && finding["gating"] == false
+                && finding["accepted"]["reason"].is_string()
+        }));
+
+    let one_acceptance = r#"{
+  "schema_version": 1,
+  "acceptances": [
+    {
+      "code": "request.property.constraints.changed",
+      "operation": "POST /ingest/llm/generate",
+      "subject": "GenerateRequest.messages",
+      "reason": "The service already rejects an empty messages collection."
+    }
+  ]
+}
+"#;
+    std::fs::write(&acceptance_path, one_acceptance).unwrap();
+    let unaccepted = gnr8(&root, &["--json", "changes", "--base", "HEAD"], None);
+    assert_eq!(
+        unaccepted.status.code(),
+        Some(1),
+        "{}",
+        combined(&unaccepted)
+    );
+    let unaccepted_report: serde_json::Value =
+        serde_json::from_slice(&unaccepted.stdout).expect("partially accepted report is JSON");
+    assert_eq!(unaccepted_report["summary"]["accepted"], 1);
+    assert_eq!(unaccepted_report["summary"]["gating"], 1);
+
+    std::fs::write(&acceptance_path, acceptance).unwrap();
+    assert!(gnr8(&root, &["generate"], None).status.success());
+    assert!(git(&["add", "openapi.yaml", "generated"]).status.success());
+    assert!(git(&[
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "current",
+    ])
+    .status
+    .success());
+    let stale = gnr8(&root, &["changes", "--base", "HEAD"], None);
+    assert_eq!(stale.status.code(), Some(2), "{}", combined(&stale));
+    let stale_text = combined(&stale);
+    assert!(
+        stale_text.contains("stale API change acceptance"),
+        "{stale_text}"
+    );
+    assert!(
+        stale_text.contains("GenerateRequest.messages"),
+        "{stale_text}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

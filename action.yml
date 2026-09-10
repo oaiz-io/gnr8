@@ -38,6 +38,10 @@ inputs:
     description: Git revision containing the committed base graph artifact.
     required: false
     default: "origin/main"
+  acceptance-file:
+    description: Project-relative JSON file containing exact reviewed breaking findings to accept.
+    required: false
+    default: ""
   exempt-tags:
     description: Newline-separated exact operation tags exempted from the API change gate.
     required: false
@@ -341,6 +345,7 @@ runs:
         BASE_REF: ${{ inputs.base-ref }}
         ANNOTATE_API_CHANGES: ${{ inputs.annotate-api-changes }}
         FAIL_ON_BREAKING: ${{ inputs.fail-on-breaking }}
+        ACCEPTANCE_FILE: ${{ inputs.acceptance-file }}
         EXEMPT_TAGS: ${{ inputs.exempt-tags }}
         GATE_OPERATIONS: ${{ inputs.gate-operations }}
         GNR8_BIN: ${{ steps.binary.outputs.path }}
