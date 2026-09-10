@@ -329,9 +329,9 @@ before `exempt-tags`, so an exempt tag removes even an explicitly selected opera
 With no operation filter, all non-exempt breaking findings retain the existing gate behavior.
 
 `acceptance-file` maps to the CLI's `--acceptance-file`. It must name one relative file in each
-configured project's root; absolute paths and directory components, including `.gnr8/`, are rejected.
-When the input is empty, each project automatically uses `gnr8-accepted-changes.json` if present. The
-file accepts only the exact breaking finding named
+configured project's root; absolute paths, directory components (including `.gnr8/`), symlinks, and
+special files are rejected. When the input is empty, each project automatically uses
+`gnr8-accepted-changes.json` if present. The file accepts only the exact breaking finding named
 by `code`, effective `operation`, and the `subject` the report shows (omitted for an operation-wide
 finding such as `operation.removed`), with a required reason. Accepted findings remain
 breaking in JSON and Markdown, while their exact match stops contributing to the gate. An unmatched

@@ -92,12 +92,21 @@ impl ChangeAcceptances {
 #[derive(Debug, thiserror::Error)]
 pub enum AcceptanceError {
     /// The configured path is not a single safe file name at the project root.
-    #[error("API change acceptance file path `{}` is invalid: {message}", path.display())]
+    #[error("API change acceptance file path {path:?} is invalid: {message}")]
     InvalidPath {
         /// Configured file path.
         path: PathBuf,
         /// Actionable validation detail.
         message: String,
+    },
+    /// The configured project-root entry is not a plain file.
+    #[error(
+        "API change acceptance file `{}` must be a regular file, not a symlink or special file",
+        path.display()
+    )]
+    InvalidFileType {
+        /// Configured file path.
+        path: PathBuf,
     },
     /// The configured file could not be read.
     #[error("cannot read API change acceptance file `{}`: {source}", path.display())]
@@ -217,8 +226,9 @@ pub enum AcceptanceError {
 ///
 /// The path must name one relative file in the project root; nested, parent-traversing, and absolute
 /// paths are rejected so invocation policy cannot enter the `.gnr8/` pipeline crate or come from
-/// outside the project. With no explicit path, [`gnr8-accepted-changes.json`](DEFAULT_ACCEPTANCE_PATH)
-/// is consumed only when present.
+/// outside the project. The named entry must be a regular file rather than a symlink or special
+/// file. With no explicit path, [`gnr8-accepted-changes.json`](DEFAULT_ACCEPTANCE_PATH) is consumed
+/// only when present.
 ///
 /// # Errors
 ///
@@ -238,8 +248,8 @@ pub fn load_change_acceptances(
     };
     validate_acceptance_path(&path)?;
     let resolved = project_root.join(&path);
-    let text = match std::fs::read_to_string(&resolved) {
-        Ok(text) => text,
+    let metadata = match std::fs::symlink_metadata(&resolved) {
+        Ok(metadata) => metadata,
         Err(source) if !required && source.kind() == std::io::ErrorKind::NotFound => {
             return Ok(None)
         }
@@ -247,6 +257,13 @@ pub fn load_change_acceptances(
             return Err(AcceptanceError::Read { path, source });
         }
     };
+    if !metadata.file_type().is_file() {
+        return Err(AcceptanceError::InvalidFileType { path });
+    }
+    let text = std::fs::read_to_string(&resolved).map_err(|source| AcceptanceError::Read {
+        path: path.clone(),
+        source,
+    })?;
     parse_change_acceptances(path, &text).map(Some)
 }
 
@@ -532,6 +549,7 @@ mod tests {
     use super::{
         apply_change_acceptances, load_change_acceptances, parse_change_acceptances,
         AcceptanceError, AcceptedChange, ChangeAcceptance, ChangeAcceptances,
+        DEFAULT_ACCEPTANCE_PATH,
     };
     use crate::changes::{
         diff_graphs, Change, ChangeKind, ChangePolicy, ChangeReport, ChangeSummary, Sides,
@@ -1024,6 +1042,51 @@ mod tests {
             .expect_err("absolute acceptance path must fail");
         assert!(matches!(error, AcceptanceError::InvalidPath { .. }));
         assert!(error.to_string().contains("project root"));
+    }
+
+    #[test]
+    fn a_rejected_path_is_escaped_in_its_diagnostic() {
+        let path = Path::new("reviewed\n::error::forged.json");
+        let error = load_change_acceptances(Path::new("."), Some(path))
+            .expect_err("control characters must fail");
+        assert!(matches!(error, AcceptanceError::InvalidPath { .. }));
+        let message = error.to_string();
+        assert!(!message.contains('\n'), "{message:?}");
+        assert!(message.contains(r"\n::error::forged.json"), "{message:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_project_root_symlink_cannot_supply_acceptance_policy() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "gnr8-acceptance-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let pipeline = root.join(".gnr8");
+        std::fs::create_dir_all(&pipeline).expect("create fixture pipeline directory");
+        std::fs::write(
+            pipeline.join("reviewed.json"),
+            r#"{"schema_version":1,"acceptances":[]}"#,
+        )
+        .expect("write nested policy");
+        symlink(
+            Path::new(".gnr8/reviewed.json"),
+            root.join(DEFAULT_ACCEPTANCE_PATH),
+        )
+        .expect("create root policy symlink");
+
+        let error = load_change_acceptances(&root, None)
+            .expect_err("a root symlink must not move policy into the pipeline crate");
+        assert!(matches!(error, AcceptanceError::InvalidFileType { .. }));
+        assert!(error.to_string().contains("not a symlink"), "{error}");
+
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[cfg(unix)]

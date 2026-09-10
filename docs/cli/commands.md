@@ -200,8 +200,9 @@ both graph sides, so a shared schema is enforced when any protected, non-exempt 
 `--acceptance-file <path>` records human review of individual breaking findings without weakening
 the surrounding gate. The path must be one relative file name at the project root: absolute paths,
 directory components (including `.gnr8/`), parent traversal, non-UTF-8 names, and control characters
-are errors. When the flag is omitted, `gnr8-accepted-changes.json` is loaded automatically if it
-exists; an explicitly named missing file is an error. The versioned JSON document is:
+are errors. The named entry must be a regular file, not a symlink or special file. When the flag is
+omitted, `gnr8-accepted-changes.json` is loaded automatically if it exists; an explicitly named
+missing file is an error. The versioned JSON document is:
 
 ```json
 {

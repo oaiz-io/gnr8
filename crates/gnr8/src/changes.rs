@@ -296,7 +296,7 @@ fn render_markdown_policy(text: &mut String, report: &ChangeReport) {
         "Acceptance list: {}\n",
         report.policy.acceptance_file.as_ref().map_or_else(
             || "none".to_string(),
-            |file| format!("<code>{}</code>", escape_html(&one_line(file))),
+            |file| format!("<code>{}</code>", escape_html(file)),
         )
     );
 }
