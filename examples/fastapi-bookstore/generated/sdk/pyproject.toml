@@ -8,6 +8,9 @@ version = "0.1.0"
 requires-python = ">=3.9"
 dependencies = ["pydantic>=2"]
 
+[project.scripts]
+"bookstore" = "sdk.cli:main"
+
 [tool.setuptools]
 packages = ["sdk"]
 

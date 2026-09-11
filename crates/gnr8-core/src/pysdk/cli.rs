@@ -31,6 +31,45 @@ fn sink(error: std::fmt::Error) -> CoreError {
     }
 }
 
+/// Write `name=<python string>,` wrapping with implicit concatenation so the line stays at 88 columns
+/// (ruff format's default).
+fn emit_string_kwarg(
+    out: &mut String,
+    indent: usize,
+    name: &str,
+    value: &str,
+) -> Result<(), CoreError> {
+    let pad = " ".repeat(indent);
+    let literal = py_string_literal(value);
+    let line = format!("{pad}{name}={literal},");
+    if line.len() <= 88 {
+        writeln!(out, "{line}").map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "{pad}{name}=(").map_err(sink)?;
+    let inner = " ".repeat(indent + 4);
+    let mut rest = value;
+    while !rest.is_empty() {
+        let min = rest.chars().next().map_or(0, char::len_utf8);
+        let mut take = rest.len();
+        loop {
+            let chunk = rest.get(..take).unwrap_or(rest);
+            let literal = py_string_literal(chunk);
+            if inner.len() + literal.len() <= 88 || take <= min {
+                writeln!(out, "{inner}{literal}").map_err(sink)?;
+                rest = &rest[chunk.len()..];
+                break;
+            }
+            take -= 1;
+            while take > min && !rest.is_char_boundary(take) {
+                take -= 1;
+            }
+        }
+    }
+    writeln!(out, "{pad}),").map_err(sink)?;
+    Ok(())
+}
+
 /// Render `<sdk dir>/cli.py` for one program name.
 ///
 /// # Errors
@@ -640,10 +679,6 @@ fn emit_parser(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
     writeln!(out, "        action=\"version\",").map_err(sink)?;
     writeln!(out, "        version=_VERSION,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
-    writeln!(out, "    parser.add_argument(").map_err(sink)?;
-    writeln!(out, "        \"--base-url\",").map_err(sink)?;
-    writeln!(out, "        default=_DEFAULT_BASE_URL,").map_err(sink)?;
-    writeln!(out, "    )").map_err(sink)?;
     if graph.operations.is_empty() {
         writeln!(out, "    return parser").map_err(sink)?;
         writeln!(out).map_err(sink)?;
@@ -701,20 +736,20 @@ fn emit_command_parser(
     writeln!(out, "    {ident} = {parent}.add_parser(").map_err(sink)?;
     writeln!(out, "        {},", py_string_literal(&command)).map_err(sink)?;
     if let Some(summary) = &prose.summary {
-        writeln!(out, "        help={},", py_string_literal(summary)).map_err(sink)?;
+        emit_string_kwarg(out, 8, "help", summary)?;
     }
     if !prose.description.is_empty() {
         let description = match &prose.summary {
             Some(summary) => format!("{summary}\n\n{}", prose.description.join("\n")),
             None => prose.description.join("\n"),
         };
-        writeln!(
-            out,
-            "        description={},",
-            py_string_literal(&description)
-        )
-        .map_err(sink)?;
+        emit_string_kwarg(out, 8, "description", &description)?;
     }
+    writeln!(out, "    )").map_err(sink)?;
+    writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"--base-url\",").map_err(sink)?;
+    writeln!(out, "        dest=\"base_url\",").map_err(sink)?;
+    writeln!(out, "        default=_DEFAULT_BASE_URL,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
     let idents = resolve_op_args_for(op, graph)?;
     let paging = paging_param_names(graph, op);
