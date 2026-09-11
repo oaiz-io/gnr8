@@ -78,6 +78,22 @@ fn main() -> std::process::ExitCode {
 }
 "#;
 
+const GO_CLI_PIPELINE: &str = r#"use gnr8::sdk::prelude::*;
+
+fn main() -> std::process::ExitCode {
+    gnr8::worker::run(
+        Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(
+                GoSdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("sdk")
+                    .cli("bookstore"),
+            ),
+    )
+}
+"#;
+
 /// Whether the Go + gofmt + cargo toolchains are all available so the e2e skips gracefully otherwise.
 fn toolchains_available() -> bool {
     let probe = |bin: &str, arg: &str| {
@@ -614,6 +630,87 @@ fn generate_python_cli_is_a_noop_on_second_run() {
         std::fs::read_to_string(&cli).expect("re-read sdk/cli.py"),
         first,
         "a no-op generate must not rewrite cli.py"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// OpenAPI → GoSdk::cli writes `sdk/cmd/<program>/main.go`, and a second generate over the same
+/// graph is a no-op (`0 written`, the CLI in `unchanged`). Needs cargo and gofmt.
+#[test]
+fn generate_go_cli_is_a_noop_on_second_run() {
+    if Command::new("cargo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+        || Command::new("gofmt")
+            .arg("-h")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+    {
+        eprintln!("skipping generate_go_cli_is_a_noop_on_second_run: cargo or gofmt unavailable");
+        return;
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gnr8-e2e-go-cli-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create the staging dir");
+    std::fs::write(root.join("openapi.yaml"), PYTHON_CLI_SPEC).expect("write the spec");
+
+    let (ok, out, err) = run_gnr8(&root, &["init"]);
+    assert!(
+        ok,
+        "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    std::fs::write(root.join(".gnr8/src/main.rs"), GO_CLI_PIPELINE).expect("write the pipeline");
+
+    let (ok, out, err) = run_gnr8(&root, &["generate"]);
+    assert!(
+        ok,
+        "gnr8 generate must write the Go CLI.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let cli = root
+        .join("sdk")
+        .join("cmd")
+        .join("bookstore")
+        .join("main.go");
+    assert!(
+        cli.is_file(),
+        "generate must write sdk/cmd/bookstore/main.go"
+    );
+    let first = std::fs::read_to_string(&cli).expect("read sdk/cmd/bookstore/main.go");
+
+    let (ok, out, err) = run_gnr8(&root, &["--json", "generate"]);
+    assert!(
+        ok,
+        "second generate must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&out).expect("generate --json is JSON");
+    assert_eq!(
+        report["counts"]["written"],
+        serde_json::json!(0),
+        "a second generate over an unchanged graph must write nothing:\n{out}"
+    );
+    let unchanged = report["unchanged"]
+        .as_array()
+        .expect("unchanged is an array");
+    assert!(
+        unchanged
+            .iter()
+            .any(|path| path.as_str() == Some("sdk/cmd/bookstore/main.go")),
+        "cmd/bookstore/main.go must be reported unchanged:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cli).expect("re-read sdk/cmd/bookstore/main.go"),
+        first,
+        "a no-op generate must not rewrite cmd/bookstore/main.go"
     );
 
     let _ = std::fs::remove_dir_all(&root);

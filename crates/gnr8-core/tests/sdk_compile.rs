@@ -26,6 +26,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use gnr8_engine::sdk::prelude::*;
+use gnr8_engine::sdk::{Artifacts, Cx, TargetExec};
+
 /// The Go Gin fixture, resolved relative to this crate's manifest dir (mirrors the other tests).
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/goalservice");
 
@@ -1489,4 +1492,291 @@ fn invalid_go_build_maps_to_go_build_error_not_panic() {
     }
 
     let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
+}
+
+fn materialize_go_cli(label: &str, graph: &gnr8_engine::graph::ApiGraph, program: &str) -> PathBuf {
+    let dir = unique_temp_dir(label);
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("sdk")
+        .without_contract_tests()
+        .cli(program)
+        .generate(graph, &mut out, &Cx::new(&dir))
+        .expect("GoSdk with .cli() must generate");
+    for file in out.files() {
+        let path = dir.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &file.text).expect("write artifact");
+    }
+    dir.join("sdk")
+}
+
+fn cli_bookstore_graph() -> gnr8_engine::graph::ApiGraph {
+    serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "getBook",
+              "method": "GET",
+              "path": "/books/{book_id}",
+              "handler": "getBook",
+              "params": [
+                {
+                  "name": "book_id",
+                  "location": "path",
+                  "required": true,
+                  "schema": { "type": "primitive", "of": { "prim": "int", "bits": 64, "signed": true } },
+                  "provenance": { "file": "http.go", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": { "ref_id": "dto.Book" } } ],
+              "provenance": { "file": "http.go", "start_line": 1, "end_line": 1 }
+            },
+            {
+              "id": "createBook",
+              "method": "POST",
+              "path": "/books",
+              "handler": "createBook",
+              "params": [],
+              "request_body": { "ref_id": "dto.Book" },
+              "request_body_required": true,
+              "responses": [ { "status": 201, "body": { "ref_id": "dto.Book" } } ],
+              "provenance": { "file": "http.go", "start_line": 2, "end_line": 2 }
+            }
+          ],
+          "schemas": [
+            {
+              "id": "dto.Book",
+              "name": "Book",
+              "body": {
+                "type": "object",
+                "of": [
+                  {
+                    "json_name": "title",
+                    "serializer_may_omit": false,
+                    "deserializer_accepts_absent": false,
+                    "deserializer_accepts_null": false,
+                    "serializer_may_emit_null": false,
+                    "validator_requires_presence": true,
+                    "validator_rejects_null": true,
+                    "schema": { "type": "primitive", "of": { "prim": "string" } },
+                    "description": null,
+                    "example": null
+                  }
+                ]
+              },
+              "provenance": { "file": "models.go", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "Bookstore API",
+          "security": []
+        }"#,
+    )
+    .expect("bookstore cli graph")
+}
+
+fn cli_auth_graph() -> gnr8_engine::graph::ApiGraph {
+    serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "listItems",
+              "method": "GET",
+              "path": "/items",
+              "handler": "listItems",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 204, "body": null } ],
+              "provenance": { "file": "http.go", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": [
+            {
+              "id": "ApiKeyAuth",
+              "kind": "apiKey",
+              "location": "header",
+              "name": "X-API-Key",
+              "global": true
+            }
+          ]
+        }"#,
+    )
+    .expect("auth cli graph")
+}
+
+fn run_cli(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> (i32, String, String) {
+    let bin = dir.join(program);
+    let mut command = Command::new(&bin);
+    command.args(args).current_dir(dir);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output().expect("run generated CLI");
+    (
+        output.status.code().unwrap_or(1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn generated_cli_go_builds() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI build: go toolchain unavailable");
+        return;
+    }
+    let dir = materialize_go_cli("cli-build", &cli_bookstore_graph(), "bookstore");
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed");
+    let (code, stdout, stderr) = run_cli(&dir, "bookstore", &["--help"], &[]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(stdout.contains("Usage:"), "{stdout}");
+    assert!(stderr.is_empty(), "{stderr}");
+    let (code, _, stderr) = run_cli(&dir, "bookstore", &[], &[]);
+    assert_eq!(code, 2, "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generated_cli_error_paths_are_diagnostics_with_documented_exit_codes() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI error paths: go toolchain unavailable");
+        return;
+    }
+    let dir = materialize_go_cli("cli-errors", &cli_bookstore_graph(), "bookstore");
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed");
+    let (code, stdout, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "create-book",
+            "--body",
+            "{oops",
+            "--base-url",
+            "http://127.0.0.1:1",
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 1, "{stderr}");
+    assert!(lines[0].contains("body is not valid JSON"), "{stderr}");
+    assert!(!stderr.contains("panic:"), "{stderr}");
+
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "create-book",
+            "--body-file",
+            "/nonexistent/body.json",
+            "--base-url",
+            "http://127.0.0.1:1",
+        ],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 1, "{stderr}");
+    assert!(lines[0].contains("cannot read"), "{stderr}");
+    assert!(!stderr.contains("panic:"), "{stderr}");
+
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "get-book",
+            "--book-id",
+            "1",
+            "--base-url",
+            "http://127.0.0.1:1",
+        ],
+        &[],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 1, "{stderr}");
+    assert!(lines[0].starts_with("bookstore:"), "{stderr}");
+    assert!(!stderr.contains("panic:"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generated_cli_helper_failure_is_exit_1_without_stack_trace() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI helper failure: go toolchain unavailable");
+        return;
+    }
+    let dir = materialize_go_cli("cli-helper", &cli_auth_graph(), "bookstore");
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed");
+    for (helper, expected) in [
+        ("/bin/false", "credential helper failed (exit 1)"),
+        (
+            "/bin/echo \"unterminated",
+            "cannot parse BOOKSTORE_CREDENTIAL_HELPER",
+        ),
+        ("   ", "BOOKSTORE_CREDENTIAL_HELPER is empty"),
+    ] {
+        let (code, stdout, stderr) = run_cli(
+            &dir,
+            "bookstore",
+            &["list-items", "--base-url", "http://127.0.0.1:1"],
+            &[
+                ("BOOKSTORE_API_KEY_AUTH", "env-credential"),
+                ("BOOKSTORE_CREDENTIAL_HELPER", helper),
+            ],
+        );
+        assert_eq!(code, 1, "helper={helper} stderr={stderr}");
+        assert!(stdout.is_empty(), "{stdout}");
+        assert!(
+            !stderr.contains("panic:"),
+            "helper={helper} stderr={stderr}"
+        );
+        let lines: Vec<&str> = stderr
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(lines.len(), 1, "helper={helper} stderr={stderr}");
+        assert!(
+            lines[0].contains("credential helper failed"),
+            "helper={helper} stderr={stderr}"
+        );
+        assert!(
+            lines[0].contains(expected),
+            "helper={helper} stderr={stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -25,6 +25,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use gnr8_engine::sdk::prelude::*;
+use gnr8_engine::sdk::{Artifacts, Cx, TargetExec};
+
 const GO_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/goalservice");
 const PY_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -366,4 +369,60 @@ fn typescript_sdk_is_prettier_clean() {
     );
 
     let _ = std::fs::remove_dir_all(&split_dir);
+}
+
+/// Go CLI (`cmd/<program>/main.go`) is gofmt-clean and included in `go vet ./...`.
+#[test]
+fn go_sdk_with_cli_is_gofmt_and_go_vet_clean() {
+    if !tool_available("go", &["version"]) {
+        eprintln!("skipping go_sdk CLI lint: go toolchain unavailable");
+        return;
+    }
+
+    let graph = gnr8_engine::analyze::build_graph(GO_FIXTURE)
+        .expect("build_graph must succeed (requires the Go toolchain)");
+    let dir = unique_temp_dir("go-cli");
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/goalservice/sdk")
+        .to("sdk")
+        .without_contract_tests()
+        .cli("goalservice")
+        .generate(&graph, &mut out, &Cx::new(&dir))
+        .expect("GoSdk with .cli() must generate");
+    for file in out.files() {
+        let path = dir.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &file.text).expect("write artifact");
+    }
+    let sdk_dir = dir.join("sdk");
+    assert!(
+        sdk_dir.join("cmd/goalservice/main.go").is_file(),
+        "CLI must be written at cmd/goalservice/main.go"
+    );
+
+    let (fmt_ok, unformatted, fmt_err) = run("gofmt", &["-l", "."], &sdk_dir, &[]);
+    assert!(
+        fmt_ok && unformatted.trim().is_empty(),
+        "generated Go SDK with CLI is not gofmt-clean:\ngofmt -l listed:\n{unformatted}\nstderr:\n{fmt_err}"
+    );
+
+    let (vet_ok, vet_out, vet_err) = run(
+        "go",
+        &["vet", "./..."],
+        &sdk_dir,
+        &[
+            ("GOPROXY", "off"),
+            ("GOFLAGS", "-mod=mod"),
+            ("GOTOOLCHAIN", "local"),
+        ],
+    );
+    assert!(
+        vet_ok,
+        "go vet flagged the generated Go SDK with CLI:\nstdout:\n{vet_out}\nstderr:\n{vet_err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
