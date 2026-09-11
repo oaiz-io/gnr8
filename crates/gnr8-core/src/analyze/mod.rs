@@ -2,7 +2,7 @@
 //!
 //! Wave 1 (02-01) landed the Rust↔Go contract surface:
 //! - [`facts`] — the serde mirror of the `goextract` JSON facts document.
-//! - [`helper`] — the `std::process::Command` subprocess driver with typed errors.
+//! - `helper` — the `std::process::Command` subprocess driver with typed errors.
 //!
 //! Wave 3 (02-03) wires them together: [`build_graph`] runs the helper, deserializes the facts, and
 //! assembles the router-agnostic [`crate::graph::ApiGraph`] (stable ids, sorted serialization,
@@ -97,9 +97,9 @@ pub(crate) fn detect_language(target_dir: &str) -> Result<Lang, crate::CoreError
 ///
 /// This is the SINGLE public face of the language detector for the CLI (`doctor`/`watch`): it carries
 /// the discrete probe-binary name and the watch trigger extension per language WITHOUT exposing the
-/// internal [`Lang`]/[`detect_language`] surface or letting a caller re-derive the language a second way
+/// internal `Lang`/`detect_language` surface or letting a caller re-derive the language a second way
 /// (CLAUDE.md rule 3 — one source of truth). It is produced ONLY by [`source_toolchain`], which maps the
-/// one [`detect_language`] decision onto these arms — never a try-one-then-fall-back chain.
+/// one `detect_language` decision onto these arms — never a try-one-then-fall-back chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceToolchain {
     /// A Go module — probed with `go version`, watched on `*.go`.
@@ -146,18 +146,18 @@ impl SourceToolchain {
     }
 }
 
-/// Resolve the source language's toolchain identity for a directory by the ONE [`detect_language`]
+/// Resolve the source language's toolchain identity for a directory by the ONE `detect_language`
 /// decision (CLI-facing surface for `doctor`/`watch`).
 ///
-/// This is a PURE MAPPING over the single classifier — it delegates to [`detect_language`] and maps each
-/// [`Lang`] arm to the matching [`SourceToolchain`] arm. It is NOT a second detector and NOT a
+/// This is a PURE MAPPING over the single classifier — it delegates to `detect_language` and maps each
+/// `Lang` arm to the matching [`SourceToolchain`] arm. It is NOT a second detector and NOT a
 /// try-go-then-python fallback (CLAUDE.md rule 3): there is exactly one file scan, exactly one decision.
 /// `detect_language`'s typed ambiguity/none [`crate::CoreError::Config`] propagates unchanged so an
 /// undetectable/mixed tree is surfaced, never guessed (the caller reports it as a finding, not a panic).
 ///
 /// # Errors
 ///
-/// Propagates [`detect_language`]'s [`crate::CoreError::Config`] when `dir` holds more than one of
+/// Propagates `detect_language`'s [`crate::CoreError::Config`] when `dir` holds more than one of
 /// Go/Python/TypeScript source (ambiguous) or none.
 pub fn source_toolchain(dir: &str) -> Result<SourceToolchain, crate::CoreError> {
     Ok(match detect_language(dir)? {
@@ -169,7 +169,7 @@ pub fn source_toolchain(dir: &str) -> Result<SourceToolchain, crate::CoreError> 
 
 /// Health-probe whether the TypeScript toolchain is ACTUALLY ready for `target_dir` — both `node` runs
 /// AND the user's `typescript` is resolvable (WR-02). The CLI-facing face of
-/// [`helper::typescript_toolchain_present`]: `gnr8 doctor` calls this for a TypeScript source so a
+/// `helper::typescript_toolchain_present`: `gnr8 doctor` calls this for a TypeScript source so a
 /// project with `node` but no `typescript` reports unhealthy up front, rather than passing doctor and
 /// then failing at `generate`. Resolution reuses the EXACT order the extractor uses (`tsextract/probe.js`
 /// → `ts.resolveTypescript`), so there is one source of truth, no second detector, no fallback (rule 3).
@@ -242,9 +242,9 @@ fn scan_markers(
 
 /// Build the router-agnostic [`crate::graph::ApiGraph`] from a Go OR Python fixture/source directory.
 ///
-/// Resolves `fixture_dir` to an absolute target, classifies its language ONCE via [`detect_language`]
+/// Resolves `fixture_dir` to an absolute target, classifies its language ONCE via `detect_language`
 /// (one deterministic detector, never a try-Go-then-try-Python fallback — CLAUDE.md rule 3), runs the
-/// matching sidecar driver ([`helper::run_goextract`] / [`helper::run_pyextract`]), and maps the SAME
+/// matching sidecar driver (`helper::run_goextract` / `helper::run_pyextract`), and maps the SAME
 /// neutral facts into the graph ([`crate::graph::ApiGraph::from_facts`], reused unchanged — the v2.0
 /// bet). Operation ids are stable, schema ids are qualified, and every collection is sorted so two
 /// runs over unchanged source are byte-identical (GRAPH-02).

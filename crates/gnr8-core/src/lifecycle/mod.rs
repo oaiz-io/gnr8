@@ -141,7 +141,7 @@ pub struct PlannedFile {
     pub new_bytes: Vec<u8>,
     /// The blake3 hash of `new_bytes` (recorded in the manifest when written).
     pub new_hash: String,
-    /// Generator provenance ([`SOURCE_GENERATED`]).
+    /// Generator provenance (`SOURCE_GENERATED`).
     pub source: String,
 }
 

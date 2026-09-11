@@ -2,8 +2,8 @@
 //!
 //! The graph is the source of truth; the `OpenAPI` document is an artifact serialized from typed
 //! structs (PROJECT constraint / D-01). [`to_openapi`] is a pure graph→typed-doc transform (no
-//! re-analysis — D-02): it builds a [`model::OpenApiDoc`] from the [`crate::graph::ApiGraph`] and
-//! serializes it with the deterministic key-ordered writer in [`yaml`].
+//! re-analysis — D-02): it builds a `model::OpenApiDoc` from the [`crate::graph::ApiGraph`] and
+//! serializes it with the deterministic key-ordered writer in `yaml`.
 //!
 //! ## Resolved Open Question A3 — the absolute base-path prefix (from code-as-config)
 //!
@@ -22,7 +22,7 @@
 //! `required` asks "must this key be present?". Input positions read decoding plus validation;
 //! output positions read serializer omission. Nullability is selected independently from decoding
 //! acceptance/validation or serializer emission. The positions come from HTTP operations and
-//! explicitly registered non-HTTP roots — see [`crate::graph::direction`]. Shared schemas whose
+//! explicitly registered non-HTTP roots — see the `graph::direction` module. Shared schemas whose
 //! contracts differ are projected into exact input/output components before lowering.
 //!
 //! ## Diagnostics (OAPI-03)
@@ -58,8 +58,8 @@ const SUPPORTED_HTTP_SCHEMES: &[&str] = &["bearer", "basic"];
 
 /// Lower the [`crate::graph::ApiGraph`] to an `OpenAPI` 3.1.0 document (serialized YAML).
 ///
-/// A pure graph→typed-doc transform (D-02): builds a [`model::OpenApiDoc`] and serializes it via the
-/// deterministic [`yaml::write`] writer. Operation paths are joined with the `base_path` prefix (Open Q
+/// A pure graph→typed-doc transform (D-02): builds a `model::OpenApiDoc` and serializes it via the
+/// deterministic `yaml::write` writer. Operation paths are joined with the `base_path` prefix (Open Q
 /// A3 — the single source of truth for the service prefix, set by a `SetBasePath` transform, CLAUDE.md
 /// rules 3 & 4); every schema `$ref` is resolved against `graph.schemas` to its bare
 /// component name. The `security` requirement and `components.securitySchemes` are built ENTIRELY from

@@ -12,9 +12,9 @@
 //! ...
 //! ```
 //!
-//! The marker is a Go-style `//` comment line; it never appears inside any emitted source and [`parse`]
+//! The marker is a Go-style `//` comment line; it never appears inside any emitted source and `parse`
 //! strips it before any file is written, so the framing is shared byte-identically across the Go, Python,
-//! and TypeScript emitters (single source of truth). [`parse`] splits the bundle back into
+//! and TypeScript emitters (single source of truth). `parse` splits the bundle back into
 //! `(name, contents)` pairs — the SAME framing [`write_to_dir`] uses to materialize files. File order is
 //! FIXED + sorted by each emitter's push order, and `to_string` is byte-identical across runs
 //! (determinism).
@@ -147,8 +147,8 @@ pub(crate) fn safe_frame_name(name: &str) -> Result<(), crate::CoreError> {
 /// Takes the public per-language `generate` output (the file-marker-framed bundle String) so an
 /// out-of-crate integration test can call it directly. File names are program-controlled — they come
 /// from the fixed per-language frame markers, never untrusted input — and are validated by
-/// [`safe_frame_name`] before being joined onto the caller's program-controlled `dir`. The bundle is
-/// split through the shared [`parse`] framing so the on-disk files match the bundle byte-for-byte. The
+/// `safe_frame_name` before being joined onto the caller's program-controlled `dir`. The bundle is
+/// split through the shared `parse` framing so the on-disk files match the bundle byte-for-byte. The
 /// framing is language-agnostic, so this one definition serves the Go, Python, and TypeScript SDKs.
 ///
 /// # Errors

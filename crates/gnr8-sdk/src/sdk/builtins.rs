@@ -30,12 +30,14 @@ use crate::sdk::model_style::PyModelStyle;
 use crate::Error;
 use std::collections::BTreeSet;
 
-/// The Go + Gin source: wraps [`crate::analyze::build_graph`] (the goextract subprocess driver).
+/// The Go + Gin source: wraps `gnr8_engine::analyze::build_graph` (the goextract subprocess driver).
 ///
 /// `inputs` are project-relative source directories; for now exactly ONE is supported (multi-input
 /// fan-in is a documented later stage), and a different count is a clear typed error rather than a
 /// silent first-wins. The single input is resolved against [`Cx::project_root`] so a relative `"."`
 /// analyzes the project root, not the process cwd.
+///
+/// [`Cx::project_root`]: crate::sdk::Cx::project_root
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GoGin {
     pub inputs: Vec<String>,
@@ -104,6 +106,8 @@ impl GoGin {
 /// operations, parameters, request/response schemas, and named components into the shared
 /// [`ApiGraph`]. Output generation remains owned by normal targets such as [`OpenApi31`],
 /// [`TsSdk`], and [`GoSdk`].
+///
+/// [`ApiGraph`]: crate::graph::ApiGraph
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OpenApi {
     pub input: String,
@@ -124,14 +128,16 @@ impl OpenApi {
     }
 }
 
-/// The FastAPI (Python) source: wraps [`crate::analyze::build_graph`] (the pyextract subprocess
+/// The FastAPI (Python) source: wraps `gnr8_engine::analyze::build_graph` (the pyextract subprocess
 /// driver), exactly like [`GoGin`] wraps goextract.
 ///
 /// `inputs` are project-relative source directories; for now exactly ONE is supported, and a
 /// different count is a clear typed error rather than a silent first-wins. The single input is
 /// resolved against [`Cx::project_root`]. This Source does NOT pick the language — it calls the SAME
-/// [`crate::analyze::build_graph`], which detects Python by scanning the target (CLAUDE.md rule 3):
+/// `gnr8_engine::analyze::build_graph`, which detects Python by scanning the target (CLAUDE.md rule 3):
 /// one deterministic path per fact, never a per-Source extraction fork.
+///
+/// [`Cx::project_root`]: crate::sdk::Cx::project_root
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FastApi {
     pub inputs: Vec<String>,
@@ -156,11 +162,11 @@ impl FastApi {
     }
 }
 
-/// The Flask (Python) source: wraps [`crate::analyze::build_graph`] (the pyextract subprocess
+/// The Flask (Python) source: wraps `gnr8_engine::analyze::build_graph` (the pyextract subprocess
 /// driver), a verbatim twin of [`FastApi`]/[`GoGin`] differing only in the error proper noun.
 ///
 /// `inputs` are project-relative source directories; exactly ONE is supported for now. Like every
-/// other source it calls the SAME [`crate::analyze::build_graph`] — language is detected from the
+/// other source it calls the SAME `gnr8_engine::analyze::build_graph` — language is detected from the
 /// target, never from which Source was used (CLAUDE.md rule 3).
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Flask {
@@ -186,12 +192,12 @@ impl Flask {
     }
 }
 
-/// The NestJS (TypeScript) source: wraps [`crate::analyze::build_graph`] (the tsextract subprocess
+/// The NestJS (TypeScript) source: wraps `gnr8_engine::analyze::build_graph` (the tsextract subprocess
 /// driver), a verbatim twin of [`FastApi`]/[`Flask`]/[`GoGin`] differing only in the error proper
 /// noun.
 ///
 /// `inputs` are project-relative source directories; exactly ONE is supported for now. Like every
-/// other source it calls the SAME [`crate::analyze::build_graph`] — language is detected from the
+/// other source it calls the SAME `gnr8_engine::analyze::build_graph` — language is detected from the
 /// TARGET (the `*.ts` tree), never from which Source was used (CLAUDE.md rule 3/4): there is no
 /// per-Source extraction fork.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -220,6 +226,8 @@ impl NestJs {
 
 /// Set [`ApiGraph::base_path`] — the API base/mount path joined to every group-relative operation
 /// path (replaces the `base_path` TOML knob).
+///
+/// [`ApiGraph::base_path`]: crate::graph::ApiGraph::base_path
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SetBasePath {
     pub base_path: String,
@@ -236,6 +244,8 @@ impl SetBasePath {
 }
 
 /// Set [`ApiGraph::title`] — the OpenAPI document title (`info.title`) (replaces the `title` knob).
+///
+/// [`ApiGraph::title`]: crate::graph::ApiGraph::title
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SetTitle {
     pub title: String,
@@ -1125,6 +1135,8 @@ impl SetEnumOrder {
 /// Push a security scheme onto [`ApiGraph::security`] — the single source of truth for the generated
 /// `security` requirement + `components.securitySchemes` (replaces the `[[security.schemes]]` knob,
 /// CLAUDE.md rule 4).
+///
+/// [`ApiGraph::security`]: crate::graph::ApiGraph::security
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ApplySecurity {
     pub scheme: SecurityScheme,
@@ -1734,7 +1746,7 @@ impl DocumentOperation {
 }
 
 /// Rename an operation by id: remap `from`'s `operation.id` to `to` (replaces a `[naming.operations]`
-/// entry). Reuses the existing [`crate::lifecycle::apply_naming`] logic so the rename semantics (and
+/// entry). Reuses the existing `gnr8_engine::lifecycle::apply_naming` logic so the rename semantics (and
 /// the `$ref`-rewrite guarantees) stay identical to the host path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RenameOperation {
@@ -1754,7 +1766,7 @@ impl RenameOperation {
 }
 
 /// Rename a type (schema) by id-or-bare-name: remap `from` to `to`, rewriting every `$ref` that
-/// pointed at it (replaces a `[naming.types]` entry). Reuses [`crate::lifecycle::apply_naming`] so a
+/// pointed at it (replaces a `[naming.types]` entry). Reuses `gnr8_engine::lifecycle::apply_naming` so a
 /// rename that would collide/collapse/chain is rejected exactly as on the host path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RenameType {
@@ -2071,7 +2083,7 @@ impl OpenApiFieldPatch {
 /// The OpenAPI 3.1 target: lowers the frozen IR to an OpenAPI document and writes it at [`OpenApi31::to`].
 ///
 /// Reads `ir.title` / `ir.base_path` / `ir.security` (the metadata transforms set) and calls the
-/// existing [`crate::lower::to_openapi`] — NOT a re-implementation. The graph's [`SecurityScheme`]s
+/// existing `gnr8_engine::lower::to_openapi` — NOT a re-implementation. The graph's [`SecurityScheme`]s
 /// are passed straight through (`to_openapi` takes `&[SecurityScheme]` directly).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OpenApi31 {
@@ -2203,8 +2215,8 @@ const fn default_contract_tests() -> bool {
 ///
 /// Derives the SDK's Go package name from [`GoSdk::module`] (the last path segment, sanitized — the
 /// same single-source-of-truth derivation the config used), calls the existing
-/// [`crate::gosdk::generate`] to produce the bundle, splits it into files via
-/// [`crate::gosdk::split_bundle`], and writes each at `<dir>/<name>`.
+/// `gnr8_engine::gosdk::generate` to produce the bundle, splits it into files via the shared bundle
+/// framing, and writes each at `<dir>/<name>`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GoSdk {
     pub module: String,
@@ -2336,11 +2348,11 @@ impl Default for GoSdk {
 /// [`PySdk::to`].
 ///
 /// The structural twin of [`GoSdk`] (minus the `gofmt` step Python has no analog for). Derives the
-/// SDK's Python package name from [`PySdk::module`] via the SAME [`sdk_package`] single-source-of-truth
+/// SDK's Python package name from [`PySdk::module`] via the SAME `sdk_package` single-source-of-truth
 /// derivation `GoSdk` uses (CLAUDE.md rule 3 — no second derivation), takes the URL prefix from
 /// `ir.base_path` (the value `SetBasePath` set and the OpenAPI lowering reads — never re-derived),
-/// calls the existing [`crate::pysdk::generate`] to produce the bundle, splits it into files via
-/// [`crate::pysdk::split_bundle`], and writes each at `<dir>/<name>`.
+/// calls the existing `gnr8_engine::pysdk::generate` to produce the bundle, splits it into files on
+/// the shared bundle framing, and writes each at `<dir>/<name>`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PySdk {
     pub module: String,
@@ -2488,11 +2500,11 @@ impl Default for PySdk {
 /// under [`TsSdk::to`].
 ///
 /// The structural twin of [`PySdk`]/[`GoSdk`]. Derives the SDK's package name from [`TsSdk::module`]
-/// via the SAME [`sdk_package`] single-source-of-truth derivation `PySdk`/`GoSdk` use (CLAUDE.md
+/// via the SAME `sdk_package` single-source-of-truth derivation `PySdk`/`GoSdk` use (CLAUDE.md
 /// rule 3 — no second derivation, no TS-specific sanitizer), takes the URL prefix from `ir.base_path`
 /// (the value `SetBasePath` set and the OpenAPI lowering reads — never re-derived), calls the existing
-/// [`crate::tssdk::generate`] to produce the bundle, splits it into files via
-/// [`crate::tssdk::split_bundle`], and writes each at `<dir>/<name>`.
+/// `gnr8_engine::tssdk::generate` to produce the bundle, splits it into files on the shared bundle
+/// framing, and writes each at `<dir>/<name>`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TsSdk {
     pub module: String,
