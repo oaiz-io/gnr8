@@ -116,12 +116,13 @@ the schemas.
 `.cli("bookstore")`. It is not gnr8's own `gnr8 generate` command surface. From this directory:
 
 ```sh
-cd generated && python3 -m sdk.cli --help            # nothing extra — works as soon as the file is written
+(cd generated && python3 -m sdk.cli --help)          # nothing extra — works as soon as the file is written
 pipx install ./generated/sdk && bookstore --help     # [project.scripts]
 uv tool install ./generated/sdk && bookstore --help
 ```
 
-`python3 -m sdk.cli` works as soon as the file is written. The installer shims need a distribution
+The subshell is what puts the package's parent on `sys.path`; the installers put the program on
+`PATH` instead. The installer shims need a distribution
 name other than the default last-segment `sdk` if you want `pipx install bookstore-sdk` — set
 `.package(SdkPackageMetadata::new().registry_name("bookstore-sdk"))` on the same `PySdk` stage.
 
