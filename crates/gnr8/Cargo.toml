@@ -12,6 +12,11 @@ description.workspace = true
 [[bin]]
 name = "gnr8"
 path = "src/main.rs"
+# This unpublished CLI binary is named `gnr8`, the same as the published thin SDK's lib target, so
+# `cargo doc --workspace` would write both to `doc/gnr8/` and warn about the collision
+# (rust-lang/cargo#6313). The binary has no library surface to document and never reaches docs.rs
+# (`publish = false`), so `doc/gnr8/` belongs to the SDK crate.
+doc = false
 
 [lints]
 workspace = true

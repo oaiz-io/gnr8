@@ -32,7 +32,7 @@
 //! forbids building forbids that too.
 //!
 //! Sharing it is only sound while the fingerprint names the same bytes read from any checkout, which
-//! is [`inputs_are_the_same_from_every_checkout`]. Two constructs can break that. A `path`
+//! is `inputs_are_the_same_from_every_checkout`. Two constructs can break that. A `path`
 //! dependency written RELATIVE to `.gnr8/` points at a directory the walk never sees AND at a
 //! different one in each checkout. A cargo `[patch]`, `[replace]` or `paths` override does it from
 //! outside the tree altogether: `.gnr8/` does not change by a byte, lockfile included, while the

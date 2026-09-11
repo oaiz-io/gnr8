@@ -1,9 +1,9 @@
 //! Pipeline stages: built-in declarations, custom Rust, and the plan the host reads.
 //!
-//! A [`Pipeline`](crate::sdk::Pipeline) stores each kind of stage in one ordered vector whose
-//! elements are either a **built-in declaration** — serializable configuration the installed host
-//! executes — or a **custom stage**, your own Rust wrapped in [`Custom`], executed in the worker
-//! process against the graph the host sends over.
+//! A [`Pipeline`] stores each kind of stage in one ordered vector whose elements are either a
+//! **built-in declaration** — serializable configuration the installed host executes — or a
+//! **custom stage**, your own Rust wrapped in [`Custom`], executed in the worker process against
+//! the graph the host sends over.
 //!
 //! [`StagePlan`] is the serializable description of that composition. It is the first thing the
 //! worker sends to the host, and it is what lets the host run the whole pipeline in order while

@@ -18,6 +18,8 @@ must move the minor version.
   surface. Credentials come from one env var per scheme or one helper command; JSON on stdout; exit
   codes 0/1/2. See [Generated CLI](docs/cli/generated-cli.md).
 
+## 0.14.1 — 2026-09-11
+
 ### Fixed
 
 - **A cookie helper that wraps its read error still proves the caller's rejection.** Requiredness
