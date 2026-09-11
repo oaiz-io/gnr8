@@ -74,7 +74,7 @@ fn main() -> std::process::ExitCode {
             .transform(SetTitle::new("Bookstore API"))          // OpenAPI info.title
             .transform(ApplySecurity::api_key("ApiKeyAuth", "X-API-Key")) // auth (lives in middleware)
             .target(OpenApi31::new().to("generated/openapi.yaml"))
-            .target(GoSdk::new().module("example.com/bookstore/sdk").to("generated/sdk"))
+            .target(GoSdk::new().module("example.com/bookstore/sdk").to("generated/sdk").cli("bookstore"))
             .post(Header::generated()),                         // "DO NOT EDIT" banner on every .go
     )
 }
