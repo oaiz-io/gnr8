@@ -1,7 +1,9 @@
 //! Emit a generated command-line client beside the Python SDK.
 //!
-//! The CLI is argparse, stdlib-only, and derived from the same [`ApiGraph`] the client is
-//! derived from. It is unrelated to gnr8's own `gnr8 init` / `generate` / `watch` command surface.
+//! The CLI is argparse and is derived from the same [`ApiGraph`] the client is derived from. It
+//! adds no dependency the SDK did not already have: the standard library, the sibling generated
+//! package, and — in the default Pydantic model style — the same `pydantic` the models import.
+//! It is unrelated to gnr8's own `gnr8 init` / `generate` / `watch` command surface.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
