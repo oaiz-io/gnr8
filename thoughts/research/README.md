@@ -29,6 +29,9 @@ The current research question:
   ([implementation review](2026-09-05-pr85-implementation-review.md))
 - [Generated SDK contract tests and `gnr8 verify`](2026-09-08-generated-sdk-contract-tests.md)
   — what the sampled cases assert, where the artifacts live, and how each language's tests are run
+- [Generating a CLI for the user's API](2026-09-11-cli-generation.md)
+  — what a command tree derives from the graph, why a graph-unchanged edit writes nothing, and where
+  every spec-driven CLI needed an escape hatch
 
 ## Current Position
 
