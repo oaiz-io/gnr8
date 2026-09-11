@@ -11,6 +11,7 @@
 //! file is framed into a [`bundle::SdkBundle`] with stable file markers; the pipeline is byte-identical
 //! across runs and never panics (RUST-04). [`write_to_dir`] materializes the same framing.
 
+mod cli;
 mod contract;
 mod emit;
 
@@ -95,6 +96,9 @@ pub fn generate_with_options(
 /// The file name the Python SDK's contract test is written at, relative to the target's output dir.
 pub(crate) const CONTRACT_TEST_FILE: &str = contract::CONTRACT_TEST_FILE;
 
+/// The file name the Python SDK's generated CLI is written at, relative to the target's output dir.
+pub(crate) const CLI_FILE: &str = cli::CLI_FILE;
+
 /// The module the generated package imports its models from, for one file layout.
 ///
 /// The contract test imports the same module the client does, resolved the one way
@@ -119,6 +123,22 @@ pub(crate) fn generate_contract_test(
     plan: &crate::verify::ContractTestPlan,
 ) -> Result<Option<String>, crate::CoreError> {
     contract::emit_contract_test(graph, &model_module_for(layout), model_style, plan)
+}
+
+/// Render the Python SDK's generated CLI.
+///
+/// # Errors
+///
+/// Returns [`crate::CoreError::SdkGen`] on a name collision, an SSE success, or an unrepresentable
+/// graph fact.
+pub(crate) fn generate_cli(
+    graph: &ApiGraph,
+    package: &str,
+    layout: &SdkFileLayout,
+    model_style: PyModelStyle,
+    cli: &gnr8::sdk::SdkCli,
+) -> Result<String, crate::CoreError> {
+    cli::emit_cli(graph, package, layout, model_style, cli)
 }
 
 /// Emit the Python SDK files from a graph that is ALREADY direction-projected — the twin of

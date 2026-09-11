@@ -221,6 +221,79 @@ fn python_sdk_is_ruff_clean() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Python target output (including `cli.py` and `contract_test.py`) is `ruff` clean.
+#[test]
+fn python_sdk_target_with_cli_is_ruff_clean() {
+    if !tool_available("ruff", &["--version"]) {
+        eprintln!("skipping python_sdk target lint: ruff unavailable");
+        return;
+    }
+    let graph = gnr8_engine::analyze::build_graph(PY_FIXTURE)
+        .expect("build_graph must succeed (requires python3 for pyextract)");
+    let target = gnr8_engine::sdk::prelude::PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("sdk")
+        .cli("bookstore");
+    let mut out = gnr8_engine::sdk::Artifacts::new();
+    gnr8_engine::sdk::TargetExec::generate(
+        &target,
+        &graph,
+        &mut out,
+        &gnr8_engine::sdk::Cx::new(std::env::temp_dir()),
+    )
+    .expect("PySdk with .cli() must generate");
+    let dir = unique_temp_dir("py-cli");
+    for artifact in out.files() {
+        let path = dir.join(&artifact.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &artifact.text).expect("write artifact");
+    }
+    let pkg = dir.join("sdk");
+    assert!(
+        pkg.join("cli.py").is_file(),
+        "target output must include cli.py"
+    );
+    assert!(
+        pkg.join("contract_test.py").is_file(),
+        "target output must include contract_test.py"
+    );
+    let pkg_str = pkg.to_str().expect("utf-8 path");
+
+    let (check_ok, check_out, check_err) = run(
+        "ruff",
+        &[
+            "check",
+            "--isolated",
+            "--no-cache",
+            "--select",
+            "F,I,UP,E",
+            "--ignore",
+            "UP007,UP045",
+            pkg_str,
+        ],
+        &dir,
+        &[],
+    );
+    assert!(
+        check_ok,
+        "ruff check flagged the generated Python SDK target:\n{check_out}{check_err}"
+    );
+
+    let (fmt_ok, fmt_out, fmt_err) = run(
+        "ruff",
+        &["format", "--isolated", "--no-cache", "--check", pkg_str],
+        &dir,
+        &[],
+    );
+    assert!(
+        fmt_ok,
+        "ruff format --check would reformat the generated Python SDK target:\n{fmt_out}{fmt_err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// TypeScript: the default SDK is Prettier-clean. Prefers the vendored `tsextract` prettier, falling back
 /// to a `PATH` prettier; skips when neither (and when `node`/`tsc` for graph-building is absent).
 #[test]

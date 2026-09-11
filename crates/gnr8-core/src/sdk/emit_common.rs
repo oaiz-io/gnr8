@@ -594,8 +594,7 @@ pub(crate) fn check_cli_names(graph: &ApiGraph, program: &str) -> Result<(), Cor
                 .operations
                 .iter()
                 .find(|other| command_group(other).as_deref() == Some(name.as_str()))
-                .map(|other| other.id.as_str())
-                .unwrap_or(name.as_str());
+                .map_or(name.as_str(), |other| other.id.as_str());
             return Err(CoreError::SdkGen {
                 message: format!(
                     "CLI {program:?} command '{name}' (operation '{}') collides with group '{name}' (operation '{grouped}'); rename one with RenameOperation",
@@ -1366,6 +1365,8 @@ pub(crate) fn operation_prose(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
     use super::{
         check_cli_names, check_unique_model_file_names, command_group, command_name,
         credential_env_var, file_stem, flag_name, helper_env_var, http_auth_features, kebab,
@@ -1561,9 +1562,10 @@ mod tests {
             ],
             ..ApiGraph::default()
         };
-        let message = check_cli_names(&graph, "bookstore")
-            .expect_err("colliding commands must be rejected")
-            .to_string();
+        let message = match check_cli_names(&graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("colliding commands must be rejected"),
+        };
         assert!(message.contains("getBook"), "{message}");
         assert!(message.contains("get_book"), "{message}");
     }
@@ -1577,9 +1579,10 @@ mod tests {
             ],
             ..ApiGraph::default()
         };
-        let message = check_cli_names(&graph, "bookstore")
-            .expect_err("command/group collision must be rejected")
-            .to_string();
+        let message = match check_cli_names(&graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("command/group collision must be rejected"),
+        };
         assert!(message.contains("books"), "{message}");
         assert!(
             message.contains("listBooks") || message.contains("group"),
@@ -1593,9 +1596,10 @@ mod tests {
             operations: vec![cli_op("getBook", None, vec![cli_param("json")])],
             ..ApiGraph::default()
         };
-        let message = check_cli_names(&graph, "bookstore")
-            .expect_err("reserved flag collision must be rejected")
-            .to_string();
+        let message = match check_cli_names(&graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("reserved flag collision must be rejected"),
+        };
         assert!(message.contains("getBook"), "{message}");
         assert!(message.contains("json"), "{message}");
         assert!(message.contains("json"), "{message}");

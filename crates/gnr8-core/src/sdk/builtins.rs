@@ -2991,6 +2991,23 @@ impl TargetExec for PySdk {
                 )?;
             }
         }
+        if let Some(cli) = &self.cli {
+            let text = crate::pysdk::generate_cli(
+                ir,
+                &model.package,
+                &self.layout,
+                self.model_style,
+                cli,
+            )?;
+            out.create(
+                format!(
+                    "{}/{}",
+                    self.dir.trim_end_matches('/'),
+                    crate::pysdk::CLI_FILE
+                ),
+                text,
+            )?;
+        }
         write_sdk_docs(
             out,
             &self.dir,
