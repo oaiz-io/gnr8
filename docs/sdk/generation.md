@@ -187,6 +187,11 @@ GoSdk::new()
 The generated Go SDK uses one ctx-first typed method surface, functional client options, explicit
 request structs, and graph-derived wire behavior.
 
+`.cli("bookstore")` emits `<sdk dir>/cmd/<program>/main.go`, a stdlib `package main` for the same
+operations. Unlike `PySdk::cli`, this does not require package metadata: there is no
+`[project.scripts]` equivalent, and `go build ./cmd/<program>` compiles the binary from that tree.
+See [Generated CLI](../cli/generated-cli.md).
+
 Exported Go identifiers are CamelCase of the wire token with Go initialisms applied, including when
 the initialism is pluralized:
 

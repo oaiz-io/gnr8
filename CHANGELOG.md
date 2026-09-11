@@ -17,6 +17,11 @@ must move the minor version.
   generated program is the user's API client, not gnr8's own `gnr8 init` / `generate` / `watch`
   surface. Credentials come from one env var per scheme or one helper command; JSON on stdout; exit
   codes 0/1/2. See [Generated CLI](docs/cli/generated-cli.md).
+- **`GoSdk::cli("bookstore")` emits a generated stdlib CLI at `<sdk dir>/cmd/<program>/main.go`.**
+  The same graph, naming, credentials, exit codes, and JSON-on-stdout contract as the Python CLI.
+  Unlike Python, `.cli()` does not require package metadata: a Go directory is one package, so the
+  CLI is a standalone `package main` that `go build ./cmd/<program>` compiles. See
+  [Generated CLI](docs/cli/generated-cli.md).
 
 ## 0.14.1 — 2026-09-11
 

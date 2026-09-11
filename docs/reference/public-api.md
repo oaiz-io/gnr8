@@ -109,10 +109,10 @@ See [OpenAPI generation](../openapi/generation.md).
 
 | Symbol | Use |
 |---|---|
-| `GoSdk` | Go client/model/docs/package/contract-test target |
+| `GoSdk` | Go client/model/docs/package/contract-test target; `.cli("bookstore")` emits `cmd/<program>/main.go` |
 | `PySdk` | Python client/model/docs/package/contract-test target; `.cli("bookstore")` emits a generated CLI |
 | `TsSdk` | TypeScript client/model/docs/package/contract-test target |
-| `SdkCli` | generated-CLI program name (`PySdk::cli`); unrelated to gnr8's own command surface |
+| `SdkCli` | generated-CLI program name (`PySdk::cli` / `GoSdk::cli`); unrelated to gnr8's own command surface |
 | `SdkFileLayout` | compact/split files, directories, and templates |
 | `OperationFileSplit` | compact/per-tag/per-endpoint operation layout enum |
 | `SdkDocs` | none/reference generated docs policy |
@@ -123,8 +123,8 @@ See [OpenAPI generation](../openapi/generation.md).
 | `ReadinessKind` | choose the OpenAPI, Go, Python, or TypeScript readiness validator |
 
 Each SDK target emits a contract test `gnr8 verify` runs with that language's own test tool;
-`without_contract_tests()` stops it. `PySdk::cli("name")` is the opt-in generated command-line
-client; see [Generated CLI](../cli/generated-cli.md).
+`without_contract_tests()` stops it. `PySdk::cli("name")` and `GoSdk::cli("name")` are the opt-in
+generated command-line clients; see [Generated CLI](../cli/generated-cli.md).
 
 See [SDK generation](../sdk/generation.md).
 

@@ -5,8 +5,10 @@
 
 This page is **not** about gnr8's own command surface (`gnr8 init`, `generate`, `watch`, `check`).
 That lives in [CLI command reference](commands.md). This page is the CLI gnr8 **generates for your
-API**: an argparse program derived from the same `ApiGraph` as the Python SDK, written next to that
-SDK as `cli.py`.
+API**: a program derived from the same `ApiGraph` as the SDK, written next to that SDK.
+
+Python emits `<sdk dir>/cli.py`. Go emits `<sdk dir>/cmd/<program>/main.go` — a Go directory is one
+package, so the CLI cannot live beside `client.go`.
 
 ## Opt in
 
@@ -17,18 +19,30 @@ SDK as `cli.py`.
         .to("generated/sdk")
         .cli("bookstore"),
 )
+.target(
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk")
+        .cli("bookstore"),
+)
 ```
 
 The builder is `.cli("bookstore")`. There is no second way to get a CLI. Absent `.cli(...)`, no
-`cli.py` is written and `pyproject.toml` has no `[project.scripts]` table.
+CLI artifact is written.
 
 `SdkCli` is the configuration type behind that method. It names the generated program. It is
 unrelated to gnr8's own CLI.
 
-Combining `.cli(...)` with `.source_only()` or `.package_metadata(false)` is a configuration error:
-without `pyproject.toml` there is nowhere for `[project.scripts]` to go.
+**Packaging is not symmetric.** Combining `.cli(...)` with `.source_only()` or
+`.package_metadata(false)` is a configuration error on `PySdk`: without `pyproject.toml` there is
+nowhere for `[project.scripts]` to go. `GoSdk::cli` does **not** require package metadata. A Go
+directory is one package, so the CLI is a standalone `package main` at `cmd/<program>/main.go` that
+`go build ./cmd/<program>` already knows how to produce a binary from. There is no `[project.scripts]`
+equivalent to write.
 
 ## What is emitted
+
+### Python
 
 One file, `<sdk dir>/cli.py`, plus three lines in `pyproject.toml` when package metadata is on:
 
@@ -46,9 +60,18 @@ The scripts key is the program name. The value's package segment is the same `sd
 Pydantic model style — the same `pydantic` the models already import. It adds no dependency the SDK
 did not already have; under `.dataclasses()` it is standard library only.
 
+### Go
+
+One file, `<sdk dir>/cmd/<program>/main.go`, `package main`, standard library only plus the sibling
+generated client. `flag.NewFlagSet` per subcommand, `os.Args[1]` dispatch, `encoding/json` on stdout,
+`os/exec` for the credential helper (`CommandContext`, 10s timeout, stdin nil, stderr discarded, first
+stdout line only). The file is `gofmt`-normalized through the same seam the rest of the Go SDK uses.
+
+Go has no `[project.scripts]` equivalent. `.cli()` does not write extra package metadata.
+
 ## How to run it
 
-From the project root, with `generated/sdk` as the output directory:
+Python, from the project root, with `generated/sdk` as the output directory:
 
 ```sh
 (cd generated && python3 -m sdk.cli --help)
@@ -65,7 +88,18 @@ installer shims need a distribution name other than the default last-segment `sd
 `.package(SdkPackageMetadata::new().registry_name("bookstore-sdk"))` on the same `PySdk` stage.
 `.cli(...)` does not invent a distribution name.
 
-The FastAPI bookstore example at `examples/fastapi-bookstore` is the committed slice.
+Go, from the SDK output directory:
+
+```sh
+go build -o bookstore ./cmd/bookstore
+./bookstore --help
+go install ./cmd/bookstore
+```
+
+The FastAPI bookstore example at `examples/fastapi-bookstore` is the committed Python slice. The Go
+bookstore example at `examples/bookstore` is the committed Go slice (`GoSdk::cli("bookstore")`).
+fastapi-bookstore's graph carries union types the Go target cannot emit, so a Go SDK is not added
+there.
 
 ## Command tree
 
@@ -198,14 +232,15 @@ commands moved.
 | default host | `document.server.*` (Breaking branch), `document.base_path.changed` | the default `--base-url` |
 | help text only | the 8 `DocOnly` codes | `--help` prose moves; tree, flags, choices and exit codes untouched |
 
-A prose-only change rewrites `cli.py`'s `--help` strings. It does not fail the breaking-change gate.
-A source edit that leaves the graph identical rewrites nothing, including `cli.py`.
+A prose-only change rewrites the generated CLI's `--help` strings. It does not fail the
+breaking-change gate. A source edit that leaves the graph identical rewrites nothing, including the
+CLI artifact.
 
 ## Determinism and ownership
 
-Two generations over the same graph produce byte-identical `cli.py`. Unchanged bytes are not
+Two generations over the same graph produce byte-identical CLI source. Unchanged bytes are not
 rewritten. The file is an ordinary artifact in the SDK output directory, so it inherits manifest
 ownership, `gnr8 check` drift reporting, `--force` protection for hand edits, and deletion when
 `.cli(...)` is removed.
 
-Go and TypeScript generated CLIs are out of this slice.
+TypeScript generated CLIs are out of this slice.

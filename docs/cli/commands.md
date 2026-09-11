@@ -5,7 +5,7 @@
 
 This page documents **gnr8's own** command surface (`gnr8 init`, `generate`, `watch`, …). A
 generated command-line client for *your* API is a separate artifact: `PySdk::cli(...)` writes
-`cli.py`. See [Generated CLI](generated-cli.md).
+`cli.py`, and `GoSdk::cli(...)` writes `cmd/<program>/main.go`. See [Generated CLI](generated-cli.md).
 
 Run commands from the application repository root. Global options are:
 

@@ -299,7 +299,9 @@ parsing and generation, and `gnr8 generate` compiles and runs it — no TOML any
 
 ## Generated CLI (current)
 
-`PySdk::cli("bookstore")` emits `<sdk dir>/cli.py`. That is the CLI gnr8 generates for the user's API;
-it is unrelated to gnr8's own `gnr8 init` / `generate` / `watch` command surface. See
+`PySdk::cli("bookstore")` emits `<sdk dir>/cli.py`. `GoSdk::cli("bookstore")` emits
+`<sdk dir>/cmd/<program>/main.go`. That is the CLI gnr8 generates for the user's API; it is
+unrelated to gnr8's own `gnr8 init` / `generate` / `watch` command surface. Go does not require
+package metadata for `.cli()` — there is no `[project.scripts]` equivalent. See
 [Generated CLI](cli/generated-cli.md).
 
