@@ -2938,6 +2938,9 @@ impl TargetExec for PySdk {
                 message: "PySdk target has no output dir — call .to(\"sdk\")".to_string(),
             });
         }
+        if let Some(cli) = &self.cli {
+            validate_pysdk_cli(&cli.program, self.package_metadata)?;
+        }
         let projected = crate::graph::projection::for_generation(ir)?;
         let ir = &*projected;
         // Derive the package from the module path via the SAME single source of truth GoSdk uses, and
@@ -3535,6 +3538,53 @@ fn sdk_package(module: &str) -> Result<String, CoreError> {
         });
     }
     Ok(pkg.to_string())
+}
+
+/// Validate a generated-CLI program name and its packaging constraint.
+///
+/// `program` must be non-empty, must not begin with `-`, and must kebab-normalize to a non-empty
+/// ASCII `[a-z0-9-]+`. Combining `.cli(...)` with `.source_only()` / `.package_metadata(false)` is a
+/// contradiction: without `pyproject.toml` there is nowhere for `[project.scripts]` to go.
+fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreError> {
+    if program.is_empty() {
+        return Err(CoreError::Config {
+            message: "PySdk::cli program name must be non-empty — call .cli(\"bookstore\") with a usable command name".to_string(),
+        });
+    }
+    if program.starts_with('-') {
+        return Err(CoreError::Config {
+            message: format!("PySdk::cli program name {program:?} must not begin with '-'"),
+        });
+    }
+    // W1: inline kebab-shaped check. W2 replaces this with emit_common::kebab, the shared
+    // derivation every CLI name uses.
+    let normalized: String = program
+        .chars()
+        .map(|c| {
+            if c == '_' {
+                '-'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    if normalized.is_empty()
+        || !normalized
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(CoreError::Config {
+            message: format!(
+                "PySdk::cli program name {program:?} does not kebab-normalize to a usable command (need ASCII [a-z0-9-]+, not starting with '-')"
+            ),
+        });
+    }
+    if !package_metadata {
+        return Err(CoreError::Config {
+            message: "PySdk::cli(...) requires package metadata so [project.scripts] can be written; do not combine .cli(...) with .source_only() or .package_metadata(false)".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn write_sdk_files(
@@ -7375,6 +7425,47 @@ mod tests {
             .expect("PySdk must emit a publishing recipe with package metadata");
         assert!(publishing.text.contains("Package: `bookstore-sdk`"));
         assert!(publishing.text.contains("python3 -m build"));
+    }
+
+    #[test]
+    fn pysdk_cli_rejects_empty_program() {
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        let error = PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-py")
+            .cli("")
+            .generate(&ir, &mut out, &cx())
+            .unwrap_err();
+        assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
+        assert!(
+            error.to_string().contains("cli"),
+            "error must name the method: {error}"
+        );
+        assert!(
+            error.to_string().contains("empty") || error.to_string().contains("non-empty"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pysdk_cli_rejects_source_only() {
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        let error = PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-py")
+            .cli("bookstore")
+            .source_only()
+            .generate(&ir, &mut out, &cx())
+            .unwrap_err();
+        assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("cli"), "{message}");
+        assert!(
+            message.contains("source_only") || message.contains("package_metadata"),
+            "{message}"
+        );
     }
 
     #[test]

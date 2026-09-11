@@ -24,6 +24,7 @@ use crate::graph::{
     OpenApiServer, PaginationMode, PaginationTermination, ResponseDocsPolicy, RuntimeHookKind,
     RuntimePolicy, SchemaUse, SecurityRequirementGroup, SecurityScheme, Type,
 };
+use crate::sdk::cli::SdkCli;
 use crate::sdk::docs::SdkDocs;
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -2353,6 +2354,8 @@ pub struct PySdk {
     pub root_exports: Vec<(String, String)>,
     #[serde(default = "default_contract_tests")]
     pub contract_tests: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<SdkCli>,
 }
 
 impl PySdk {
@@ -2369,6 +2372,7 @@ impl PySdk {
             package_info: SdkPackageMetadata::default(),
             root_exports: Vec::new(),
             contract_tests: true,
+            cli: None,
         }
     }
 
@@ -2468,6 +2472,13 @@ impl PySdk {
     #[must_use]
     pub const fn without_contract_tests(mut self) -> Self {
         self.contract_tests = false;
+        self
+    }
+
+    /// Emit a command-line client for this API beside the generated package, invoked as `<name>`.
+    #[must_use]
+    pub fn cli(mut self, program: impl Into<String>) -> Self {
+        self.cli = Some(SdkCli::new(program));
         self
     }
 
