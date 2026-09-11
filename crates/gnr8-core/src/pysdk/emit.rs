@@ -302,8 +302,46 @@ fn pydantic_field_ident(field: &Field) -> String {
 }
 
 /// Quote a Python string literal for generated source.
+///
+/// Python and Rust agree on `\n`, `\r`, `\t`, `\"` and `\\`, and they agree on WHICH characters
+/// have to be escaped — that decision is `char::escape_debug`'s, and re-deriving it here would be a
+/// second answer to one question. They disagree on the SPELLING of the escape hatch: Rust writes
+/// `\u{7f}`, and Python's tokenizer rejects that (`\u` takes exactly four hex digits, with no
+/// braces). So the printability test is Rust's and the spelling is Python's — `\xHH`, `\uHHHH`,
+/// `\UHHHHHHHH`. Text a human wrote reaches this function (an operation's prose, a schema example),
+/// and a no-break space, a soft hyphen, a byte-order mark or a decomposed accent are all characters
+/// Rust escapes, so `format!("{value:?}")` emitted Python that would not parse.
 pub(crate) fn py_string_literal(value: &str) -> String {
-    format!("{value:?}")
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // `str`'s own `Debug` leaves the single quote bare inside a double-quoted literal, and
+            // so does Python; only `char::escape_debug` (which cannot know its quoting context)
+            // escapes it.
+            '\'' => out.push('\''),
+            // A one-character `escape_debug` is a character Rust prints verbatim.
+            _ if ch.escape_debug().len() == 1 => out.push(ch),
+            _ => {
+                let code = ch as u32;
+                let escaped = if code <= 0xff {
+                    format!("\\x{code:02x}")
+                } else if code <= 0xffff {
+                    format!("\\u{code:04x}")
+                } else {
+                    format!("\\U{code:08x}")
+                };
+                out.push_str(&escaped);
+            }
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Emit a field default/metadata expression for a Pydantic v2 model.
@@ -3380,7 +3418,8 @@ mod tests {
 
     use super::{
         emit_client, emit_client_with_models, emit_errors, emit_init, emit_models,
-        emit_models_with_style, emit_operations, py_type, screaming_snake, snake,
+        emit_models_with_style, emit_operations, py_string_literal, py_type, screaming_snake,
+        snake,
     };
     use crate::graph::{ApiGraph, Operation, Prim, Type};
     use crate::sdk::model_style::PyModelStyle;
@@ -3467,6 +3506,39 @@ mod tests {
     fn sample_graph() -> ApiGraph {
         let facts = serde_json::from_slice(SAMPLE).unwrap();
         ApiGraph::from_facts(facts, "/root")
+    }
+
+    mod string_literals {
+        use super::py_string_literal;
+
+        /// Every literal the emitters produce has to survive Python's tokenizer, and the escape
+        /// hatch is the one place Rust's `Debug` spelling is not Python's.
+        #[test]
+        fn unprintable_characters_use_python_escape_spelling() {
+            assert_eq!(py_string_literal("a\u{a0}b"), r#""a\xa0b""#);
+            assert_eq!(py_string_literal("e\u{301}"), r#""e\u0301""#);
+            assert_eq!(py_string_literal("\u{feff}bom"), r#""\ufeffbom""#);
+            assert_eq!(py_string_literal("bell\u{7}"), r#""bell\x07""#);
+            assert_eq!(py_string_literal("\u{e0100}"), r#""\U000e0100""#);
+            // `\0` followed by a digit would read as one octal escape in Python.
+            assert_eq!(py_string_literal("\u{0}7"), r#""\x007""#);
+        }
+
+        /// Text that needs no escape hatch keeps the bytes `format!("{value:?}")` produced, so no
+        /// committed generated file moves.
+        #[test]
+        fn printable_text_is_unchanged_from_debug() {
+            for value in [
+                "plain",
+                "it's",
+                "say \"hi\"",
+                "back\\slash",
+                "line\nbreak\ttab\r",
+                "caf\u{e9} — 中 😀",
+            ] {
+                assert_eq!(py_string_literal(value), format!("{value:?}"), "{value:?}");
+            }
+        }
     }
 
     mod casing {
