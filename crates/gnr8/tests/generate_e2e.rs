@@ -36,6 +36,48 @@ use std::time::Duration;
 /// The installed `gnr8` host binary cargo built for this integration test.
 const GNR8_BIN: &str = env!("CARGO_BIN_EXE_gnr8");
 
+/// A minimal OpenAPI document for the Python CLI no-rewrite path (no language extractor).
+const PYTHON_CLI_SPEC: &str = r#"openapi: 3.1.0
+info:
+  title: Bookstore
+  version: 1.0.0
+paths:
+  /books/{book_id}:
+    get:
+      operationId: getBook
+      parameters:
+        - name: book_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: integer }
+"#;
+
+const PYTHON_CLI_PIPELINE: &str = r#"use gnr8::sdk::prelude::*;
+
+fn main() -> std::process::ExitCode {
+    gnr8::worker::run(
+        Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(
+                PySdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("sdk")
+                    .cli("bookstore"),
+            ),
+    )
+}
+"#;
+
 /// Whether the Go + gofmt + cargo toolchains are all available so the e2e skips gracefully otherwise.
 fn toolchains_available() -> bool {
     let probe = |bin: &str, arg: &str| {
@@ -512,57 +554,16 @@ fn generate_e2e_scaffolds_compiles_runs_and_is_idempotent() {
 /// only declares the pipeline and the host emitter writes text.
 #[test]
 fn generate_python_cli_is_a_noop_on_second_run() {
-    if !Command::new("cargo")
+    if Command::new("cargo")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        .is_err()
     {
         eprintln!("skipping generate_python_cli_is_a_noop_on_second_run: cargo unavailable");
         return;
     }
-
-    const SPEC: &str = r#"openapi: 3.1.0
-info:
-  title: Bookstore
-  version: 1.0.0
-paths:
-  /books/{book_id}:
-    get:
-      operationId: getBook
-      parameters:
-        - name: book_id
-          in: path
-          required: true
-          schema: { type: integer }
-      responses:
-        "200":
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [id]
-                properties:
-                  id: { type: integer }
-"#;
-
-    const PIPELINE: &str = r#"use gnr8::sdk::prelude::*;
-
-fn main() -> std::process::ExitCode {
-    gnr8::worker::run(
-        Pipeline::new()
-            .source(OpenApi::new().input("openapi.yaml"))
-            .target(
-                PySdk::new()
-                    .module("example.com/bookstore/sdk")
-                    .to("sdk")
-                    .cli("bookstore"),
-            ),
-    )
-}
-"#;
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -570,14 +571,15 @@ fn main() -> std::process::ExitCode {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("gnr8-e2e-cli-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&root).expect("create the staging dir");
-    std::fs::write(root.join("openapi.yaml"), SPEC).expect("write the spec");
+    std::fs::write(root.join("openapi.yaml"), PYTHON_CLI_SPEC).expect("write the spec");
 
     let (ok, out, err) = run_gnr8(&root, &["init"]);
     assert!(
         ok,
         "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}"
     );
-    std::fs::write(root.join(".gnr8/src/main.rs"), PIPELINE).expect("write the pipeline");
+    std::fs::write(root.join(".gnr8/src/main.rs"), PYTHON_CLI_PIPELINE)
+        .expect("write the pipeline");
 
     let (ok, out, err) = run_gnr8(&root, &["generate"]);
     assert!(

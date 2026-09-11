@@ -7455,7 +7455,11 @@ mod tests {
             .expect("PySdk must emit a publishing recipe with package metadata");
         assert!(publishing.text.contains("Package: `bookstore-sdk`"));
         assert!(publishing.text.contains("python3 -m build"));
+    }
 
+    #[test]
+    fn pysdk_cli_emits_project_scripts_before_setuptools() {
+        let ir = ApiGraph::default();
         let with_cli = PySdk::new()
             .module("example.com/bookstore/sdk")
             .package(
