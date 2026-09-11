@@ -66,17 +66,25 @@ jobs:
             needs_go: "true"
             needs_python: "true"
             needs_node: "true"
-          # gnr8-cli is split: one cold `cargo test -p gnr8-cli` rebuilds the engine, links the
-          # host binary, then cargo-builds a `.gnr8/` worker per compiling test. That blows the
-          # 5-minute cap on a cache miss (lockfile/version bump). Each entry compiles only the
+          # gnr8-cli is split into three entries. A cold 2-4 core runner rebuilds the engine,
+          # links the host binary, then cargo-builds a `.gnr8/` worker per compiling test; one
+          # combined job exceeds the 5-minute cap on a cache miss (lockfile/version bump).
+          # Unit tests + verify_e2e compile/run ~2-3m; generate_e2e's host binary + 2 worker
+          # builds ~3-4m; worker_contract is proven at 2m22s cold. Each entry compiles only the
           # targets it runs; together they still execute every test exactly once. A new
-          # crates/gnr8/tests/*.rs file must be added to one of the two test_args lists.
+          # crates/gnr8/tests/*.rs file must be added to one of the test_args lists.
           - package: gnr8-cli
             name: gnr8-cli
             needs_go: "true"
             needs_python: "false"
             needs_node: "false"
-            test_args: "--bins --test generate_e2e --test verify_e2e --test watch_smoke"
+            test_args: "--bins --test verify_e2e --test watch_smoke"
+          - package: gnr8-cli
+            name: gnr8-cli generate e2e
+            needs_go: "true"
+            needs_python: "false"
+            needs_node: "false"
+            test_args: "--test generate_e2e"
           - package: gnr8-cli
             name: gnr8-cli workers
             needs_go: "false"
