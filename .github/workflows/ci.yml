@@ -115,6 +115,14 @@ jobs:
         if: matrix.needs_python == 'true'
         run: python -m pip install PyYAML==6.0.2
 
+      # `sdk_lint` asserts the emitted Python needs no post-processing to be clean under the
+      # language's usual linter/formatter, and it early-returns when `ruff` is missing. Without
+      # this step that assertion never ran here, so a green run said nothing about it. Pinned for
+      # the same reason PyYAML is: a formatter release may not turn CI red on its own schedule.
+      - name: Install the Python linter the SDK lint gate needs
+        if: matrix.needs_python == 'true'
+        run: python -m pip install ruff==0.16.7
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: tests-${{ matrix.name || matrix.package }}
