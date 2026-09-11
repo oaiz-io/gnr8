@@ -777,9 +777,7 @@ fn go_func<'a>(text: &'a str, name: &str) -> &'a str {
         .find(&format!("func {name}("))
         .unwrap_or_else(|| panic!("missing func {name}:\n{text}"));
     let rest = &text[start..];
-    let next = rest[5..]
-        .find("\nfunc ")
-        .map_or(rest.len(), |idx| 5 + idx);
+    let next = rest[5..].find("\nfunc ").map_or(rest.len(), |idx| 5 + idx);
     &rest[..next]
 }
 
