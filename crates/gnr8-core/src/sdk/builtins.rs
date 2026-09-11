@@ -2967,6 +2967,7 @@ impl TargetExec for PySdk {
                     &self.package_info,
                     self.model_style,
                     &files,
+                    self.cli.as_ref(),
                 )?,
             });
             files.push(super::bundle::SdkFile {
@@ -3613,6 +3614,7 @@ fn pyproject_toml(
     metadata: &SdkPackageMetadata,
     model_style: PyModelStyle,
     files: &[super::bundle::SdkFile],
+    cli: Option<&gnr8::sdk::SdkCli>,
 ) -> Result<String, CoreError> {
     let version = metadata.resolved_version()?;
     let dependencies = if model_style.is_pydantic() {
@@ -3638,6 +3640,11 @@ fn pyproject_toml(
         );
     }
     let project_optional = pyproject_optional_metadata(metadata)?;
+    // Scripts sit after every `[project]` key (including optional description/license/keywords
+    // and `[project.urls]`) and before `[tool.setuptools]`. Inserting the scripts table between
+    // `dependencies` and `project_optional` would put remaining `[project]` keys after a sub-table
+    // whenever package metadata is set, which is invalid TOML.
+    let scripts = pyproject_scripts(import_package, cli);
     Ok(format!(
         "[build-system]\n\
 requires = [\"setuptools>=68\", \"wheel\"]\n\
@@ -3645,7 +3652,7 @@ build-backend = \"setuptools.build_meta\"\n\n\
 [project]\n\
 name = {}\n\
 version = {}\n\
-requires-python = \">=3.9\"{}{}\n\n\
+requires-python = \">=3.9\"{}{}{}\n\n\
 [tool.setuptools]\n\
 packages = [{}]\n\n\
 [tool.setuptools.package-dir]\n\
@@ -3654,9 +3661,21 @@ packages = [{}]\n\n\
         quoted_string_literal(&version),
         dependencies,
         project_optional,
+        scripts,
         package_list,
         package_dirs
     ))
+}
+
+fn pyproject_scripts(import_package: &str, cli: Option<&gnr8::sdk::SdkCli>) -> String {
+    let Some(cli) = cli else {
+        return String::new();
+    };
+    format!(
+        "\n\n[project.scripts]\n{} = {}",
+        quoted_string_literal(&cli.program),
+        quoted_string_literal(&format!("{import_package}.cli:main")),
+    )
 }
 
 fn pyproject_packages(package: &str, files: &[super::bundle::SdkFile]) -> Vec<(String, String)> {
@@ -7424,6 +7443,11 @@ mod tests {
             "{}",
             pyproject.text
         );
+        assert!(
+            !pyproject.text.contains("[project.scripts]"),
+            "PySdk without .cli() must not emit [project.scripts]: {}",
+            pyproject.text
+        );
         let publishing = out
             .files()
             .iter()
@@ -7431,6 +7455,48 @@ mod tests {
             .expect("PySdk must emit a publishing recipe with package metadata");
         assert!(publishing.text.contains("Package: `bookstore-sdk`"));
         assert!(publishing.text.contains("python3 -m build"));
+
+        let with_cli = PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .package(
+                SdkPackageMetadata::new()
+                    .name("bookstore-sdk")
+                    .version("1.2.3")
+                    .description("Bookstore SDK")
+                    .license("MIT")
+                    .repository("https://example.com/repo.git")
+                    .homepage("https://example.com")
+                    .documentation("https://example.com/docs")
+                    .keywords(["bookstore", "sdk"]),
+            )
+            .to("generated/sdk-py")
+            .cli("bookstore");
+        let mut cli_out = Artifacts::new();
+        with_cli.generate(&ir, &mut cli_out, &cx()).unwrap();
+        let cli_pyproject = cli_out
+            .files()
+            .iter()
+            .find(|file| file.path == "generated/sdk-py/pyproject.toml")
+            .expect("PySdk must emit pyproject.toml package metadata");
+        let scripts = "[project.scripts]\n\"bookstore\" = \"sdk.cli:main\"";
+        assert!(
+            cli_pyproject.text.contains(scripts),
+            "{}",
+            cli_pyproject.text
+        );
+        let scripts_at = cli_pyproject
+            .text
+            .find(scripts)
+            .expect("scripts block must be present");
+        let setuptools_at = cli_pyproject
+            .text
+            .find("[tool.setuptools]")
+            .expect("[tool.setuptools] must be present");
+        assert!(
+            scripts_at < setuptools_at,
+            "[project.scripts] must precede [tool.setuptools]: {}",
+            cli_pyproject.text
+        );
     }
 
     #[test]
