@@ -9,6 +9,15 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **`PySdk::cli("bookstore")` emits a generated argparse CLI beside the Python SDK.** Opt-in: one
+  extra file, `<sdk dir>/cli.py`, derived from the same API graph as the client, plus a
+  `[project.scripts]` entry so `pipx install` / `uv tool install` put the program on PATH. The
+  generated program is the user's API client, not gnr8's own `gnr8 init` / `generate` / `watch`
+  surface. Credentials come from one env var per scheme or one helper command; JSON on stdout; exit
+  codes 0/1/2. See [Generated CLI](docs/cli/generated-cli.md).
+
 ### Fixed
 
 - **A cookie helper that wraps its read error still proves the caller's rejection.** Requiredness

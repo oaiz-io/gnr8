@@ -10,6 +10,7 @@ current task; each page includes runnable examples, invariants, and failure beha
 |---|---|
 | Install the packaged CLI or set up resources | [Installing gnr8](../install.md) |
 | Discover or run a CLI command | [CLI command reference](../cli/commands.md) |
+| Generate a command-line client for the API | [Generated CLI](../cli/generated-cli.md) |
 | Create or edit `.gnr8/src/main.rs` | [Pipeline configuration](../pipeline/configuration.md) |
 | Correct, enrich, or select API facts | [Transforms and overrides](../pipeline/transforms.md) |
 | Extract from Go, Python, NestJS, or OpenAPI | [Sources and extraction](../extraction/sources.md) |

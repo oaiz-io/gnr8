@@ -217,6 +217,10 @@ PySdk::new()
 `pydantic()` is the default and emits Pydantic v2 models. `dataclasses()` emits stdlib dataclasses for
 no-dependency consumers. `PyModelStyle` exposes the same choice when a reusable value is needed.
 
+`.cli("bookstore")` emits `<sdk dir>/cli.py`, an argparse client for the same operations, and a
+`[project.scripts]` entry in `pyproject.toml`. It is the CLI gnr8 generates for the user's API, not
+gnr8's own command surface. See [Generated CLI](../cli/generated-cli.md).
+
 ## TypeScript target controls
 
 ```rust
