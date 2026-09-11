@@ -418,9 +418,170 @@ fn auth_matrix_and_and_or() {
     assert!(text.contains("kwargs[\"api_keys\"]"), "{text}");
     assert!(text.contains("kwargs[\"bearer_token\"]"), "{text}");
     assert!(!text.contains("api_key="), "{text}");
-    assert!(text.contains("\"HeaderAuth\""), "{text}");
-    assert!(text.contains("\"QueryAuth\""), "{text}");
-    assert!(text.contains("\"BearerAuth\""), "{text}");
+    // The scheme ids have to reach the RIGHT command: an AND alternative resolves both of its
+    // schemes, an OR alternative resolves either of its two, and neither command may be handed the
+    // graph's whole scheme list. Asserting only that the three ids appear somewhere in the file
+    // would pass on an emitter that ignored `operation_security` entirely.
+    assert!(
+        text.contains("def _cmd_get_and(args: argparse.Namespace) -> Any:\n    client = _build_client(args.base_url, [\"HeaderAuth\", \"QueryAuth\"])"),
+        "{text}"
+    );
+    assert!(
+        text.contains("def _cmd_get_or(args: argparse.Namespace) -> Any:\n    client = _build_client(args.base_url, [\"BearerAuth\", \"HeaderAuth\"])"),
+        "{text}"
+    );
+}
+
+/// argparse `%`-expands `help=` against its own parameter dict, so prose carrying a percent sign
+/// has to arrive doubled — and `description=`, which argparse only expands when the author wrote
+/// `%(prog)`, has to arrive verbatim.
+#[test]
+fn a_percent_in_prose_is_escaped_for_help_and_left_alone_in_description() {
+    let graph = op_graph(
+        "listBooks",
+        r#""summary": "Sell 50% of the stock.", "description": "Half of 50% is 25%.","#,
+    );
+    let text = generate_cli(&graph, "bookstore");
+    assert!(
+        text.contains(r#"help="Sell 50%% of the stock.","#),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"description="Sell 50% of the stock.\n\nHalf of 50% is 25%.","#),
+        "{text}"
+    );
+}
+
+/// An enum renders the way `ruff format` would write the tuple, including the one-member case
+/// where the trailing comma is what makes it a tuple at all.
+#[test]
+fn choices_are_emitted_in_the_formatter_s_own_shape() {
+    let one = generate_cli(&enum_param_graph(&["hardcover"]), "bookstore");
+    assert!(one.contains(r#"choices=("hardcover",),"#), "{one}");
+    let two = generate_cli(&enum_param_graph(&["hardcover", "paperback"]), "bookstore");
+    assert!(
+        two.contains(r#"choices=("hardcover", "paperback"),"#),
+        "{two}"
+    );
+    let long = generate_cli(
+        &enum_param_graph(&[
+            "aaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbb",
+            "cccccccccccccccccccccc",
+        ]),
+        "bookstore",
+    );
+    assert!(
+        long.contains("        choices=(\n            \"aaaaaaaaaaaaaaaaaaaaaa\",\n"),
+        "{long}"
+    );
+    for line in long.lines() {
+        assert!(line.len() <= 88, "line over 88 columns: {line:?}");
+    }
+}
+
+fn enum_param_graph(members: &[&str]) -> ApiGraph {
+    let values = members
+        .iter()
+        .map(|member| format!("\"{member}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    serde_json::from_str(&format!(
+        r#"{{
+          "module": "app",
+          "operations": [
+            {{
+              "id": "getBook",
+              "method": "GET",
+              "path": "/books",
+              "handler": "getBook",
+              "params": [
+                {{
+                  "name": "fmt",
+                  "location": "query",
+                  "required": false,
+                  "schema": {{ "type": "enum", "of": [{values}] }},
+                  "provenance": {{ "file": "main.py", "start_line": 1, "end_line": 1 }}
+                }}
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ {{ "status": 204, "body": null }} ],
+              "provenance": {{ "file": "main.py", "start_line": 1, "end_line": 1 }}
+            }}
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }}"#
+    ))
+    .expect("enum graph json")
+}
+
+/// Only the credential kinds the graph declares are named. A local the graph never reaches is an
+/// F841 under the `ruff check` gate the emitted SDK is held to, and almost every real API declares
+/// one or two of the three kinds.
+#[test]
+fn only_the_declared_credential_kinds_are_named() {
+    let bearer = generate_cli(
+        &secured_graph("BearerAuth", "http", "", "bearer"),
+        "bookstore",
+    );
+    assert!(
+        bearer.contains("    bearer_token: Optional[str] = None"),
+        "{bearer}"
+    );
+    assert!(!bearer.contains("api_keys"), "{bearer}");
+    assert!(!bearer.contains("basic_auth"), "{bearer}");
+    assert!(
+        bearer.contains("        if kind == \"bearer\":"),
+        "{bearer}"
+    );
+    assert!(!bearer.contains("elif kind =="), "{bearer}");
+
+    let api_key = generate_cli(
+        &secured_graph("ApiKeyAuth", "apiKey", "header", "X-API-Key"),
+        "bookstore",
+    );
+    assert!(
+        api_key.contains("    api_keys: dict[str, str] = {}"),
+        "{api_key}"
+    );
+    assert!(!api_key.contains("bearer_token"), "{api_key}");
+    assert!(!api_key.contains("basic_auth"), "{api_key}");
+}
+
+/// A credential helper that cannot even be split into an argv is a diagnostic like any other
+/// helper failure — never a `shlex` traceback, and never an argv whose program name came from the
+/// graph rather than from the user's command.
+#[test]
+fn helper_parsing_failures_are_typed_before_anything_is_executed() {
+    let text = generate_cli(
+        &secured_graph("ApiKeyAuth", "apiKey", "header", "X-API-Key"),
+        "bookstore",
+    );
+    assert!(text.contains("        except ValueError as exc:"), "{text}");
+    assert!(
+        text.contains(r#"raise _HelperError(f"cannot parse {_HELPER_ENV}: {exc}") from None"#),
+        "{text}"
+    );
+    assert!(text.contains("        if not command:"), "{text}");
+    assert!(
+        text.contains(r#"raise _HelperError(f"{_HELPER_ENV} is empty")"#),
+        "{text}"
+    );
+    let split_at = text
+        .find("shlex.split(helper)")
+        .expect("the helper is split");
+    let exec_at = text
+        .find("subprocess.run(")
+        .expect("the helper is executed");
+    assert!(
+        split_at < exec_at,
+        "the split must be checked before the run"
+    );
 }
 
 #[test]

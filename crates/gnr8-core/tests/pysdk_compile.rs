@@ -1717,18 +1717,81 @@ import sys
 
 from bookstore import cli
 
-os.environ["BOOKSTORE_CREDENTIAL_HELPER"] = "/bin/false"
-buf = io.StringIO()
-old = sys.stderr
-sys.stderr = buf
-code = cli.main(["list-items", "--base-url", "http://127.0.0.1:1"])
-sys.stderr = old
-stderr = buf.getvalue()
+
+def run(argv):
+    buf = io.StringIO()
+    old = sys.stderr
+    sys.stderr = buf
+    try:
+        code = cli.main(argv)
+    finally:
+        sys.stderr = old
+    return code, buf.getvalue()
+
+
+# Set the per-scheme variable too. The helper is a MODE, not a first attempt: a helper that fails
+# must not slide into the environment variable. Without this line every assertion below would also
+# hold for an implementation that fell back, which is the thing being ruled out.
+os.environ["BOOKSTORE_API_KEY_AUTH"] = "env-credential"
+os.environ["BOOKSTORE_BEARER_AUTH"] = "env-credential"
+
+for helper, expected in [
+    ("/bin/false", "credential helper failed (exit 1)"),
+    ('/bin/echo "unterminated', "cannot parse BOOKSTORE_CREDENTIAL_HELPER"),
+    ("   ", "BOOKSTORE_CREDENTIAL_HELPER is empty"),
+]:
+    os.environ["BOOKSTORE_CREDENTIAL_HELPER"] = helper
+    code, stderr = run(["list-items", "--base-url", "http://127.0.0.1:1"])
+    assert code == 1, (helper, code, stderr)
+    assert "Traceback" not in stderr, (helper, stderr)
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    assert len(lines) == 1, (helper, stderr)
+    assert "credential helper failed" in lines[0], (helper, stderr)
+    assert expected in lines[0], (helper, stderr)
+"#;
+
+/// A transport failure and a malformed body are diagnostics with the documented exit codes, not
+/// tracebacks: a CLI is run by a human who typed a wrong URL far more often than anything else.
+const CLI_ERROR_PATH_DRIVER: &str = r#"import io
+import sys
+
+from bookstore import cli
+
+
+def run(argv):
+    buf = io.StringIO()
+    old = sys.stderr
+    sys.stderr = buf
+    try:
+        code = cli.main(argv)
+    finally:
+        sys.stderr = old
+    return code, buf.getvalue()
+
+
+# Port 1 is bound by nothing: urllib raises URLError, which is an OSError.
+code, stderr = run(["get-book", "--book-id", "1", "--base-url", "http://127.0.0.1:1"])
 assert code == 1, (code, stderr)
 assert "Traceback" not in stderr, stderr
 lines = [line for line in stderr.splitlines() if line.strip()]
 assert len(lines) == 1, stderr
-assert "credential helper failed" in lines[0], stderr
+assert lines[0].startswith("bookstore: "), stderr
+
+code, stderr = run(["create-book", "--body", "{oops", "--base-url", "http://127.0.0.1:1"])
+assert code == 2, (code, stderr)
+assert "Traceback" not in stderr, stderr
+lines = [line for line in stderr.splitlines() if line.strip()]
+assert len(lines) == 1, stderr
+assert "not valid JSON" in lines[0], stderr
+
+code, stderr = run(
+    ["create-book", "--body-file", "/nonexistent/body.json", "--base-url", "http://127.0.0.1:1"]
+)
+assert code == 2, (code, stderr)
+assert "Traceback" not in stderr, stderr
+lines = [line for line in stderr.splitlines() if line.strip()]
+assert len(lines) == 1, stderr
+assert "cannot read" in lines[0], stderr
 "#;
 
 /// A generated CLI round-trips `get-book` against a stdlib HTTP server via in-process `cli.main`.
@@ -1773,8 +1836,32 @@ fn generated_cli_dispatches_get_book_against_stdlib_http_server() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A credential helper that exits non-zero is a one-line diagnostic, never a traceback, and never
-/// an environment-variable fallback.
+/// The error paths a human hits first — a wrong `--base-url`, a mistyped `--body`, an unreadable
+/// `--body-file` — are one-line diagnostics with the documented exit codes.
+#[test]
+fn generated_cli_error_paths_are_diagnostics_with_documented_exit_codes() {
+    if !python_available() {
+        eprintln!("skipping pysdk_compile CLI error paths: python3 toolchain unavailable");
+        return;
+    }
+    let graph = gnr8_engine::analyze::build_graph(FIXTURE_DIR)
+        .expect("Phase 2 build_graph must succeed (requires python3 for the pyextract sidecar)");
+    let dir = materialize_sdk_target_with_cli("cli-errors", &graph, "bookstore");
+    let driver = dir.join("cli_error_path_driver.py");
+    std::fs::write(&driver, CLI_ERROR_PATH_DRIVER).expect("write CLI error-path driver");
+    let driver_str = driver.to_str().expect("utf-8 path");
+    let result = run_python(&[driver_str], &dir);
+    assert!(
+        result.is_ok(),
+        "a transport error, a malformed body and an unreadable body file must each be one \
+         diagnostic line with the documented exit code: {result:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A credential helper that fails — non-zero, unparseable, or empty — is a one-line diagnostic,
+/// never a traceback, and never an environment-variable fallback.
 #[test]
 fn generated_cli_helper_failure_is_exit_1_without_traceback() {
     if !python_available() {

@@ -50,6 +50,13 @@ use model::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The API version every artifact reports when the graph carries none.
+///
+/// `info.version` in the `OpenAPI` document and `--version` in the generated CLI are the same
+/// fact read twice, so they read one default: two artifacts of one pipeline may not disagree
+/// about the version of the API they describe (CLAUDE.md rule 3).
+pub(crate) const DEFAULT_API_VERSION: &str = "0.1.0";
+
 /// Supported `apiKey` locations.
 const SUPPORTED_API_KEY_LOCATIONS: &[&str] = &["header", "query"];
 
@@ -147,7 +154,7 @@ pub(crate) fn build_openapi_doc(
                 .openapi_metadata
                 .version
                 .clone()
-                .unwrap_or_else(|| "0.1.0".to_string()),
+                .unwrap_or_else(|| DEFAULT_API_VERSION.to_string()),
             description: graph.openapi_metadata.description.clone(),
             terms_of_service: graph.openapi_metadata.terms_of_service.clone(),
             contact: graph

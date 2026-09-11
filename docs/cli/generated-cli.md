@@ -42,21 +42,26 @@ The scripts key is the program name. The value's package segment is the same `sd
 (including optional description/license/keywords and `[project.urls]`) and before
 `[tool.setuptools]`.
 
-`cli.py` imports only the Python standard library and the sibling generated package. It does not add
-a dependency the SDK did not already have.
+`cli.py` imports the Python standard library, the sibling generated package, and — in the default
+Pydantic model style — the same `pydantic` the models already import. It adds no dependency the SDK
+did not already have; under `.dataclasses()` it is standard library only.
 
 ## How to run it
 
-From the SDK output's parent directory:
+From the project root, with `generated/sdk` as the output directory:
 
 ```sh
-cd generated && python3 -m sdk.cli --help
+(cd generated && python3 -m sdk.cli --help)
 pipx install ./generated/sdk && bookstore --help
 uv tool install ./generated/sdk && bookstore --help
 ```
 
-`python3 -m sdk.cli` works as soon as the file is written. The installer shims need a distribution name
-other than the default last-segment `sdk` if you want `pipx install bookstore-sdk` — set
+`python3 -m sdk.cli` needs the package's parent on `sys.path`, which is what the subshell's `cd`
+gives it; the installers put the program on `PATH` instead.
+
+No install step is needed for the first line — it works as soon as the file is written. The
+installer shims need a distribution name other than the default last-segment `sdk` if you want
+`pipx install bookstore-sdk` — set
 `.package(SdkPackageMetadata::new().registry_name("bookstore-sdk"))` on the same `PySdk` stage.
 `.cli(...)` does not invent a distribution name.
 
@@ -68,7 +73,7 @@ The FastAPI bookstore example at `examples/fastapi-bookstore` is the committed s
 |---|---|
 | program name (`prog=`) | `SdkCli::program` |
 | top-level description | graph title, plus `openapi_metadata.description` when present |
-| `--version` | `openapi_metadata.version`, else `0.0.0` |
+| `--version` | `openapi_metadata.version`, else `0.1.0` — the same default `info.version` takes |
 | group subparser | `op.group`, kebab-cased, only when `Some` |
 | command subparser | kebab-case of `op.id` |
 | `--help` / `description=` | the handler's own doc-comment synopsis and remainder |
@@ -112,9 +117,15 @@ Per-flag `help=` text is not emitted in this slice.
 | 1 | `ApiError` | `bookstore: 404 not found (book.missing)` on stderr |
 | 1 | missing credentials | names the env vars that would satisfy the command |
 | 1 | helper failure | `bookstore: credential helper failed (exit 1)` on stderr |
+| 1 | transport failure | `bookstore: <urlopen error [Errno 111] Connection refused>` on stderr |
 | 2 | usage | argparse's own message on stderr |
+| 2 | unreadable or malformed body | `bookstore: body is not valid JSON: ...` on stderr |
 
-`--help` and `--version` go to stdout and exit 0.
+`--help` and `--version` go to stdout and exit 0. Every one of those is a single line of prose:
+a wrong `--base-url`, a mistyped `--body` and a missing `--body-file` are the errors a human hits
+first, and a generated program answers them with a diagnostic rather than a Python traceback. A
+response the SDK cannot decode is the exception — that is the API disagreeing with the SDK, and it
+surfaces raw.
 
 ## Credentials
 
@@ -151,9 +162,13 @@ invocation : argv = shlex.split($PROG_CREDENTIAL_HELPER) + [scheme_id]
              shell=False, stdin=DEVNULL, timeout=10s, cwd inherited
 success    : exit 0 and a non-empty first line of stdout
 secret     : that first line, trailing newline stripped
-failure    : non-zero exit, empty stdout, missing executable, or timeout
+failure    : non-zero exit, empty stdout, missing executable, timeout, an unparseable
+             command line, or a command line that is only whitespace
              → one stderr line, exit 1
 ```
+
+The diagnostic names the variable and the reason, never the command line the variable holds: a
+helper command can carry a token of its own.
 
 The secret never appears on `argv`. No `keyring` import is emitted. Backends are user-chosen at
 runtime, for example:

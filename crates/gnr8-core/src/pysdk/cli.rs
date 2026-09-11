@@ -10,6 +10,7 @@ use gnr8::facts::LiteralValue;
 use gnr8::sdk::SdkCli;
 
 use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type};
+use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::emit_common::{
     check_cli_names, command_group, command_name, credential_env_var, flag_name, helper_env_var,
     http_auth_features, operation_auth_alternatives, operation_prose, request_body_models_of,
@@ -213,7 +214,7 @@ fn program_version(graph: &ApiGraph, program: &str) -> String {
         .version
         .as_deref()
         .filter(|version| !version.is_empty())
-        .unwrap_or("0.0.0");
+        .unwrap_or(DEFAULT_API_VERSION);
     format!("{program} {version}")
 }
 
@@ -348,6 +349,9 @@ fn emit_constants(out: &mut String, graph: &ApiGraph, cli: &SdkCli) -> Result<()
         }
         writeln!(out, "}}").map_err(sink)?;
     }
+    // Two blank lines before the first top-level `def`/`class`: the emitted SDK is clean under
+    // `ruff format` with no post-processing step (`crates/gnr8-core/tests/sdk_lint.rs`).
+    writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
 }
@@ -362,7 +366,21 @@ fn emit_credential_helpers(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "def _resolve(scheme_id: str) -> Optional[str]:").map_err(sink)?;
     writeln!(out, "    helper = os.environ.get(_HELPER_ENV)").map_err(sink)?;
     writeln!(out, "    if helper:").map_err(sink)?;
-    writeln!(out, "        argv = shlex.split(helper) + [scheme_id]").map_err(sink)?;
+    writeln!(out, "        try:").map_err(sink)?;
+    writeln!(out, "            command = shlex.split(helper)").map_err(sink)?;
+    writeln!(out, "        except ValueError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "            raise _HelperError(f\"cannot parse {{_HELPER_ENV}}: {{exc}}\") from None"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        if not command:").map_err(sink)?;
+    writeln!(
+        out,
+        "            raise _HelperError(f\"{{_HELPER_ENV}} is empty\")"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        argv = command + [scheme_id]").map_err(sink)?;
     writeln!(out, "        try:").map_err(sink)?;
     writeln!(out, "            completed = subprocess.run(").map_err(sink)?;
     writeln!(out, "                argv,").map_err(sink)?;
@@ -410,22 +428,42 @@ fn emit_body_helpers(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError
     if !has_request_body(graph)? {
         return Ok(());
     }
+    writeln!(out, "class _InputError(Exception):").map_err(sink)?;
+    writeln!(out, "    def __init__(self, reason: str) -> None:").map_err(sink)?;
+    writeln!(out, "        super().__init__(reason)").map_err(sink)?;
+    writeln!(out, "        self.reason = reason").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "def _load_body(args: argparse.Namespace) -> Any:").map_err(sink)?;
-    writeln!(out, "    if getattr(args, \"body\", None) is not None:").map_err(sink)?;
-    writeln!(out, "        return json.loads(args.body)").map_err(sink)?;
-    writeln!(out, "    path = getattr(args, \"body_file\", None)").map_err(sink)?;
-    writeln!(out, "    if path is None:").map_err(sink)?;
-    writeln!(out, "        return None").map_err(sink)?;
-    writeln!(out, "    if path == \"-\":").map_err(sink)?;
-    writeln!(out, "        raw = sys.stdin.read()").map_err(sink)?;
-    writeln!(out, "    else:").map_err(sink)?;
+    writeln!(out, "    raw = getattr(args, \"body\", None)").map_err(sink)?;
+    writeln!(out, "    if raw is None:").map_err(sink)?;
+    writeln!(out, "        path = getattr(args, \"body_file\", None)").map_err(sink)?;
+    writeln!(out, "        if path is None:").map_err(sink)?;
+    writeln!(out, "            return None").map_err(sink)?;
+    writeln!(out, "        if path == \"-\":").map_err(sink)?;
+    writeln!(out, "            raw = sys.stdin.read()").map_err(sink)?;
+    writeln!(out, "        else:").map_err(sink)?;
+    writeln!(out, "            try:").map_err(sink)?;
     writeln!(
         out,
-        "        with open(path, encoding=\"utf-8\") as handle:"
+        "                with open(path, encoding=\"utf-8\") as handle:"
     )
     .map_err(sink)?;
-    writeln!(out, "            raw = handle.read()").map_err(sink)?;
-    writeln!(out, "    return json.loads(raw)").map_err(sink)?;
+    writeln!(out, "                    raw = handle.read()").map_err(sink)?;
+    writeln!(out, "            except OSError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "                raise _InputError(f\"cannot read {{path!r}}: {{exc}}\") from None"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    try:").map_err(sink)?;
+    writeln!(out, "        return json.loads(raw)").map_err(sink)?;
+    writeln!(out, "    except json.JSONDecodeError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "        raise _InputError(f\"body is not valid JSON: {{exc}}\") from None"
+    )
+    .map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
@@ -439,40 +477,63 @@ fn emit_client_builder(out: &mut String, graph: &ApiGraph) -> Result<(), CoreErr
         writeln!(out).map_err(sink)?;
         return Ok(());
     }
+    // Only the credential kinds this graph actually declares are named. A local the graph never
+    // reaches is an F841 (`assigned to but never used`) under the `ruff check` gate, and a
+    // generated SDK is clean under the language's usual linter with no post-processing step.
+    // `http_auth_features` above rejects every scheme that is not one of these three, so at least
+    // one arm is always emitted.
+    let api_key = has_api_key_auth(graph);
+    let bearer = has_bearer_auth(graph);
+    let basic = has_basic_auth(graph);
     writeln!(
         out,
         "def _build_client(base_url: str, scheme_ids: list[str]) -> Client:"
     )
     .map_err(sink)?;
-    writeln!(out, "    api_keys: dict[str, str] = {{}}").map_err(sink)?;
-    writeln!(out, "    bearer_token: Optional[str] = None").map_err(sink)?;
-    writeln!(out, "    basic_auth: Optional[tuple[str, str]] = None").map_err(sink)?;
+    if api_key {
+        writeln!(out, "    api_keys: dict[str, str] = {{}}").map_err(sink)?;
+    }
+    if bearer {
+        writeln!(out, "    bearer_token: Optional[str] = None").map_err(sink)?;
+    }
+    if basic {
+        writeln!(out, "    basic_auth: Optional[tuple[str, str]] = None").map_err(sink)?;
+    }
     writeln!(out, "    for scheme_id in scheme_ids:").map_err(sink)?;
     writeln!(out, "        secret = _resolve(scheme_id)").map_err(sink)?;
     writeln!(out, "        if secret is None:").map_err(sink)?;
     writeln!(out, "            continue").map_err(sink)?;
     writeln!(out, "        kind = _SCHEME_KINDS.get(scheme_id)").map_err(sink)?;
-    writeln!(out, "        if kind == \"apiKey\":").map_err(sink)?;
-    writeln!(out, "            api_keys[scheme_id] = secret").map_err(sink)?;
-    writeln!(out, "        elif kind == \"bearer\":").map_err(sink)?;
-    writeln!(out, "            bearer_token = secret").map_err(sink)?;
-    writeln!(out, "        elif kind == \"basic\":").map_err(sink)?;
-    writeln!(
-        out,
-        "            user, _sep, password = secret.partition(\":\")"
-    )
-    .map_err(sink)?;
-    writeln!(out, "            basic_auth = (user, password)").map_err(sink)?;
+    let mut branch = "if";
+    if api_key {
+        writeln!(out, "        {branch} kind == \"apiKey\":").map_err(sink)?;
+        writeln!(out, "            api_keys[scheme_id] = secret").map_err(sink)?;
+        branch = "elif";
+    }
+    if bearer {
+        writeln!(out, "        {branch} kind == \"bearer\":").map_err(sink)?;
+        writeln!(out, "            bearer_token = secret").map_err(sink)?;
+        branch = "elif";
+    }
+    if basic {
+        writeln!(out, "        {branch} kind == \"basic\":").map_err(sink)?;
+        writeln!(
+            out,
+            "            user, _sep, password = secret.partition(\":\")"
+        )
+        .map_err(sink)?;
+        writeln!(out, "            basic_auth = (user, password)").map_err(sink)?;
+    }
     writeln!(out, "    kwargs: dict[str, Any] = {{}}").map_err(sink)?;
-    if has_api_key_auth(graph) {
+    if api_key {
         writeln!(out, "    if api_keys:").map_err(sink)?;
         writeln!(out, "        kwargs[\"api_keys\"] = api_keys").map_err(sink)?;
     }
-    if has_bearer_auth(graph) {
+    if bearer {
         writeln!(out, "    if bearer_token is not None:").map_err(sink)?;
         writeln!(out, "        kwargs[\"bearer_token\"] = bearer_token").map_err(sink)?;
     }
-    if has_basic_auth(graph) {
+    if basic {
         writeln!(out, "    if basic_auth is not None:").map_err(sink)?;
         writeln!(out, "        kwargs[\"basic_auth\"] = basic_auth").map_err(sink)?;
     }
@@ -736,7 +797,7 @@ fn emit_command_parser(
     writeln!(out, "    {ident} = {parent}.add_parser(").map_err(sink)?;
     writeln!(out, "        {},", py_string_literal(&command)).map_err(sink)?;
     if let Some(summary) = &prose.summary {
-        emit_string_kwarg(out, 8, "help", summary)?;
+        emit_string_kwarg(out, 8, "help", &argparse_help_text(summary))?;
     }
     if !prose.description.is_empty() {
         let description = match &prose.summary {
@@ -794,6 +855,17 @@ fn emit_command_parser(
     }
     writeln!(out, "    {ident}.set_defaults(_handler=_cmd_{method})").map_err(sink)?;
     Ok(())
+}
+
+/// Escape prose for argparse's `help=`, which is a format string and not a literal.
+///
+/// `HelpFormatter._expand_help` runs `help % params` unconditionally, so a summary reading
+/// "Fetch a secret (100% reliable)" either crashes `--help` or splices argparse's internal
+/// parameter dict into the text. Doubling the percent sign is argparse's own escape for that, and
+/// it applies to `help=` alone: `description=` is only `%`-expanded when the author literally wrote
+/// `%(prog)`, so doubling there would print `%%` to the user instead.
+fn argparse_help_text(summary: &str) -> String {
+    summary.replace('%', "%%")
 }
 
 fn emit_flag(
@@ -921,13 +993,31 @@ fn emit_flag_type_kwargs(
     Ok(())
 }
 
+/// Emit `choices=(...)` the way `ruff format` would write it.
+///
+/// A one-member tuple keeps the trailing comma because that comma is what makes it a tuple; a
+/// longer one takes it only in the exploded form, where the magic trailing comma is the
+/// formatter's own output. Writing `("a", "b",)` on one line asked `ruff format --check` to
+/// reformat the file, and the emitted SDK is formatter-clean with no post-processing step.
 fn emit_choices(out: &mut String, members: &[String]) -> Result<(), CoreError> {
-    let values = members
+    let literals = members
         .iter()
         .map(|member| py_string_literal(member))
-        .collect::<Vec<_>>()
-        .join(", ");
-    writeln!(out, "        choices=({values},),").map_err(sink)?;
+        .collect::<Vec<_>>();
+    let inline = if literals.len() == 1 {
+        format!("        choices=({},),", literals[0])
+    } else {
+        format!("        choices=({}),", literals.join(", "))
+    };
+    if inline.len() <= 88 {
+        writeln!(out, "{inline}").map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "        choices=(").map_err(sink)?;
+    for literal in &literals {
+        writeln!(out, "            {literal},").map_err(sink)?;
+    }
+    writeln!(out, "        ),").map_err(sink)?;
     Ok(())
 }
 
@@ -1019,6 +1109,25 @@ fn emit_main(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
         writeln!(out, "        )").map_err(sink)?;
         writeln!(out, "        return 1").map_err(sink)?;
     }
+    if has_request_body(graph)? {
+        writeln!(out, "    except _InputError as exc:").map_err(sink)?;
+        writeln!(
+            out,
+            "        print(f\"{{_PROGRAM}}: {{exc.reason}}\", file=sys.stderr)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "        return 2").map_err(sink)?;
+    }
+    // `urllib.error.URLError` — a refused connection, an unresolvable host, a timeout — is an
+    // `OSError`, and so is every read the CLI itself performs. A generated program that prints a
+    // Python traceback because a server is down is not a command-line program.
+    writeln!(out, "    except OSError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "        print(f\"{{_PROGRAM}}: {{exc}}\", file=sys.stderr)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        return 1").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "if __name__ == \"__main__\":").map_err(sink)?;
