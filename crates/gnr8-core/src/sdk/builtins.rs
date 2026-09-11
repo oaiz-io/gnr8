@@ -32,7 +32,7 @@ use crate::graph::{
 };
 use crate::lower::model::{OpenApiDoc, SchemaObject};
 use crate::sdk::docs::write_sdk_docs;
-use crate::sdk::emit_common::quoted_string_literal;
+use crate::sdk::emit_common::{kebab, quoted_string_literal};
 use crate::sdk::hash_files;
 use crate::sdk::model::SdkModel;
 use crate::sdk::model_style::PyModelStyle;
@@ -3556,18 +3556,7 @@ fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreE
             message: format!("PySdk::cli program name {program:?} must not begin with '-'"),
         });
     }
-    // W1: inline kebab-shaped check. W2 replaces this with emit_common::kebab, the shared
-    // derivation every CLI name uses.
-    let normalized: String = program
-        .chars()
-        .map(|c| {
-            if c == '_' {
-                '-'
-            } else {
-                c.to_ascii_lowercase()
-            }
-        })
-        .collect();
+    let normalized = kebab(program);
     if normalized.is_empty()
         || !normalized
             .chars()

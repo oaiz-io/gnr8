@@ -238,14 +238,7 @@ pub(crate) fn operation_method_name(op: &Operation) -> String {
     snake(&op.id)
 }
 
-/// Convert an enum member value to a `SCREAMING_SNAKE` identifier: `out-of-stock` → `OUT_OF_STOCK`.
-pub(crate) fn screaming_snake(value: &str) -> String {
-    split_words(value)
-        .iter()
-        .map(|w| w.to_ascii_uppercase())
-        .collect::<Vec<_>>()
-        .join("_")
-}
+pub(crate) use crate::sdk::emit_common::screaming_snake;
 
 /// The fixed set of Python reserved words that may NOT be used as bare identifiers.
 ///
