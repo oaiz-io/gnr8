@@ -3560,9 +3560,10 @@ fn sdk_package(module: &str) -> Result<String, CoreError> {
 
 /// Validate a generated-CLI program name and its packaging constraint.
 ///
-/// `program` must be non-empty, must not begin with `-`, and must kebab-normalize to a non-empty
-/// ASCII `[a-z0-9-]+`. Combining `.cli(...)` with `.source_only()` / `.package_metadata(false)` is a
-/// contradiction: without `pyproject.toml` there is nowhere for `[project.scripts]` to go.
+/// `program` must be non-empty, must not begin with `-`, must spell a command name out of ASCII
+/// letters, digits, `-`, `_` or `.`, and must contain at least one alphanumeric. Combining
+/// `.cli(...)` with `.source_only()` / `.package_metadata(false)` is a contradiction: without
+/// `pyproject.toml` there is nowhere for `[project.scripts]` to go.
 fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreError> {
     if program.is_empty() {
         return Err(CoreError::Config {
@@ -3574,15 +3575,17 @@ fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreE
             message: format!("PySdk::cli program name {program:?} must not begin with '-'"),
         });
     }
-    let normalized = kebab(program);
-    if normalized.is_empty()
-        || !normalized
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
+    // The name is emitted verbatim — `argparse(prog=...)`, `_PROGRAM`, and the `[project.scripts]`
+    // key an installer turns into a file in `bin/` — so the characters of `program` ITSELF are what
+    // has to hold. Checking `kebab(program)` would check a value that is `[a-z0-9-]` by
+    // construction, which is no check at all.
+    let spellable = program
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if !spellable || kebab(program).is_empty() {
         return Err(CoreError::Config {
             message: format!(
-                "PySdk::cli program name {program:?} does not kebab-normalize to a usable command (need ASCII [a-z0-9-]+, not starting with '-')"
+                "PySdk::cli program name {program:?} is not a usable command name (need ASCII letters, digits, '-', '_' or '.', with at least one letter or digit)"
             ),
         });
     }
@@ -7522,6 +7525,39 @@ mod tests {
             error.to_string().contains("empty") || error.to_string().contains("non-empty"),
             "{error}"
         );
+    }
+
+    /// A name that kebab-normalizes cleanly can still be unusable verbatim, and verbatim is how it
+    /// is emitted: `prog=`, `_PROGRAM`, and the `[project.scripts]` key an installer turns into a
+    /// file in `bin/`.
+    #[test]
+    fn pysdk_cli_rejects_a_program_name_it_cannot_emit_verbatim() {
+        for program in ["book store", "books/get", "book;rm", "..."] {
+            let ir = ApiGraph::default();
+            let mut out = Artifacts::new();
+            let error = PySdk::new()
+                .module("example.com/bookstore/sdk")
+                .to("generated/sdk-py")
+                .cli(program)
+                .generate(&ir, &mut out, &cx())
+                .unwrap_err();
+            assert!(
+                matches!(error, crate::CoreError::Config { .. }),
+                "{program:?}: {error}"
+            );
+            assert!(
+                error.to_string().contains(program),
+                "the error must quote the name: {error}"
+            );
+        }
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-py")
+            .cli("book_store.v2")
+            .generate(&ir, &mut out, &cx())
+            .expect("a conventional console-script name stays accepted");
     }
 
     #[test]
