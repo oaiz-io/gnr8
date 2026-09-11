@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.14.1 — 2026-09-11
+
 ### Fixed
 
 - **A cookie helper that wraps its read error still proves the caller's rejection.** Requiredness
