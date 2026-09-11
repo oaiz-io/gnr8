@@ -7,9 +7,10 @@
 //! dataclasses when explicitly configured, plus `enum.Enum` named enums).
 //!
 //! This is the structural twin of [`crate::gosdk`], MINUS the `gofmt` normalization step: Python has no
-//! stdlib formatter, so [`emit`] produces already-correct significant-whitespace Python directly. Each
-//! file is framed into a [`bundle::SdkBundle`] with stable file markers; the pipeline is byte-identical
-//! across runs and never panics (RUST-04). [`write_to_dir`] materializes the same framing.
+//! stdlib formatter, so `emit` produces already-correct significant-whitespace Python directly. Each
+//! file is framed into a `bundle::SdkBundle` with stable file markers; the pipeline is byte-identical
+//! across runs and never panics (RUST-04). [`write_to_dir`](crate::sdk::bundle::write_to_dir)
+//! materializes the same framing.
 
 mod contract;
 mod emit;
@@ -32,7 +33,7 @@ use crate::sdk::model_style::PyModelStyle;
 ///
 /// Emits `__init__.py` (re-exports), `client.py` (the `urllib`-backed `Client` + one method per
 /// operation), `errors.py` (typed `ApiError`), and model files (Pydantic v2 by default, dataclasses
-/// when configured), then frames them into a single [`bundle::SdkBundle`] String. Generating twice over
+/// when configured), then frames them into a single `bundle::SdkBundle` String. Generating twice over
 /// the same graph is byte-identical (PYSDK-03). There is NO `gofmt`-style normalization step (Python
 /// has no stdlib formatter) — the emitters produce correct significant-whitespace Python directly.
 ///

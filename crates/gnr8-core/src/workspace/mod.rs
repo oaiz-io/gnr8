@@ -26,7 +26,7 @@
 //! `Cargo.toml` is portable and can be committed. A build from this repository emits a path
 //! dependency on the local `crates/gnr8-sdk` instead, so developing gnr8 itself stays offline.
 //! `scripts/package-release.sh` fixes the choice at compile time via `GNR8_PACKAGED_RELEASE`; it is
-//! never inferred from the runtime filesystem. See [`core_dependency_line`].
+//! never inferred from the runtime filesystem. See `core_dependency_line`.
 //!
 //! Idempotency (D-01): every workspace file is written *only if absent*, via
 //! `OpenOptions::create_new(true)` — atomically failing with [`std::io::ErrorKind::AlreadyExists`] if

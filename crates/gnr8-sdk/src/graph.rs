@@ -29,7 +29,7 @@ pub use crate::facts::{FieldFact as Field, Prim, Type, WellKnown};
 ///
 /// The graph carries imported `OpenAPI` fragments verbatim ([`Param::openapi_content`] and
 /// [`Param::openapi_fields`]), so reading the `$ref`s inside one is a graph-level concern: both the
-/// `OpenAPI` target (rewriting them to public names) and [`direction`] (following them to decide which
+/// `OpenAPI` target (rewriting them to public names) and `direction` (following them to decide which
 /// side of an exchange a component is reached from) need the same parse, and one parse is one answer.
 /// Returns `None` for anything that is not a local `#/components/schemas/...` reference.
 #[must_use]
@@ -1163,7 +1163,7 @@ fn relativize(file: &str, root: &str) -> String {
 
 /// Whether `file` names a location INSIDE the analyzed module.
 ///
-/// This is the property [`relativize`] guarantees for a path it could strip, read back off the
+/// This is the property `relativize` guarantees for a path it could strip, read back off the
 /// result. `relativize` strips the module root only on a separator boundary and otherwise leaves
 /// the path exactly as the sidecar reported it — absolute. A path that is still absolute therefore
 /// names a file the analyzed module does not contain: a dependency, the standard library, or a

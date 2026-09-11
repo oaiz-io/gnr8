@@ -549,7 +549,8 @@ fn distinct_source_files(ir: &ApiGraph) -> usize {
     files.len()
 }
 
-/// A [`StageRunner`] that executes a composed [`Pipeline`]'s custom stages in this process.
+/// A [`StageRunner`] that executes a composed [`Pipeline`](crate::sdk::Pipeline)'s custom stages in
+/// this process.
 ///
 /// The CLI never uses this: it always talks to a project's worker, because that is where a user's
 /// Rust belongs. It exists for the two callers that already hold the `Pipeline` value — gnr8's own

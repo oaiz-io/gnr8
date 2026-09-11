@@ -10,11 +10,6 @@
 //! It is intentionally CONSERVATIVE — a false "unavailable" only causes a skip (never a false pass),
 //! and the green CI box (node + vendored typescript present) always runs the assertions.
 
-// This module is `mod`-included into several test binaries; not every binary uses every item, and
-// `pub fn available` is unreachable across the binary boundary (each test binary compiles its own
-// copy) — both are expected for a shared test helper, not a defect.
-#![allow(dead_code, unreachable_pub)]
-
 use std::path::Path;
 use std::process::Command;
 
@@ -28,7 +23,7 @@ const VENDORED_TYPESCRIPT: &str = concat!(
 ///
 /// Probes (a) that `node --version` spawns + exits 0, and (b) that the vendored typescript package
 /// is present on disk. Both are required; either absent → skip (return early in the caller).
-pub fn available() -> bool {
+pub(crate) fn available() -> bool {
     let node_ok = Command::new("node")
         .arg("--version")
         .output()

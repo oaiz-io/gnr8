@@ -10,9 +10,9 @@
 //! This is the structural twin of [`crate::pysdk`], MINUS the Python-only workarounds (required-first
 //! field ordering, the `from __future__` header, PEP-484 forward-ref aliases, the f-string `safe=''`
 //! trick): TypeScript `?:` is order-free, `type` aliases are order-independent, and template literals
-//! impose no backslash restriction. Each file is framed into a [`bundle::SdkBundle`] with stable file
-//! markers; the pipeline is byte-identical across runs and never panics (RUST-04). [`write_to_dir`]
-//! materializes the same framing.
+//! impose no backslash restriction. Each file is framed into a `bundle::SdkBundle` with stable file
+//! markers; the pipeline is byte-identical across runs and never panics (RUST-04).
+//! [`write_to_dir`](crate::sdk::bundle::write_to_dir) materializes the same framing.
 
 mod contract;
 mod emit;
@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 ///
 /// Emits `client.ts` (the `fetch`-backed `Client` + one method per operation), `errors.ts` (typed
 /// `ApiError`), `index.ts` (re-exports), and `models.ts` (`interface` models + literal-union enums +
-/// `type` aliases) in a FIXED alpha push order, then frames them into a single [`bundle::SdkBundle`]
+/// `type` aliases) in a FIXED alpha push order, then frames them into a single `bundle::SdkBundle`
 /// String. Generating twice over the same graph is byte-identical (TSSDK-03). There is NO `gofmt`-style
 /// normalization step (the generated TypeScript is already correct) and NO computed import header.
 ///

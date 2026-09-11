@@ -9,12 +9,6 @@
 //! Security (threat T-02-01): `target_dir` is passed as a DISCRETE `Command`
 //! argument, never interpolated into a shell string — there is no `sh -c`.
 
-// The driver is the Rust↔Go contract surface for 02-01. Its production consumer is
-// `analyze::build_graph`, which 02-03 implements; until then `run_goextract` and
-// `goextract_dir` are exercised only by the unit tests below. Allow dead_code so the
-// clippy `-D warnings` gate stays green this wave without masking a real signal.
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 use std::process::Command;
 

@@ -4,11 +4,12 @@
 //! Go SDK bundle String (D-06): one functional-options `client.go`, one typed `errors.go`, one generic
 //! `operations.go` resource surface, and one `models.go`. Tags were an annotation fact and have been
 //! removed (CLAUDE.md rules 1 & 3), so the SDK is a single operations surface rather than per-tag files.
-//! The package name is supplied by the caller (derived from the `GoSdk` target's module path, the
-//! single source of truth — see [`crate::sdk::builtins::GoSdk`]). Each file is emitted by [`emit`]
-//! (`format!`-based, no template engine — D-05), normalized through the real `gofmt` ([`gofmt`]), and
-//! framed into an [`bundle::SdkBundle`] with stable file markers. The pipeline is byte-identical across
-//! runs and never panics (RUST-04); [`write_to_dir`] materializes the same framing for 03-03's compile
+//! The package name is supplied by the caller (derived from the `GoSdk` target's module path, the single
+//! source of truth — see [`crate::sdk::builtins::GoSdk`]). Each file is emitted by `emit`
+//! (`format!`-based, no template engine — D-05), normalized through the real `gofmt` (the `gofmt`
+//! module), and framed into a `bundle::SdkBundle` with stable file markers. The pipeline is
+//! byte-identical across runs and never panics (RUST-04);
+//! [`write_to_dir`](crate::sdk::bundle::write_to_dir) materializes the same framing for 03-03's compile
 //! test.
 
 mod contract;
@@ -32,7 +33,7 @@ use crate::sdk::layout::{OperationFileSplit, SdkFileLayout};
 /// Emits `client.go` (functional-options `Client`), `errors.go` (typed `APIError`), one generic
 /// `operations.go` (`context.Context`-first methods on `*Client`), and `models.go` (request/response
 /// structs + enum newtypes), pipes each through `gofmt`, and frames them into a single
-/// [`bundle::SdkBundle`] String. Generating twice over the same graph is byte-identical (T-03-02-03).
+/// `bundle::SdkBundle` String. Generating twice over the same graph is byte-identical (T-03-02-03).
 ///
 /// `package` is the SDK's Go package name — derived from the `GoSdk` target's module path (the single
 /// source of truth) via [`crate::sdk::builtins::GoSdk`]; it appears in every file's `package` clause.

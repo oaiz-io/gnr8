@@ -239,7 +239,7 @@ pub struct ManifestEntry {
 /// version regardless of how the in-memory value was constructed.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Manifest {
-    /// The on-disk schema version (written as [`MANIFEST_VERSION`] on save).
+    /// The on-disk schema version (written as `MANIFEST_VERSION` on save).
     #[serde(default)]
     pub version: u32,
     /// The generated-file records, kept sorted by path for deterministic diffs.
