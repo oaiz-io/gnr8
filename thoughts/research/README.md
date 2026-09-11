@@ -32,6 +32,7 @@ The current research question:
 - [Generating a CLI for the user's API](2026-09-11-cli-generation.md)
   — what a command tree derives from the graph, why a graph-unchanged edit writes nothing, and where
   every spec-driven CLI needed an escape hatch
+  ([implementation plan](2026-09-11-cli-generation-plan.md))
 
 ## Current Position
 
