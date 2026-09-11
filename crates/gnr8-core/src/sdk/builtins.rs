@@ -2838,6 +2838,9 @@ impl TargetExec for GoSdk {
                     .to_string(),
             });
         }
+        if let Some(cli) = &self.cli {
+            validate_gosdk_cli(&cli.program)?;
+        }
         let projected = crate::graph::projection::for_generation(ir)?;
         let ir = &*projected;
         // Derive the package from the module path (the single source of truth) and generate via the
@@ -3558,43 +3561,61 @@ fn sdk_package(module: &str) -> Result<String, CoreError> {
     Ok(pkg.to_string())
 }
 
-/// Validate a generated-CLI program name and its packaging constraint.
+/// Validate a generated-CLI program name.
 ///
 /// `program` must be non-empty, must not begin with `-`, must spell a command name out of ASCII
-/// letters, digits, `-`, `_` or `.`, and must contain at least one alphanumeric. Combining
-/// `.cli(...)` with `.source_only()` / `.package_metadata(false)` is a contradiction: without
-/// `pyproject.toml` there is nowhere for `[project.scripts]` to go.
-fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreError> {
+/// letters, digits, `-`, `_` or `.`, and must contain at least one alphanumeric. The name is emitted
+/// verbatim — Python `argparse(prog=...)` / `[project.scripts]`, Go `cmd/<program>/main.go` — so
+/// the characters of `program` itself are what has to hold. Checking `kebab(program)` would check
+/// a value that is `[a-z0-9-]` by construction, which is no check at all.
+fn validate_cli_program(target: &str, program: &str) -> Result<(), CoreError> {
     if program.is_empty() {
         return Err(CoreError::Config {
-            message: "PySdk::cli program name must be non-empty — call .cli(\"bookstore\") with a usable command name".to_string(),
+            message: format!(
+                "{target}::cli program name must be non-empty — call .cli(\"bookstore\") with a usable command name"
+            ),
         });
     }
     if program.starts_with('-') {
         return Err(CoreError::Config {
-            message: format!("PySdk::cli program name {program:?} must not begin with '-'"),
+            message: format!("{target}::cli program name {program:?} must not begin with '-'"),
         });
     }
-    // The name is emitted verbatim — `argparse(prog=...)`, `_PROGRAM`, and the `[project.scripts]`
-    // key an installer turns into a file in `bin/` — so the characters of `program` ITSELF are what
-    // has to hold. Checking `kebab(program)` would check a value that is `[a-z0-9-]` by
-    // construction, which is no check at all.
     let spellable = program
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
     if !spellable || kebab(program).is_empty() {
         return Err(CoreError::Config {
             message: format!(
-                "PySdk::cli program name {program:?} is not a usable command name (need ASCII letters, digits, '-', '_' or '.', with at least one letter or digit)"
+                "{target}::cli program name {program:?} is not a usable command name (need ASCII letters, digits, '-', '_' or '.', with at least one letter or digit)"
             ),
         });
     }
+    Ok(())
+}
+
+/// Validate a generated-CLI program name and its packaging constraint.
+///
+/// Combining `.cli(...)` with `.source_only()` / `.package_metadata(false)` is a contradiction:
+/// without `pyproject.toml` there is nowhere for `[project.scripts]` to go.
+fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreError> {
+    validate_cli_program("PySdk", program)?;
     if !package_metadata {
         return Err(CoreError::Config {
             message: "PySdk::cli(...) requires package metadata so [project.scripts] can be written; do not combine .cli(...) with .source_only() or .package_metadata(false)".to_string(),
         });
     }
     Ok(())
+}
+
+/// Validate a generated-CLI program name for [`GoSdk`].
+///
+/// Go has no `[project.scripts]` equivalent. The CLI is `cmd/<program>/main.go`, a standalone
+/// `package main` that compiles without `go.mod` being the thing that registers it, so `.cli()`
+/// does **not** require package metadata — the asymmetry with [`validate_pysdk_cli`] is
+/// intentional and documented on [`GoSdk::cli`].
+fn validate_gosdk_cli(program: &str) -> Result<(), CoreError> {
+    validate_cli_program("GoSdk", program)
 }
 
 fn write_sdk_files(
@@ -7578,6 +7599,64 @@ mod tests {
             message.contains("source_only") || message.contains("package_metadata"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn gosdk_cli_rejects_empty_program() {
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        let error = GoSdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-go")
+            .cli("")
+            .generate(&ir, &mut out, &cx())
+            .unwrap_err();
+        assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
+        assert!(
+            error.to_string().contains("cli"),
+            "error must name the method: {error}"
+        );
+        assert!(
+            error.to_string().contains("empty") || error.to_string().contains("non-empty"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn gosdk_cli_rejects_a_program_name_it_cannot_emit_verbatim() {
+        for program in ["book store", "books/get", "book;rm", "..."] {
+            let ir = ApiGraph::default();
+            let mut out = Artifacts::new();
+            let error = GoSdk::new()
+                .module("example.com/bookstore/sdk")
+                .to("generated/sdk-go")
+                .cli(program)
+                .generate(&ir, &mut out, &cx())
+                .unwrap_err();
+            assert!(
+                matches!(error, crate::CoreError::Config { .. }),
+                "{program:?}: {error}"
+            );
+            assert!(
+                error.to_string().contains(program),
+                "the error must quote the name: {error}"
+            );
+        }
+    }
+
+    /// Go has no `[project.scripts]` equivalent — `cmd/<program>/main.go` compiles standalone —
+    /// so `.cli(...)` with `.source_only()` is not a contradiction.
+    #[test]
+    fn gosdk_cli_allows_source_only() {
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        GoSdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-go")
+            .cli("bookstore")
+            .source_only()
+            .generate(&ir, &mut out, &cx())
+            .expect("GoSdk::cli does not require package metadata");
     }
 
     #[test]

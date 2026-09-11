@@ -9,7 +9,10 @@
 /// `gnr8 init` / `generate` / `watch` command surface.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SdkCli {
-    /// Program name — `argparse(prog=…)` and the `[project.scripts]` key.
+    /// Program name — Python `argparse(prog=…)` / `[project.scripts]` key, and the Go
+    /// `cmd/<program>/` directory. Go has no `[project.scripts]` equivalent: `.cli()` on
+    /// [`crate::sdk::builtins::GoSdk`] does not require package metadata, because
+    /// `cmd/<program>/main.go` compiles standalone.
     pub program: String,
 }
 
@@ -28,13 +31,20 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::SdkCli;
-    use crate::sdk::builtins::PySdk;
+    use crate::sdk::builtins::{GoSdk, PySdk};
 
     #[test]
     fn cli_sets_the_field() {
         let sdk = PySdk::new().cli("bookstore");
         assert_eq!(
             sdk.cli,
+            Some(SdkCli {
+                program: "bookstore".to_string()
+            })
+        );
+        let go = GoSdk::new().cli("bookstore");
+        assert_eq!(
+            go.cli,
             Some(SdkCli {
                 program: "bookstore".to_string()
             })
@@ -58,6 +68,18 @@ mod tests {
             "absent cli must skip serializing: {json}"
         );
         let back: PySdk = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.cli, None);
+    }
+
+    #[test]
+    fn gosdk_serialized_without_cli_deserializes_to_none() {
+        let sdk = GoSdk::new().module("example.com/bookstore/sdk").to("sdk");
+        let json = serde_json::to_string(&sdk).expect("serialize");
+        assert!(
+            !json.contains("\"cli\""),
+            "absent cli must skip serializing: {json}"
+        );
+        let back: GoSdk = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.cli, None);
     }
 }

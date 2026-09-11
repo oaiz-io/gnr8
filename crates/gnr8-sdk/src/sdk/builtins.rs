@@ -2229,6 +2229,8 @@ pub struct GoSdk {
     pub package_info: SdkPackageMetadata,
     #[serde(default = "default_contract_tests")]
     pub contract_tests: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<SdkCli>,
 }
 
 impl GoSdk {
@@ -2244,6 +2246,7 @@ impl GoSdk {
             package_metadata: true,
             package_info: SdkPackageMetadata::default(),
             contract_tests: true,
+            cli: None,
         }
     }
 
@@ -2329,6 +2332,18 @@ impl GoSdk {
     #[must_use]
     pub const fn without_contract_tests(mut self) -> Self {
         self.contract_tests = false;
+        self
+    }
+
+    /// Emit a command-line client for this API at `cmd/<program>/main.go`, invoked as `<name>`.
+    ///
+    /// Unlike [`PySdk::cli`], this does **not** require [`GoSdk::package_metadata`]. A Go directory
+    /// is one package, so the CLI cannot live beside `client.go`; `cmd/<program>/main.go` is a
+    /// standalone `package main` that `go build` / `go install` already know how to produce a
+    /// binary from. There is no `[project.scripts]` equivalent to write.
+    #[must_use]
+    pub fn cli(mut self, program: impl Into<String>) -> Self {
+        self.cli = Some(SdkCli::new(program));
         self
     }
 
