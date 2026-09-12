@@ -239,7 +239,7 @@ fn python_sdk_is_ruff_clean() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Python target output — the package plus the generated `cli.py` — is `ruff` clean.
+/// Python target output — the SDK package plus the generated `cli/` subpackage — is `ruff` clean.
 ///
 /// The files are passed by name rather than as a directory, for two reasons that are both facts
 /// about the tree and not preferences. The target also writes `README.md`/`PUBLISHING.md`, and a

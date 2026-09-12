@@ -17,8 +17,8 @@ use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
     flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
-    operation_prose, reject_sse_operations, request_body_models_of, OperationAuthScheme,
-    RequestBodyModel,
+    operation_prose, reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
+    OperationAuthScheme, RequestBodyModel,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -83,6 +83,18 @@ fn command_modules<'a>(
             ops,
         });
     }
+    // `commands/__init__.py` and `parser.py` list these modules in this order, and
+    // `ruff check --select I` sorts the members of a `from … import (…)`. Partition order puts
+    // `root` first, which is only correct when no group sorts before it.
+    modules.sort_by(|left, right| left.stem.cmp(&right.stem));
+    reject_duplicate_command_files(
+        modules
+            .iter()
+            .map(|module| (module.stem.as_str(), module.group.as_deref())),
+        program,
+        "cli/commands",
+        "py",
+    )?;
     Ok(modules)
 }
 
@@ -232,7 +244,11 @@ fn emit_package_main() -> Result<String, CoreError> {
     writeln!(out).map_err(sink)?;
     writeln!(out, "from .main import main").map_err(sink)?;
     writeln!(out).map_err(sink)?;
-    writeln!(out, "raise SystemExit(main())").map_err(sink)?;
+    // `runpy` sets `__name__` to `"__main__"` for `python -m`, so the guard is true there and only
+    // there. Without it, anything that merely IMPORTS this module — a package walker, an autodoc
+    // pass, a test collector — runs the program and exits the process.
+    writeln!(out, "if __name__ == \"__main__\":").map_err(sink)?;
+    writeln!(out, "    raise SystemExit(main())").map_err(sink)?;
     Ok(out)
 }
 

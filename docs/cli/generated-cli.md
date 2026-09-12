@@ -7,8 +7,8 @@ This page is **not** about gnr8's own command surface (`gnr8 init`, `generate`, 
 That lives in [CLI command reference](commands.md). This page is the CLI gnr8 **generates for your
 API**: a program derived from the same `ApiGraph` as the SDK, written next to that SDK.
 
-Python emits `<sdk dir>/cli.py`. Go emits `<sdk dir>/cmd/<program>/main.go` — a Go directory is one
-package, so the CLI cannot live beside `client.go`.
+Python emits a `<sdk dir>/cli/` subpackage. Go emits a `<sdk dir>/cmd/<program>/` project — a Go
+directory is one package, so the CLI cannot live beside `client.go`.
 
 ## Opt in
 

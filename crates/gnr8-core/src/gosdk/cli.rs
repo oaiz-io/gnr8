@@ -18,8 +18,8 @@ use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
     flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
-    operation_prose, quoted_string_literal, reject_sse_operations, request_body_models_of,
-    success_responses_of, OperationAuthScheme, RequestBodyModel,
+    operation_prose, quoted_string_literal, reject_duplicate_command_files, reject_sse_operations,
+    request_body_models_of, success_responses_of, OperationAuthScheme, RequestBodyModel,
 };
 use crate::CoreError;
 
@@ -58,6 +58,7 @@ fn internal_import(module: &str, program: &str) -> String {
 /// Ungrouped commands land in `commands.go`, so a group whose file stem matches one of these has
 /// no file of its own. Rejecting it names the remedy every other CLI name collision names.
 const RESERVED_CLI_FILES: &[&str] = &[
+    "body",
     "cli",
     "commands",
     "config",
@@ -113,6 +114,14 @@ fn command_files<'a>(
             ops,
         });
     }
+    reject_duplicate_command_files(
+        files
+            .iter()
+            .map(|file| (file.stem.as_str(), file.group.as_deref())),
+        program,
+        "internal/cli",
+        "go",
+    )?;
     Ok(files)
 }
 

@@ -1905,3 +1905,185 @@ fn an_empty_graph_without_a_selector_still_emits_a_command_less_program() {
         "there are no commands to add:\n{text}"
     );
 }
+
+/// A graph with both ungrouped and grouped operations — the only shape that exercises the module
+/// list in `commands/__init__.py` and `parser.py`.
+fn mixed_group_graph() -> ApiGraph {
+    serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "ping",
+              "method": "GET",
+              "path": "/ping",
+              "handler": "ping",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 204, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            },
+            {
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "group": "books",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 204, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap()
+}
+
+/// The emitted module lists are sorted, so the package is `ruff check --select I` clean.
+///
+/// Ungrouped commands land in `commands/root.py` and groups in `commands/<group>.py`. Emitting
+/// `root` first because it was partitioned first puts `root` ahead of every group that sorts before
+/// it, which `I001` reports — and no other fixture mixes the two, so nothing else would catch it.
+#[test]
+fn the_command_module_list_is_sorted() {
+    let mut out = Artifacts::new();
+    PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk")
+        .cli("bookstore")
+        .generate(&mixed_group_graph(), &mut out, &cx())
+        .expect("a mixed-group graph must generate");
+
+    let commands_init = artifact(&out, "generated/sdk/cli/commands/__init__.py");
+    let books = commands_init
+        .find("    books,")
+        .expect("the group module must be listed");
+    let root = commands_init
+        .find("    root,")
+        .expect("the root module must be listed");
+    assert!(
+        books < root,
+        "`from . import (...)` members must be sorted:\n{commands_init}"
+    );
+    let all_books = commands_init
+        .find("\"books\",")
+        .expect("__all__ must list the group");
+    let all_root = commands_init
+        .find("\"root\",")
+        .expect("__all__ must list root");
+    assert!(
+        all_books < all_root,
+        "__all__ must be sorted:\n{commands_init}"
+    );
+
+    let parser = artifact(&out, "generated/sdk/cli/parser.py");
+    let imported_books = parser
+        .find("    books,")
+        .expect("parser must import the group module");
+    let imported_root = parser
+        .find("    root,")
+        .expect("parser must import the root module");
+    assert!(
+        imported_books < imported_root,
+        "parser.py's import members must be sorted:\n{parser}"
+    );
+}
+
+/// Two groups whose names collapse to one file are rejected naming both.
+///
+/// A group name is a file name now, and `file_stem` is not injective — a leading digit picks up a
+/// `value_` prefix, so `2024 Reports` and `Value 2024 Reports` both become `value_2024_reports`.
+/// Without the check the second file silently replaces the first inside gofmt's temp dir, and the
+/// user sees an `artifact.path_collision` naming neither group.
+#[test]
+fn two_groups_mapping_to_one_command_file_name_both() {
+    let graph: ApiGraph = serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "listOld",
+              "method": "GET",
+              "path": "/old",
+              "handler": "listOld",
+              "group": "2024 Reports",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 204, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            },
+            {
+              "id": "listNew",
+              "method": "GET",
+              "path": "/new",
+              "handler": "listNew",
+              "group": "Value 2024 Reports",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 204, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap();
+    let error = generate_cli_result(&graph, SdkCli::new("bookstore"))
+        .expect_err("two groups mapping to one file must be rejected");
+    let message = error.to_string();
+    // The diagnostic names the kebab form, which is the group as the command tree spells it.
+    assert!(message.contains("'2024-reports'"), "{message}");
+    assert!(message.contains("'value-2024-reports'"), "{message}");
+    assert!(message.contains("value_2024_reports"), "{message}");
+    assert!(message.contains("GroupOperations"), "{message}");
+}
+
+/// A group named after a shared Go file is rejected before two files claim one path.
+#[test]
+fn go_a_group_named_body_is_rejected() {
+    let graph: ApiGraph = serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "upload",
+              "method": "POST",
+              "path": "/upload",
+              "handler": "upload",
+              "group": "body",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 204, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.go", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap();
+    let error = generate_go_cli_result(&graph, "bookstore")
+        .expect_err("a group named after a shared file must be rejected");
+    let message = error.to_string();
+    assert!(message.contains("'body'"), "{message}");
+    assert!(message.contains("internal/cli/body.go"), "{message}");
+    assert!(message.contains("GroupOperations"), "{message}");
+}

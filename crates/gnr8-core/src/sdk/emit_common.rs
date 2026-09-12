@@ -738,6 +738,39 @@ pub(crate) fn check_cli_names(
     Ok(())
 }
 
+/// Reject two groups whose names collapse to one file.
+///
+/// A group name is a file name now, and `file_stem` is not injective: `2024 Reports` and
+/// `Value 2024 Reports` both become `value_2024_reports`. Without this the second file silently
+/// replaces the first, or surfaces as an `artifact.path_collision` that names neither group. The
+/// shape follows `check_unique_model_file_names`, which rejects the same class for schemas.
+pub(crate) fn reject_duplicate_command_files<'a>(
+    stems: impl Iterator<Item = (&'a str, Option<&'a str>)>,
+    program: &str,
+    dir: &str,
+    extension: &str,
+) -> Result<(), CoreError> {
+    let mut seen: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    for (stem, group) in stems {
+        if let Some(previous) = seen.insert(stem, group) {
+            let name = |group: Option<&str>| {
+                group.map_or_else(
+                    || "the ungrouped commands".to_string(),
+                    |g| format!("group '{g}'"),
+                )
+            };
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} {} and {} both map to '{dir}/{stem}.{extension}'; rename one with GroupOperations",
+                    name(previous),
+                    name(group)
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Reject an in-scope operation whose success response is a stream the CLI cannot print.
 ///
 /// A `text/event-stream` success has no terminating document to render, and a target has no warning
