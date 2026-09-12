@@ -62,14 +62,17 @@ jobs:
             needs_go: "false"
             needs_python: "false"
             needs_node: "false"
+            test_args: ""
           - package: gnr8-engine
             needs_go: "true"
             needs_python: "true"
             needs_node: "true"
+            test_args: ""
           - package: gnr8-cli
             needs_go: "true"
             needs_python: "false"
             needs_node: "false"
+            test_args: "-- --test-threads=1"
     steps:
       - uses: actions/checkout@v7
 
@@ -107,7 +110,7 @@ jobs:
           key: tests-${{ matrix.package }}
 
       - name: Test package
-        run: cargo test -p "${{ matrix.package }}" --all-features
+        run: cargo test -p "${{ matrix.package }}" --all-features ${{ matrix.test_args }}
 
   sidecars:
     name: Language sidecars and action contract
