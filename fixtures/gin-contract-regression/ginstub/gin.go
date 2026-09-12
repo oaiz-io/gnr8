@@ -30,6 +30,11 @@ func (c *Context) DefaultQuery(string, string) string                           
 func (c *Context) GetQuery(string) (string, bool)                                  { return "", false }
 func (c *Context) GetHeader(string) string                                         { return "" }
 func (c *Context) Cookie(string) (string, error)                                   { return "", nil }
+func (c *Context) ContentType() string                                             { return "" }
+func (c *Context) GetRawData() ([]byte, error)                                     { return nil, nil }
+func (c *Context) ShouldBindQuery(any) error                                       { return nil }
+func (c *Context) ShouldBindUri(any) error                                         { return nil }
+func (c *Context) ShouldBindHeader(any) error                                      { return nil }
 func (c *Context) ShouldBindJSON(any) error                                        { return nil }
 func (c *Context) JSON(int, any)                                                   {}
 func (c *Context) String(int, string, ...any)                                      {}

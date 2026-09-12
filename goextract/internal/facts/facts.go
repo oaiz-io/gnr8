@@ -75,19 +75,21 @@ type RouteFact struct {
 	Span                   SourceSpan               `json:"span"`
 }
 
-// ParamFact describes a path or query parameter, derived purely from code. Path
-// params are required; query params default to a string type and not required. There
-// is no enum or description — those were annotation-only and are gone.
+// ParamFact describes a path, query, header, or cookie parameter derived purely
+// from code. Typed binding can supply enum members, validation constraints, and
+// serialization alongside the native Go type.
 type ParamFact struct {
-	Name          string        `json:"name"`
-	Location      string        `json:"location"`
-	Required      bool          `json:"required"`
-	Schema        Type          `json:"schema"`
-	Default       *LiteralValue `json:"default,omitempty"`
-	Style         string        `json:"style,omitempty"`
-	Explode       *bool         `json:"explode,omitempty"`
-	AllowReserved bool          `json:"allow_reserved,omitempty"`
-	Span          SourceSpan    `json:"span"`
+	Name            string        `json:"name"`
+	Location        string        `json:"location"`
+	Required        bool          `json:"required"`
+	Schema          Type          `json:"schema"`
+	Constraints     *Constraints  `json:"constraints,omitempty"`
+	ItemConstraints *Constraints  `json:"item_constraints,omitempty"`
+	Default         *LiteralValue `json:"default,omitempty"`
+	Style           string        `json:"style,omitempty"`
+	Explode         *bool         `json:"explode,omitempty"`
+	AllowReserved   bool          `json:"allow_reserved,omitempty"`
+	Span            SourceSpan    `json:"span"`
 }
 
 // ResponseFact describes one response keyed by HTTP status.
@@ -308,7 +310,8 @@ func BytesPrim() Prim { return Prim{Prim: PrimBytes} }
 
 // TypeRef is a reference to a schema by its stable id.
 type TypeRef struct {
-	RefID string `json:"ref_id"`
+	RefID string      `json:"ref_id"`
+	Span  *SourceSpan `json:"span,omitempty"`
 }
 
 // DiagnosticFact is one diagnostic with a source location (D-10 / GO-06).

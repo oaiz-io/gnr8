@@ -1656,7 +1656,7 @@ func ParseTime(value string) (*time.Time, error) {
 	}
 }
 
-func TestGetRawDataWithJSONUsageSynthesizesFreeFormJSONBody(t *testing.T) {
+func TestGetRawDataWithJSONUnmarshalInfersNamedJSONBody(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/rawjsonbody
 
@@ -1690,6 +1690,7 @@ import (
 
 type Server struct{ R *gin.Engine }
 type Result struct { OK bool `+"`json:\"ok\"`"+` }
+type Payload struct { Value string `+"`json:\"value\"`"+` }
 
 func (s Server) Register() {
 	s.R.POST("/ingest", s.ingest)
@@ -1697,7 +1698,7 @@ func (s Server) Register() {
 
 func (s Server) ingest(c *gin.Context) {
 	raw, _ := c.GetRawData()
-	var payload map[string]any
+	var payload Payload
 	_ = json.Unmarshal(raw, &payload)
 	c.JSON(200, Result{})
 }
@@ -1713,19 +1714,311 @@ func (s Server) ingest(c *gin.Context) {
 	for _, r := range routes.Recognize(res) {
 		cf = analyzer.Analyze(r, diags)
 	}
-	if cf.RequestBody == nil || cf.RequestBody.RefID != "__synthetic.IngestRawJSONRequest" {
-		t.Fatalf("raw JSON body should synthesize free-form request schema, got %+v", cf.RequestBody)
-	}
+	assertBodySuffix(t, cf.RequestBody, "Payload")
 	if cf.RequestBodyContentType != "application/json" {
 		t.Fatalf("raw JSON body content type: want application/json got %q", cf.RequestBodyContentType)
 	}
-	if len(cf.Schemas) != 1 || cf.Schemas[0].Body.Type != facts.TypeAny {
-		t.Fatalf("raw JSON body schema should be Any, got %+v", cf.Schemas)
+	if len(cf.Schemas) != 0 {
+		t.Fatalf("named JSON body should use the extracted DTO schema, got synthetic schemas %+v", cf.Schemas)
 	}
 	// The read that produced the body cannot also report the body as unresolved.
 	for _, item := range diags.Items() {
 		if item.Code == "request.body.unresolved" {
 			t.Fatalf("a resolved raw JSON body must not also be diagnosed: %+v", item)
+		}
+	}
+}
+
+func TestEncodingJSONDecoderBodiesFollowTypedCallsAndWrappers(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/jsondecoder
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+import "net/http"
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{ Request *http.Request }
+
+func (e *Engine) POST(string, HandlerFunc) {}
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package jsondecoder
+
+import (
+	"encoding/json"
+	"io"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Server struct{ R *gin.Engine }
+type Payload struct { Value string `+"`json:\"value\"`"+` }
+type Result struct { OK bool `+"`json:\"ok\"`"+` }
+
+func (s Server) Register() {
+	s.R.POST("/direct", s.direct)
+	s.R.POST("/any", s.anyTarget)
+	s.R.POST("/generic", s.generic)
+	s.R.POST("/wrapper", s.wrapper)
+	s.R.POST("/unrelated", s.unrelated)
+}
+
+func (s Server) direct(c *gin.Context) {
+	var request Payload
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	_ = decoder.Decode(&request)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) anyTarget(c *gin.Context) {
+	var request Payload
+	_ = decodeStrictJSON(c, &request)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) generic(c *gin.Context) {
+	_, _ = decodeGeneric[Payload](c)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) wrapper(c *gin.Context) {
+	var request Payload
+	_ = decodeWrapper(c, &request)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) unrelated(c *gin.Context) {
+	var request Payload
+	_ = decodeReader(strings.NewReader("{}"), &request)
+	c.JSON(200, Result{OK: true})
+}
+
+func decodeStrictJSON(c *gin.Context, target any) error {
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
+
+func decodeGeneric[T any](c *gin.Context) (T, error) {
+	var target T
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	return target, decoder.Decode(&target)
+}
+
+func decodeWrapper(c *gin.Context, target any) error {
+	return decodeStrictJSON(c, target)
+}
+
+func decodeReader(reader io.Reader, target any) error {
+	return json.NewDecoder(reader).Decode(target)
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load JSON decoder fixture: %v", err)
+	}
+	diags := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/jsondecoder", diags)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diags)
+	}
+	for _, handler := range []string{"direct", "anyTarget", "generic", "wrapper"} {
+		code := got[handler]
+		assertBodySuffix(t, code.RequestBody, "Payload")
+		if code.RequestBodyContentType != "application/json" || !code.RequestBodyRequired {
+			t.Fatalf("%s JSON decoder body mismatch: %+v", handler, code)
+		}
+		if code.RequestBody.Span == nil || code.RequestBody.Span.StartLine == 0 || !strings.HasSuffix(code.RequestBody.Span.File, "app.go") {
+			t.Fatalf("%s must retain body call-site provenance, got %+v", handler, code.RequestBody)
+		}
+	}
+	if unrelated := got["unrelated"]; unrelated.RequestBody != nil || unrelated.RequestBodyContentType != "" {
+		t.Fatalf("an unrelated reader must not become the routed request body: %+v", unrelated)
+	}
+	for _, item := range diags.Items() {
+		if item.Code == "request.body.unresolved" && item.Operation != "POST /unrelated" {
+			t.Fatalf("typed decoder patterns must not remain unresolved: %+v", item)
+		}
+	}
+}
+
+func TestRawRequestBodiesRequireStaticTypeAndMediaEvidence(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/rawbodies
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+import "net/http"
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{ Request *http.Request }
+
+func (e *Engine) POST(string, HandlerFunc) {}
+func (c *Context) ContentType() string { return "" }
+func (c *Context) GetRawData() ([]byte, error) { return nil, nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package rawbodies
+
+import (
+	"encoding/json"
+	"io"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Command interface { Execute([]byte) error }
+type Server struct { R *gin.Engine; Command Command }
+type Payload struct { Value string `+"`json:\"value\"`"+` }
+type Result struct { OK bool `+"`json:\"ok\"`"+` }
+
+func (s Server) Register() {
+	s.R.POST("/binary", s.binary)
+	s.R.POST("/dynamic-media", s.dynamicMedia)
+	s.R.POST("/rejected-media", s.rejectedMedia)
+	s.R.POST("/typed", s.typed)
+	s.R.POST("/ambiguous", s.ambiguous)
+	s.R.POST("/transformed", s.transformed)
+	s.R.POST("/reassigned", s.reassigned)
+}
+
+func (s Server) binary(c *gin.Context) {
+	raw, _ := io.ReadAll(c.Request.Body)
+	switch c.ContentType() {
+	case "application/octet-stream", "application/vnd.example.command":
+		_ = s.Command.Execute(raw)
+	}
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) dynamicMedia(c *gin.Context) {
+	raw, _ := c.GetRawData()
+	contentType := dynamicContentType()
+	_ = contentType
+	_ = s.Command.Execute(raw)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) rejectedMedia(c *gin.Context) {
+	raw, _ := c.GetRawData()
+	if c.ContentType() == "application/json" {
+		return
+	}
+	_ = s.Command.Execute(raw)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) typed(c *gin.Context) {
+	raw, _ := io.ReadAll(c.Request.Body)
+	var payload Payload
+	_ = json.Unmarshal(raw, &payload)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) ambiguous(c *gin.Context) {
+	raw, _ := c.GetRawData()
+	var payload map[string]any
+	_ = json.Unmarshal(raw, &payload)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) transformed(c *gin.Context) {
+	raw, _ := c.GetRawData()
+	_ = s.Command.Execute([]byte(strings.TrimSpace(string(raw))))
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) reassigned(c *gin.Context) {
+	raw, _ := c.GetRawData()
+	raw = []byte("replacement")
+	_ = s.Command.Execute(raw)
+	c.JSON(200, Result{OK: true})
+}
+
+func dynamicContentType() string { return "application/octet-stream" }
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load raw body fixture: %v", err)
+	}
+	diags := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/rawbodies", diags)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diags)
+	}
+
+	binary := got["binary"]
+	if binary.RequestBody == nil || binary.RequestBodyContentType != "application/octet-stream" || len(binary.RequestBodyVariants) != 1 || binary.RequestBodyVariants[0].ContentType != "application/vnd.example.command" {
+		t.Fatalf("static raw body media variants mismatch: %+v", binary)
+	}
+	if len(binary.Schemas) != 1 || primName(binary.Schemas[0].Body) != facts.PrimBytes {
+		t.Fatalf("genuinely raw body must use a byte schema: %+v", binary.Schemas)
+	}
+	assertBodySuffix(t, got["typed"].RequestBody, "Payload")
+	if got["typed"].RequestBodyContentType != "application/json" {
+		t.Fatalf("typed raw JSON decode mismatch: %+v", got["typed"])
+	}
+	dynamic := got["dynamicMedia"]
+	if dynamic.RequestBody == nil || dynamic.RequestBodyContentType != "" || len(dynamic.Schemas) != 1 || primName(dynamic.Schemas[0].Body) != facts.PrimBytes {
+		t.Fatalf("dynamic media must retain only the proven byte body fact: %+v", dynamic)
+	}
+	rejected := got["rejectedMedia"]
+	if rejected.RequestBody == nil || rejected.RequestBodyContentType != "" || len(rejected.Schemas) != 1 || primName(rejected.Schemas[0].Body) != facts.PrimBytes {
+		t.Fatalf("a rejected static media type must not be published as accepted: %+v", rejected)
+	}
+	for _, handler := range []string{"ambiguous", "transformed", "reassigned"} {
+		if code := got[handler]; code.RequestBody != nil {
+			t.Fatalf("%s must not invent a request body: %+v", handler, code)
+		}
+	}
+
+	wantDiagnostic := map[string]string{
+		"POST /dynamic-media":  "media type is not statically established",
+		"POST /rejected-media": "media type is not statically established",
+		"POST /ambiguous":      "does not resolve to a named schema",
+		"POST /transformed":    "raw request bytes do not state a media type or schema",
+		"POST /reassigned":     "raw request bytes do not state a media type or schema",
+	}
+	for operation, reason := range wantDiagnostic {
+		found := false
+		for _, item := range diags.Items() {
+			if item.Code == "request.body.unresolved" && item.Operation == operation && strings.Contains(item.Message, reason) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s body diagnostic containing %q: %+v", operation, reason, diags.Items())
 		}
 	}
 }
@@ -2010,6 +2303,281 @@ func (s Server) getThing(c *gin.Context) {
 		cf = analyzer.Analyze(r, diags)
 	}
 	assertResponseSuffix(t, cf.Responses, 200, "GetThing200Response")
+}
+
+func TestTypedGinBindingsCarryNativeFactsAndConstraints(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/typedbindings
+
+go 1.22
+
+require (
+	github.com/gin-gonic/gin v0.0.0
+	github.com/google/uuid v0.0.0
+)
+
+replace github.com/gin-gonic/gin => ./ginstub
+replace github.com/google/uuid => ./uuidstub
+`)
+	for _, subdir := range []string{"ginstub", "uuidstub"} {
+		if err := os.Mkdir(filepath.Join(dir, subdir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", subdir, err)
+		}
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) ShouldBindQuery(any) error { return nil }
+func (c *Context) ShouldBindUri(any) error { return nil }
+func (c *Context) ShouldBindHeader(any) error { return nil }
+func (c *Context) BindQuery(any) error { return nil }
+func (c *Context) BindUri(any) error { return nil }
+func (c *Context) BindHeader(any) error { return nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "uuidstub", "go.mod"), "module github.com/google/uuid\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "uuidstub", "uuid.go"), "package uuid\n\ntype UUID [16]byte\n")
+	mustWrite(t, filepath.Join(dir, "app.go"), `package typedbindings
+
+import (
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+type Status string
+
+const (
+	StatusReady Status = "ready"
+	StatusDone Status = "done"
+)
+
+type Query struct {
+	IDs       []uuid.UUID `+"`form:\"ids,parser=encoding.TextUnmarshaler\" collection_format:\"csv\"`"+`
+	Statuses  []Status    `+"`form:\"statuses\" collection_format:\"csv\"`"+`
+	Limit     uint        `+"`form:\"limit,default=20\" binding:\"min=1,max=100\"`"+`
+	RequestID string      `+"`form:\"request_id\" binding:\"omitempty,max=128\"`"+`
+	Enabled   *bool       `+"`form:\"enabled\"`"+`
+	Count     int32       `+"`form:\"count\" binding:\"gte=-5,lte=5\"`"+`
+	Ratio     float64     `+"`form:\"ratio\" binding:\"min=0.25,max=0.75\"`"+`
+	Scores    []int       `+"`form:\"scores\" binding:\"min=1,max=5,dive,gte=0,lte=10\"`"+`
+	Labels    []string    `+"`form:\"labels\" binding:\"dive,min=2,max=20\"`"+`
+	At        time.Time   `+"`form:\"at\"`"+`
+}
+
+type URI struct {
+	ID uuid.UUID `+"`uri:\"id,parser=encoding.TextUnmarshaler\" binding:\"required\"`"+`
+}
+
+type Headers struct {
+	RequestID string `+"`header:\"X-Request-ID\" binding:\"required,max=64\"`"+`
+	Retry     uint16 `+"`header:\"X-Retry\" binding:\"gte=1,lte=9\"`"+`
+}
+
+type Server struct{ R *gin.Engine }
+type Result struct { OK bool `+"`json:\"ok\"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/items/:id", s.shouldBind)
+	s.R.GET("/aliases/:id", s.bindAliases)
+}
+
+func (s Server) shouldBind(c *gin.Context) {
+	var query Query
+	var uri URI
+	var headers Headers
+	_ = c.ShouldBindQuery(&query)
+	_ = c.ShouldBindUri(&uri)
+	_ = c.ShouldBindHeader(&headers)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) bindAliases(c *gin.Context) {
+	var query Query
+	var uri URI
+	var headers Headers
+	_ = c.BindQuery(&query)
+	_ = c.BindUri(&uri)
+	_ = c.BindHeader(&headers)
+	c.JSON(200, Result{OK: true})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load typed binding fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/typedbindings", diagnostics)
+	got := map[string]handlers.CodeFacts{}
+	for _, route := range routes.Recognize(res) {
+		got[route.Handler] = analyzer.Analyze(route, diagnostics)
+	}
+	for _, handler := range []string{"shouldBind", "bindAliases"} {
+		code := got[handler]
+		ids, ok := paramByName(code.Params, "ids")
+		if !ok || ids.Required || ids.Style != "form" || ids.Explode == nil || *ids.Explode || arrayElement(t, ids.Schema).Type != facts.TypeWellKnown || arrayElement(t, ids.Schema).Of != facts.WellKnownUUID {
+			t.Fatalf("%s UUID CSV query mismatch: %+v", handler, ids)
+		}
+		statuses, _ := paramByName(code.Params, "statuses")
+		if statuses.Style != "form" || statuses.Explode == nil || *statuses.Explode {
+			t.Fatalf("%s enum CSV serialization mismatch: %+v", handler, statuses)
+		}
+		assertEnum(t, arrayElement(t, statuses.Schema), "done", "ready")
+		limit, _ := paramByName(code.Params, "limit")
+		limitPrim, _ := limit.Schema.Of.(*facts.Prim)
+		if limit.Required || limit.Default == nil || limit.Default.Value != "20" || limitPrim == nil || limitPrim.Prim != facts.PrimInt || limitPrim.Signed == nil || *limitPrim.Signed || limit.Constraints == nil || stringPointerValue(limit.Constraints.Minimum) != "1" || stringPointerValue(limit.Constraints.Maximum) != "100" {
+			t.Fatalf("%s bounded uint default mismatch: %+v", handler, limit)
+		}
+		requestID, _ := paramByName(code.Params, "request_id")
+		if requestID.Required || requestID.Constraints == nil || uintPointerValue(requestID.Constraints.MaxLength) != 128 {
+			t.Fatalf("%s optional bounded request id mismatch: %+v", handler, requestID)
+		}
+		enabled, _ := paramByName(code.Params, "enabled")
+		if enabled.Required || primName(enabled.Schema) != facts.PrimBool {
+			t.Fatalf("%s pointer bool optionality mismatch: %+v", handler, enabled)
+		}
+		count, _ := paramByName(code.Params, "count")
+		countPrim, _ := count.Schema.Of.(*facts.Prim)
+		if countPrim == nil || countPrim.Prim != facts.PrimInt || countPrim.Bits == nil || *countPrim.Bits != 32 || countPrim.Signed == nil || !*countPrim.Signed || count.Constraints == nil || stringPointerValue(count.Constraints.Minimum) != "-5" || stringPointerValue(count.Constraints.Maximum) != "5" {
+			t.Fatalf("%s signed integer constraints mismatch: %+v", handler, count)
+		}
+		ratio, _ := paramByName(code.Params, "ratio")
+		ratioPrim, _ := ratio.Schema.Of.(*facts.Prim)
+		if ratioPrim == nil || ratioPrim.Prim != facts.PrimFloat || ratioPrim.Bits == nil || *ratioPrim.Bits != 64 || ratio.Constraints == nil || stringPointerValue(ratio.Constraints.Minimum) != "0.25" || stringPointerValue(ratio.Constraints.Maximum) != "0.75" {
+			t.Fatalf("%s float constraints mismatch: %+v", handler, ratio)
+		}
+		scores, _ := paramByName(code.Params, "scores")
+		if scores.Constraints == nil || uintPointerValue(scores.Constraints.MinItems) != 1 || uintPointerValue(scores.Constraints.MaxItems) != 5 || scores.ItemConstraints == nil || stringPointerValue(scores.ItemConstraints.Minimum) != "0" || stringPointerValue(scores.ItemConstraints.Maximum) != "10" {
+			t.Fatalf("%s array/item numeric constraints mismatch: %+v", handler, scores)
+		}
+		labels, _ := paramByName(code.Params, "labels")
+		if labels.ItemConstraints == nil || uintPointerValue(labels.ItemConstraints.MinLength) != 2 || uintPointerValue(labels.ItemConstraints.MaxLength) != 20 {
+			t.Fatalf("%s string item constraints mismatch: %+v", handler, labels)
+		}
+		at, _ := paramByName(code.Params, "at")
+		if at.Schema.Type != facts.TypeWellKnown || at.Schema.Of != facts.WellKnownDateTime {
+			t.Fatalf("%s time query mismatch: %+v", handler, at)
+		}
+		id, _ := paramByName(code.Params, "id")
+		if id.Location != "path" || !id.Required || id.Schema.Type != facts.TypeWellKnown || id.Schema.Of != facts.WellKnownUUID {
+			t.Fatalf("%s URI binding mismatch: %+v", handler, id)
+		}
+		header, _ := paramByName(code.Params, "X-Request-ID")
+		if header.Location != "header" || !header.Required || header.Constraints == nil || uintPointerValue(header.Constraints.MaxLength) != 64 {
+			t.Fatalf("%s header binding mismatch: %+v", handler, header)
+		}
+		retry, _ := paramByName(code.Params, "X-Retry")
+		if retry.Constraints == nil || stringPointerValue(retry.Constraints.Minimum) != "1" || stringPointerValue(retry.Constraints.Maximum) != "9" {
+			t.Fatalf("%s numeric header constraints mismatch: %+v", handler, retry)
+		}
+		for _, param := range code.Params {
+			if param.Span.StartLine == 0 || !strings.HasSuffix(param.Span.File, "app.go") {
+				t.Fatalf("%s parameter lost field provenance: %+v", handler, param)
+			}
+		}
+	}
+	for _, item := range diagnostics.Items() {
+		if item.Code == "request.parameter.unresolved" || item.Code == "request.parameter.ambiguous" {
+			t.Fatalf("native typed binding fixture must be complete: %+v", item)
+		}
+	}
+}
+
+func stringPointerValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func uintPointerValue(value *uint64) uint64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func TestTypedBindingReportsConstraintsItCannotRepresent(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/badconstraints
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) ShouldBindQuery(any) error { return nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package badconstraints
+
+import "github.com/gin-gonic/gin"
+
+type Query struct {
+		Flag bool              `+"`form:\"flag\" binding:\"min=1\"`"+`
+		Keys map[string]string `+"`form:\"keys\" binding:\"dive,keys,min=2,endkeys\"`"+`
+		Code string            `+"`form:\"code\" binding:\"startswith=acct_\"`"+`
+		Nested [][]int         `+"`form:\"nested\" binding:\"dive,dive,min=1\"`"+`
+}
+
+type Server struct{ R *gin.Engine }
+type Result struct { OK bool `+"`json:\"ok\"`"+` }
+
+func (s Server) Register() { s.R.GET("/search", s.search) }
+func (s Server) search(c *gin.Context) {
+	var query Query
+	_ = c.ShouldBindQuery(&query)
+	c.JSON(200, Result{OK: true})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load unsupported constraint fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/badconstraints", diagnostics)
+	var code handlers.CodeFacts
+	for _, route := range routes.Recognize(res) {
+		code = analyzer.Analyze(route, diagnostics)
+	}
+	for _, name := range []string{"flag", "keys", "code", "nested"} {
+		param, ok := paramByName(code.Params, name)
+		if !ok {
+			t.Fatalf("missing diagnosed parameter %s: %+v", name, code.Params)
+		}
+		if param.Constraints != nil || param.ItemConstraints != nil {
+			t.Fatalf("%s must not acquire guessed constraints: %+v", name, param)
+		}
+		found := false
+		for _, item := range diagnostics.Items() {
+			if item.Code == "request.parameter.unresolved" && item.Subject == name && item.Line > 0 && strings.Contains(item.Message, `binding:"`) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing precise constraint diagnostic for %s: %+v", name, diagnostics.Items())
+		}
+	}
 }
 
 func TestModuleOwnedMultiHopTypedParametersAndMultipartAreExtracted(t *testing.T) {

@@ -44,7 +44,7 @@ func TestScopedClassifiesTokensByScope(t *testing.T) {
 			name:  "nested dives never return to the field",
 			value: "dive,dive,required",
 			want: []Token{
-				{Text: "required", Scope: ScopeElement},
+				{Text: "required", Scope: ScopeElement, Nested: true},
 			},
 		},
 		{
@@ -52,7 +52,7 @@ func TestScopedClassifiesTokensByScope(t *testing.T) {
 			value: "dive,keys,min=1,endkeys,dive,required",
 			want: []Token{
 				{Text: "min=1", Scope: ScopeMapKey},
-				{Text: "required", Scope: ScopeElement},
+				{Text: "required", Scope: ScopeElement, Nested: true},
 			},
 		},
 		{

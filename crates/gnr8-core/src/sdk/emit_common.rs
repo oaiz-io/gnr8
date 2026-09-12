@@ -1725,6 +1725,8 @@ mod tests {
             location: "query".to_string(),
             required: false,
             schema: Type::Primitive(crate::graph::Prim::String),
+            constraints: crate::analyze::facts::Constraints::default(),
+            item_constraints: crate::analyze::facts::Constraints::default(),
             default: None,
             style: None,
             explode: None,
@@ -2139,6 +2141,7 @@ mod tests {
                 status: 204,
                 body: Some(crate::graph::SchemaRef {
                     ref_id: "message".to_string(),
+                    provenance: None,
                 }),
                 body_kind: "json".to_string(),
                 content_type: Some("application/json".to_string()),

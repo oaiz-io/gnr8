@@ -393,6 +393,7 @@ mod tests {
             params: Vec::new(),
             request_body: Some(SchemaRef {
                 ref_id: "Payload".to_string(),
+                provenance: None,
             }),
             request_body_required: true,
             request_body_content_type: None,
@@ -406,6 +407,7 @@ mod tests {
             status: 200,
             body: Some(SchemaRef {
                 ref_id: "Payload".to_string(),
+                provenance: None,
             }),
             body_kind: "json".to_string(),
             content_type: Some("application/json".to_string()),

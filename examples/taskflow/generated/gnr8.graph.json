@@ -57,7 +57,12 @@
         "group": "tasks",
         "params": [],
         "request_body": {
-          "ref_id": "CreateTaskRequest"
+          "ref_id": "CreateTaskRequest",
+          "provenance": {
+            "file": "main.go",
+            "start_line": 45,
+            "end_line": 45
+          }
         },
         "request_body_content_type": "application/json",
         "responses": [
@@ -235,7 +240,12 @@
           }
         ],
         "request_body": {
-          "ref_id": "UpdateTaskRequest"
+          "ref_id": "UpdateTaskRequest",
+          "provenance": {
+            "file": "main.go",
+            "start_line": 78,
+            "end_line": 78
+          }
         },
         "request_body_content_type": "application/json",
         "responses": [
