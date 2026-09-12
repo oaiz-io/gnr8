@@ -2155,3 +2155,22 @@ fn a_long_description_wraps_without_quadratic_rescanning() {
         expected.len()
     );
 }
+
+/// A grouped command's usage line spells the invocation that actually works.
+///
+/// `flag.FlagSet` knows only the leaf name, so the usage line has to be built from the command tree
+/// instead. Printing `bookstore list-books` for a command reached as `bookstore books list-books`
+/// hands the reader a line that exits 2 with `unknown command`.
+#[test]
+fn a_grouped_command_prints_its_group_in_the_usage_line() {
+    let text = generate_go_cli(&mixed_group_graph(), "bookstore");
+    assert!(
+        text.contains(r"Usage: %s books list-books [flags]\n"),
+        "grouped command must print its group; got:\n{text}"
+    );
+    // An ungrouped command is reached as `bookstore ping`, so it must NOT gain a group segment.
+    assert!(
+        text.contains(r"Usage: %s ping [flags]\n"),
+        "ungrouped command must print the bare leaf; got:\n{text}"
+    );
+}

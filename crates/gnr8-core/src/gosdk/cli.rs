@@ -1079,12 +1079,19 @@ fn emit_handler(
         )
         .map_err(sink)?;
     }
+    // The group segment is part of the invocation: `bookstore books list-books`, never `bookstore
+    // list-books`. Printing the leaf alone hands the reader a line that exits 2 with `unknown
+    // command`, which is worse than no usage line at all.
+    let invocation = match command_group(op) {
+        Some(group) => format!("{group} {command}"),
+        None => command.clone(),
+    };
     writeln!(
         out,
         "fmt.Fprintf(fs.Output(), {}, program)",
         quoted_string_literal(&format!(
             "Usage: %s {} [flags]\n",
-            command.replace('%', "%%")
+            invocation.replace('%', "%%")
         ))
     )
     .map_err(sink)?;

@@ -15,7 +15,7 @@ func cmdListBooks(args []string) int {
 	fs := flag.NewFlagSet("list-books", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "list-books: Returns every book in the catalogue.")
-		fmt.Fprintf(fs.Output(), "Usage: %s list-books [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "Usage: %s books list-books [flags]\n", program)
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "")
@@ -45,7 +45,7 @@ func cmdCreateBook(args []string) int {
 	fs := flag.NewFlagSet("create-book", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "create-book: Adds a book to the catalogue.")
-		fmt.Fprintf(fs.Output(), "Usage: %s create-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "Usage: %s books create-book [flags]\n", program)
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "")
@@ -92,7 +92,7 @@ func cmdDeleteBook(args []string) int {
 	fs := flag.NewFlagSet("delete-book", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "delete-book: Permanently removes one book from the catalogue.")
-		fmt.Fprintf(fs.Output(), "Usage: %s delete-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "Usage: %s books delete-book [flags]\n", program)
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "")
@@ -122,7 +122,7 @@ func cmdGetBook(args []string) int {
 	fs := flag.NewFlagSet("get-book", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "get-book: Returns one book by its identifier.")
-		fmt.Fprintf(fs.Output(), "Usage: %s get-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "Usage: %s books get-book [flags]\n", program)
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "")
@@ -152,7 +152,7 @@ func cmdUpdateBook(args []string) int {
 	fs := flag.NewFlagSet("update-book", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "update-book: Replaces the mutable fields of one book.")
-		fmt.Fprintf(fs.Output(), "Usage: %s update-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "Usage: %s books update-book [flags]\n", program)
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "")
