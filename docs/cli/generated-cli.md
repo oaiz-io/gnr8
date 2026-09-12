@@ -17,21 +17,30 @@ package, so the CLI cannot live beside `client.go`.
     PySdk::new()
         .module("example.com/bookstore/sdk")
         .to("generated/sdk")
-        .cli("bookstore"),
+        .cli(SdkCli::new("bookstore").base_url("https://api.example.com")),
 )
 .target(
     GoSdk::new()
         .module("example.com/bookstore/sdk")
         .to("generated/sdk")
-        .cli("bookstore"),
+        .cli(SdkCli::new("bookstore").base_url("https://api.example.com")),
 )
 ```
 
-The builder is `.cli("bookstore")`. There is no second way to get a CLI. Absent `.cli(...)`, no
-CLI artifact is written.
+The builder is `.cli(...)`. There is no second way to get a CLI. Absent `.cli(...)`, no CLI artifact
+is written.
 
-`SdkCli` is the configuration type behind that method. It names the generated program. It is
-unrelated to gnr8's own CLI.
+`SdkCli` is the configuration type behind that method, and it carries the facts that belong to the
+**program** rather than to the API — none of which the graph holds:
+
+| Method | Fact |
+|---|---|
+| `SdkCli::new(program)` | the name it is invoked as |
+| [`base_url(url)`](#the-host-the-program-talks-to) | the host it talks to unless `--base-url` says otherwise |
+| [`commands(selector)`](#command-scope) | which operations become commands |
+
+`.cli("bookstore")` is still accepted — a program name converts into an `SdkCli` — so a program that
+needs nothing but a name says nothing but a name. `SdkCli` is unrelated to gnr8's own CLI.
 
 **Packaging is not symmetric.** Combining `.cli(...)` with `.source_only()` or
 `.package_metadata(false)` is a configuration error on `PySdk`: without `pyproject.toml` there is
@@ -153,6 +162,26 @@ Reserved flags are computed per command from what that command actually binds: `
 emitter because output is unconditionally JSON. A parameter named `json`, `limit`, `version` or
 `body` on a command that does not bind that flag is therefore fine.
 
+## Flag defaults in `--help`
+
+Per-flag prose is not emitted. The one thing a flag's `--help` does carry is a source default:
+
+| | Where the default appears | Why |
+|---|---|---|
+| Python | `help="default: 10"` | `argparse` shows a default only through the help string |
+| Go | `(default 10)`, from `flag.PrintDefaults` | `flag` renders the registered default itself, and omits it when it is the zero value for the type |
+| Go, booleans | `(default true)` in the usage string | a `flag.Value` has no default for `PrintDefaults` to render |
+
+**A default is shown, never sent.** Omit the flag and the CLI sends nothing, so the request is the
+one the SDK's own method builds and the server applies its own default. This is what the keyword
+means: OpenAPI says the Schema Object's `default` "documents the receiver's behavior rather than
+inserting the value into the data", and JSON Schema files it under annotations. Sending it would
+make an omitted flag indistinguishable from a user who typed the value, and would pin every CLI
+caller to today's value if the server's changed.
+
+A source default does not make a required parameter optional: a required flag must still be
+supplied, and omitting it is a usage error.
+
 ## The host the program talks to
 
 `SdkCli::base_url` is the program's default, and the only source for one:
@@ -178,23 +207,6 @@ rather than one deployment) shipped a client aimed at localhost.
 There is no environment variable for the host. One value, one source, plus the flag: `--base-url` is
 the user answering at run time, not a second place the fact is written down.
 
-Per-flag prose is not emitted. The one thing a flag's `--help` does carry is a source default:
-
-| | Where the default appears | Why |
-|---|---|---|
-| Python | `help="default: 10"` | `argparse` shows a default only through the help string |
-| Go | `(default 10)`, from `flag.PrintDefaults` | `flag` renders the registered default itself, and omits it when it is the zero value for the type |
-| Go, booleans | `(default true)` in the usage string | a `flag.Value` has no default for `PrintDefaults` to render |
-
-**A default is shown, never sent.** Omit the flag and the CLI sends nothing, so the request is the
-one the SDK's own method builds and the server applies its own default. This is what the keyword
-means: OpenAPI says the Schema Object's `default` "documents the receiver's behavior rather than
-inserting the value into the data", and JSON Schema files it under annotations. Sending it would
-make an omitted flag indistinguishable from a user who typed the value, and would pin every CLI
-caller to today's value if the server's changed.
-
-A source default does not make a required parameter optional: a required flag must still be
-supplied, and omitting it is a usage error.
 
 ## Command scope
 
@@ -269,6 +281,7 @@ alias bkls='bookstore list-books'
 | 1 | helper failure | `bookstore: credential helper failed (exit 1)` on stderr |
 | 1 | transport failure | `bookstore: <urlopen error [Errno 111] Connection refused>` on stderr |
 | 2 | usage | argparse's own message on stderr |
+| 2 | a required flag was omitted | `bookstore: missing required flag --base-url` on stderr |
 | 2 | unreadable or malformed body | `bookstore: body is not valid JSON: ...` on stderr |
 
 `--help` and `--version` go to stdout and exit 0. Every one of those is a single line of prose:
