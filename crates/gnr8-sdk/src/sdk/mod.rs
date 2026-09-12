@@ -49,6 +49,7 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod builtins;
+pub mod cli;
 pub mod docs;
 pub mod layout;
 pub mod model_style;
@@ -60,6 +61,10 @@ use std::path::PathBuf;
 use crate::graph::{ApiGraph, Diagnostic};
 use crate::Error;
 
+pub use cli::SdkCli;
+pub use docs::SdkDocs;
+pub use layout::{OperationFileSplit, SdkFileLayout};
+pub use model_style::PyModelStyle;
 pub use stage::{
     BuiltinPost, BuiltinSource, BuiltinTarget, BuiltinTransform, Custom, PostStage, SourceStage,
     StagePlan, TargetStage, TransformStage,
@@ -650,6 +655,7 @@ pub mod prelude {
         SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticFiles, TsSdk,
     };
+    pub use super::cli::SdkCli;
     pub use super::docs::SdkDocs;
     pub use super::layout::{OperationFileSplit, SdkFileLayout};
     pub use super::model_style::PyModelStyle;

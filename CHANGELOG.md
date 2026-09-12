@@ -9,6 +9,77 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **`PySdk::cli("bookstore")` emits a generated argparse CLI beside the Python SDK.** Opt-in: a
+  `<sdk dir>/cli/` subpackage derived from the same API graph as the client, plus a
+  `[project.scripts]` entry so `pipx install` / `uv tool install` put the program on PATH. One module
+  per concern — `config`, `credentials`, `output`, `body`, `parser`, `main`, and
+  `commands/<group>.py` per command group, each registering its own subparsers. The generated program
+  is the user's API client, not gnr8's own `gnr8 init` / `generate` / `watch` surface. Credentials
+  come from one env var per scheme or one helper command; JSON on stdout; exit codes 0/1/2. See
+  [Generated CLI](docs/cli/generated-cli.md).
+- **`GoSdk::cli("bookstore")` emits a generated stdlib CLI project at `<sdk dir>/cmd/<program>/`.**
+  `main.go` is a `package main` that calls `cli.Run`; everything else is an `internal/cli` package
+  beside it, which Go's own visibility rule keeps importable from that program and nowhere else. The
+  same graph, naming, credentials, exit codes, and JSON-on-stdout contract as the Python CLI. Unlike
+  Python, `.cli()` does not require package metadata: `go build ./cmd/<program>` compiles the binary
+  from that tree. See [Generated CLI](docs/cli/generated-cli.md).
+- **`SdkCli::commands(selector)` chooses which operations become commands.** Scope is a fact about
+  the program, not about the API: an operation left out is still in `openapi.yaml` and still a method
+  on the generated client. It takes the same `OperationSelector` every selector-taking transform
+  uses, now with `OperationSelector::not(...)` for exclusion. Name and flag collision checks run over
+  the selected operations only, so an operation that is not a command can no longer fail generation
+  for a flag it never emits. A selector that matches nothing — or a scope that leaves no commands —
+  is a configuration error.
+- **`SdkCli::base_url(url)` sets the host a generated CLI talks to by default.** `--base-url`
+  overrides it per invocation. Without it the program has no default and the flag is required.
+
+### Fixed
+
+- **A streaming operation no longer makes `.cli(...)` unusable for a whole API.** The refusal of a
+  `text/event-stream` success now considers only the operations the program wraps, and its remedy is
+  `SdkCli::commands(...)` rather than "drop it from the graph with a `Transform`" — which would also
+  have removed the operation from `openapi.yaml` and from every SDK and reported
+  `operation.removed` as a breaking change. The two verbatim copies of the check are now one helper.
+  [Response overrides](docs/pipeline/transforms.md) now say which targets consume `event_stream`:
+  the OpenAPI targets do, SDK targets reject a typed event schema, and a CLI cannot print a stream.
+- **A generated CLI that could not start is now a generation error.** Two parameters of one
+  operation whose names differ only in casing style (`page_size` beside `pageSize`) mapped to one
+  flag, and so did a parameter named `no_verified` beside a boolean `verified` whose negation is
+  already `--no-verified`. Go's `flag` panics on a name already in use and `argparse` raises while
+  building the parser, so the emitted program failed on every invocation including `--help`, while
+  `gnr8 generate` reported success. This is now the fourth collision class, naming the operation,
+  both subjects, the flag, and which side is a negation.
+- **A generated CLI no longer sends a parameter default the user did not type.** Both emitters bound
+  a source default as the flag's value and then transmitted it, so `bookstore list-books` sent
+  `limit=10` where `client.list_books()` sent nothing — two artifacts of one graph making different
+  requests, with the CLI pinned to the server's default as of generation time. The default is now
+  shown in `--help` (`help="default: 10"` in Python, `flag.PrintDefaults` in Go) and sent only when
+  the flag is supplied, which is what OpenAPI and JSON Schema say the keyword means. A required
+  parameter with a default must still be supplied.
+- **Reserved CLI flags are computed per command from what that command binds.** The flat list
+  rejected a parameter named `json`, `limit`, `all`, `body`, `body-file` or `version` on any
+  operation, and the only remedy was renaming a wire parameter — a breaking API change to satisfy a
+  flag spelling. `--help` and `--base-url` are reserved on every command; `--body`/`--body-file`
+  only where the operation has a request body; `--limit`/`--all` only where a `PaginationPolicy`
+  names it; plus `--no-<flag>` for each boolean. `--version` is bound on the root parser, which is
+  not a command, and `--json` is bound by neither emitter, so neither is reserved.
+- **A generated CLI no longer guesses the host it talks to.** It derived the default from the
+  OpenAPI document's `servers` and fell back to `http://localhost:8000`, so a fact about the program
+  depended on a fact about the document: pointing a CLI at production meant publishing a deployment
+  URL in the API description, and an API that declares no `servers` shipped a client aimed at
+  localhost. `SdkCli::base_url(url)` is now the one source; without it the program has no default
+  and `--base-url` is required. `openapi_metadata.servers` and the localhost constant are no longer
+  consulted.
+
+### Changed
+
+- **`PySdk::cli` / `GoSdk::cli` take an `SdkCli` as well as a program name.** Every existing
+  `.cli("name")` call keeps compiling — a name converts into an `SdkCli`.
+- A generated CLI without `SdkCli::base_url` now requires `--base-url` on every invocation, where it
+  previously defaulted to the document's first server or to `http://localhost:8000`.
+
 ## 0.14.1 — 2026-09-11
 
 ### Fixed

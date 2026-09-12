@@ -25,6 +25,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use gnr8_engine::sdk::prelude::*;
+use gnr8_engine::sdk::{Artifacts, Cx, TargetExec};
+
 const GO_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/goalservice");
 const PY_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -131,6 +134,21 @@ fn go_sdk_is_gofmt_and_go_vet_clean() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every `.py` file under `dir`, recursively, in no particular order.
+fn collect_python_sources(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_python_sources(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "py") {
+            out.push(path.to_str().expect("utf-8 path").to_string());
+        }
+    }
+}
+
 /// Python: the default (Pydantic v2) SDK is `ruff check` + `ruff format` clean. `--isolated` ignores any
 /// ambient `pyproject.toml`; `--select`/`--ignore` pin exactly the modern rule set we commit to.
 #[test]
@@ -221,6 +239,173 @@ fn python_sdk_is_ruff_clean() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Python target output — the SDK package plus the generated `cli/` subpackage — is `ruff` clean.
+///
+/// The files are passed by name rather than as a directory, for two reasons that are both facts
+/// about the tree and not preferences. The target also writes `README.md`/`PUBLISHING.md`, and a
+/// `ruff` new enough to format fenced code blocks would reformat prose this test does not claim
+/// anything about. And `contract_test.py` is not clean today — it emits queued response bodies as
+/// one long line and its imports are not `I001`-sorted — which is debt that predates the CLI and
+/// is not this file's to hide.
+#[test]
+fn python_sdk_target_with_cli_is_ruff_clean() {
+    if !tool_available("ruff", &["--version"]) {
+        eprintln!("skipping python_sdk target lint: ruff unavailable");
+        return;
+    }
+    let graph = gnr8_engine::analyze::build_graph(PY_FIXTURE)
+        .expect("build_graph must succeed (requires python3 for pyextract)");
+    let target = gnr8_engine::sdk::prelude::PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("sdk")
+        .cli("bookstore");
+    let mut out = gnr8_engine::sdk::Artifacts::new();
+    gnr8_engine::sdk::TargetExec::generate(
+        &target,
+        &graph,
+        &mut out,
+        &gnr8_engine::sdk::Cx::new(std::env::temp_dir()),
+    )
+    .expect("PySdk with .cli() must generate");
+    let dir = unique_temp_dir("py-cli");
+    for artifact in out.files() {
+        let path = dir.join(&artifact.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &artifact.text).expect("write artifact");
+    }
+    let pkg = dir.join("sdk");
+    assert!(
+        pkg.join("cli").join("main.py").is_file(),
+        "target output must include the CLI package"
+    );
+    assert!(
+        pkg.join("contract_test.py").is_file(),
+        "target output must include contract_test.py"
+    );
+    // Walk the package, not just its root: the generated CLI is a subpackage, and a non-recursive
+    // read would lint the SDK and silently skip every CLI module.
+    let mut sources: Vec<String> = Vec::new();
+    collect_python_sources(&pkg, &mut sources);
+    sources.retain(|path| !path.ends_with("contract_test.py"));
+    sources.sort();
+    assert!(
+        sources.iter().any(|path| path.ends_with("cli/main.py")),
+        "the linted set must include the CLI package: {sources:?}"
+    );
+    assert!(
+        sources
+            .iter()
+            .any(|path| path.ends_with("cli/commands/root.py")),
+        "the linted set must reach nested CLI modules: {sources:?}"
+    );
+
+    let mut check_args = vec![
+        "check",
+        "--isolated",
+        "--no-cache",
+        "--select",
+        "F,I,UP,E",
+        "--ignore",
+        "UP007,UP045",
+    ];
+    check_args.extend(sources.iter().map(String::as_str));
+    let (check_ok, check_out, check_err) = run("ruff", &check_args, &dir, &[]);
+    assert!(
+        check_ok,
+        "ruff check flagged the generated Python SDK target:\n{check_out}{check_err}"
+    );
+
+    let mut fmt_args = vec!["format", "--isolated", "--no-cache", "--check"];
+    fmt_args.extend(sources.iter().map(String::as_str));
+    let (fmt_ok, fmt_out, fmt_err) = run("ruff", &fmt_args, &dir, &[]);
+    assert!(
+        fmt_ok,
+        "ruff format --check would reformat the generated Python SDK target:\n{fmt_out}{fmt_err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The generated CLI package of a SECURED graph is `ruff` clean.
+///
+/// Credential resolution is the CLI's largest shared module and is emitted only when the graph
+/// declares a scheme, so the unsecured gate above never sees it — which is how an unused import and
+/// two undefined names reached it. Only `<pkg>/cli/**` is linted here: securing the graph also
+/// widens the SDK's own `client.py` past 88 columns, which is debt that predates the CLI.
+#[test]
+fn secured_python_cli_package_is_ruff_clean() {
+    if !tool_available("ruff", &["--version"]) {
+        eprintln!("skipping secured python CLI lint: ruff unavailable");
+        return;
+    }
+    let mut graph = gnr8_engine::analyze::build_graph(PY_FIXTURE)
+        .expect("build_graph must succeed (requires python3 for pyextract)");
+    gnr8_engine::sdk::TransformExec::apply(
+        &gnr8_engine::sdk::prelude::ApplySecurity::api_key("ApiKeyAuth", "X-API-Key"),
+        &mut graph,
+        &gnr8_engine::sdk::Cx::new(std::env::temp_dir()),
+    )
+    .expect("ApplySecurity must apply");
+    let target = gnr8_engine::sdk::prelude::PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("sdk")
+        .cli("bookstore");
+    let mut out = gnr8_engine::sdk::Artifacts::new();
+    gnr8_engine::sdk::TargetExec::generate(
+        &target,
+        &graph,
+        &mut out,
+        &gnr8_engine::sdk::Cx::new(std::env::temp_dir()),
+    )
+    .expect("PySdk with .cli() must generate");
+    let dir = unique_temp_dir("py-cli-secured");
+    for artifact in out.files() {
+        let path = dir.join(&artifact.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &artifact.text).expect("write artifact");
+    }
+    let cli_dir = dir.join("sdk").join("cli");
+    assert!(
+        cli_dir.join("credentials.py").is_file(),
+        "a secured graph must emit credential resolution"
+    );
+    let mut sources: Vec<String> = Vec::new();
+    collect_python_sources(&cli_dir, &mut sources);
+    sources.sort();
+    assert!(
+        sources.len() >= 8,
+        "the CLI package must be linted whole: {sources:?}"
+    );
+
+    let mut check_args = vec![
+        "check",
+        "--isolated",
+        "--no-cache",
+        "--select",
+        "F,I,UP,E",
+        "--ignore",
+        "UP007,UP045",
+    ];
+    check_args.extend(sources.iter().map(String::as_str));
+    let (check_ok, check_out, check_err) = run("ruff", &check_args, &dir, &[]);
+    assert!(
+        check_ok,
+        "ruff check flagged the secured CLI package:\n{check_out}{check_err}"
+    );
+
+    let mut fmt_args = vec!["format", "--isolated", "--no-cache", "--check"];
+    fmt_args.extend(sources.iter().map(String::as_str));
+    let (fmt_ok, fmt_out, fmt_err) = run("ruff", &fmt_args, &dir, &[]);
+    assert!(
+        fmt_ok,
+        "ruff format --check would reformat the secured CLI package:\n{fmt_out}{fmt_err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// TypeScript: the default SDK is Prettier-clean. Prefers the vendored `tsextract` prettier, falling back
 /// to a `PATH` prettier; skips when neither (and when `node`/`tsc` for graph-building is absent).
 #[test]
@@ -279,4 +464,63 @@ fn typescript_sdk_is_prettier_clean() {
     );
 
     let _ = std::fs::remove_dir_all(&split_dir);
+}
+
+/// Go CLI (`cmd/<program>/main.go`) is gofmt-clean and included in `go vet ./...`.
+#[test]
+fn go_sdk_with_cli_is_gofmt_and_go_vet_clean() {
+    if !tool_available("go", &["version"]) {
+        eprintln!("skipping go_sdk CLI lint: go toolchain unavailable");
+        return;
+    }
+
+    let graph = gnr8_engine::analyze::build_graph(GO_FIXTURE)
+        .expect("build_graph must succeed (requires the Go toolchain)");
+    let dir = unique_temp_dir("go-cli");
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/goalservice/sdk")
+        .to("sdk")
+        .without_contract_tests()
+        .cli("goalservice")
+        .generate(&graph, &mut out, &Cx::new(&dir))
+        .expect("GoSdk with .cli() must generate");
+    for file in out.files() {
+        let path = dir.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &file.text).expect("write artifact");
+    }
+    let sdk_dir = dir.join("sdk");
+    assert!(
+        sdk_dir.join("cmd/goalservice/main.go").is_file()
+            && sdk_dir
+                .join("cmd/goalservice/internal/cli/cli.go")
+                .is_file(),
+        "the CLI project must be written under cmd/goalservice/"
+    );
+
+    let (fmt_ok, unformatted, fmt_err) = run("gofmt", &["-l", "."], &sdk_dir, &[]);
+    assert!(
+        fmt_ok && unformatted.trim().is_empty(),
+        "generated Go SDK with CLI is not gofmt-clean:\ngofmt -l listed:\n{unformatted}\nstderr:\n{fmt_err}"
+    );
+
+    let (vet_ok, vet_out, vet_err) = run(
+        "go",
+        &["vet", "./..."],
+        &sdk_dir,
+        &[
+            ("GOPROXY", "off"),
+            ("GOFLAGS", "-mod=mod"),
+            ("GOTOOLCHAIN", "local"),
+        ],
+    );
+    assert!(
+        vet_ok,
+        "go vet flagged the generated Go SDK with CLI:\nstdout:\n{vet_out}\nstderr:\n{vet_err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

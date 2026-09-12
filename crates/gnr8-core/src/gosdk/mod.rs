@@ -12,6 +12,7 @@
 //! [`write_to_dir`](crate::sdk::bundle::write_to_dir) materializes the same framing for 03-03's compile
 //! test.
 
+mod cli;
 mod contract;
 mod emit;
 mod gofmt;
@@ -233,6 +234,28 @@ pub(crate) fn generate_contract_test(
 
 /// The file name the Go SDK's contract test is written at, relative to the target's output dir.
 pub(crate) const CONTRACT_TEST_FILE: &str = contract::CONTRACT_TEST_FILE;
+
+/// Render the Go SDK's generated CLI as one `gofmt`-clean `cmd/<program>/main.go`.
+///
+/// Unlike the Python CLI, this is a sibling `package main` rather than a file beside `client.go`: a
+/// Go directory is one package. `.cli()` on `GoSdk` does not require package metadata; `go build
+/// ./cmd/<program>` is enough.
+///
+/// # Errors
+///
+/// Returns [`crate::CoreError::SdkGen`] on a name collision, an SSE success, or an unrepresentable
+/// graph fact, [`crate::CoreError::GoFmt`] if `gofmt` rejects the emitted source, or
+/// [`crate::CoreError::GoToolchainMissing`] if `gofmt` cannot be spawned.
+pub(crate) fn generate_cli(
+    graph: &ApiGraph,
+    module: &str,
+    package: &str,
+    cli: &gnr8::sdk::SdkCli,
+    memo_dir: Option<&std::path::Path>,
+) -> Result<Vec<SdkFile>, crate::CoreError> {
+    let raw = cli::emit_cli(graph, module, package, cli)?;
+    gofmt::gofmt_files(raw, memo_dir)
+}
 
 fn raw_go_file(name: impl Into<String>, raw: impl Into<String>) -> SdkFile {
     SdkFile {

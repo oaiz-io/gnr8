@@ -11,7 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use crate::graph::{ApiGraph, Operation, Prim, Schema, Type};
+use gnr8::sdk::SdkCli;
+
+use crate::graph::{ApiGraph, Operation, Param, Prim, Schema, Type};
 use crate::sdk::layout::SdkFileLayout;
 use crate::CoreError;
 
@@ -95,6 +97,132 @@ pub(crate) fn file_stem(name: &str) -> String {
         out.insert_str(0, "value_");
     }
     out
+}
+
+/// Convert an identifier into kebab-case over [`split_words`].
+///
+/// Unlike [`kebab_stem`], this does not inject a `value`/`value_` prefix: a command or flag name
+/// that would be empty must fail at [`check_cli_names`], not silently become `value-...`.
+pub(crate) fn kebab(name: &str) -> String {
+    split_words(name)
+        .iter()
+        .map(|w| w.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// The CLI verb for an operation: kebab-case of `op.id`.
+pub(crate) fn command_name(op: &Operation) -> String {
+    kebab(&op.id)
+}
+
+/// The CLI noun for an operation, when `op.group` is set.
+///
+/// Ungrouped operations sit directly under the program — there is no `"default"` group level.
+pub(crate) fn command_group(op: &Operation) -> Option<String> {
+    op.group.as_deref().map(kebab)
+}
+
+/// The CLI flag spelling of a parameter: kebab-case of the wire name.
+///
+/// The wire name stays `param.name`; only the spelling is re-cased.
+pub(crate) fn flag_name(param: &Param) -> String {
+    kebab(&param.name)
+}
+
+/// Convert a value to a `SCREAMING_SNAKE` identifier: `out-of-stock` → `OUT_OF_STOCK`.
+pub(crate) fn screaming_snake(value: &str) -> String {
+    split_words(value)
+        .iter()
+        .map(|w| w.to_ascii_uppercase())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+/// Environment variable holding one security scheme's credential: `{PROG}_{SCHEME}`.
+pub(crate) fn credential_env_var(program: &str, scheme_id: &str) -> String {
+    format!(
+        "{}_{}",
+        screaming_snake(program),
+        screaming_snake(scheme_id)
+    )
+}
+
+/// Environment variable selecting the credential-helper command: `{PROG}_CREDENTIAL_HELPER`.
+pub(crate) fn helper_env_var(program: &str) -> String {
+    format!("{}_CREDENTIAL_HELPER", screaming_snake(program))
+}
+
+/// Global flags every generated command binds, whatever the operation carries.
+///
+/// `--help` is bound by `argparse` on every parser it builds and by the Go dispatcher's own `-h`
+/// handling; `--base-url` is declared on each command so it can follow the subcommand.
+///
+/// Everything else is conditional and computed per command by [`reserved_flags_for`] — reserving a
+/// name no command binds costs a user a legitimate parameter for nothing, and the only remedy
+/// available to them is changing their API's wire contract.
+const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url"];
+
+/// The global flags one command binds, which its parameter flags may not shadow.
+///
+/// Conditional because the emitters are: `--body`/`--body-file` exist only where the operation has
+/// a request body, and `--limit`/`--all` only where a `PaginationPolicy` names it. `--version` is
+/// bound on the root parser, which is not a command, so it is not reserved here. `--json` is bound
+/// by neither emitter — output is unconditionally JSON — so it is not reserved either.
+fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<String>, CoreError> {
+    let mut reserved: BTreeSet<String> = ALWAYS_RESERVED_FLAGS
+        .iter()
+        .map(|flag| (*flag).to_string())
+        .collect();
+    if !request_body_models_of(op, graph)?.is_empty() {
+        reserved.insert("body".to_string());
+        reserved.insert("body-file".to_string());
+    }
+    if graph
+        .pagination
+        .iter()
+        .any(|policy| policy.operation_id == op.id)
+    {
+        reserved.insert("limit".to_string());
+        reserved.insert("all".to_string());
+    }
+    Ok(reserved)
+}
+
+/// The operations one generated CLI wraps, in graph order.
+///
+/// `SdkCli::commands` selects which facts become commands; it never renames one. An operation left
+/// out is still in the OpenAPI document and still a method on the generated client, so this filter
+/// is a property of the program rather than of the API (CLAUDE.md rule 4).
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when the selector matches no operation, matching every other
+/// selector consumer: a selector that selects nothing is a typo, and a program with no commands is
+/// not a program.
+pub(crate) fn cli_operations<'a>(
+    graph: &'a ApiGraph,
+    cli: &SdkCli,
+) -> Result<Vec<&'a Operation>, CoreError> {
+    let Some(selector) = &cli.commands else {
+        return Ok(graph.operations.iter().collect());
+    };
+    let selected: Vec<&Operation> = graph
+        .operations
+        .iter()
+        .filter(|op| {
+            crate::sdk::builtins::operation_selector_matches(selector, op, &graph.base_path)
+        })
+        .collect();
+    if selected.is_empty() {
+        return Err(CoreError::Config {
+            message: format!(
+                "CLI {:?} commands selector did not match any operation: {selector:?}",
+                cli.program
+            ),
+        });
+    }
+    Ok(selected)
 }
 
 /// Put `file_name` under an optional relative directory for configurable split layouts.
@@ -220,9 +348,25 @@ pub(crate) struct HttpAuthFeatures {
 }
 
 /// Resolve which HTTP auth helpers the generated SDK client must expose.
+///
+/// The client wraps every operation, so it validates every operation's auth slots.
 pub(crate) fn http_auth_features(graph: &ApiGraph) -> Result<HttpAuthFeatures, CoreError> {
+    let all: Vec<&Operation> = graph.operations.iter().collect();
+    http_auth_features_for(&all, graph)
+}
+
+/// The same resolution over only the operations one artifact wraps.
+///
+/// A generated CLI wraps the operations `SdkCli::commands` selects, so it must not fail on an auth
+/// declaration belonging to an operation it never emits a command for — that is the class of
+/// failure command scope exists to remove. The scheme check is unconditional either way: it
+/// validates `graph.security`, which the credential plumbing reads whole.
+pub(crate) fn http_auth_features_for(
+    ops: &[&Operation],
+    graph: &ApiGraph,
+) -> Result<HttpAuthFeatures, CoreError> {
     let schemes = supported_security_schemes(graph)?;
-    for op in &graph.operations {
+    for op in ops.iter().copied() {
         validate_operation_auth_slots(graph, op, &schemes)?;
     }
     let mut features = HttpAuthFeatures::default();
@@ -491,6 +635,209 @@ pub(crate) fn check_unique_model_file_names(
         }
     }
     Ok(())
+}
+
+/// Reject CLI command/flag collisions before any text is emitted.
+///
+/// Four classes, all [`CoreError::SdkGen`]: two operations kebab to one command in one group; a
+/// top-level command collides with a group name; a flag collides with a global this command binds;
+/// two parameters of one operation kebab to one flag. No auto-rename table — the user fixes the
+/// graph with `RenameOperation` or a source change.
+pub(crate) fn check_cli_names(
+    ops: &[&Operation],
+    graph: &ApiGraph,
+    program: &str,
+) -> Result<(), CoreError> {
+    let mut commands: BTreeMap<(Option<String>, String), &str> = BTreeMap::new();
+    for op in ops.iter().copied() {
+        let group = command_group(op);
+        let name = command_name(op);
+        if let Some(previous) = commands.insert((group.clone(), name.clone()), op.id.as_str()) {
+            let command = match group {
+                Some(group) => format!("{group} {name}"),
+                None => name,
+            };
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} commands collide: operations '{previous}' and '{}' both map to '{command}'; rename one with RenameOperation",
+                    op.id
+                ),
+            });
+        }
+    }
+
+    let groups: BTreeSet<String> = ops.iter().copied().filter_map(command_group).collect();
+    for op in ops.iter().copied() {
+        if op.group.is_some() {
+            continue;
+        }
+        let name = command_name(op);
+        if groups.contains(&name) {
+            let grouped = ops
+                .iter()
+                .copied()
+                .find(|other| command_group(other).as_deref() == Some(name.as_str()))
+                .map_or(name.as_str(), |other| other.id.as_str());
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} command '{name}' (operation '{}') collides with group '{name}' (operation '{grouped}'); rename one with RenameOperation",
+                    op.id
+                ),
+            });
+        }
+    }
+
+    for op in ops.iter().copied() {
+        let paging = paging_param_names(graph, op);
+        // Every flag name this command binds for a parameter, including the `--no-<flag>` negation
+        // both emitters bind for a boolean. Two registrations of one name is not a rendering wart:
+        // Go's `flag` panics on a name already in use and argparse raises `ArgumentError` while
+        // building the parser, so the emitted program cannot start — not even `--help`.
+        let reserved = reserved_flags_for(op, graph)?;
+        let mut bound: BTreeMap<String, FlagOrigin<'_>> = BTreeMap::new();
+        for param in &op.params {
+            if paging.contains(&param.name) {
+                continue;
+            }
+            let flag = flag_name(param);
+            let mut spellings = vec![FlagOrigin {
+                param: param.name.as_str(),
+                negation: false,
+            }];
+            if matches!(param.schema, Type::Primitive(Prim::Bool)) {
+                spellings.push(FlagOrigin {
+                    param: param.name.as_str(),
+                    negation: true,
+                });
+            }
+            for origin in spellings {
+                let spelling = if origin.negation {
+                    format!("no-{flag}")
+                } else {
+                    flag.clone()
+                };
+                if reserved.contains(&spelling) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} operation '{}' {origin} maps to flag '--{spelling}', which collides with the reserved global '--{spelling}'",
+                            op.id
+                        ),
+                    });
+                }
+                if let Some(previous) = bound.insert(spelling.clone(), origin) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} operation '{}' binds flag '--{spelling}' twice: for {previous} and for {origin}; rename one in the source so each parameter has its own flag",
+                            op.id
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject two groups whose names collapse to one file.
+///
+/// A group name is a file name now, and `file_stem` is not injective: `2024 Reports` and
+/// `Value 2024 Reports` both become `value_2024_reports`. Without this the second file silently
+/// replaces the first, or surfaces as an `artifact.path_collision` that names neither group. The
+/// shape follows `check_unique_model_file_names`, which rejects the same class for schemas.
+pub(crate) fn reject_duplicate_command_files<'a>(
+    stems: impl Iterator<Item = (&'a str, Option<&'a str>)>,
+    program: &str,
+    dir: &str,
+    extension: &str,
+) -> Result<(), CoreError> {
+    let mut seen: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    for (stem, group) in stems {
+        if let Some(previous) = seen.insert(stem, group) {
+            let name = |group: Option<&str>| {
+                group.map_or_else(
+                    || "the ungrouped commands".to_string(),
+                    |g| format!("group '{g}'"),
+                )
+            };
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} {} and {} both map to '{dir}/{stem}.{extension}'; rename one with GroupOperations",
+                    name(previous),
+                    name(group)
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Reject an in-scope operation whose success response is a stream the CLI cannot print.
+///
+/// A `text/event-stream` success has no terminating document to render, and a target has no warning
+/// channel (`Target::generate` takes `&ApiGraph` and `Artifacts` has no diagnostic sink), so the
+/// choice is hard error or silent omission — and silently dropping a command is the worse failure.
+/// The remedy is to leave the operation out of the *program*, not out of the graph: dropping it
+/// from the graph would also remove it from the OpenAPI document and from every SDK, and report
+/// `operation.removed` as a breaking change.
+pub(crate) fn reject_sse_operations(ops: &[&Operation], program: &str) -> Result<(), CoreError> {
+    for op in ops.iter().copied() {
+        for response in &op.responses {
+            let success = (200..300).contains(&response.status);
+            if success && response.body_kind == "sse" {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' success response is SSE \
+                         (text/event-stream); a generated CLI cannot print a streaming response. \
+                         Leave it out of the program with SdkCli::commands(...) — the operation \
+                         stays in the OpenAPI document and stays a method on the generated client",
+                        op.id
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Which parameter a command's flag name came from, and whether it is the boolean negation.
+///
+/// Both emitters bind `--no-<flag>` beside `--<flag>` for a boolean, so a collision can name a
+/// parameter's own flag or another parameter's negation, and the diagnostic has to say which.
+#[derive(Clone, Copy)]
+struct FlagOrigin<'a> {
+    param: &'a str,
+    negation: bool,
+}
+
+impl std::fmt::Display for FlagOrigin<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.negation {
+            write!(f, "the negation of boolean parameter '{}'", self.param)
+        } else {
+            write!(f, "parameter '{}'", self.param)
+        }
+    }
+}
+
+fn paging_param_names(graph: &ApiGraph, op: &Operation) -> BTreeSet<String> {
+    let Some(policy) = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)
+    else {
+        return BTreeSet::new();
+    };
+    [
+        policy.cursor_param.as_deref(),
+        policy.page_param.as_deref(),
+        policy.offset_param.as_deref(),
+        policy.limit_param.as_deref(),
+        policy.page_size_param.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(ToOwned::to_owned)
+    .collect()
 }
 
 /// Whether a neutral map key can be represented as a JSON/OpenAPI object key.
@@ -1213,13 +1560,17 @@ pub(crate) fn operation_prose(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
     use super::{
-        check_unique_model_file_names, file_stem, http_auth_features, operation_auth_alternatives,
-        split_words, success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
+        check_cli_names, check_unique_model_file_names, command_group, command_name,
+        credential_env_var, file_stem, flag_name, helper_env_var, http_auth_features,
+        http_auth_features_for, kebab, operation_auth_alternatives, split_words,
+        success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
         SuccessResponses,
     };
     use crate::graph::{
-        ApiGraph, Operation, OperationSecurityPolicy, Response, SecurityRequirementGroup,
+        ApiGraph, Operation, OperationSecurityPolicy, Param, Response, SecurityRequirementGroup,
         SecurityScheme, SourceSpan, Type,
     };
     use crate::sdk::layout::SdkFileLayout;
@@ -1324,6 +1675,317 @@ mod tests {
         assert_eq!(split_words("IDsomething"), ["I", "Dsomething"]);
         // A separator or digit after the plural `s` closes the acronym the same way.
         assert_eq!(split_words("user_UUIDs_list"), ["user", "UUIDs", "list"]);
+    }
+
+    fn cli_span() -> SourceSpan {
+        SourceSpan {
+            file: "h.go".to_string(),
+            start_line: 1,
+            end_line: 1,
+        }
+    }
+
+    fn cli_op(id: &str, group: Option<&str>, params: Vec<Param>) -> Operation {
+        Operation {
+            id: id.to_string(),
+            method: "GET".to_string(),
+            path: format!("/{id}"),
+            handler: id.to_string(),
+            summary: None,
+            description: None,
+            group: group.map(str::to_string),
+            middleware: Vec::new(),
+            params,
+            request_body: None,
+            request_body_required: true,
+            request_body_content_type: None,
+            request_body_variants: Vec::new(),
+            responses: Vec::new(),
+            security: Vec::new(),
+            security_overrides_global: false,
+            provenance: cli_span(),
+        }
+    }
+
+    fn cli_param(name: &str) -> Param {
+        Param {
+            name: name.to_string(),
+            location: "query".to_string(),
+            required: false,
+            schema: Type::Primitive(crate::graph::Prim::String),
+            default: None,
+            style: None,
+            explode: None,
+            allow_reserved: false,
+            openapi_content: None,
+            openapi_fields: Vec::new(),
+            provenance: cli_span(),
+        }
+    }
+
+    #[test]
+    fn kebab_is_the_fourth_casing_over_split_words() {
+        assert_eq!(kebab("listBooks"), "list-books");
+        assert_eq!(kebab("userUUIDsList"), "user-uuids-list");
+        assert_eq!(kebab("get_book"), "get-book");
+    }
+
+    #[test]
+    fn command_and_flag_names_re_case_graph_facts() {
+        let grouped = cli_op("listBooks", Some("Books"), vec![cli_param("bookId")]);
+        assert_eq!(command_name(&grouped), "list-books");
+        assert_eq!(command_group(&grouped).as_deref(), Some("books"));
+        assert_eq!(flag_name(&grouped.params[0]), "book-id");
+        let ungrouped = cli_op("getBook", None, Vec::new());
+        assert_eq!(command_group(&ungrouped), None);
+    }
+
+    #[test]
+    fn credential_env_vars_scream_the_program_and_scheme() {
+        assert_eq!(
+            credential_env_var("bookstore", "ApiKeyAuth"),
+            "BOOKSTORE_API_KEY_AUTH"
+        );
+        assert_eq!(helper_env_var("bookstore"), "BOOKSTORE_CREDENTIAL_HELPER");
+    }
+
+    #[test]
+    fn colliding_commands_in_one_group_name_both_operation_ids() {
+        let graph = ApiGraph {
+            operations: vec![
+                cli_op("getBook", Some("books"), Vec::new()),
+                cli_op("get_book", Some("books"), Vec::new()),
+            ],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("colliding commands must be rejected"),
+        };
+        assert!(message.contains("getBook"), "{message}");
+        assert!(message.contains("get_book"), "{message}");
+    }
+
+    #[test]
+    fn top_level_command_colliding_with_a_group_names_both() {
+        let graph = ApiGraph {
+            operations: vec![
+                cli_op("books", None, Vec::new()),
+                cli_op("listBooks", Some("books"), Vec::new()),
+            ],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("command/group collision must be rejected"),
+        };
+        assert!(message.contains("books"), "{message}");
+        assert!(
+            message.contains("listBooks") || message.contains("group"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn reserved_flag_collision_names_operation_parameter_and_global() {
+        let graph = ApiGraph {
+            operations: vec![cli_op("getBook", None, vec![cli_param("base_url")])],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("reserved flag collision must be rejected"),
+        };
+        assert!(message.contains("getBook"), "{message}");
+        assert!(message.contains("base_url"), "{message}");
+        assert!(message.contains("--base-url"), "{message}");
+    }
+
+    #[test]
+    fn a_flag_no_command_binds_is_not_reserved() -> Result<(), crate::CoreError> {
+        // `--json` is bound by neither emitter, and `--limit`/`--all`/`--body`/`--body-file` are
+        // bound only where the operation carries the fact that produces them. Reserving them
+        // unconditionally rejected APIs whose only remedy was to rename a wire parameter.
+        let graph = ApiGraph {
+            operations: vec![cli_op(
+                "listBooks",
+                None,
+                vec![
+                    cli_param("json"),
+                    cli_param("limit"),
+                    cli_param("all"),
+                    cli_param("body"),
+                    cli_param("body_file"),
+                    cli_param("version"),
+                ],
+            )],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        check_cli_names(&ops, &graph, "bookstore")
+    }
+
+    #[test]
+    fn limit_is_reserved_on_a_paginated_operation() {
+        let graph = ApiGraph {
+            operations: vec![cli_op("listBooks", None, vec![cli_param("limit")])],
+            pagination: vec![crate::graph::PaginationPolicy {
+                operation_id: "listBooks".to_string(),
+                mode: crate::graph::PaginationMode::Offset,
+                items_field: "items".to_string(),
+                cursor_param: None,
+                next_cursor_field: None,
+                page_param: None,
+                page_size_param: None,
+                offset_param: Some("offset".to_string()),
+                limit_param: None,
+                termination: crate::graph::PaginationTermination::EmptyItems,
+            }],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("--limit is bound on a paginated command"),
+        };
+        assert!(message.contains("--limit"), "{message}");
+    }
+
+    fn cli_bool_param(name: &str) -> Param {
+        Param {
+            schema: Type::Primitive(crate::graph::Prim::Bool),
+            ..cli_param(name)
+        }
+    }
+
+    /// A CLI must not fail on the auth declaration of an operation it never wraps.
+    ///
+    /// The client validates every operation because it wraps every operation. A scoped CLI wraps a
+    /// subset, and this is the one remaining place where the full set used to be walked — the same
+    /// class of failure `SdkCli::commands` exists to remove.
+    #[test]
+    fn scoped_auth_validation_ignores_an_operation_outside_the_program() {
+        let mut graph = ApiGraph {
+            security: vec![
+                SecurityScheme {
+                    id: "BearerAuth".to_string(),
+                    kind: "http".to_string(),
+                    location: String::new(),
+                    name: "bearer".to_string(),
+                    global: false,
+                },
+                SecurityScheme {
+                    id: "BasicAuth".to_string(),
+                    kind: "http".to_string(),
+                    location: String::new(),
+                    name: "basic".to_string(),
+                    global: false,
+                },
+            ],
+            operations: vec![
+                cli_op("listBooks", None, Vec::new()),
+                cli_op("audit", None, Vec::new()),
+            ],
+            ..ApiGraph::default()
+        };
+        // `audit` asks for two schemes that both occupy the Authorization header.
+        graph.operation_security = vec![OperationSecurityPolicy {
+            operation_id: "audit".to_string(),
+            alternatives: vec![SecurityRequirementGroup {
+                schemes: vec!["BearerAuth".to_string(), "BasicAuth".to_string()],
+            }],
+        }];
+
+        let all: Vec<&Operation> = graph.operations.iter().collect();
+        assert!(
+            http_auth_features_for(&all, &graph).is_err(),
+            "the client wraps `audit`, so it must still reject the conflict"
+        );
+
+        let scoped: Vec<&Operation> = graph
+            .operations
+            .iter()
+            .filter(|op| op.id == "listBooks")
+            .collect();
+        assert!(
+            http_auth_features_for(&scoped, &graph).is_ok(),
+            "a program that does not wrap `audit` must not fail on it"
+        );
+    }
+
+    #[test]
+    fn two_parameters_mapping_to_one_flag_name_both() {
+        let graph = ApiGraph {
+            operations: vec![cli_op(
+                "listBooks",
+                None,
+                vec![cli_param("page_size"), cli_param("pageSize")],
+            )],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("two parameters mapping to one flag must be rejected"),
+        };
+        assert!(message.contains("listBooks"), "{message}");
+        assert!(message.contains("pageSize"), "{message}");
+        assert!(message.contains("page_size"), "{message}");
+        assert!(message.contains("--page-size"), "{message}");
+    }
+
+    #[test]
+    fn a_parameter_colliding_with_a_boolean_negation_names_both() {
+        let graph = ApiGraph {
+            operations: vec![cli_op(
+                "listBooks",
+                None,
+                vec![cli_bool_param("verified"), cli_param("no_verified")],
+            )],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("a collision with a boolean negation must be rejected"),
+        };
+        assert!(message.contains("verified"), "{message}");
+        assert!(message.contains("no_verified"), "{message}");
+        assert!(message.contains("--no-verified"), "{message}");
+        assert!(
+            message.contains("negation of boolean parameter 'verified'"),
+            "the message must say which side is a negation: {message}"
+        );
+    }
+
+    #[test]
+    fn distinct_flags_on_one_operation_are_accepted() -> Result<(), crate::CoreError> {
+        let graph = ApiGraph {
+            operations: vec![cli_op(
+                "listBooks",
+                None,
+                vec![cli_bool_param("verified"), cli_param("genre")],
+            )],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        check_cli_names(&ops, &graph, "bookstore")
+    }
+
+    #[test]
+    fn one_flag_name_on_two_different_operations_is_accepted() -> Result<(), crate::CoreError> {
+        let graph = ApiGraph {
+            operations: vec![
+                cli_op("listBooks", None, vec![cli_param("page_size")]),
+                cli_op("listAuthors", None, vec![cli_param("pageSize")]),
+            ],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        check_cli_names(&ops, &graph, "bookstore")
     }
 
     #[test]

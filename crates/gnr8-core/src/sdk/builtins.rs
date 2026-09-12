@@ -32,7 +32,7 @@ use crate::graph::{
 };
 use crate::lower::model::{OpenApiDoc, SchemaObject};
 use crate::sdk::docs::write_sdk_docs;
-use crate::sdk::emit_common::quoted_string_literal;
+use crate::sdk::emit_common::{kebab, quoted_string_literal};
 use crate::sdk::hash_files;
 use crate::sdk::model::SdkModel;
 use crate::sdk::model_style::PyModelStyle;
@@ -1929,7 +1929,7 @@ impl TransformExec for ApplySecurity {
     }
 }
 
-fn operation_selector_matches(
+pub(crate) fn operation_selector_matches(
     selector: &OperationSelector,
     op: &crate::graph::Operation,
     base_path: &str,
@@ -1953,6 +1953,7 @@ fn operation_selector_matches(
         OperationSelector::All(selectors) => selectors
             .iter()
             .all(|selector| operation_selector_matches(selector, op, base_path)),
+        OperationSelector::Not(selector) => !operation_selector_matches(selector, op, base_path),
     }
 }
 
@@ -2838,6 +2839,9 @@ impl TargetExec for GoSdk {
                     .to_string(),
             });
         }
+        if let Some(cli) = &self.cli {
+            validate_gosdk_cli(&cli.program)?;
+        }
         let projected = crate::graph::projection::for_generation(ir)?;
         let ir = &*projected;
         // Derive the package from the module path (the single source of truth) and generate via the
@@ -2869,6 +2873,21 @@ impl TargetExec for GoSdk {
             }
         }
         write_sdk_docs(out, &self.dir, "Go", &model.package, ir, &model, &self.docs)?;
+        if let Some(cli) = &self.cli {
+            let cli_files = crate::gosdk::generate_cli(
+                ir,
+                &self.module,
+                &model.package,
+                cli,
+                Some(&cache_dir(cx)),
+            )?;
+            for file in cli_files {
+                out.create(
+                    format!("{}/{}", self.dir.trim_end_matches('/'), file.name),
+                    file.contents,
+                )?;
+            }
+        }
         if self.package_metadata {
             out.create(
                 format!("{}/go.mod", self.dir.trim_end_matches('/')),
@@ -2938,6 +2957,9 @@ impl TargetExec for PySdk {
                 message: "PySdk target has no output dir — call .to(\"sdk\")".to_string(),
             });
         }
+        if let Some(cli) = &self.cli {
+            validate_pysdk_cli(&cli.program, self.package_metadata)?;
+        }
         let projected = crate::graph::projection::for_generation(ir)?;
         let ir = &*projected;
         // Derive the package from the module path via the SAME single source of truth GoSdk uses, and
@@ -2954,6 +2976,19 @@ impl TargetExec for PySdk {
             self.model_style,
         )?;
         append_python_root_exports(&mut files, &self.root_exports)?;
+        // The generated CLI is a SUBPACKAGE, so it has to be in `files` before `pyproject.toml` is
+        // rendered: `pyproject_packages` discovers a package from the `__init__.py` files it finds
+        // here, and a wheel that omits `cli/` would ship a `[project.scripts]` entry point with no
+        // module behind it.
+        if let Some(cli) = &self.cli {
+            files.extend(crate::pysdk::generate_cli(
+                ir,
+                &model.package,
+                &self.layout,
+                self.model_style,
+                cli,
+            )?);
+        }
         if self.package_metadata {
             let dist_name = self.package_info.resolved_name(&model.package)?;
             files.push(super::bundle::SdkFile {
@@ -2964,6 +2999,7 @@ impl TargetExec for PySdk {
                     &self.package_info,
                     self.model_style,
                     &files,
+                    self.cli.as_ref(),
                 )?,
             });
             files.push(super::bundle::SdkFile {
@@ -3537,6 +3573,63 @@ fn sdk_package(module: &str) -> Result<String, CoreError> {
     Ok(pkg.to_string())
 }
 
+/// Validate a generated-CLI program name.
+///
+/// `program` must be non-empty, must not begin with `-`, must spell a command name out of ASCII
+/// letters, digits, `-`, `_` or `.`, and must contain at least one alphanumeric. The name is emitted
+/// verbatim — Python `argparse(prog=...)` / `[project.scripts]`, Go `cmd/<program>/main.go` — so
+/// the characters of `program` itself are what has to hold. Checking `kebab(program)` would check
+/// a value that is `[a-z0-9-]` by construction, which is no check at all.
+fn validate_cli_program(target: &str, program: &str) -> Result<(), CoreError> {
+    if program.is_empty() {
+        return Err(CoreError::Config {
+            message: format!(
+                "{target}::cli program name must be non-empty — call .cli(\"bookstore\") with a usable command name"
+            ),
+        });
+    }
+    if program.starts_with('-') {
+        return Err(CoreError::Config {
+            message: format!("{target}::cli program name {program:?} must not begin with '-'"),
+        });
+    }
+    let spellable = program
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if !spellable || kebab(program).is_empty() {
+        return Err(CoreError::Config {
+            message: format!(
+                "{target}::cli program name {program:?} is not a usable command name (need ASCII letters, digits, '-', '_' or '.', with at least one letter or digit)"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a generated-CLI program name and its packaging constraint.
+///
+/// Combining `.cli(...)` with `.source_only()` / `.package_metadata(false)` is a contradiction:
+/// without `pyproject.toml` there is nowhere for `[project.scripts]` to go.
+fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreError> {
+    validate_cli_program("PySdk", program)?;
+    if !package_metadata {
+        return Err(CoreError::Config {
+            message: "PySdk::cli(...) requires package metadata so [project.scripts] can be written; do not combine .cli(...) with .source_only() or .package_metadata(false)".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a generated-CLI program name for [`GoSdk`].
+///
+/// Go has no `[project.scripts]` equivalent. The CLI is `cmd/<program>/main.go`, a standalone
+/// `package main` that compiles without `go.mod` being the thing that registers it, so `.cli()`
+/// does **not** require package metadata — the asymmetry with [`validate_pysdk_cli`] is
+/// intentional and documented on [`GoSdk::cli`].
+fn validate_gosdk_cli(program: &str) -> Result<(), CoreError> {
+    validate_cli_program("GoSdk", program)
+}
+
 fn write_sdk_files(
     out: &mut Artifacts,
     dir: &str,
@@ -3557,6 +3650,7 @@ fn pyproject_toml(
     metadata: &SdkPackageMetadata,
     model_style: PyModelStyle,
     files: &[super::bundle::SdkFile],
+    cli: Option<&gnr8::sdk::SdkCli>,
 ) -> Result<String, CoreError> {
     let version = metadata.resolved_version()?;
     let dependencies = if model_style.is_pydantic() {
@@ -3582,6 +3676,11 @@ fn pyproject_toml(
         );
     }
     let project_optional = pyproject_optional_metadata(metadata)?;
+    // Scripts sit after every `[project]` key (including optional description/license/keywords
+    // and `[project.urls]`) and before `[tool.setuptools]`. Inserting the scripts table between
+    // `dependencies` and `project_optional` would put remaining `[project]` keys after a sub-table
+    // whenever package metadata is set, which is invalid TOML.
+    let scripts = pyproject_scripts(import_package, cli);
     Ok(format!(
         "[build-system]\n\
 requires = [\"setuptools>=68\", \"wheel\"]\n\
@@ -3589,7 +3688,7 @@ build-backend = \"setuptools.build_meta\"\n\n\
 [project]\n\
 name = {}\n\
 version = {}\n\
-requires-python = \">=3.9\"{}{}\n\n\
+requires-python = \">=3.9\"{}{}{}\n\n\
 [tool.setuptools]\n\
 packages = [{}]\n\n\
 [tool.setuptools.package-dir]\n\
@@ -3598,9 +3697,21 @@ packages = [{}]\n\n\
         quoted_string_literal(&version),
         dependencies,
         project_optional,
+        scripts,
         package_list,
         package_dirs
     ))
+}
+
+fn pyproject_scripts(import_package: &str, cli: Option<&gnr8::sdk::SdkCli>) -> String {
+    let Some(cli) = cli else {
+        return String::new();
+    };
+    format!(
+        "\n\n[project.scripts]\n{} = {}",
+        quoted_string_literal(&cli.program),
+        quoted_string_literal(&format!("{import_package}.cli:main")),
+    )
 }
 
 fn pyproject_packages(package: &str, files: &[super::bundle::SdkFile]) -> Vec<(String, String)> {
@@ -7368,6 +7479,11 @@ mod tests {
             "{}",
             pyproject.text
         );
+        assert!(
+            !pyproject.text.contains("[project.scripts]"),
+            "PySdk without .cli() must not emit [project.scripts]: {}",
+            pyproject.text
+        );
         let publishing = out
             .files()
             .iter()
@@ -7375,6 +7491,184 @@ mod tests {
             .expect("PySdk must emit a publishing recipe with package metadata");
         assert!(publishing.text.contains("Package: `bookstore-sdk`"));
         assert!(publishing.text.contains("python3 -m build"));
+    }
+
+    #[test]
+    fn pysdk_cli_emits_project_scripts_before_setuptools() {
+        let ir = ApiGraph::default();
+        let with_cli = PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .package(
+                SdkPackageMetadata::new()
+                    .name("bookstore-sdk")
+                    .version("1.2.3")
+                    .description("Bookstore SDK")
+                    .license("MIT")
+                    .repository("https://example.com/repo.git")
+                    .homepage("https://example.com")
+                    .documentation("https://example.com/docs")
+                    .keywords(["bookstore", "sdk"]),
+            )
+            .to("generated/sdk-py")
+            .cli("bookstore");
+        let mut cli_out = Artifacts::new();
+        with_cli.generate(&ir, &mut cli_out, &cx()).unwrap();
+        let cli_pyproject = cli_out
+            .files()
+            .iter()
+            .find(|file| file.path == "generated/sdk-py/pyproject.toml")
+            .expect("PySdk must emit pyproject.toml package metadata");
+        let scripts = "[project.scripts]\n\"bookstore\" = \"sdk.cli:main\"";
+        assert!(
+            cli_pyproject.text.contains(scripts),
+            "{}",
+            cli_pyproject.text
+        );
+        let scripts_at = cli_pyproject
+            .text
+            .find(scripts)
+            .expect("scripts block must be present");
+        let setuptools_at = cli_pyproject
+            .text
+            .find("[tool.setuptools]")
+            .expect("[tool.setuptools] must be present");
+        assert!(
+            scripts_at < setuptools_at,
+            "[project.scripts] must precede [tool.setuptools]: {}",
+            cli_pyproject.text
+        );
+    }
+
+    #[test]
+    fn pysdk_cli_rejects_empty_program() {
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        let error = PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-py")
+            .cli("")
+            .generate(&ir, &mut out, &cx())
+            .unwrap_err();
+        assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
+        assert!(
+            error.to_string().contains("cli"),
+            "error must name the method: {error}"
+        );
+        assert!(
+            error.to_string().contains("empty") || error.to_string().contains("non-empty"),
+            "{error}"
+        );
+    }
+
+    /// A name that kebab-normalizes cleanly can still be unusable verbatim, and verbatim is how it
+    /// is emitted: `prog=`, `_PROGRAM`, and the `[project.scripts]` key an installer turns into a
+    /// file in `bin/`.
+    #[test]
+    fn pysdk_cli_rejects_a_program_name_it_cannot_emit_verbatim() {
+        for program in ["book store", "books/get", "book;rm", "..."] {
+            let ir = ApiGraph::default();
+            let mut out = Artifacts::new();
+            let error = PySdk::new()
+                .module("example.com/bookstore/sdk")
+                .to("generated/sdk-py")
+                .cli(program)
+                .generate(&ir, &mut out, &cx())
+                .unwrap_err();
+            assert!(
+                matches!(error, crate::CoreError::Config { .. }),
+                "{program:?}: {error}"
+            );
+            assert!(
+                error.to_string().contains(program),
+                "the error must quote the name: {error}"
+            );
+        }
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-py")
+            .cli("book_store.v2")
+            .generate(&ir, &mut out, &cx())
+            .expect("a conventional console-script name stays accepted");
+    }
+
+    #[test]
+    fn pysdk_cli_rejects_source_only() {
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        let error = PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-py")
+            .cli("bookstore")
+            .source_only()
+            .generate(&ir, &mut out, &cx())
+            .unwrap_err();
+        assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("cli"), "{message}");
+        assert!(
+            message.contains("source_only") || message.contains("package_metadata"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn gosdk_cli_rejects_empty_program() {
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        let error = GoSdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-go")
+            .cli("")
+            .generate(&ir, &mut out, &cx())
+            .unwrap_err();
+        assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
+        assert!(
+            error.to_string().contains("cli"),
+            "error must name the method: {error}"
+        );
+        assert!(
+            error.to_string().contains("empty") || error.to_string().contains("non-empty"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn gosdk_cli_rejects_a_program_name_it_cannot_emit_verbatim() {
+        for program in ["book store", "books/get", "book;rm", "..."] {
+            let ir = ApiGraph::default();
+            let mut out = Artifacts::new();
+            let error = GoSdk::new()
+                .module("example.com/bookstore/sdk")
+                .to("generated/sdk-go")
+                .cli(program)
+                .generate(&ir, &mut out, &cx())
+                .unwrap_err();
+            assert!(
+                matches!(error, crate::CoreError::Config { .. }),
+                "{program:?}: {error}"
+            );
+            assert!(
+                error.to_string().contains(program),
+                "the error must quote the name: {error}"
+            );
+        }
+    }
+
+    /// Go has no `[project.scripts]` equivalent — `cmd/<program>/main.go` compiles standalone —
+    /// so `.cli(...)` with `.source_only()` is not a contradiction.
+    #[test]
+    fn gosdk_cli_allows_source_only() {
+        let ir = ApiGraph::default();
+        let mut out = Artifacts::new();
+        GoSdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk-go")
+            .cli("bookstore")
+            .source_only()
+            .generate(&ir, &mut out, &cx())
+            .expect("GoSdk::cli does not require package metadata");
     }
 
     #[test]

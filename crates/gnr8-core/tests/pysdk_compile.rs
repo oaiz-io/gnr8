@@ -1620,3 +1620,283 @@ fn generated_sdk_pagination_helpers_work_against_stdlib_http_server() {
 
     let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
 }
+
+fn materialize_sdk_target_with_cli(
+    label: &str,
+    graph: &gnr8_engine::graph::ApiGraph,
+    program: &str,
+) -> PathBuf {
+    use gnr8_engine::sdk::prelude::*;
+    use gnr8_engine::sdk::{Artifacts, Cx, TargetExec};
+
+    let dir = unique_temp_dir(label);
+    let mut out = Artifacts::new();
+    PySdk::new()
+        .module(format!("example.com/{PACKAGE}"))
+        .to(PACKAGE)
+        .cli(program)
+        .generate(graph, &mut out, &Cx::new(&dir))
+        .expect("PySdk with .cli() must generate");
+    for file in out.files() {
+        let path = dir.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &file.text).expect("write artifact");
+    }
+    write_pydantic_stub(&dir);
+    dir
+}
+
+/// The CLI driver: a stdlib `http.server` plus an in-process `cli.main([...])` so the test never
+/// spawns a second interpreter. Written to a file and run by path (never `-c`).
+const CLI_DISPATCH_DRIVER: &str = r#"import io
+import json
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from bookstore import cli
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        body = json.dumps(
+            {
+                "author": {"name": "Ada", "bio": None},
+                "format": "hardcover",
+                "id": 1,
+                "title": "Notes",
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def main():
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        code = cli.main(
+            [
+                "get-book",
+                "--book-id",
+                "1",
+                "--base-url",
+                "http://127.0.0.1:%d" % port,
+            ]
+        )
+        sys.stdout = old
+        assert code == 0, (code, buf.getvalue())
+        payload = json.loads(buf.getvalue())
+        assert payload["id"] == 1, payload
+        assert payload["title"] == "Notes", payload
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const CLI_HELPER_FAILURE_DRIVER: &str = r#"import io
+import os
+import sys
+
+from bookstore import cli
+
+
+def run(argv):
+    buf = io.StringIO()
+    old = sys.stderr
+    sys.stderr = buf
+    try:
+        code = cli.main(argv)
+    finally:
+        sys.stderr = old
+    return code, buf.getvalue()
+
+
+# Set the per-scheme variable too. The helper is a MODE, not a first attempt: a helper that fails
+# must not slide into the environment variable. Without this line every assertion below would also
+# hold for an implementation that fell back, which is the thing being ruled out.
+os.environ["BOOKSTORE_API_KEY_AUTH"] = "env-credential"
+os.environ["BOOKSTORE_BEARER_AUTH"] = "env-credential"
+
+for helper, expected in [
+    ("/bin/false", "credential helper failed (exit 1)"),
+    ('/bin/echo "unterminated', "cannot parse BOOKSTORE_CREDENTIAL_HELPER"),
+    ("   ", "BOOKSTORE_CREDENTIAL_HELPER is empty"),
+]:
+    os.environ["BOOKSTORE_CREDENTIAL_HELPER"] = helper
+    code, stderr = run(["list-items", "--base-url", "http://127.0.0.1:1"])
+    assert code == 1, (helper, code, stderr)
+    assert "Traceback" not in stderr, (helper, stderr)
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    assert len(lines) == 1, (helper, stderr)
+    assert "credential helper failed" in lines[0], (helper, stderr)
+    assert expected in lines[0], (helper, stderr)
+"#;
+
+/// A transport failure and a malformed body are diagnostics with the documented exit codes, not
+/// tracebacks: a CLI is run by a human who typed a wrong URL far more often than anything else.
+const CLI_ERROR_PATH_DRIVER: &str = r#"import io
+import sys
+
+from bookstore import cli
+
+
+def run(argv):
+    buf = io.StringIO()
+    old = sys.stderr
+    sys.stderr = buf
+    try:
+        code = cli.main(argv)
+    finally:
+        sys.stderr = old
+    return code, buf.getvalue()
+
+
+# Port 1 is bound by nothing: urllib raises URLError, which is an OSError.
+code, stderr = run(["get-book", "--book-id", "1", "--base-url", "http://127.0.0.1:1"])
+assert code == 1, (code, stderr)
+assert "Traceback" not in stderr, stderr
+lines = [line for line in stderr.splitlines() if line.strip()]
+assert len(lines) == 1, stderr
+assert lines[0].startswith("bookstore: "), stderr
+
+code, stderr = run(["create-book", "--body", "{oops", "--base-url", "http://127.0.0.1:1"])
+assert code == 2, (code, stderr)
+assert "Traceback" not in stderr, stderr
+lines = [line for line in stderr.splitlines() if line.strip()]
+assert len(lines) == 1, stderr
+assert "not valid JSON" in lines[0], stderr
+
+code, stderr = run(
+    ["create-book", "--body-file", "/nonexistent/body.json", "--base-url", "http://127.0.0.1:1"]
+)
+assert code == 2, (code, stderr)
+assert "Traceback" not in stderr, stderr
+lines = [line for line in stderr.splitlines() if line.strip()]
+assert len(lines) == 1, stderr
+assert "cannot read" in lines[0], stderr
+"#;
+
+/// A generated CLI round-trips `get-book` against a stdlib HTTP server via in-process `cli.main`.
+#[test]
+fn generated_cli_dispatches_get_book_against_stdlib_http_server() {
+    if !python_available() {
+        eprintln!("skipping pysdk_compile CLI dispatch: python3 toolchain unavailable");
+        return;
+    }
+    let graph = gnr8_engine::analyze::build_graph(FIXTURE_DIR)
+        .expect("Phase 2 build_graph must succeed (requires python3 for the pyextract sidecar)");
+    let dir = materialize_sdk_target_with_cli("cli-dispatch", &graph, "bookstore");
+    let pkg_dir = dir.join(PACKAGE);
+    assert!(
+        pkg_dir.join("cli").join("main.py").is_file(),
+        "target output must include the CLI package"
+    );
+    // Compile the whole package, not one module: the CLI is a tree now, and a syntax error in a
+    // command module would otherwise only surface when that command is run.
+    let compiled = run_python(
+        &[
+            "-m",
+            "compileall",
+            "-q",
+            pkg_dir.to_str().expect("utf-8 path"),
+        ],
+        &dir,
+    );
+    assert!(
+        compiled.is_ok(),
+        "python3 -m compileall over the package must succeed: {compiled:?}"
+    );
+    // Importing the package runs `cli/__init__.py`, which imports `main`, which imports every other
+    // CLI module — so one import exercises the whole tree's import graph.
+    let imported = run_python(&["-c", "import bookstore.cli"], &dir);
+    assert!(
+        imported.is_ok(),
+        "python3 -c 'import bookstore.cli' must succeed: {imported:?}"
+    );
+    let entry_point = run_python(
+        &[
+            "-c",
+            "from bookstore.cli import main; assert callable(main)",
+        ],
+        &dir,
+    );
+    assert!(
+        entry_point.is_ok(),
+        "the [project.scripts] entry point `<pkg>.cli:main` must resolve: {entry_point:?}"
+    );
+
+    let driver = dir.join("cli_dispatch_driver.py");
+    std::fs::write(&driver, CLI_DISPATCH_DRIVER).expect("write CLI dispatch driver");
+    let driver_str = driver.to_str().expect("utf-8 path");
+    let result = run_python(&[driver_str], &dir);
+    assert!(
+        result.is_ok(),
+        "cli.main([get-book, --book-id, 1]) must round-trip JSON: {result:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The error paths a human hits first — a wrong `--base-url`, a mistyped `--body`, an unreadable
+/// `--body-file` — are one-line diagnostics with the documented exit codes.
+#[test]
+fn generated_cli_error_paths_are_diagnostics_with_documented_exit_codes() {
+    if !python_available() {
+        eprintln!("skipping pysdk_compile CLI error paths: python3 toolchain unavailable");
+        return;
+    }
+    let graph = gnr8_engine::analyze::build_graph(FIXTURE_DIR)
+        .expect("Phase 2 build_graph must succeed (requires python3 for the pyextract sidecar)");
+    let dir = materialize_sdk_target_with_cli("cli-errors", &graph, "bookstore");
+    let driver = dir.join("cli_error_path_driver.py");
+    std::fs::write(&driver, CLI_ERROR_PATH_DRIVER).expect("write CLI error-path driver");
+    let driver_str = driver.to_str().expect("utf-8 path");
+    let result = run_python(&[driver_str], &dir);
+    assert!(
+        result.is_ok(),
+        "a transport error, a malformed body and an unreadable body file must each be one \
+         diagnostic line with the documented exit code: {result:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A credential helper that fails — non-zero, unparseable, or empty — is a one-line diagnostic,
+/// never a traceback, and never an environment-variable fallback.
+#[test]
+fn generated_cli_helper_failure_is_exit_1_without_traceback() {
+    if !python_available() {
+        eprintln!("skipping pysdk_compile CLI helper failure: python3 toolchain unavailable");
+        return;
+    }
+    let graph = auth_graph();
+    let dir = materialize_sdk_target_with_cli("cli-helper", &graph, "bookstore");
+    let driver = dir.join("cli_helper_failure_driver.py");
+    std::fs::write(&driver, CLI_HELPER_FAILURE_DRIVER).expect("write CLI helper-failure driver");
+    let driver_str = driver.to_str().expect("utf-8 path");
+    let result = run_python(&[driver_str], &dir);
+    assert!(
+        result.is_ok(),
+        "BOOKSTORE_CREDENTIAL_HELPER=/bin/false must be exit 1, one stderr line, no Traceback: {result:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

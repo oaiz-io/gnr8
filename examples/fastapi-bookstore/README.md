@@ -60,7 +60,13 @@ fn main() -> std::process::ExitCode {
             .source(FastApi::new().inputs(["."]))              // analyze this project (the app/ package)
             .transform(SetTitle::new("Bookstore API"))         // OpenAPI info.title
             .target(OpenApi31::new().to("generated/openapi.yaml"))
-            .target(PySdk::new().module("example.com/bookstore/sdk").to("generated/sdk"))
+            .target(
+                PySdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("generated/sdk")
+                    // the program's own facts: its name, and the host it talks to by default
+                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8000")),
+            )
             .post(Header::generated()),                         // "DO NOT EDIT" banner on every .py
     )
 }
@@ -75,7 +81,8 @@ gnr8 generate
 ```
 
 That compiles + runs `.gnr8/`, then writes `generated/openapi.yaml` and
-`generated/sdk/*.py`. Running it again over unchanged source is a byte-identical no-op.
+`generated/sdk/*.py` (including `cli.py`). Running it again over unchanged source is a
+byte-identical no-op.
 
 **No `pip install` is needed.** pyextract parses the source statically with the
 standard-library `ast` — it never imports or executes the FastAPI app.
@@ -106,6 +113,20 @@ paths:
 **Python SDK** — a typed `urllib` client with a method per operation and Pydantic v2 models that mirror
 the schemas.
 
+**Generated CLI** — `generated/sdk/cli.py` is an argparse client for the same operations, opt-in via
+`.cli(...)`. It is not gnr8's own `gnr8 generate` command surface. From this directory:
+
+```sh
+(cd generated && python3 -m sdk.cli --help)          # nothing extra — works as soon as the file is written
+pipx install ./generated/sdk && bookstore --help     # [project.scripts]
+uv tool install ./generated/sdk && bookstore --help
+```
+
+The subshell is what puts the package's parent on `sys.path`; the installers put the program on
+`PATH` instead. The installer shims need a distribution
+name other than the default last-segment `sdk` if you want `pipx install bookstore-sdk` — set
+`.package(SdkPackageMetadata::new().registry_name("bookstore-sdk"))` on the same `PySdk` stage.
+
 ## What this showcases
 
 - **Zero annotations (code-first).** Routes, request/response types, status
@@ -121,3 +142,7 @@ the schemas.
   or run, so there is no `pip install` and no runtime dependency.
 - **No TOML.** `.gnr8/src/main.rs` is the entire configuration surface — built-in
   stages composed as code. `gnr8 generate` compiles and runs it.
+- **Generated CLI beside the SDK.** `.cli(...)` emits `cli.py` and a `[project.scripts]` entry; it
+  reads the same graph the client does. `SdkCli` carries what the graph cannot: the program name,
+  the host it defaults to, and — via `.commands(selector)` — which operations become commands.
+  Without `.base_url(...)` the program has no default host and `--base-url` is required.

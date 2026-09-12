@@ -51,7 +51,7 @@ jobs:
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   rust-tests:
-    name: Rust tests (${{ matrix.package }})
+    name: Rust tests (${{ matrix.name || matrix.package }})
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:
@@ -66,10 +66,31 @@ jobs:
             needs_go: "true"
             needs_python: "true"
             needs_node: "true"
+          # gnr8-cli is split into three entries. A cold 2-4 core runner rebuilds the engine,
+          # links the host binary, then cargo-builds a `.gnr8/` worker per compiling test; one
+          # combined job exceeds the 5-minute cap on a cache miss (lockfile/version bump).
+          # Unit tests + verify_e2e compile/run ~2-3m; generate_e2e's host binary + 2 worker
+          # builds ~3-4m; worker_contract is proven at 2m22s cold. Each entry compiles only the
+          # targets it runs; together they still execute every test exactly once. A new
+          # crates/gnr8/tests/*.rs file must be added to one of the test_args lists.
           - package: gnr8-cli
+            name: gnr8-cli
             needs_go: "true"
             needs_python: "false"
             needs_node: "false"
+            test_args: "--bins --test verify_e2e --test watch_smoke"
+          - package: gnr8-cli
+            name: gnr8-cli generate e2e
+            needs_go: "true"
+            needs_python: "false"
+            needs_node: "false"
+            test_args: "--test generate_e2e"
+          - package: gnr8-cli
+            name: gnr8-cli workers
+            needs_go: "false"
+            needs_python: "false"
+            needs_node: "false"
+            test_args: "--test worker_contract"
     steps:
       - uses: actions/checkout@v7
 
@@ -102,12 +123,20 @@ jobs:
         if: matrix.needs_python == 'true'
         run: python -m pip install PyYAML==6.0.2
 
+      # `sdk_lint` asserts the emitted Python needs no post-processing to be clean under the
+      # language's usual linter/formatter, and it early-returns when `ruff` is missing. Without
+      # this step that assertion never ran here, so a green run said nothing about it. Pinned for
+      # the same reason PyYAML is: a formatter release may not turn CI red on its own schedule.
+      - name: Install the Python linter the SDK lint gate needs
+        if: matrix.needs_python == 'true'
+        run: python -m pip install ruff==0.16.7
+
       - uses: Swatinem/rust-cache@v2
         with:
-          key: tests-${{ matrix.package }}
+          key: tests-${{ matrix.name || matrix.package }}
 
       - name: Test package
-        run: cargo test -p "${{ matrix.package }}" --all-features
+        run: cargo test -p "${{ matrix.package }}" --all-features ${{ matrix.test_args }}
 
   sidecars:
     name: Language sidecars and action contract

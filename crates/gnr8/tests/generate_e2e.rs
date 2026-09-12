@@ -36,6 +36,64 @@ use std::time::Duration;
 /// The installed `gnr8` host binary cargo built for this integration test.
 const GNR8_BIN: &str = env!("CARGO_BIN_EXE_gnr8");
 
+/// A minimal OpenAPI document for the Python CLI no-rewrite path (no language extractor).
+const PYTHON_CLI_SPEC: &str = r#"openapi: 3.1.0
+info:
+  title: Bookstore
+  version: 1.0.0
+paths:
+  /books/{book_id}:
+    get:
+      operationId: getBook
+      parameters:
+        - name: book_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: integer }
+"#;
+
+const PYTHON_CLI_PIPELINE: &str = r#"use gnr8::sdk::prelude::*;
+
+fn main() -> std::process::ExitCode {
+    gnr8::worker::run(
+        Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(
+                PySdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("sdk")
+                    .cli("bookstore"),
+            ),
+    )
+}
+"#;
+
+const GO_CLI_PIPELINE: &str = r#"use gnr8::sdk::prelude::*;
+
+fn main() -> std::process::ExitCode {
+    gnr8::worker::run(
+        Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(
+                GoSdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("sdk")
+                    .cli("bookstore"),
+            ),
+    )
+}
+"#;
+
 /// Whether the Go + gofmt + cargo toolchains are all available so the e2e skips gracefully otherwise.
 fn toolchains_available() -> bool {
     let probe = |bin: &str, arg: &str| {
@@ -503,6 +561,401 @@ fn generate_e2e_scaffolds_compiles_runs_and_is_idempotent() {
     //    Force repairs the emitted path, but an unrelated support file sharing the SDK directory
     //    survives because directory membership alone is not ownership evidence.
     assert_protection_and_force(&root);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// OpenAPI → PySdk::cli writes the `sdk/cli/` package, and a second generate over the same graph is
+/// a no-op (`0 written`, every module in `unchanged`). Needs the host binary and cargo, not Python:
+/// the worker only declares the pipeline and the host emitter writes text.
+#[test]
+fn generate_python_cli_is_a_noop_on_second_run() {
+    if Command::new("cargo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("skipping generate_python_cli_is_a_noop_on_second_run: cargo unavailable");
+        return;
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gnr8-e2e-cli-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create the staging dir");
+    std::fs::write(root.join("openapi.yaml"), PYTHON_CLI_SPEC).expect("write the spec");
+
+    let (ok, out, err) = run_gnr8(&root, &["init"]);
+    assert!(
+        ok,
+        "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    std::fs::write(root.join(".gnr8/src/main.rs"), PYTHON_CLI_PIPELINE)
+        .expect("write the pipeline");
+
+    let (ok, out, err) = run_gnr8(&root, &["generate"]);
+    assert!(
+        ok,
+        "gnr8 generate must write the Python CLI.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    // The CLI is a package, so the no-rewrite contract has to hold for every module in it.
+    let cli_dir = root.join("sdk").join("cli");
+    let modules = [
+        "__init__.py",
+        "__main__.py",
+        "config.py",
+        "credentials.py",
+        "main.py",
+        "output.py",
+        "parser.py",
+        "commands/root.py",
+    ];
+    let mut first: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for module in modules {
+        let path = cli_dir.join(module);
+        assert!(path.is_file(), "generate must write sdk/cli/{module}");
+        first.push((
+            path.clone(),
+            std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read sdk/cli/{module}")),
+        ));
+    }
+
+    let (ok, out, err) = run_gnr8(&root, &["--json", "generate"]);
+    assert!(
+        ok,
+        "second generate must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&out).expect("generate --json is JSON");
+    assert_eq!(
+        report["counts"]["written"],
+        serde_json::json!(0),
+        "a second generate over an unchanged graph must write nothing:\n{out}"
+    );
+    let unchanged = report["unchanged"]
+        .as_array()
+        .expect("unchanged is an array");
+    for module in modules {
+        let expected = format!("sdk/cli/{module}");
+        assert!(
+            unchanged
+                .iter()
+                .any(|path| path.as_str() == Some(expected.as_str())),
+            "{expected} must be reported unchanged:\n{out}"
+        );
+    }
+    for (path, before) in &first {
+        assert_eq!(
+            &std::fs::read_to_string(path).expect("re-read a CLI module"),
+            before,
+            "a no-op generate must not rewrite {}",
+            path.display()
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The pipeline above with `.cli(...)` removed, so the CLI stops being produced.
+const PYTHON_NO_CLI_PIPELINE: &str = r#"use gnr8::sdk::prelude::*;
+
+fn main() -> std::process::ExitCode {
+    gnr8::worker::run(
+        Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(
+                PySdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("sdk"),
+            ),
+    )
+}
+"#;
+
+/// The CLI moves between one file and a package in both directions, and nothing is left behind.
+///
+/// The emitted shape changed from `sdk/cli.py` to a `sdk/cli/` package, and both transitions run
+/// through the same machinery: a manifest-owned path this generation no longer produces is deleted.
+/// The Python case is the one that has to work — `sdk/cli.py` and `sdk/cli/` are two spellings of
+/// the importable name `sdk.cli`, so an orphan left beside the package is not merely untidy.
+#[test]
+fn generate_moves_the_python_cli_between_a_file_and_a_package() {
+    if Command::new("cargo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("skipping generate_moves_the_python_cli_between_a_file_and_a_package: cargo unavailable");
+        return;
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gnr8-e2e-cli-move-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create the staging dir");
+    std::fs::write(root.join("openapi.yaml"), PYTHON_CLI_SPEC).expect("write the spec");
+    let (ok, out, err) = run_gnr8(&root, &["init"]);
+    assert!(
+        ok,
+        "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    std::fs::write(root.join(".gnr8/src/main.rs"), PYTHON_CLI_PIPELINE)
+        .expect("write the pipeline");
+    let (ok, out, err) = run_gnr8(&root, &["generate"]);
+    assert!(
+        ok,
+        "first generate must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        root.join("sdk/cli/main.py").is_file(),
+        "the CLI package must exist before the transition"
+    );
+
+    // --- upgrade: a manifest-owned `sdk/cli.py` from the single-file shape must be deleted. ---
+    // Its bytes are copied from a file gnr8 already owns so the recorded hash matches without this
+    // test hashing anything itself; a divergent hash would read as a hand edit and be preserved.
+    let manifest_path = root.join(".gnr8/cache/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("read the manifest"))
+            .expect("the manifest is JSON");
+    let owned = manifest["files"]
+        .as_array()
+        .expect("files is an array")
+        .iter()
+        .find(|entry| entry["path"] == serde_json::json!("sdk/cli/config.py"))
+        .cloned()
+        .expect("config.py must be manifest-owned");
+    std::fs::write(
+        root.join("sdk/cli.py"),
+        std::fs::read(root.join("sdk/cli/config.py")).expect("read config.py"),
+    )
+    .expect("write the stale single-file CLI");
+    manifest["files"]
+        .as_array_mut()
+        .expect("files is an array")
+        .push(serde_json::json!({
+            "path": "sdk/cli.py",
+            "hash": owned["hash"],
+            "source": owned["source"],
+        }));
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).expect("serialize the manifest"),
+    )
+    .expect("write the manifest");
+
+    let (ok, out, err) = run_gnr8(&root, &["--json", "generate"]);
+    assert!(
+        ok,
+        "the upgrade generate must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&out).expect("generate --json is JSON");
+    assert!(
+        report["deleted"]
+            .as_array()
+            .expect("deleted is an array")
+            .iter()
+            .any(|path| path.as_str() == Some("sdk/cli.py")),
+        "the stale single-file CLI must be deleted:\n{out}"
+    );
+    assert!(
+        !root.join("sdk/cli.py").exists(),
+        "sdk/cli.py must not survive beside the sdk/cli/ package"
+    );
+    assert!(
+        root.join("sdk/cli/main.py").is_file(),
+        "the package must survive the upgrade"
+    );
+
+    assert_downgrade_removes_the_cli(&root);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Removing `.cli(...)` deletes every module of the package, and nothing else.
+fn assert_downgrade_removes_the_cli(root: &Path) {
+    std::fs::write(root.join(".gnr8/src/main.rs"), PYTHON_NO_CLI_PIPELINE)
+        .expect("write the pipeline without a CLI");
+    let (ok, out, err) = run_gnr8(root, &["--json", "generate"]);
+    assert!(
+        ok,
+        "the downgrade generate must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&out).expect("generate --json is JSON");
+    let deleted: Vec<&str> = report["deleted"]
+        .as_array()
+        .expect("deleted is an array")
+        .iter()
+        .filter_map(|path| path.as_str())
+        .collect();
+    for module in [
+        "sdk/cli/__init__.py",
+        "sdk/cli/main.py",
+        "sdk/cli/commands/root.py",
+    ] {
+        assert!(
+            deleted.contains(&module),
+            "{module} must be deleted when .cli(...) is removed:\n{out}"
+        );
+    }
+    assert!(
+        !root.join("sdk/cli/main.py").exists(),
+        "no CLI module may survive the downgrade"
+    );
+    assert!(
+        root.join("sdk/client.py").is_file(),
+        "the SDK itself must be untouched by the downgrade"
+    );
+    let pyproject =
+        std::fs::read_to_string(root.join("sdk/pyproject.toml")).expect("read pyproject.toml");
+    assert!(
+        !pyproject.contains("sdk.cli"),
+        "packages and [project.scripts] must drop the CLI:\n{pyproject}"
+    );
+}
+
+/// The per-group command files in an emitted `internal/cli` package.
+///
+/// Which ones exist depends on the graph's groups, so they are discovered rather than named.
+fn command_file_names(dir: &std::path::Path) -> Vec<String> {
+    const SHARED: &[&str] = &[
+        "cli.go",
+        "config.go",
+        "credentials.go",
+        "flags.go",
+        "output.go",
+        "errors.go",
+        "body.go",
+    ];
+    let found: Vec<String> = std::fs::read_dir(dir)
+        .expect("read the internal/cli package")
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| {
+            std::path::Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext == "go")
+                && !SHARED.contains(&name.as_str())
+        })
+        .map(|name| format!("internal/cli/{name}"))
+        .collect();
+    assert!(
+        !found.is_empty(),
+        "the project must carry at least one command file"
+    );
+    found
+}
+
+/// OpenAPI → GoSdk::cli writes a `sdk/cmd/<program>/` project, and a second generate over the same
+/// graph is a no-op (`0 written`, the CLI in `unchanged`). Needs cargo and gofmt.
+#[test]
+fn generate_go_cli_is_a_noop_on_second_run() {
+    if Command::new("cargo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+        || Command::new("gofmt")
+            .arg("-h")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+    {
+        eprintln!("skipping generate_go_cli_is_a_noop_on_second_run: cargo or gofmt unavailable");
+        return;
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gnr8-e2e-go-cli-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create the staging dir");
+    std::fs::write(root.join("openapi.yaml"), PYTHON_CLI_SPEC).expect("write the spec");
+
+    let (ok, out, err) = run_gnr8(&root, &["init"]);
+    assert!(
+        ok,
+        "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    std::fs::write(root.join(".gnr8/src/main.rs"), GO_CLI_PIPELINE).expect("write the pipeline");
+
+    let (ok, out, err) = run_gnr8(&root, &["generate"]);
+    assert!(
+        ok,
+        "gnr8 generate must write the Go CLI.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    // The CLI is a project now, so the no-rewrite contract has to hold for every file in it.
+    let cmd = root.join("sdk").join("cmd").join("bookstore");
+    // Every file the project always has; the per-group command files depend on the graph, so they
+    // are discovered rather than named.
+    let mut go_files: Vec<String> = [
+        "main.go",
+        "internal/cli/cli.go",
+        "internal/cli/config.go",
+        "internal/cli/credentials.go",
+        "internal/cli/flags.go",
+        "internal/cli/output.go",
+        "internal/cli/errors.go",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect();
+    go_files.extend(command_file_names(&cmd.join("internal").join("cli")));
+    go_files.sort();
+    let mut first: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for name in &go_files {
+        let path = cmd.join(name);
+        assert!(
+            path.is_file(),
+            "generate must write sdk/cmd/bookstore/{name}"
+        );
+        first.push((
+            path.clone(),
+            std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {name}")),
+        ));
+    }
+
+    let (ok, out, err) = run_gnr8(&root, &["--json", "generate"]);
+    assert!(
+        ok,
+        "second generate must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&out).expect("generate --json is JSON");
+    assert_eq!(
+        report["counts"]["written"],
+        serde_json::json!(0),
+        "a second generate over an unchanged graph must write nothing:\n{out}"
+    );
+    let unchanged = report["unchanged"]
+        .as_array()
+        .expect("unchanged is an array");
+    for name in &go_files {
+        let expected = format!("sdk/cmd/bookstore/{name}");
+        assert!(
+            unchanged
+                .iter()
+                .any(|path| path.as_str() == Some(expected.as_str())),
+            "{expected} must be reported unchanged:\n{out}"
+        );
+    }
+    for (path, before) in &first {
+        assert_eq!(
+            &std::fs::read_to_string(path).expect("re-read a CLI file"),
+            before,
+            "a no-op generate must not rewrite {}",
+            path.display()
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&root);
 }

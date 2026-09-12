@@ -74,7 +74,13 @@ fn main() -> std::process::ExitCode {
             .transform(SetTitle::new("Bookstore API"))          // OpenAPI info.title
             .transform(ApplySecurity::api_key("ApiKeyAuth", "X-API-Key")) // auth (lives in middleware)
             .target(OpenApi31::new().to("generated/openapi.yaml"))
-            .target(GoSdk::new().module("example.com/bookstore/sdk").to("generated/sdk"))
+            .target(
+                GoSdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("generated/sdk")
+                    // the program's own facts: its name, and the host it talks to by default
+                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8080")),
+            )
             .post(Header::generated()),                         // "DO NOT EDIT" banner on every .go
     )
 }
@@ -140,6 +146,29 @@ func (c *Client) CreateBook(ctx context.Context, in CreateBookRequest) (Book, er
 }
 ```
 
+**Generated CLI** — `generated/sdk/cmd/bookstore/main.go` is a standard-library command-line client
+over the same graph, opt-in via `.cli(...)`. `go build ./cmd/bookstore` produces the binary:
+
+```sh
+(cd generated/sdk && go build ./cmd/bookstore && ./bookstore books get-book --id 1)
+```
+
+`SdkCli` carries what the graph cannot — facts about the *program* rather than the API:
+
+```rust
+.cli(
+    SdkCli::new("bookstore")
+        // the host it talks to unless --base-url says otherwise; without this the flag is required
+        .base_url("http://127.0.0.1:8080")
+        // and, if you want fewer commands than the API has operations:
+        .commands(OperationSelector::not(OperationSelector::operation("deleteBook"))),
+)
+```
+
+This example deliberately leaves `.commands(...)` off, so every operation is a command. An operation
+left out would still be in `generated/openapi.yaml` and still a method on the client — scope narrows
+the program, never the contract. See [Generated CLI](../../docs/cli/generated-cli.md).
+
 ## What this showcases
 
 - **Zero annotations (code-first).** Routes, request/response types, status
@@ -155,3 +184,6 @@ func (c *Client) CreateBook(ctx context.Context, in CreateBookRequest) (Book, er
   it is joined to every path in both the spec and the SDK.
 - **No TOML.** `.gnr8/src/main.rs` is the entire configuration surface — built-in
   stages composed as code. `gnr8 generate` compiles and runs it.
+- **The program's facts live on the target that emits it.** A CLI's name, default host, and command
+  set are not properties of the API, so they sit on `.cli(...)` rather than in a `Transform` over
+  the shared graph — which would have changed the OpenAPI document and every SDK too.
