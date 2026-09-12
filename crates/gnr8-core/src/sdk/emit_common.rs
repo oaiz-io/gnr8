@@ -599,9 +599,10 @@ pub(crate) fn check_unique_model_file_names(
 
 /// Reject CLI command/flag collisions before any text is emitted.
 ///
-/// Three classes, all [`CoreError::SdkGen`]: two operations kebab to one command in one group; a
-/// top-level command collides with a group name; a flag collides with a reserved global. No
-/// auto-rename table — the user fixes the graph with `RenameOperation` or a source change.
+/// Four classes, all [`CoreError::SdkGen`]: two operations kebab to one command in one group; a
+/// top-level command collides with a group name; a flag collides with a global this command binds;
+/// two parameters of one operation kebab to one flag. No auto-rename table — the user fixes the
+/// graph with `RenameOperation` or a source change.
 pub(crate) fn check_cli_names(
     ops: &[&Operation],
     graph: &ApiGraph,
@@ -648,18 +649,48 @@ pub(crate) fn check_cli_names(
 
     for op in ops.iter().copied() {
         let paging = paging_param_names(graph, op);
+        // Every flag name this command binds for a parameter, including the `--no-<flag>` negation
+        // both emitters bind for a boolean. Two registrations of one name is not a rendering wart:
+        // Go's `flag` panics on a name already in use and argparse raises `ArgumentError` while
+        // building the parser, so the emitted program cannot start — not even `--help`.
+        let mut bound: BTreeMap<String, FlagOrigin<'_>> = BTreeMap::new();
         for param in &op.params {
             if paging.contains(&param.name) {
                 continue;
             }
             let flag = flag_name(param);
-            if RESERVED_FLAGS.contains(&flag.as_str()) {
-                return Err(CoreError::SdkGen {
-                    message: format!(
-                        "CLI {program:?} operation '{}' parameter '{}' maps to flag '--{flag}', which collides with the reserved global '--{flag}'",
-                        op.id, param.name
-                    ),
+            let mut spellings = vec![FlagOrigin {
+                param: param.name.as_str(),
+                negation: false,
+            }];
+            if matches!(param.schema, Type::Primitive(Prim::Bool)) {
+                spellings.push(FlagOrigin {
+                    param: param.name.as_str(),
+                    negation: true,
                 });
+            }
+            for origin in spellings {
+                let spelling = if origin.negation {
+                    format!("no-{flag}")
+                } else {
+                    flag.clone()
+                };
+                if RESERVED_FLAGS.contains(&spelling.as_str()) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} operation '{}' {origin} maps to flag '--{spelling}', which collides with the reserved global '--{spelling}'",
+                            op.id
+                        ),
+                    });
+                }
+                if let Some(previous) = bound.insert(spelling.clone(), origin) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} operation '{}' binds flag '--{spelling}' twice: for {previous} and for {origin}; rename one in the source so each parameter has its own flag",
+                            op.id
+                        ),
+                    });
+                }
             }
         }
     }
@@ -692,6 +723,26 @@ pub(crate) fn reject_sse_operations(ops: &[&Operation], program: &str) -> Result
         }
     }
     Ok(())
+}
+
+/// Which parameter a command's flag name came from, and whether it is the boolean negation.
+///
+/// Both emitters bind `--no-<flag>` beside `--<flag>` for a boolean, so a collision can name a
+/// parameter's own flag or another parameter's negation, and the diagnostic has to say which.
+#[derive(Clone, Copy)]
+struct FlagOrigin<'a> {
+    param: &'a str,
+    negation: bool,
+}
+
+impl std::fmt::Display for FlagOrigin<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.negation {
+            write!(f, "the negation of boolean parameter '{}'", self.param)
+        } else {
+            write!(f, "parameter '{}'", self.param)
+        }
+    }
 }
 
 fn paging_param_names(graph: &ApiGraph, op: &Operation) -> BTreeSet<String> {
@@ -1676,6 +1727,85 @@ mod tests {
         assert!(message.contains("getBook"), "{message}");
         assert!(message.contains("json"), "{message}");
         assert!(message.contains("json"), "{message}");
+    }
+
+    fn cli_bool_param(name: &str) -> Param {
+        Param {
+            schema: Type::Primitive(crate::graph::Prim::Bool),
+            ..cli_param(name)
+        }
+    }
+
+    #[test]
+    fn two_parameters_mapping_to_one_flag_name_both() {
+        let graph = ApiGraph {
+            operations: vec![cli_op(
+                "listBooks",
+                None,
+                vec![cli_param("page_size"), cli_param("pageSize")],
+            )],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("two parameters mapping to one flag must be rejected"),
+        };
+        assert!(message.contains("listBooks"), "{message}");
+        assert!(message.contains("pageSize"), "{message}");
+        assert!(message.contains("page_size"), "{message}");
+        assert!(message.contains("--page-size"), "{message}");
+    }
+
+    #[test]
+    fn a_parameter_colliding_with_a_boolean_negation_names_both() {
+        let graph = ApiGraph {
+            operations: vec![cli_op(
+                "listBooks",
+                None,
+                vec![cli_bool_param("verified"), cli_param("no_verified")],
+            )],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("a collision with a boolean negation must be rejected"),
+        };
+        assert!(message.contains("verified"), "{message}");
+        assert!(message.contains("no_verified"), "{message}");
+        assert!(message.contains("--no-verified"), "{message}");
+        assert!(
+            message.contains("negation of boolean parameter 'verified'"),
+            "the message must say which side is a negation: {message}"
+        );
+    }
+
+    #[test]
+    fn distinct_flags_on_one_operation_are_accepted() -> Result<(), crate::CoreError> {
+        let graph = ApiGraph {
+            operations: vec![cli_op(
+                "listBooks",
+                None,
+                vec![cli_bool_param("verified"), cli_param("genre")],
+            )],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        check_cli_names(&ops, &graph, "bookstore")
+    }
+
+    #[test]
+    fn one_flag_name_on_two_different_operations_is_accepted() -> Result<(), crate::CoreError> {
+        let graph = ApiGraph {
+            operations: vec![
+                cli_op("listBooks", None, vec![cli_param("page_size")]),
+                cli_op("listAuthors", None, vec![cli_param("pageSize")]),
+            ],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        check_cli_names(&ops, &graph, "bookstore")
     }
 
     #[test]

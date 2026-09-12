@@ -131,9 +131,23 @@ Paging parameters named by a `PaginationPolicy` are not ordinary flags. They are
 A success response whose `body_kind` is `sse` is a generation error naming the operation. Leave it out
 of the program with `SdkCli::commands(...)` — see [Command scope](#command-scope).
 
-Name collisions (two commands, a command vs a group, a flag vs a reserved name) are generation
-errors that name both subjects. Reserved flags: `json`, `help`, `version`, `base-url`, `limit`,
-`all`, `body`, `body-file`. There is no auto-rename.
+Name collisions are generation errors that name both subjects. There is no auto-rename — the fix is
+`RenameOperation` or a source change. Four classes:
+
+| Class | Example |
+|---|---|
+| two operations map to one command in one group | `getBook` and `get_book` → `get-book` |
+| a top-level command collides with a group name | an ungrouped `books` beside a `books` group |
+| a flag collides with a global the command binds | a parameter named `base_url` |
+| two parameters of one operation map to one flag | `page_size` beside `pageSize`; or `no_verified` beside a boolean `verified`, whose negation is already `--no-verified` |
+
+The last class matters because the emitted program would not start at all: Go's `flag` panics on a
+name already in use, and `argparse` raises `ArgumentError` while building the parser, so even
+`--help` fails.
+
+Reserved flags: `help`, `base-url` on every command; `body`/`body-file` where the operation has a
+request body; `limit`/`all` where a `PaginationPolicy` names it; and `no-<flag>` for each boolean
+parameter.
 
 `--base-url` is declared on each command so it can follow the subcommand:
 

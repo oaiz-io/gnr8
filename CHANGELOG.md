@@ -39,6 +39,13 @@ must move the minor version.
   `operation.removed` as a breaking change. The two verbatim copies of the check are now one helper.
   [Response overrides](docs/pipeline/transforms.md) now say which targets consume `event_stream`:
   the OpenAPI targets do, SDK targets reject a typed event schema, and a CLI cannot print a stream.
+- **A generated CLI that could not start is now a generation error.** Two parameters of one
+  operation whose names differ only in casing style (`page_size` beside `pageSize`) mapped to one
+  flag, and so did a parameter named `no_verified` beside a boolean `verified` whose negation is
+  already `--no-verified`. Go's `flag` panics on a name already in use and `argparse` raises while
+  building the parser, so the emitted program failed on every invocation including `--help`, while
+  `gnr8 generate` reported success. This is now the fourth collision class, naming the operation,
+  both subjects, the flag, and which side is a negation.
 
 ## 0.14.1 — 2026-09-11
 
