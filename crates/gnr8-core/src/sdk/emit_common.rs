@@ -161,7 +161,7 @@ pub(crate) fn helper_env_var(program: &str) -> String {
 /// Everything else is conditional and computed per command by [`reserved_flags_for`] — reserving a
 /// name no command binds costs a user a legitimate parameter for nothing, and the only remedy
 /// available to them is changing their API's wire contract.
-pub(crate) const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url"];
+const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url"];
 
 /// The global flags one command binds, which its parameter flags may not shadow.
 ///
