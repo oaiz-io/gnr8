@@ -281,6 +281,17 @@ JSON, `application/*+json`, form, multipart, text, and binary choices use the sa
 classification in every target. Multipart array fields become repeated parts; absent or null fields
 are omitted.
 
+Raw binary values stay byte-capable throughout each generated SDK. Go uses `[]byte`; Python uses
+`bytes` for raw binary bodies and exported aliases; TypeScript request aliases and multipart fields
+use `Blob | ArrayBuffer | Uint8Array`, while binary responses return `Blob`. A bytes field carried in
+JSON retains its JSON representation rather than being reclassified as a multipart file.
+
+Python multipart file fields use the exported `MultipartFile(filename: str, content: bytes)` value so
+the encoder can emit a real filename in `Content-Disposition`. Single and repeated file fields use
+`MultipartFile` and `list[MultipartFile]` respectively, with request optionality preserved. Empty
+filenames and filenames containing carriage returns or newlines are rejected. TypeScript multipart
+file fields accept the same byte-capable platform types as raw binary bodies.
+
 ## Success return types
 
 An SDK method has one return type, and one rule decides it: **an operation that declares a JSON

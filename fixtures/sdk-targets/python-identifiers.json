@@ -1,0 +1,77 @@
+{
+  "module": "sdk.identifiers",
+  "operations": [
+    {
+      "id": "writeIdentifiers",
+      "method": "POST",
+      "path": "/identifiers",
+      "handler": "writeIdentifiers",
+      "params": [],
+      "request_body": { "ref_id": "sdk.IdentifierModel" },
+      "request_body_required": true,
+      "request_body_content_type": "application/json",
+      "responses": [{ "status": 204, "body": null }],
+      "provenance": { "file": "service.py", "start_line": 1, "end_line": 1 }
+    }
+  ],
+  "schemas": [
+    {
+      "id": "sdk.IdentifierModel",
+      "name": "IdentifierModel",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "bool",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": { "type": "primitive", "of": { "prim": "bool" } }
+          },
+          {
+            "json_name": "bool_",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": { "type": "primitive", "of": { "prim": "string" } }
+          },
+          {
+            "json_name": "class",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": { "type": "primitive", "of": { "prim": "int", "bits": 64, "signed": true } }
+          },
+          {
+            "json_name": "list",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": {
+              "type": "array",
+              "of": { "type": "primitive", "of": { "prim": "string" } }
+            }
+          }
+        ]
+      },
+      "enum_source_order": [],
+      "provenance": { "file": "models.py", "start_line": 1, "end_line": 4 }
+    }
+  ],
+  "diagnostics": [],
+  "base_path": "/",
+  "title": "Identifier allocation API",
+  "security": []
+}

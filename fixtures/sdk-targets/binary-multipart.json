@@ -1,0 +1,168 @@
+{
+  "module": "sdk.targets",
+  "operations": [
+    {
+      "id": "receiveBinary",
+      "method": "GET",
+      "path": "/binary",
+      "handler": "receiveBinary",
+      "params": [],
+      "request_body": null,
+      "responses": [
+        {
+          "status": 200,
+          "body": null,
+          "body_kind": "binary",
+          "content_type": "application/octet-stream"
+        }
+      ],
+      "provenance": { "file": "service.src", "start_line": 1, "end_line": 1 }
+    },
+    {
+      "id": "sendBinary",
+      "method": "POST",
+      "path": "/binary",
+      "handler": "sendBinary",
+      "params": [],
+      "request_body": { "ref_id": "sdk.Payload" },
+      "request_body_required": true,
+      "request_body_content_type": "application/octet-stream",
+      "responses": [{ "status": 204, "body": null }],
+      "provenance": { "file": "service.src", "start_line": 2, "end_line": 2 }
+    },
+    {
+      "id": "sendJsonBytes",
+      "method": "POST",
+      "path": "/json",
+      "handler": "sendJsonBytes",
+      "params": [],
+      "request_body": { "ref_id": "sdk.JsonBytes" },
+      "request_body_required": true,
+      "request_body_content_type": "application/json",
+      "responses": [{ "status": 204, "body": null }],
+      "provenance": { "file": "service.src", "start_line": 3, "end_line": 3 }
+    },
+    {
+      "id": "sendMultipart",
+      "method": "POST",
+      "path": "/multipart",
+      "handler": "sendMultipart",
+      "params": [],
+      "request_body": { "ref_id": "sdk.MultipartRequest" },
+      "request_body_required": true,
+      "request_body_content_type": "multipart/form-data",
+      "responses": [{ "status": 204, "body": null }],
+      "provenance": { "file": "service.src", "start_line": 4, "end_line": 4 }
+    }
+  ],
+  "schemas": [
+    {
+      "id": "sdk.JsonBytes",
+      "name": "JsonBytes",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "data",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": false,
+            "schema": { "type": "primitive", "of": { "prim": "bytes" } },
+            "description": null,
+            "example": null
+          }
+        ]
+      },
+      "enum_source_order": [],
+      "provenance": { "file": "models.src", "start_line": 1, "end_line": 1 }
+    },
+    {
+      "id": "sdk.MultipartRequest",
+      "name": "MultipartRequest",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "aliasedFile",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": { "type": "named", "of": "sdk.Payload" },
+            "description": null,
+            "example": null
+          },
+          {
+            "json_name": "description",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": false,
+            "schema": { "type": "primitive", "of": { "prim": "string" } },
+            "description": null,
+            "example": null
+          },
+          {
+            "json_name": "optionalFile",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": { "type": "primitive", "of": { "prim": "bytes" } },
+            "description": null,
+            "example": null
+          },
+          {
+            "json_name": "optionalFiles",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": {
+              "type": "array",
+              "of": { "type": "primitive", "of": { "prim": "bytes" } }
+            },
+            "description": null,
+            "example": null
+          },
+          {
+            "json_name": "requiredFile",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": false,
+            "schema": { "type": "primitive", "of": { "prim": "bytes" } },
+            "description": null,
+            "example": null
+          }
+        ]
+      },
+      "enum_source_order": [],
+      "provenance": { "file": "models.src", "start_line": 2, "end_line": 2 }
+    },
+    {
+      "id": "sdk.Payload",
+      "name": "Payload",
+      "body": { "type": "primitive", "of": { "prim": "bytes" } },
+      "enum_source_order": [],
+      "provenance": { "file": "models.src", "start_line": 3, "end_line": 3 }
+    }
+  ],
+  "diagnostics": [],
+  "base_path": "/",
+  "title": "Binary and multipart API",
+  "security": []
+}

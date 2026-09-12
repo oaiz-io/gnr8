@@ -750,6 +750,87 @@ pub(crate) enum RequestBodyEncoding {
     Binary,
 }
 
+/// Binary shape of one schema when it is used as a multipart object field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BinaryValueShape {
+    Other,
+    Single,
+    Repeated,
+}
+
+/// Resolve direct and named binary field types to their scalar/repeated shape.
+///
+/// Alias traversal is semantic rather than target-specific, so every SDK sees the same answer. An
+/// alias cycle or dangling reference is a graph error instead of silently degrading a file part to a
+/// textual field.
+pub(crate) fn binary_value_shape(
+    schema: &Type,
+    graph: &ApiGraph,
+) -> Result<BinaryValueShape, CoreError> {
+    fn resolve(
+        schema: &Type,
+        graph: &ApiGraph,
+        seen: &mut BTreeSet<String>,
+    ) -> Result<BinaryValueShape, CoreError> {
+        match schema {
+            Type::Primitive(Prim::Bytes) => Ok(BinaryValueShape::Single),
+            Type::Array(items) => Ok(match resolve(items, graph, seen)? {
+                BinaryValueShape::Single => BinaryValueShape::Repeated,
+                BinaryValueShape::Other | BinaryValueShape::Repeated => BinaryValueShape::Other,
+            }),
+            Type::Named(ref_id) => {
+                if !seen.insert(ref_id.clone()) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "cyclic schema reference '{ref_id}' cannot determine multipart binary shape"
+                        ),
+                    });
+                }
+                let target = graph
+                    .schemas
+                    .iter()
+                    .find(|candidate| candidate.id == *ref_id)
+                    .ok_or_else(|| CoreError::SdkGen {
+                        message: format!(
+                            "dangling schema reference '{ref_id}' cannot determine multipart binary shape"
+                        ),
+                    })?;
+                resolve(&target.body, graph, seen)
+            }
+            Type::Primitive(_)
+            | Type::WellKnown(_)
+            | Type::Map { .. }
+            | Type::Object(_)
+            | Type::Enum(_)
+            | Type::Union(_)
+            | Type::Any {} => Ok(BinaryValueShape::Other),
+        }
+    }
+
+    resolve(schema, graph, &mut BTreeSet::new())
+}
+
+/// Whether a schema is the object carried by any multipart request body.
+///
+/// This is a shared SDK-model fact: language emitters choose their syntax for file fields, but they
+/// must all classify the schema from the same operation media semantics.
+pub(crate) fn schema_is_multipart_request(
+    graph: &ApiGraph,
+    schema_id: &str,
+) -> Result<bool, CoreError> {
+    for operation in &graph.operations {
+        if request_body_models_of(operation, graph)?
+            .iter()
+            .any(|body| {
+                body.schema_id == schema_id && body.encoding == RequestBodyEncoding::Multipart
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl SuccessResponses {
     /// Whether at least one declared success has no body while another has a typed body.
     pub(crate) fn has_bodyless_alternative(&self) -> bool {
