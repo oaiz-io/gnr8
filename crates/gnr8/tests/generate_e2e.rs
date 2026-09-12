@@ -659,7 +659,39 @@ fn generate_python_cli_is_a_noop_on_second_run() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// OpenAPI → GoSdk::cli writes `sdk/cmd/<program>/main.go`, and a second generate over the same
+/// The per-group command files in an emitted `internal/cli` package.
+///
+/// Which ones exist depends on the graph's groups, so they are discovered rather than named.
+fn command_file_names(dir: &std::path::Path) -> Vec<String> {
+    const SHARED: &[&str] = &[
+        "cli.go",
+        "config.go",
+        "credentials.go",
+        "flags.go",
+        "output.go",
+        "errors.go",
+        "body.go",
+    ];
+    let found: Vec<String> = std::fs::read_dir(dir)
+        .expect("read the internal/cli package")
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| {
+            std::path::Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext == "go")
+                && !SHARED.contains(&name.as_str())
+        })
+        .map(|name| format!("internal/cli/{name}"))
+        .collect();
+    assert!(
+        !found.is_empty(),
+        "the project must carry at least one command file"
+    );
+    found
+}
+
+/// OpenAPI → GoSdk::cli writes a `sdk/cmd/<program>/` project, and a second generate over the same
 /// graph is a no-op (`0 written`, the CLI in `unchanged`). Needs cargo and gofmt.
 #[test]
 fn generate_go_cli_is_a_noop_on_second_run() {
@@ -700,16 +732,36 @@ fn generate_go_cli_is_a_noop_on_second_run() {
         ok,
         "gnr8 generate must write the Go CLI.\nstdout:\n{out}\nstderr:\n{err}"
     );
-    let cli = root
-        .join("sdk")
-        .join("cmd")
-        .join("bookstore")
-        .join("main.go");
-    assert!(
-        cli.is_file(),
-        "generate must write sdk/cmd/bookstore/main.go"
-    );
-    let first = std::fs::read_to_string(&cli).expect("read sdk/cmd/bookstore/main.go");
+    // The CLI is a project now, so the no-rewrite contract has to hold for every file in it.
+    let cmd = root.join("sdk").join("cmd").join("bookstore");
+    // Every file the project always has; the per-group command files depend on the graph, so they
+    // are discovered rather than named.
+    let mut go_files: Vec<String> = [
+        "main.go",
+        "internal/cli/cli.go",
+        "internal/cli/config.go",
+        "internal/cli/credentials.go",
+        "internal/cli/flags.go",
+        "internal/cli/output.go",
+        "internal/cli/errors.go",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect();
+    go_files.extend(command_file_names(&cmd.join("internal").join("cli")));
+    go_files.sort();
+    let mut first: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for name in &go_files {
+        let path = cmd.join(name);
+        assert!(
+            path.is_file(),
+            "generate must write sdk/cmd/bookstore/{name}"
+        );
+        first.push((
+            path.clone(),
+            std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {name}")),
+        ));
+    }
 
     let (ok, out, err) = run_gnr8(&root, &["--json", "generate"]);
     assert!(
@@ -725,17 +777,23 @@ fn generate_go_cli_is_a_noop_on_second_run() {
     let unchanged = report["unchanged"]
         .as_array()
         .expect("unchanged is an array");
-    assert!(
-        unchanged
-            .iter()
-            .any(|path| path.as_str() == Some("sdk/cmd/bookstore/main.go")),
-        "cmd/bookstore/main.go must be reported unchanged:\n{out}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&cli).expect("re-read sdk/cmd/bookstore/main.go"),
-        first,
-        "a no-op generate must not rewrite cmd/bookstore/main.go"
-    );
+    for name in &go_files {
+        let expected = format!("sdk/cmd/bookstore/{name}");
+        assert!(
+            unchanged
+                .iter()
+                .any(|path| path.as_str() == Some(expected.as_str())),
+            "{expected} must be reported unchanged:\n{out}"
+        );
+    }
+    for (path, before) in &first {
+        assert_eq!(
+            &std::fs::read_to_string(path).expect("re-read a CLI file"),
+            before,
+            "a no-op generate must not rewrite {}",
+            path.display()
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&root);
 }

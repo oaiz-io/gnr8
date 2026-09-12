@@ -14,11 +14,12 @@ use gnr8::sdk::SdkCli;
 
 use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type, WellKnown};
 use crate::lower::DEFAULT_API_VERSION;
+use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    check_cli_names, cli_operations, command_group, command_name, credential_env_var, flag_name,
-    helper_env_var, http_auth_features_for, operation_auth_alternatives, operation_prose,
-    quoted_string_literal, reject_sse_operations, request_body_models_of, success_responses_of,
-    OperationAuthScheme, RequestBodyModel,
+    check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
+    flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
+    operation_prose, quoted_string_literal, reject_sse_operations, request_body_models_of,
+    success_responses_of, OperationAuthScheme, RequestBodyModel,
 };
 use crate::CoreError;
 
@@ -34,11 +35,91 @@ fn sink(error: std::fmt::Error) -> CoreError {
 }
 
 /// Relative path of the generated CLI inside the SDK output directory.
-pub(crate) fn cli_file(program: &str) -> String {
+/// The `package main` entry point: `cmd/<program>/main.go`.
+pub(crate) fn main_file(program: &str) -> String {
     format!("cmd/{program}/main.go")
 }
 
-/// Render `cmd/<program>/main.go` for one program name.
+/// One file inside the CLI's own `internal/cli` package.
+fn internal_file(program: &str, stem: &str) -> String {
+    format!("cmd/{program}/internal/cli/{stem}.go")
+}
+
+/// The import path of the CLI's internal package, for `main.go`.
+fn internal_import(module: &str, program: &str) -> String {
+    format!(
+        "{}/cmd/{program}/internal/cli",
+        module.trim_end_matches('/')
+    )
+}
+
+/// File stems `internal/cli` reserves for itself.
+///
+/// Ungrouped commands land in `commands.go`, so a group whose file stem matches one of these has
+/// no file of its own. Rejecting it names the remedy every other CLI name collision names.
+const RESERVED_CLI_FILES: &[&str] = &[
+    "cli",
+    "commands",
+    "config",
+    "credentials",
+    "errors",
+    "flags",
+    "output",
+];
+
+/// One emitted `internal/cli/*.go` file: the commands under one group, or the ungrouped ones.
+struct CommandFile<'a> {
+    /// File stem inside `internal/cli/` (`books`, or `commands` for ungrouped commands).
+    stem: String,
+    /// The command group these operations sit under, or `None` at the program root.
+    group: Option<String>,
+    ops: Vec<&'a Operation>,
+}
+
+/// Partition the program's operations into one file per group, ungrouped first.
+fn command_files<'a>(
+    ops: &[&'a Operation],
+    program: &str,
+) -> Result<Vec<CommandFile<'a>>, CoreError> {
+    let mut ungrouped: Vec<&Operation> = Vec::new();
+    let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
+    for op in ops.iter().copied() {
+        match command_group(op) {
+            Some(group) => grouped.entry(group).or_default().push(op),
+            None => ungrouped.push(op),
+        }
+    }
+    let mut files = Vec::new();
+    if !ungrouped.is_empty() {
+        files.push(CommandFile {
+            stem: "commands".to_string(),
+            group: None,
+            ops: ungrouped,
+        });
+    }
+    for (group, ops) in grouped {
+        let stem = file_stem(&group);
+        if RESERVED_CLI_FILES.contains(&stem.as_str()) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} group '{group}' maps to the reserved file \
+                     'internal/cli/{stem}.go'; rename the group with GroupOperations"
+                ),
+            });
+        }
+        files.push(CommandFile {
+            stem,
+            group: Some(group),
+            ops,
+        });
+    }
+    Ok(files)
+}
+
+/// Render the `cmd/<program>/` project for one program name.
+///
+/// `main.go` is `package main` and does nothing but call `cli.Run`. Everything else lives in
+/// `internal/cli`, which Go's own visibility rule keeps unimportable from outside this program.
 ///
 /// # Errors
 ///
@@ -49,35 +130,135 @@ pub(crate) fn emit_cli(
     module: &str,
     package: &str,
     cli: &SdkCli,
-) -> Result<String, CoreError> {
+) -> Result<Vec<SdkFile>, CoreError> {
     let ops = cli_operations(graph, cli)?;
     check_cli_names(&ops, graph, &cli.program)?;
     reject_sse_operations(&ops, &cli.program)?;
     http_auth_features_for(&ops, graph)?;
+    let command_files = command_files(&ops, &cli.program)?;
+    let program = cli.program.as_str();
+    let part = |stem: &str,
+                build: &dyn Fn(&mut String, &mut ImportSet) -> Result<(), CoreError>|
+     -> Result<SdkFile, CoreError> {
+        let mut body = String::new();
+        let mut imports = ImportSet::default();
+        build(&mut body, &mut imports)?;
+        Ok(SdkFile {
+            name: internal_file(program, stem),
+            contents: render_internal(module, package, &imports, &body),
+        })
+    };
 
-    let mut body = String::new();
-    let mut imports = ImportSet::default();
-    emit_constants(&mut body, &ops, graph, cli)?;
-    if has_security(graph) && !ops.is_empty() {
-        emit_credential_helpers(&mut body, &mut imports)?;
+    let mut files = vec![
+        SdkFile {
+            name: main_file(program),
+            contents: emit_main_go(module, program),
+        },
+        part("config", &|body, _imports| {
+            emit_constants(body, &ops, graph, cli)
+        })?,
+        {
+            let mut body = String::new();
+            let mut imports = ImportSet::default();
+            emit_main(&mut body, &command_files, &ops, &mut imports)?;
+            SdkFile {
+                name: internal_file(program, "cli"),
+                contents: render_internal_documented(module, package, program, &imports, &body),
+            }
+        },
+    ];
+    if !ops.is_empty() {
+        files.push(part("credentials", &|body, imports| {
+            if has_security(graph) {
+                emit_credential_helpers(body, imports)?;
+            }
+            emit_client_builder(body, graph, package, imports)
+        })?);
+        files.push(part("flags", &|body, imports| {
+            emit_shared_helpers(body, &ops, graph, cli, imports)
+        })?);
+        files.push(part("output", &|body, imports| {
+            emit_print_helpers(body, imports)
+        })?);
+        files.push(part("errors", &|body, imports| {
+            emit_handle_err(body, &ops, graph, package, imports)
+        })?);
+        for file in &command_files {
+            files.push(part(&file.stem, &|body, imports| {
+                emit_handlers(body, &file.ops, graph, cli, package, imports)
+            })?);
+        }
     }
     if has_request_body(&ops, graph)? {
-        emit_body_helpers(&mut body, &mut imports)?;
+        files.push(part("body", &|body, imports| {
+            emit_body_helpers(body, imports)
+        })?);
     }
-    if !ops.is_empty() {
-        emit_shared_helpers(&mut body, &ops, graph, cli, &mut imports)?;
-        emit_client_builder(&mut body, graph, package, &mut imports)?;
-        emit_print_helpers(&mut body, &mut imports)?;
-        emit_handlers(&mut body, &ops, graph, cli, package, &mut imports)?;
-    }
-    emit_main(&mut body, &ops, graph, package, &mut imports)?;
-    imports.add("os");
-    imports.add("fmt");
-    if !ops.is_empty() {
-        imports.sdk = true;
-    }
+    files.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(files)
+}
 
-    Ok(render_file(module, package, &imports, &body))
+/// `cmd/<program>/main.go` — the only `package main` file, and the only thing a user runs.
+fn emit_main_go(module: &str, program: &str) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "package main");
+    out.push('\n');
+    let _ = writeln!(out, "import (");
+    let _ = writeln!(out, "{}", quoted_string_literal("os"));
+    out.push('\n');
+    let _ = writeln!(
+        out,
+        "{}",
+        go_import("cli", &internal_import(module, program))
+    );
+    let _ = writeln!(out, ")");
+    out.push('\n');
+    let _ = writeln!(out, "func main() {{");
+    let _ = writeln!(out, "os.Exit(cli.Run(os.Args[1:]))");
+    let _ = writeln!(out, "}}");
+    out
+}
+
+/// One Go import line, aliased only when the package name is not the path's last segment.
+///
+/// `sdk "example.com/acme/sdk"` is the alias a reader would delete; `sdk "example.com/acme/go-sdk"`
+/// is the one they need.
+fn go_import(package: &str, path: &str) -> String {
+    let last = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
+    if last == package {
+        quoted_string_literal(path)
+    } else {
+        format!("{package} {}", quoted_string_literal(path))
+    }
+}
+
+/// One `internal/cli` file: the `package cli` clause, its own imports, and its body.
+///
+/// Each file carries exactly the imports it uses — Go rejects an unused one — so the import set is
+/// built per file rather than once for the program.
+fn render_internal(module: &str, package: &str, imports: &ImportSet, body: &str) -> String {
+    render_file_with_clause("package cli", module, package, imports, body)
+}
+
+/// The same, with the package's doc comment. Go wants exactly one, so only `cli.go` carries it.
+fn render_internal_documented(
+    module: &str,
+    package: &str,
+    program: &str,
+    imports: &ImportSet,
+    body: &str,
+) -> String {
+    render_file_with_clause(
+        &format!("// Package cli implements the {program} command-line client.\npackage cli"),
+        module,
+        package,
+        imports,
+        body,
+    )
 }
 
 #[derive(Default)]
@@ -92,9 +273,15 @@ impl ImportSet {
     }
 }
 
-fn render_file(module: &str, package: &str, imports: &ImportSet, body: &str) -> String {
+fn render_file_with_clause(
+    clause: &str,
+    module: &str,
+    package: &str,
+    imports: &ImportSet,
+    body: &str,
+) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "package main");
+    let _ = writeln!(out, "{clause}");
     out.push('\n');
     let stdlib: Vec<&str> = imports.stdlib.iter().copied().collect();
     let has_sdk = imports.sdk;
@@ -110,13 +297,17 @@ fn render_file(module: &str, package: &str, imports: &ImportSet, body: &str) -> 
         if !stdlib.is_empty() {
             out.push('\n');
         }
-        let _ = writeln!(out, "{package} {}", quoted_string_literal(module));
+        let _ = writeln!(out, "{}", go_import(package, module));
     }
     out.push_str(")\n\n");
     out.push_str(body);
     out
 }
 
+/// `internal/cli/cli.go` — `Run`, the command table, and the usage text.
+///
+/// This is the only exported symbol in the package: `main.go` calls `cli.Run(os.Args[1:])` and
+/// exits with what it returns.
 fn has_security(graph: &ApiGraph) -> bool {
     !graph.security.is_empty()
 }
@@ -802,6 +993,13 @@ fn emit_handlers(
     package: &str,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
+    if !ops.is_empty() {
+        // Every command parses a FlagSet, reports to stderr, and calls a client method.
+        imports.add("flag");
+        imports.add("fmt");
+        imports.add("os");
+        imports.sdk = true;
+    }
     for op in ops.iter().copied() {
         emit_handler(out, graph, cli, op, package, imports)?;
     }
@@ -968,7 +1166,7 @@ fn emit_handler(
         }
     }
     if let Some(body) = bodies.first() {
-        emit_body_local(out, op, body, &bodies, package)?;
+        emit_body_local(out, op, body, &bodies, package, imports)?;
     }
 
     let mut call_args = vec!["ctx".to_string()];
@@ -1399,7 +1597,9 @@ fn emit_body_local(
     body: &RequestBodyModel,
     bodies: &[RequestBodyModel],
     package: &str,
+    imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
+    imports.add("encoding/json");
     writeln!(out, "var payload []byte").map_err(sink)?;
     writeln!(out, "if seen[\"body\"] || seen[\"body-file\"] {{").map_err(sink)?;
     writeln!(out, "var err error").map_err(sink)?;
@@ -1460,22 +1660,26 @@ fn emit_body_local(
 
 fn emit_main(
     out: &mut String,
+    command_files: &[CommandFile<'_>],
     ops: &[&Operation],
-    graph: &ApiGraph,
-    package: &str,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
     imports.add("fmt");
     imports.add("os");
 
-    let mut ungrouped: Vec<&Operation> = Vec::new();
-    let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
-    for op in ops.iter().copied() {
-        match command_group(op) {
-            Some(group) => grouped.entry(group).or_default().push(op),
-            None => ungrouped.push(op),
-        }
-    }
+    let ungrouped: Vec<&Operation> = command_files
+        .iter()
+        .filter(|file| file.group.is_none())
+        .flat_map(|file| file.ops.iter().copied())
+        .collect();
+    let grouped: BTreeMap<String, Vec<&Operation>> = command_files
+        .iter()
+        .filter_map(|file| {
+            file.group
+                .as_ref()
+                .map(|group| (group.clone(), file.ops.clone()))
+        })
+        .collect();
 
     writeln!(out, "func printRootUsage(out *os.File) {{").map_err(sink)?;
     writeln!(out, "fmt.Fprintln(out, description)").map_err(sink)?;
@@ -1489,23 +1693,23 @@ fn emit_main(
         for op in &ungrouped {
             writeln!(
                 out,
-                "fmt.Fprintln(out, \"  \" + {})",
-                quoted_string_literal(&command_name(op))
+                "fmt.Fprintln(out, {})",
+                quoted_string_literal(&format!("  {}", command_name(op)))
             )
             .map_err(sink)?;
         }
         for (group, ops) in &grouped {
             writeln!(
                 out,
-                "fmt.Fprintln(out, \"  \" + {})",
-                quoted_string_literal(group)
+                "fmt.Fprintln(out, {})",
+                quoted_string_literal(&format!("  {group}"))
             )
             .map_err(sink)?;
             for op in ops {
                 writeln!(
                     out,
-                    "fmt.Fprintln(out, \"    \" + {})",
-                    quoted_string_literal(&command_name(op))
+                    "fmt.Fprintln(out, {})",
+                    quoted_string_literal(&format!("    {}", command_name(op)))
                 )
                 .map_err(sink)?;
             }
@@ -1514,18 +1718,17 @@ fn emit_main(
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
 
-    if !ops.is_empty() {
-        emit_handle_err(out, ops, graph, package, imports)?;
-        for (group, ops) in &grouped {
-            emit_group_dispatch(out, group, ops)?;
-        }
+    // `handleErr` lives in errors.go now; only the dispatch tree belongs beside Run.
+    for (group, ops) in &grouped {
+        emit_group_dispatch(out, group, ops)?;
     }
 
-    writeln!(out, "func main() {{").map_err(sink)?;
-    writeln!(out, "os.Exit(run(os.Args[1:]))").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
-    writeln!(out, "func run(args []string) int {{").map_err(sink)?;
+    writeln!(
+        out,
+        "// Run executes one invocation and returns the process exit code."
+    )
+    .map_err(sink)?;
+    writeln!(out, "func Run(args []string) int {{").map_err(sink)?;
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(out, "printRootUsage(os.Stderr)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -1603,6 +1806,10 @@ fn emit_handle_err(
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
     imports.add("errors");
+    imports.add("fmt");
+    imports.add("os");
+    // Every branch matches a typed error the generated client defines.
+    imports.sdk = true;
     writeln!(out, "func handleErr(err error) int {{").map_err(sink)?;
     if has_security(graph) {
         writeln!(out, "var helper *helperError").map_err(sink)?;

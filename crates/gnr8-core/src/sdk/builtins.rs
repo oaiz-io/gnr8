@@ -2874,17 +2874,19 @@ impl TargetExec for GoSdk {
         }
         write_sdk_docs(out, &self.dir, "Go", &model.package, ir, &model, &self.docs)?;
         if let Some(cli) = &self.cli {
-            let file = crate::gosdk::generate_cli(
+            let cli_files = crate::gosdk::generate_cli(
                 ir,
                 &self.module,
                 &model.package,
                 cli,
                 Some(&cache_dir(cx)),
             )?;
-            out.create(
-                format!("{}/{}", self.dir.trim_end_matches('/'), file.name),
-                file.contents,
-            )?;
+            for file in cli_files {
+                out.create(
+                    format!("{}/{}", self.dir.trim_end_matches('/'), file.name),
+                    file.contents,
+                )?;
+            }
         }
         if self.package_metadata {
             out.create(

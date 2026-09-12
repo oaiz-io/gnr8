@@ -252,15 +252,9 @@ pub(crate) fn generate_cli(
     package: &str,
     cli: &gnr8::sdk::SdkCli,
     memo_dir: Option<&std::path::Path>,
-) -> Result<SdkFile, crate::CoreError> {
+) -> Result<Vec<SdkFile>, crate::CoreError> {
     let raw = cli::emit_cli(graph, module, package, cli)?;
-    let mut formatted = gofmt::gofmt_files(
-        vec![raw_go_file(cli::cli_file(&cli.program), raw)],
-        memo_dir,
-    )?;
-    formatted.pop().ok_or_else(|| crate::CoreError::SdkGen {
-        message: "Go CLI gofmt produced no file".to_string(),
-    })
+    gofmt::gofmt_files(raw, memo_dir)
 }
 
 fn raw_go_file(name: impl Into<String>, raw: impl Into<String>) -> SdkFile {

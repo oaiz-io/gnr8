@@ -80,6 +80,22 @@ fn argument_block<'a>(text: &'a str, flag: &str) -> &'a str {
 /// The CLI is a package now, so a test that asks "does the program bind this flag" has to look
 /// across its modules. `Artifacts::files` is already in ascending path order, so the
 /// concatenation is deterministic without sorting.
+/// Every emitted Go CLI file concatenated in path order.
+///
+/// The CLI is a project now — `main.go` plus an `internal/cli` package — so a test that asks "does
+/// the program bind this flag" has to look across its files.
+fn go_cli_source(out: &Artifacts, dir: &str, program: &str) -> String {
+    let prefix = format!("{dir}/cmd/{program}/");
+    let parts: Vec<&str> = out
+        .files()
+        .iter()
+        .filter(|file| file.path.starts_with(&prefix))
+        .map(|file| file.text.as_str())
+        .collect();
+    assert!(!parts.is_empty(), "no CLI project under {prefix}");
+    parts.join("\n")
+}
+
 fn python_cli_source(out: &Artifacts, dir: &str) -> String {
     let prefix = format!("{dir}/cli/");
     let parts: Vec<&str> = out
@@ -110,7 +126,7 @@ fn generate_go_cli(graph: &ApiGraph, program: &str) -> String {
         .cli(program)
         .generate(graph, &mut out, &cx())
         .expect("GoSdk with .cli() must generate");
-    artifact(&out, &format!("generated/sdk-go/cmd/{program}/main.go")).to_string()
+    go_cli_source(&out, "generated/sdk-go", program)
 }
 
 fn generate_go_cli_result(
@@ -764,8 +780,8 @@ fn go_cli_artifact_is_under_the_output_dir_and_covered_by_anchors() {
     assert!(
         out.files()
             .iter()
-            .any(|file| file.path == "generated/sdk-go/cmd/bookstore/main.go"),
-        "cmd/bookstore/main.go must be written under the trimmed output dir"
+            .any(|file| file.path == "generated/sdk-go/cmd/bookstore/internal/cli/cli.go"),
+        "the CLI project must be written under the trimmed output dir"
     );
     for file in out.files() {
         assert!(
@@ -851,12 +867,22 @@ fn go_sse_success_response_is_sdk_gen() {
     );
 }
 
+/// One Go function's source, from its `func` line to the next top-level declaration.
+///
+/// Stopping only at the next `func` used to be enough when the CLI was one file. Across a package
+/// the next file may open with `const`/`var`/`type`, and slicing past it would pull unrelated text
+/// — an `alternativesByID` map naming every scheme — into a function's body.
 fn go_func<'a>(text: &'a str, name: &str) -> &'a str {
     let start = text
         .find(&format!("func {name}("))
         .unwrap_or_else(|| panic!("missing func {name}:\n{text}"));
     let rest = &text[start..];
-    let next = rest[5..].find("\nfunc ").map_or(rest.len(), |idx| 5 + idx);
+    // gofmt indents every declaration inside a function, so a keyword at column 0 is top level.
+    let next = ["\nfunc ", "\nconst ", "\nvar ", "\ntype ", "\n// Package "]
+        .iter()
+        .filter_map(|marker| rest[5..].find(marker).map(|idx| 5 + idx))
+        .min()
+        .unwrap_or(rest.len());
     &rest[..next]
 }
 
@@ -1312,7 +1338,7 @@ fn go_commands_selector_emits_only_the_selected_operations() {
         )))
         .generate(&bookstore_graph(), &mut out, &cx())
         .expect("scoped Go CLI must generate");
-    let text = artifact(&out, "generated/sdk-go/cmd/bookstore/main.go");
+    let text = go_cli_source(&out, "generated/sdk-go", "bookstore");
     assert!(!text.contains("\"get-book\""), "{text}");
     assert!(text.contains("\"create-book\""), "{text}");
     let operations = artifact(&out, "generated/sdk-go/operations.go");
@@ -1403,7 +1429,7 @@ fn go_sse_operation_out_of_scope_no_longer_blocks_the_whole_cli() {
         )))
         .generate(&graph, &mut out, &cx())
         .expect("a scoped Go CLI over an SSE-carrying graph must generate");
-    let text = artifact(&out, "generated/sdk-go/cmd/bookstore/main.go");
+    let text = go_cli_source(&out, "generated/sdk-go", "bookstore");
     assert!(text.contains("\"get-book\""), "{text}");
     assert!(!text.contains("stream-events"), "{text}");
 }
@@ -1686,7 +1712,7 @@ fn go_base_url_is_the_programs_default_and_servers_is_not_consulted() {
         .cli(SdkCli::new("bookstore").base_url("https://api.example.com"))
         .generate(&bookstore_graph(), &mut out, &cx())
         .expect("a Go CLI with a declared base URL must generate");
-    let text = artifact(&out, "generated/sdk-go/cmd/bookstore/main.go");
+    let text = go_cli_source(&out, "generated/sdk-go", "bookstore");
     assert!(
         text.contains(r#"const defaultBaseURL = "https://api.example.com""#),
         "{text}"
@@ -1824,7 +1850,7 @@ fn go_a_declared_server_is_never_the_clis_default_host() {
         .cli(SdkCli::new("bookstore").base_url("https://api.example.com"))
         .generate(&graph, &mut out, &cx())
         .expect("a declared base URL must win over an advertised server");
-    let declared = artifact(&out, "generated/sdk-go/cmd/bookstore/main.go");
+    let declared = go_cli_source(&out, "generated/sdk-go", "bookstore");
     assert!(
         declared.contains(r#"const defaultBaseURL = "https://api.example.com""#),
         "{declared}"

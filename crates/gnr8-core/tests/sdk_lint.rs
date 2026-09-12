@@ -415,8 +415,11 @@ fn go_sdk_with_cli_is_gofmt_and_go_vet_clean() {
     }
     let sdk_dir = dir.join("sdk");
     assert!(
-        sdk_dir.join("cmd/goalservice/main.go").is_file(),
-        "CLI must be written at cmd/goalservice/main.go"
+        sdk_dir.join("cmd/goalservice/main.go").is_file()
+            && sdk_dir
+                .join("cmd/goalservice/internal/cli/cli.go")
+                .is_file(),
+        "the CLI project must be written under cmd/goalservice/"
     );
 
     let (fmt_ok, unformatted, fmt_err) = run("gofmt", &["-l", "."], &sdk_dir, &[]);
