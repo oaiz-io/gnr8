@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use gnr8_engine::sdk::{model_style::PyModelStyle, prelude::SdkFileLayout};
+
 /// The `FastAPI` fixture, resolved relative to this crate's manifest dir (mirrors the other tests).
 const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -41,8 +43,14 @@ const FIXTURE_DIR: &str = concat!(
 /// The generated SDK's Python package name (also the import name and the package subdir).
 const PACKAGE: &str = "bookstore";
 
-/// The four files the `pysdk` bundle always frames (D-06 push order).
-const SDK_FILES: [&str; 4] = ["__init__.py", "client.py", "errors.py", "models.py"];
+/// The five files the compact `pysdk` bundle always frames.
+const SDK_FILES: [&str; 5] = [
+    "__init__.py",
+    "client.py",
+    "errors.py",
+    "models.py",
+    "multipart.py",
+];
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -54,6 +62,18 @@ fn python_available() -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok()
+}
+
+fn pydantic_v2_available() -> bool {
+    Command::new("python3")
+        .args([
+            "-c",
+            "import pydantic; assert int(pydantic.VERSION.split('.')[0]) >= 2",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Create a UNIQUE temp subdir under `std::env::temp_dir()` (PID + nanosecond timestamp — no
@@ -183,7 +203,7 @@ class BaseModel:
 /// Materialize the generated SDK into a fresh temp dir as an importable `<dir>/bookstore/` package,
 /// returning the temp dir (the package PARENT). Python needs NO manifest analog to the Go `go.mod`.
 ///
-/// The four files go under `<dir>/bookstore/` so `__init__.py`'s relative imports (`from .client import
+/// The generated files go under `<dir>/bookstore/` so `__init__.py`'s relative imports (`from .client import
 /// Client`) resolve and `python3 -c "import bookstore"` works with `<dir>` as the current dir.
 fn materialize_sdk_from_graph(
     label: &str,
@@ -199,6 +219,34 @@ fn materialize_sdk_from_graph(
         .expect("write_to_dir must materialize the SDK");
     write_pydantic_stub(&dir);
     dir
+}
+
+fn materialize_sdk_from_graph_with_real_pydantic(
+    label: &str,
+    graph: &gnr8_engine::graph::ApiGraph,
+) -> PathBuf {
+    let bundle = gnr8_engine::pysdk::generate(graph, PACKAGE, &graph.base_path)
+        .expect("pysdk::generate must succeed");
+    let dir = unique_temp_dir(label);
+    let pkg_dir = dir.join(PACKAGE);
+    std::fs::create_dir_all(&pkg_dir).expect("create package subdir");
+    gnr8_engine::sdk::bundle::write_to_dir(&bundle, &pkg_dir)
+        .expect("write_to_dir must materialize the SDK");
+    dir
+}
+
+fn binary_multipart_graph() -> gnr8_engine::graph::ApiGraph {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/sdk-targets/binary-multipart.json"
+    ))
+    .expect("binary/multipart target fixture must deserialize")
+}
+
+fn python_identifier_graph() -> gnr8_engine::graph::ApiGraph {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/sdk-targets/python-identifiers.json"
+    ))
+    .expect("Python identifier target fixture must deserialize")
 }
 
 fn materialize_sdk() -> PathBuf {
@@ -1173,9 +1221,10 @@ class _Handler(BaseHTTPRequestHandler):
             assert self.headers.get("Content-Type", "").startswith("multipart/form-data; boundary="), self.headers
             assert b'name="title"' in body, body
             assert b"Report" in body, body
-            assert b'name="file"; filename="file"' in body, body
+            assert b'name="file"; filename="primary.bin"' in body, body
             assert b"\xff\x00binary" in body, body
-            assert body.count(b'name="files"; filename="files"') == 2, body
+            assert b'name="files"; filename="part-one.bin"' in body, body
+            assert b'name="files"; filename="part-two.bin"' in body, body
             assert b"part-one" in body, body
             assert b"part-two" in body, body
         elif self.path == "/binary":
@@ -1201,8 +1250,11 @@ def main():
         assert client.post_multipart(
             bookstore.MultipartBody(
                 title=WireValue.REPORT,
-                file=b"\xff\x00binary",
-                files=[b"part-one", b"part-two"],
+                file=bookstore.MultipartFile("primary.bin", b"\xff\x00binary"),
+                files=[
+                    bookstore.MultipartFile("part-one.bin", b"part-one"),
+                    bookstore.MultipartFile("part-two.bin", b"part-two"),
+                ],
             )
         ) is None
         assert client.post_binary(b"raw-bytes") is None
@@ -1214,6 +1266,142 @@ def main():
 
 if __name__ == "__main__":
     main()
+"#;
+
+const BINARY_MULTIPART_DRIVER: &str = r#"import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import bookstore
+
+
+class _Handler(BaseHTTPRequestHandler):
+    seen = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        assert self.path == "/binary", self.path
+        _Handler.seen.append("get")
+        body = b"response-bytes"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        if self.path == "/binary":
+            _Handler.seen.append("post-binary")
+            assert self.headers.get("Content-Type") == "application/octet-stream"
+            assert body == b"request-bytes", body
+        elif self.path == "/multipart":
+            _Handler.seen.append("post-multipart")
+            assert self.headers.get("Content-Type", "").startswith(
+                "multipart/form-data; boundary="
+            )
+            assert b'name="description"' in body and b"mixed fields" in body, body
+            assert b'name="requiredFile"; filename="required.bin"' in body, body
+            assert b"required-content" in body, body
+            assert b'name="optionalFile"; filename="optional.bin"' in body, body
+            assert b"optional-content" in body, body
+            assert b'name="optionalFiles"; filename="first.bin"' in body, body
+            assert b'name="optionalFiles"; filename="second.bin"' in body, body
+            assert b"first-content" in body and b"second-content" in body, body
+            assert b'name="aliasedFile"; filename="alias.bin"' in body, body
+            assert b"alias-content" in body, body
+        else:
+            raise AssertionError(self.path)
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def expect_error(error_type, call):
+    try:
+        call()
+    except error_type:
+        return
+    raise AssertionError(f"expected {error_type.__name__}")
+
+
+def main():
+    assert bookstore.Payload is bytes, bookstore.Payload
+    assert "MultipartFile" in bookstore.__all__, bookstore.__all__
+    expect_error(ValueError, lambda: bookstore.MultipartFile("", b"x"))
+    expect_error(ValueError, lambda: bookstore.MultipartFile("bad\nname", b"x"))
+    expect_error(ValueError, lambda: bookstore.MultipartFile("bad\rname", b"x"))
+    expect_error(TypeError, lambda: bookstore.MultipartFile("bad.bin", bytearray(b"x")))
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = bookstore.Client(
+            f"http://127.0.0.1:{server.server_address[1]}",
+            opener=urllib.request.build_opener(),
+        )
+        # Optional single/repeated file fields can both be omitted.
+        omitted = bookstore.MultipartRequest(
+            description="only required",
+            required_file=bookstore.MultipartFile("required.bin", b"required-content"),
+        )
+        assert omitted.optional_file is None
+        assert omitted.optional_files is None
+
+        request = bookstore.MultipartRequest(
+            description="mixed fields",
+            required_file=bookstore.MultipartFile("required.bin", b"required-content"),
+            optional_file=bookstore.MultipartFile("optional.bin", b"optional-content"),
+            optional_files=[
+                bookstore.MultipartFile("first.bin", b"first-content"),
+                bookstore.MultipartFile("second.bin", b"second-content"),
+            ],
+            aliased_file=bookstore.MultipartFile("alias.bin", b"alias-content"),
+        )
+        dumped = request.to_dict()
+        assert dumped["requiredFile"].filename == "required.bin", dumped
+        assert dumped["optionalFiles"][1].content == b"second-content", dumped
+        assert client.send_multipart(request) is None
+        assert client.send_binary(b"request-bytes") is None
+        assert client.receive_binary() == b"response-bytes"
+
+        anonymous = lambda: client._encode_multipart(
+            {"requiredFile": b"anonymous"}, "boundary"
+        )
+        expect_error(TypeError, anonymous)
+        mutated = bookstore.MultipartFile("safe.bin", b"content")
+        mutated.filename = "bad\nname"
+        expect_error(
+            ValueError,
+            lambda: client._encode_multipart({"requiredFile": mutated}, "boundary"),
+        )
+        assert _Handler.seen == ["post-multipart", "post-binary", "get"], _Handler.seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
+"#;
+
+const PYTHON_IDENTIFIER_DRIVER: &str = r#"import bookstore
+
+wire = {"bool": True, "bool_": "wire", "class": 7, "list": ["a", "b"]}
+model = bookstore.IdentifierModel.model_validate(wire)
+assert model.bool_ is True
+assert model.bool__2 == "wire"
+assert model.class_ == 7
+assert model.list_ == ["a", "b"]
+assert model.model_dump(by_alias=True, exclude_unset=True) == wire
+assert model.to_dict() == wire
+assert bookstore.IdentifierModel.from_dict(wire).model_dump(
+    by_alias=True, exclude_unset=True
+) == wire
 "#;
 
 const RUNTIME_DRIVER: &str = r#"import threading
@@ -1477,6 +1665,134 @@ fn generated_sdk_media_request_bodies_work_against_stdlib_http_server() {
     );
 
     let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
+}
+
+#[test]
+fn generated_sdk_preserves_binary_aliases_and_named_multipart_files() {
+    if !pydantic_v2_available() {
+        eprintln!("skipping binary/multipart Python SDK test: Pydantic v2 unavailable");
+        return;
+    }
+    let graph = binary_multipart_graph();
+    let dir = materialize_sdk_from_graph_with_real_pydantic("binary-multipart", &graph);
+    let package = dir.join(PACKAGE);
+    let models = std::fs::read_to_string(package.join("models.py")).expect("read models.py");
+    assert!(
+        models.contains("Payload = bytes"),
+        "standalone bytes aliases must be real Python types:\n{models}"
+    );
+    assert!(
+        models.contains("from .multipart import MultipartFile"),
+        "multipart models must import the public file abstraction:\n{models}"
+    );
+    for declaration in [
+        "    required_file: MultipartFile = Field(..., alias=\"requiredFile\")",
+        "    optional_file: Optional[MultipartFile] = Field(default=None, alias=\"optionalFile\")",
+        "    optional_files: Optional[list[MultipartFile]] = Field(default=None, alias=\"optionalFiles\")",
+        "    aliased_file: Optional[MultipartFile] = Field(default=None, alias=\"aliasedFile\")",
+        "    description: str",
+    ] {
+        assert!(
+            models.contains(declaration),
+            "multipart model must contain `{declaration}`:\n{models}"
+        );
+    }
+
+    let driver = dir.join("binary_multipart_driver.py");
+    std::fs::write(&driver, BINARY_MULTIPART_DRIVER).expect("write binary/multipart driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 driver path")], &dir);
+    assert!(
+        result.is_ok(),
+        "named Python multipart files and binary aliases must work end-to-end: {result:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+
+    let layout = SdkFileLayout::split().operations_per_endpoint();
+    let bundle =
+        gnr8_engine::pysdk::generate_with_layout(&graph, PACKAGE, &graph.base_path, &layout)
+            .expect("split Python binary/multipart SDK must generate");
+    let split_dir = unique_temp_dir("binary-multipart-split");
+    let split_package = split_dir.join(PACKAGE);
+    std::fs::create_dir_all(&split_package).expect("create split package");
+    gnr8_engine::sdk::bundle::write_to_dir(&bundle, &split_package)
+        .expect("materialize split Python binary/multipart SDK");
+    let split_model =
+        std::fs::read_to_string(split_package.join("models").join("multipart_request.py"))
+            .expect("read split multipart model");
+    assert!(
+        split_model.contains("from ..multipart import MultipartFile"),
+        "split multipart model must import from the package runtime:\n{split_model}"
+    );
+    let import = run_python(&["-c", "import bookstore"], &split_dir);
+    assert!(
+        import.is_ok(),
+        "split Python binary/multipart SDK must be importable: {import:?}"
+    );
+    let _ = std::fs::remove_dir_all(split_dir);
+
+    let dataclass_bundle = gnr8_engine::pysdk::generate_with_options(
+        &graph,
+        PACKAGE,
+        &graph.base_path,
+        &SdkFileLayout::compact(),
+        PyModelStyle::Dataclass,
+    )
+    .expect("dataclass Python binary/multipart SDK must generate");
+    let dataclass_dir = unique_temp_dir("binary-multipart-dataclass");
+    let dataclass_package = dataclass_dir.join(PACKAGE);
+    std::fs::create_dir_all(&dataclass_package).expect("create dataclass package");
+    gnr8_engine::sdk::bundle::write_to_dir(&dataclass_bundle, &dataclass_package)
+        .expect("materialize dataclass Python binary/multipart SDK");
+    let dataclass_models = std::fs::read_to_string(dataclass_package.join("models.py"))
+        .expect("read dataclass models");
+    for declaration in [
+        "    requiredFile: MultipartFile",
+        "    optionalFile: Optional[MultipartFile] = None",
+        "    optionalFiles: Optional[list[MultipartFile]] = None",
+    ] {
+        assert!(
+            dataclass_models.contains(declaration),
+            "dataclass multipart model must contain `{declaration}`:\n{dataclass_models}"
+        );
+    }
+    let import = run_python(&["-c", "import bookstore"], &dataclass_dir);
+    assert!(
+        import.is_ok(),
+        "dataclass Python binary/multipart SDK must be importable: {import:?}"
+    );
+    let _ = std::fs::remove_dir_all(dataclass_dir);
+}
+
+#[test]
+fn generated_pydantic_models_allocate_annotation_safe_wire_aliases() {
+    if !pydantic_v2_available() {
+        eprintln!("skipping Python identifier test: Pydantic v2 unavailable");
+        return;
+    }
+    let graph = python_identifier_graph();
+    let dir = materialize_sdk_from_graph_with_real_pydantic("identifiers", &graph);
+    let models =
+        std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).expect("read models.py");
+    for declaration in [
+        "    bool_: Optional[bool] = Field(default=None, alias=\"bool\")",
+        "    bool__2: Optional[str] = Field(default=None, alias=\"bool_\")",
+        "    class_: Optional[int] = Field(default=None, alias=\"class\")",
+        "    list_: Optional[list[str]] = Field(default=None, alias=\"list\")",
+    ] {
+        assert!(
+            models.contains(declaration),
+            "identifier fixture must contain `{declaration}`:\n{models}"
+        );
+    }
+
+    let driver = dir.join("identifier_driver.py");
+    std::fs::write(&driver, PYTHON_IDENTIFIER_DRIVER).expect("write identifier driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 driver path")], &dir);
+    assert!(
+        result.is_ok(),
+        "Pydantic wire aliases must import and round-trip: {result:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// RUN-01..07: generated Python SDK runtime controls are observable end-to-end against a stdlib

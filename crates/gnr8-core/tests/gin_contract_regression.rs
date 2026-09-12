@@ -408,13 +408,23 @@ fn assert_python_models(py_models: &str) {
         "{py_models}"
     );
     assert_eq!(
-        py_models.matches("    asset: bytes").count(),
+        py_models.matches("    asset: MultipartFile").count(),
         2,
-        "both FormFile access paths must expose the same Python bytes field:\n{py_models}"
+        "both FormFile access paths must expose the same named Python file field:\n{py_models}"
     );
-    for field in ["    primary_image: bytes", "    supporting_document: bytes"] {
+    for field in [
+        "    primary_image: MultipartFile",
+        "    supporting_document: MultipartFile",
+    ] {
         assert!(py_models.contains(field), "missing {field}:\n{py_models}");
     }
+    assert_eq!(
+        py_models
+            .matches("    files: Optional[list[MultipartFile]] = Field(default=None)")
+            .count(),
+        2,
+        "both repeated-file models must retain optionality and file metadata:\n{py_models}"
+    );
 }
 
 fn assert_python_client(py_client: &str) {

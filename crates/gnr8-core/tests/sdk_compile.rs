@@ -32,6 +32,13 @@ use gnr8_engine::sdk::{Artifacts, Cx, TargetExec};
 /// The Go Gin fixture, resolved relative to this crate's manifest dir (mirrors the other tests).
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/goalservice");
 
+fn binary_multipart_graph() -> gnr8_engine::graph::ApiGraph {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/sdk-targets/binary-multipart.json"
+    ))
+    .expect("binary/multipart target fixture must deserialize")
+}
+
 /// Whether the `go` toolchain is available so this test skips gracefully if it is absent.
 fn go_available() -> bool {
     Command::new("go")
@@ -1969,5 +1976,31 @@ fn generated_cli_helper_failure_is_exit_1_without_stack_trace() {
             "helper={helper} stderr={stderr}"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generated_go_binary_alias_remains_a_byte_slice() {
+    if !go_available() {
+        eprintln!("skipping Go binary alias test: go toolchain unavailable");
+        return;
+    }
+    let graph = binary_multipart_graph();
+    let dir = materialize_sdk_from_graph("binary-multipart", &graph, &graph.base_path);
+    let models = std::fs::read_to_string(dir.join("models.go")).expect("read models.go");
+    let operations =
+        std::fs::read_to_string(dir.join("operations.go")).expect("read operations.go");
+    assert!(models.contains("type Payload = []byte"), "{models}");
+    assert!(
+        operations.contains("in Payload")
+            && operations.contains("func (c *Client) ReceiveBinary(")
+            && operations.contains(") ([]byte, error)"),
+        "Go request aliases and binary responses must agree on byte slices:\n{operations}"
+    );
+    let build = run_go(&["build", "./..."], &dir);
+    assert!(
+        build.is_ok(),
+        "Go binary/multipart SDK must compile: {build:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

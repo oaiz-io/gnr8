@@ -8,6 +8,7 @@ from .models import (
     OrderInput,
     Price,
 )
+from .multipart import MultipartFile
 
 __all__ = [
     "Client",
@@ -16,6 +17,7 @@ __all__ = [
     "RequestOptions",
     "ApiError",
     "AuthConfigurationError",
+    "MultipartFile",
     "Availability",
     "OrderConfirmation",
     "OrderInput",
