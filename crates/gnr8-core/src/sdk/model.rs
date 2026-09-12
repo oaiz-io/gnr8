@@ -628,6 +628,7 @@ mod tests {
                 params: vec![],
                 request_body: Some(SchemaRef {
                     ref_id: "app.Book".to_string(),
+                    provenance: None,
                 }),
                 request_body_required: true,
                 request_body_content_type: None,
@@ -637,6 +638,7 @@ mod tests {
                         status: 201,
                         body: Some(SchemaRef {
                             ref_id: "app.Book".to_string(),
+                            provenance: None,
                         }),
                         body_kind: "json".to_string(),
                         content_type: None,
@@ -647,6 +649,7 @@ mod tests {
                         status: 404,
                         body: Some(SchemaRef {
                             ref_id: "app.ErrorResponse".to_string(),
+                            provenance: None,
                         }),
                         body_kind: "json".to_string(),
                         content_type: None,
@@ -712,6 +715,7 @@ mod tests {
             .push(RequestBodyVariant {
                 body: SchemaRef {
                     ref_id: "app.Book".to_string(),
+                    provenance: None,
                 },
                 content_type: "multipart/form-data".to_string(),
             });
@@ -803,6 +807,7 @@ mod tests {
         let mut graph = graph();
         graph.operations[0].request_body = Some(SchemaRef {
             ref_id: "app.Missing".to_string(),
+            provenance: None,
         });
 
         let err = SdkModel::build(&graph, "books", "/api", &SdkFileLayout::compact()).unwrap_err();

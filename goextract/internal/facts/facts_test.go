@@ -129,8 +129,8 @@ var canonicalFieldNames = []string{
 	// RouteFact ("description" is shared with FieldFact below; "summary" is route-only)
 	"method", "path", "handler", "operation_id", "summary", "group", "middleware", "params",
 	"request_body", "request_body_required", "request_body_content_type", "request_body_variants", "responses", "span",
-	// ParamFact (name/location/required/schema/span)
-	"name", "location", "required", "schema", "default",
+	// ParamFact (name/location/required/schema/constraints/item_constraints/span)
+	"name", "location", "required", "schema", "item_constraints", "default",
 	// ResponseFact
 	"status", "body", "body_kind", "content_type", "content_types", "headers",
 	// SchemaFact (id/name/body/span)
@@ -237,12 +237,14 @@ func fullyPopulatedDoc() facts.GoFacts {
 				Params: []facts.ParamFact{
 					{
 						Name: "uuid", Location: "path", Required: true,
-						Schema:  facts.WellKnownType(facts.WellKnownUUID),
-						Default: &facts.LiteralValue{Type: "string", Value: "00000000-0000-0000-0000-000000000000"},
-						Span:    facts.SourceSpan{File: "handlers.go", StartLine: 94, EndLine: 94},
+						Schema:          facts.WellKnownType(facts.WellKnownUUID),
+						Constraints:     &facts.Constraints{MinLength: &minLen},
+						ItemConstraints: &facts.Constraints{MaxLength: &maxLen},
+						Default:         &facts.LiteralValue{Type: "string", Value: "00000000-0000-0000-0000-000000000000"},
+						Span:            facts.SourceSpan{File: "handlers.go", StartLine: 94, EndLine: 94},
 					},
 				},
-				RequestBody:            &facts.TypeRef{RefID: "internal/dto.UpdateGoalInput"},
+				RequestBody:            &facts.TypeRef{RefID: "internal/dto.UpdateGoalInput", Span: &facts.SourceSpan{File: "handlers.go", StartLine: 95, EndLine: 95}},
 				RequestBodyRequired:    true,
 				RequestBodyContentType: "application/json",
 				RequestBodyVariants: []facts.RequestBodyVariantFact{

@@ -895,7 +895,10 @@ impl TransformExec for SetOperationSuccessResponse {
             .retain(|response| !(200..300).contains(&response.status));
         op.responses.push(Response {
             status: self.status,
-            body: Some(SchemaRef { ref_id: schema_id }),
+            body: Some(SchemaRef {
+                ref_id: schema_id,
+                provenance: None,
+            }),
             body_kind: "json".to_string(),
             content_type: None,
             content_types: vec!["application/json".to_string()],
@@ -1209,6 +1212,8 @@ fn apply_typed_parameter_override(
         location: requested.location.clone(),
         required: requested.required,
         schema: requested.schema.clone(),
+        constraints: crate::analyze::facts::Constraints::default(),
+        item_constraints: crate::analyze::facts::Constraints::default(),
         default: requested.default.clone(),
         style: requested.style.clone(),
         explode: requested.explode,
@@ -1499,7 +1504,10 @@ fn apply_request_body_override(
         let resolved = resolve_schema_ref(ir, schema_ref, "request body override schema")?;
         let identity = OperationDiagnosticIdentity::from(&ir.operations[op_index]);
         let op = &mut ir.operations[op_index];
-        op.request_body = Some(SchemaRef { ref_id: resolved });
+        op.request_body = Some(SchemaRef {
+            ref_id: resolved,
+            provenance: None,
+        });
         op.request_body_required = required.unwrap_or(true);
         op.request_body_content_type = content_type.map(str::to_string);
         remove_all_operation_diagnostics(ir, "request.body.unresolved", &identity);
@@ -1621,6 +1629,7 @@ fn apply_default_response_override(
             status: override_.status,
             body: body_ref.as_ref().map(|ref_id| SchemaRef {
                 ref_id: ref_id.clone(),
+                provenance: None,
             }),
             body_kind: override_.body_kind.clone(),
             content_type: override_.content_type.clone(),
@@ -1640,6 +1649,7 @@ fn response_override_body(
         .map(|schema| {
             Ok(SchemaRef {
                 ref_id: resolve_schema_ref(ir, schema, "response override schema")?,
+                provenance: None,
             })
         })
         .transpose()
@@ -2278,6 +2288,7 @@ fn apply_documented_error_responses(
             status: response.status,
             body: Some(SchemaRef {
                 ref_id: response.schema_ref.clone(),
+                provenance: None,
             }),
             body_kind: "json".to_string(),
             content_type: None,
@@ -4722,6 +4733,8 @@ mod tests {
             location: "query".to_string(),
             required,
             schema: Type::Primitive(Prim::String),
+            constraints: crate::analyze::facts::Constraints::default(),
+            item_constraints: crate::analyze::facts::Constraints::default(),
             default: None,
             style: None,
             explode: None,
@@ -5058,6 +5071,7 @@ mod tests {
                     params: vec![],
                     request_body: Some(SchemaRef {
                         ref_id: "app.MarkReadRequest".to_string(),
+                        provenance: None,
                     }),
                     request_body_required: true,
                     request_body_content_type: Some("application/json".to_string()),
@@ -5431,6 +5445,7 @@ mod tests {
                     params: vec![],
                     request_body: Some(SchemaRef {
                         ref_id: "app.ImportBooksRequest".to_string(),
+                        provenance: None,
                     }),
                     request_body_required: true,
                     request_body_content_type: None,
@@ -5787,6 +5802,7 @@ mod tests {
                         status: 200,
                         body: Some(SchemaRef {
                             ref_id: "app.Book".to_string(),
+                            provenance: None,
                         }),
                         body_kind: "json".to_string(),
                         content_type: None,
@@ -6765,6 +6781,7 @@ mod tests {
     fn split_component_graph() -> ApiGraph {
         let json_body = |ref_id: &str| SchemaRef {
             ref_id: ref_id.to_string(),
+            provenance: None,
         };
         ApiGraph {
             operations: vec![

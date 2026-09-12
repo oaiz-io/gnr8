@@ -12,12 +12,14 @@
 //! function symbol (e.g. `createGoal`) — purely code-derived, with no annotation override (CLAUDE.md
 //! rules 1 & 3). Schema ids are the package-qualified type name the sidecar already emits.
 //!
-//! Provenance (D-07): every operation, param, and schema carries a [`SourceSpan`] (file + line range,
-//! the file path normalized relative to the analyzed module so the graph is portable across machines).
+//! Provenance (D-07): every operation, param, schema, and source-established request-body reference
+//! carries a [`SourceSpan`] (file + line range, the file path normalized relative to the analyzed
+//! module so the graph is portable across machines).
 
 use crate::facts::{
-    DiagnosticCategoryFact, DiagnosticFact, FieldFact, GoFacts, LiteralValue, ParamFact,
-    RequestBodyVariantFact, ResponseFact, ResponseHeaderFact, RouteFact, SchemaFact, TypeRef,
+    Constraints, DiagnosticCategoryFact, DiagnosticFact, FieldFact, GoFacts, LiteralValue,
+    ParamFact, RequestBodyVariantFact, ResponseFact, ResponseHeaderFact, RouteFact, SchemaFact,
+    TypeRef,
 };
 
 // Re-export the neutral type vocabulary so the IR and the facts DTO share ONE definition (the IR
@@ -543,9 +545,8 @@ pub struct Operation {
     pub provenance: SourceSpan,
 }
 
-/// One path or query parameter of an operation, derived purely from code. Path params are required;
-/// query params default to a string type and not required. There is no enum or description — those
-/// were annotation-only and have been removed (CLAUDE.md rules 1 & 3).
+/// One path, query, header, or cookie parameter of an operation. Typed source may carry enums,
+/// validation constraints, and serialization without any secondary annotation source.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Param {
     /// The parameter name (e.g. `"uuid"`, `"cursor"`).
@@ -556,6 +557,12 @@ pub struct Param {
     pub required: bool,
     /// The parameter's type.
     pub schema: Type,
+    /// Constraints on the parameter value itself.
+    #[serde(default, skip_serializing_if = "Constraints::is_empty")]
+    pub constraints: Constraints,
+    /// Constraints on one array item or map value.
+    #[serde(default, skip_serializing_if = "Constraints::is_empty")]
+    pub item_constraints: Constraints,
     /// Source-inferred default value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<LiteralValue>,
@@ -698,6 +705,9 @@ pub struct Schema {
 pub struct SchemaRef {
     /// The referenced schema id.
     pub ref_id: String,
+    /// Source location where this particular reference was established.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SourceSpan>,
 }
 
 /// Stable class of diagnostic for policy matching and reporting.
@@ -943,7 +953,7 @@ impl Operation {
         let mut responses: Vec<Response> = route
             .responses
             .into_iter()
-            .map(Response::from_fact)
+            .map(|response| Response::from_fact(response, root))
             .collect();
         responses.sort_by_key(|r| r.status);
 
@@ -953,7 +963,7 @@ impl Operation {
         let mut request_body_variants = route
             .request_body_variants
             .into_iter()
-            .map(RequestBodyVariant::from_fact)
+            .map(|variant| RequestBodyVariant::from_fact(variant, root))
             .collect::<Vec<_>>();
         request_body_variants.sort_by(|left, right| {
             left.content_type
@@ -971,7 +981,9 @@ impl Operation {
             group: route.group,
             middleware,
             params,
-            request_body: route.request_body.map(SchemaRef::from_fact),
+            request_body: route
+                .request_body
+                .map(|request_body| SchemaRef::from_fact(request_body, root)),
             request_body_required: route.request_body_required,
             request_body_content_type: route.request_body_content_type,
             request_body_variants,
@@ -990,6 +1002,8 @@ impl Param {
             location: param.location,
             required: param.required,
             schema: normalize_type(param.schema),
+            constraints: param.constraints,
+            item_constraints: param.item_constraints,
             default: param.default,
             style: param.style,
             explode: param.explode,
@@ -1002,8 +1016,10 @@ impl Param {
 }
 
 impl Response {
-    fn from_fact(response: ResponseFact) -> Self {
-        let body = response.body.map(SchemaRef::from_fact);
+    fn from_fact(response: ResponseFact, root: &str) -> Self {
+        let body = response
+            .body
+            .map(|response_body| SchemaRef::from_fact(response_body, root));
         let content_types =
             normalize_content_types(response.content_type.as_deref(), response.content_types);
         let body_kind =
@@ -1026,9 +1042,9 @@ impl Response {
 }
 
 impl RequestBodyVariant {
-    fn from_fact(variant: RequestBodyVariantFact) -> Self {
+    fn from_fact(variant: RequestBodyVariantFact, root: &str) -> Self {
         Self {
-            body: SchemaRef::from_fact(variant.body),
+            body: SchemaRef::from_fact(variant.body, root),
             content_type: variant.content_type,
         }
     }
@@ -1085,9 +1101,13 @@ impl Schema {
 }
 
 impl SchemaRef {
-    fn from_fact(type_ref: TypeRef) -> Self {
+    fn from_fact(type_ref: TypeRef, root: &str) -> Self {
         Self {
             ref_id: type_ref.ref_id,
+            provenance: type_ref
+                .span
+                .as_ref()
+                .map(|span| relativize_span(span, root)),
         }
     }
 }
@@ -1295,7 +1315,10 @@ mod tests {
               "span": { "file": "/root/handlers.go", "start_line": 94, "end_line": 94 }
             }
           ],
-          "request_body": { "ref_id": "internal/common/dto.UpdateGoalInput" },
+          "request_body": {
+            "ref_id": "internal/common/dto.UpdateGoalInput",
+            "span": { "file": "/root/handlers.go", "start_line": 77, "end_line": 77 }
+          },
           "responses": [
             { "status": 400, "body": { "ref_id": "internal/common/dto.HttpError" } },
             { "status": 200, "body": { "ref_id": "internal/common/dto.CommandMessage" } }
@@ -1308,7 +1331,10 @@ mod tests {
           "handler": "createGoal",
           "operation_id": "createGoal",
           "params": [],
-          "request_body": { "ref_id": "internal/common/dto.CreateGoalInput" },
+          "request_body": {
+            "ref_id": "internal/common/dto.CreateGoalInput",
+            "span": { "file": "/root/handlers.go", "start_line": 19, "end_line": 19 }
+          },
           "responses": [
             { "status": 201, "body": { "ref_id": "internal/common/dto.CommandMessageWithUUID" } }
           ],
@@ -1544,6 +1570,8 @@ mod tests {
             for param in &op.params {
                 assert_eq!(param.provenance.file, "handlers.go");
             }
+            let body = op.request_body.as_ref().unwrap();
+            assert_eq!(body.provenance.as_ref().unwrap().file, "handlers.go");
         }
         for schema in &graph.schemas {
             assert!(!schema.provenance.file.starts_with('/'));
@@ -1637,6 +1665,7 @@ mod tests {
         operation.request_body_variants.push(RequestBodyVariant {
             body: SchemaRef {
                 ref_id: request_ref,
+                provenance: None,
             },
             content_type: "multipart/form-data".to_string(),
         });

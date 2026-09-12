@@ -1003,6 +1003,8 @@ impl Importer {
             location,
             required,
             schema: imported.ty,
+            constraints: Constraints::default(),
+            item_constraints: Constraints::default(),
             default,
             style,
             explode,
@@ -1735,7 +1737,10 @@ impl Importer {
     fn schema_ref_for(&mut self, schema: &Value, suggested: &str) -> SchemaRef {
         if let Some(ref_value) = schema.get("$ref").and_then(Value::as_str) {
             if let Some((id, _)) = self.resolve_ref_schema(ref_value) {
-                return SchemaRef { ref_id: id };
+                return SchemaRef {
+                    ref_id: id,
+                    provenance: None,
+                };
             }
             self.warn(format!(
                 "schema reference '{ref_value}' could not be resolved"
@@ -1747,7 +1752,10 @@ impl Importer {
     fn insert_raw_synthetic_schema(&mut self, suggested: &str, schema: Value) -> SchemaRef {
         let id = unique_synthetic_id(suggested, &self.raw_schemas);
         self.raw_schemas.insert(id.clone(), schema);
-        SchemaRef { ref_id: id }
+        SchemaRef {
+            ref_id: id,
+            provenance: None,
+        }
     }
 
     fn insert_synthetic_schema(&mut self, suggested: &str, ty: Type) -> SchemaRef {
@@ -1762,7 +1770,10 @@ impl Importer {
         };
         self.schema_names.insert(id.clone(), name);
         self.inject_imported_schema(&schema);
-        SchemaRef { ref_id: id }
+        SchemaRef {
+            ref_id: id,
+            provenance: None,
+        }
     }
 
     fn inject_imported_schema(&mut self, schema: &Schema) {
