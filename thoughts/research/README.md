@@ -33,6 +33,8 @@ The current research question:
   — what a command tree derives from the graph, why a graph-unchanged edit writes nothing, and where
   every spec-driven CLI needed an escape hatch
   ([implementation plan](2026-09-11-cli-generation-plan.md))
+- [Pre-ship requirements for generated CLIs](2026-09-11-cli-pre-ship-requirements.md)
+  — the four owner requirements gating a release with `.cli()`: command scope, SSE, renaming, defaults
 
 ## Current Position
 
