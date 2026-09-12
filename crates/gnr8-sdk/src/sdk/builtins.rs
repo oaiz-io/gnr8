@@ -1164,6 +1164,8 @@ pub enum OperationSelector {
     Any(Vec<OperationSelector>),
     /// Match only if all nested selectors match.
     All(Vec<OperationSelector>),
+    /// Match exactly when the nested selector does not.
+    Not(Box<OperationSelector>),
 }
 
 impl OperationSelector {
@@ -1263,6 +1265,18 @@ impl OperationSelector {
         I: IntoIterator<Item = OperationSelector>,
     {
         Self::All(selectors.into_iter().collect())
+    }
+
+    /// Match exactly the operations `selector` does not match.
+    ///
+    /// Exclusion is otherwise inexpressible: `Any`/`All` can only add conditions, so "everything
+    /// except these three" would mean enumerating the complement.
+    // Named for the variant it builds, beside `any`/`all`. `std::ops::Not` is a different shape —
+    // it takes `self` and negates a value, not a constructor over one.
+    #[allow(clippy::should_implement_trait)]
+    #[must_use]
+    pub fn not(selector: OperationSelector) -> Self {
+        Self::Not(Box::new(selector))
     }
 }
 
@@ -2341,9 +2355,12 @@ impl GoSdk {
     /// is one package, so the CLI cannot live beside `client.go`; `cmd/<program>/main.go` is a
     /// standalone `package main` that `go build` / `go install` already know how to produce a
     /// binary from. There is no `[project.scripts]` equivalent to write.
+    ///
+    /// Takes a program name, or an [`SdkCli`] carrying the program's other facts:
+    /// `.cli(SdkCli::new("bookstore").commands(…))`.
     #[must_use]
-    pub fn cli(mut self, program: impl Into<String>) -> Self {
-        self.cli = Some(SdkCli::new(program));
+    pub fn cli(mut self, cli: impl Into<SdkCli>) -> Self {
+        self.cli = Some(cli.into());
         self
     }
 
@@ -2503,9 +2520,12 @@ impl PySdk {
     }
 
     /// Emit a command-line client for this API beside the generated package, invoked as `<name>`.
+    ///
+    /// Takes a program name, or an [`SdkCli`] carrying the program's other facts:
+    /// `.cli(SdkCli::new("bookstore").commands(…))`.
     #[must_use]
-    pub fn cli(mut self, program: impl Into<String>) -> Self {
-        self.cli = Some(SdkCli::new(program));
+    pub fn cli(mut self, cli: impl Into<SdkCli>) -> Self {
+        self.cli = Some(cli.into());
         self
     }
 

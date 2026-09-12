@@ -25,6 +25,27 @@ fn generate_cli(graph: &ApiGraph, program: &str) -> String {
     artifact(&out, "generated/sdk/cli.py").to_string()
 }
 
+fn generate_cli_with(graph: &ApiGraph, cli: SdkCli) -> String {
+    let mut out = Artifacts::new();
+    PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk")
+        .cli(cli)
+        .generate(graph, &mut out, &cx())
+        .expect("PySdk with .cli() must generate");
+    artifact(&out, "generated/sdk/cli.py").to_string()
+}
+
+fn generate_cli_result(graph: &ApiGraph, cli: SdkCli) -> Result<Artifacts, gnr8_engine::CoreError> {
+    let mut out = Artifacts::new();
+    PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk")
+        .cli(cli)
+        .generate(graph, &mut out, &cx())?;
+    Ok(out)
+}
+
 fn gofmt_available() -> bool {
     std::process::Command::new("gofmt")
         .arg("-h")
@@ -980,5 +1001,216 @@ fn go_helper_is_argv_not_a_shell_and_never_prints_the_secret() {
     assert!(
         !text.contains("os/exec/shell") && !text.contains("bash -c"),
         "{text}"
+    );
+}
+
+// --- S1-S4: command scope ------------------------------------------------------------------
+
+#[test]
+fn commands_selector_emits_only_the_selected_operations() {
+    let text = generate_cli_with(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::operation("getBook")),
+    );
+    assert!(text.contains("\"get-book\""), "{text}");
+    assert!(
+        !text.contains("\"create-book\""),
+        "an unselected operation must not become a command:\n{text}"
+    );
+}
+
+#[test]
+fn not_selector_excludes_exactly_the_named_operations() {
+    let text = generate_cli_with(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::not(OperationSelector::operation(
+            "getBook",
+        ))),
+    );
+    assert!(
+        !text.contains("\"get-book\""),
+        "Not must drop the named operation:\n{text}"
+    );
+    assert!(text.contains("\"create-book\""), "{text}");
+}
+
+#[test]
+fn double_negation_selects_the_same_set_as_the_inner_selector() {
+    let once = generate_cli_with(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::operation("getBook")),
+    );
+    let twice = generate_cli_with(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::not(OperationSelector::not(
+            OperationSelector::operation("getBook"),
+        ))),
+    );
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn not_composes_with_any_to_exclude_several_operations() {
+    let text = generate_cli_with(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::not(OperationSelector::any([
+            OperationSelector::operation("getBook"),
+            OperationSelector::route("POST", "/not-a-route"),
+        ]))),
+    );
+    assert!(!text.contains("\"get-book\""), "{text}");
+    assert!(text.contains("\"create-book\""), "{text}");
+}
+
+#[test]
+fn excluding_every_operation_is_a_configuration_error() {
+    let error = generate_cli_result(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::not(OperationSelector::any([
+            OperationSelector::operation("getBook"),
+            OperationSelector::operation("createBook"),
+        ]))),
+    )
+    .expect_err("a program with no commands must be rejected");
+    assert!(
+        matches!(error, gnr8_engine::CoreError::Config { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("did not match any operation"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_scoped_cli_is_byte_identical_across_generations() {
+    let cli = SdkCli::new("bookstore").commands(OperationSelector::not(
+        OperationSelector::operation("getBook"),
+    ));
+    assert_eq!(
+        generate_cli_with(&bookstore_graph(), cli.clone()),
+        generate_cli_with(&bookstore_graph(), cli)
+    );
+}
+
+#[test]
+fn a_selector_matching_nothing_is_a_configuration_error() {
+    let error = generate_cli_result(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::operation("noSuchOperation")),
+    )
+    .expect_err("a selector that selects nothing must be rejected");
+    assert!(
+        matches!(error, gnr8_engine::CoreError::Config { .. }),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("bookstore"), "{message}");
+    assert!(message.contains("did not match any operation"), "{message}");
+}
+
+#[test]
+fn scoping_the_cli_leaves_the_client_and_models_whole() {
+    let mut out = Artifacts::new();
+    PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk")
+        .cli(SdkCli::new("bookstore").commands(OperationSelector::operation("getBook")))
+        .generate(&bookstore_graph(), &mut out, &cx())
+        .expect("scoped CLI must generate");
+    let client = artifact(&out, "generated/sdk/client.py");
+    assert!(
+        client.contains("def create_book"),
+        "an operation outside CLI scope must stay a client method:\n{client}"
+    );
+    assert!(client.contains("def get_book"), "{client}");
+}
+
+#[test]
+fn an_out_of_scope_operation_does_not_fail_a_name_check_it_never_reaches() {
+    // `listBooks` carries a parameter whose flag collides with a reserved global. Selecting only
+    // `getBook` must generate, because the colliding flag is never emitted.
+    let graph: ApiGraph = serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "getBook",
+              "method": "GET",
+              "path": "/books/{id}",
+              "handler": "getBook",
+              "params": [
+                {
+                  "name": "id",
+                  "location": "path",
+                  "required": true,
+                  "schema": { "type": "primitive", "of": { "prim": "string" } },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            },
+            {
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "params": [
+                {
+                  "name": "base_url",
+                  "location": "query",
+                  "required": false,
+                  "schema": { "type": "primitive", "of": { "prim": "string" } },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap();
+    generate_cli_result(&graph, SdkCli::new("bookstore"))
+        .expect_err("an in-scope reserved-flag collision must still be rejected");
+    let text = generate_cli_with(
+        &graph,
+        SdkCli::new("bookstore").commands(OperationSelector::operation("getBook")),
+    );
+    assert!(text.contains("\"get-book\""), "{text}");
+}
+
+#[test]
+fn go_commands_selector_emits_only_the_selected_operations() {
+    if skip_go() {
+        return;
+    }
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(SdkCli::new("bookstore").commands(OperationSelector::not(
+            OperationSelector::operation("getBook"),
+        )))
+        .generate(&bookstore_graph(), &mut out, &cx())
+        .expect("scoped Go CLI must generate");
+    let text = artifact(&out, "generated/sdk-go/cmd/bookstore/main.go");
+    assert!(!text.contains("\"get-book\""), "{text}");
+    assert!(text.contains("\"create-book\""), "{text}");
+    let operations = artifact(&out, "generated/sdk-go/operations.go");
+    assert!(
+        operations.contains("func (c *Client) GetBook"),
+        "an operation outside CLI scope must stay a client method:\n{operations}"
     );
 }

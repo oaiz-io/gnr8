@@ -67,7 +67,7 @@ See [Transforms and overrides](../pipeline/transforms.md).
 
 | Symbol | Use |
 |---|---|
-| `OperationSelector` | reusable exact/prefix/method/middleware/boolean selector |
+| `OperationSelector` | reusable exact/prefix/method/middleware/boolean selector, including `not` |
 | `ApiOverrides` | checked field presence/nullability, schema-use root, parameter, body, response, and security corrections |
 | `SchemaUse` | name the input or output payload position a correction or root applies to |
 | `RequestParameter` | typed query/header/path/cookie parameter builder |
@@ -112,7 +112,7 @@ See [OpenAPI generation](../openapi/generation.md).
 | `GoSdk` | Go client/model/docs/package/contract-test target; `.cli("bookstore")` emits `cmd/<program>/main.go` |
 | `PySdk` | Python client/model/docs/package/contract-test target; `.cli("bookstore")` emits a generated CLI |
 | `TsSdk` | TypeScript client/model/docs/package/contract-test target |
-| `SdkCli` | generated-CLI program name (`PySdk::cli` / `GoSdk::cli`); unrelated to gnr8's own command surface |
+| `SdkCli` | generated-CLI program name and command scope (`PySdk::cli` / `GoSdk::cli`); unrelated to gnr8's own command surface |
 | `SdkFileLayout` | compact/split files, directories, and templates |
 | `OperationFileSplit` | compact/per-tag/per-endpoint operation layout enum |
 | `SdkDocs` | none/reference generated docs policy |

@@ -128,8 +128,8 @@ without a default has three states; the field is sent only when the value is not
 Paging parameters named by a `PaginationPolicy` are not ordinary flags. They are replaced by
 `--limit N` / `--all`.
 
-A success response whose `body_kind` is `sse` is a generation error naming the operation. Drop it from
-the graph with a `Transform` if you want a CLI.
+A success response whose `body_kind` is `sse` is a generation error naming the operation. Leave it out
+of the program with `SdkCli::commands(...)` — see [Command scope](#command-scope).
 
 Name collisions (two commands, a command vs a group, a flag vs a reserved name) are generation
 errors that name both subjects. Reserved flags: `json`, `help`, `version`, `base-url`, `limit`,
@@ -142,6 +142,69 @@ bookstore get-book --book-id 1 --base-url http://127.0.0.1:8000
 ```
 
 Per-flag `help=` text is not emitted in this slice.
+
+## Command scope
+
+By default every operation in the graph becomes a command. `SdkCli::commands(selector)` narrows that
+to the operations the selector matches:
+
+```rust
+use gnr8::sdk::prelude::*;
+
+.target(
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk")
+        .cli(SdkCli::new("bookstore").commands(OperationSelector::not(
+            OperationSelector::any([
+                OperationSelector::operation("streamJobEvents"),
+                OperationSelector::operation("watchWorkflow"),
+            ]),
+        ))),
+)
+```
+
+`.cli("bookstore")` still works — a program name converts into an `SdkCli`, so the two spellings are
+one method with one argument.
+
+This is the same [`OperationSelector`](../pipeline/transforms.md) every selector-taking transform
+uses, plus `OperationSelector::not(...)` for exclusion. `Any`/`All` compose inside it.
+
+**Scope is a fact about the program, not about the API.** An operation left out is still in
+`openapi.yaml` and still a method on the generated client — the CLI simply does not wrap it, the way
+a hand-written CLI wraps part of the SDK it calls. That is why scope belongs here and not in a
+`Transform`: a transform that drops the operation from the graph would also remove it from the
+OpenAPI document and from every SDK, and `gnr8 changes` would report `operation.removed` as a
+breaking change.
+
+Consequences worth knowing:
+
+- A selector that matches no operation is a configuration error, like every other selector consumer.
+  So is a scope that leaves the program with no commands at all.
+- Name and flag collisions are checked over the **selected** operations only. An operation that is
+  not a command can no longer fail generation for a flag it never emits.
+- `ConfigurePagination`, `ApplySecurity` and the other selector-taking transforms are unaffected by
+  CLI scope: they configure graph facts, which do not depend on which program wraps them.
+- There is no "hidden command". Out of scope means not emitted; `--help` still lists everything the
+  program can do.
+
+## Renaming
+
+There is one canonical way to change a command's name, and it is not CLI-specific:
+
+| To change | Use | What moves with it |
+|---|---|---|
+| the command (verb) | `RenameOperation::new("getBook", "fetchBook")` | the CLI command, the SDK method in all three languages, and the OpenAPI `operationId` |
+| the group (noun) | `GroupOperations` | the CLI group, the SDK grouping, and the OpenAPI tag |
+
+A flag's spelling is the wire name re-cased, so it changes when the parameter changes in the source.
+
+**Aliases are a non-goal.** A generated second name for one operation is two names for one fact, and
+it moves whenever the graph moves. If you want a shorter invocation, your shell already has one:
+
+```sh
+alias bkls='bookstore list-books'
+```
 
 ## Output and exit codes
 

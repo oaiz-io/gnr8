@@ -22,6 +22,13 @@ must move the minor version.
   Unlike Python, `.cli()` does not require package metadata: a Go directory is one package, so the
   CLI is a standalone `package main` that `go build ./cmd/<program>` compiles. See
   [Generated CLI](docs/cli/generated-cli.md).
+- **`SdkCli::commands(selector)` chooses which operations become commands.** Scope is a fact about
+  the program, not about the API: an operation left out is still in `openapi.yaml` and still a method
+  on the generated client. It takes the same `OperationSelector` every selector-taking transform
+  uses, now with `OperationSelector::not(...)` for exclusion. Name and flag collision checks run over
+  the selected operations only, so an operation that is not a command can no longer fail generation
+  for a flag it never emits. A selector that matches nothing — or a scope that leaves no commands —
+  is a configuration error.
 
 ## 0.14.1 — 2026-09-11
 

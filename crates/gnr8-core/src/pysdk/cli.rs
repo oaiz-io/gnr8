@@ -14,9 +14,9 @@ use gnr8::sdk::SdkCli;
 use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type};
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::emit_common::{
-    check_cli_names, command_group, command_name, credential_env_var, flag_name, helper_env_var,
-    http_auth_features, operation_auth_alternatives, operation_prose, request_body_models_of,
-    OperationAuthScheme, RequestBodyModel,
+    check_cli_names, cli_operations, command_group, command_name, credential_env_var, flag_name,
+    helper_env_var, http_auth_features, operation_auth_alternatives, operation_prose,
+    reject_sse_operations, request_body_models_of, OperationAuthScheme, RequestBodyModel,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -87,42 +87,24 @@ pub(crate) fn emit_cli(
     cli: &SdkCli,
 ) -> Result<String, CoreError> {
     let _ = package;
-    check_cli_names(graph, &cli.program)?;
-    reject_sse_operations(graph)?;
+    let ops = cli_operations(graph, cli)?;
+    check_cli_names(&ops, graph, &cli.program)?;
+    reject_sse_operations(&ops, &cli.program)?;
     http_auth_features(graph)?;
 
     let mut out = String::new();
-    emit_imports(&mut out, graph, layout, model_style)?;
-    emit_constants(&mut out, graph, cli)?;
+    emit_imports(&mut out, &ops, graph, layout, model_style)?;
+    emit_constants(&mut out, &ops, graph, cli)?;
     if has_security(graph) {
         emit_credential_helpers(&mut out)?;
     }
-    emit_body_helpers(&mut out, graph)?;
+    emit_body_helpers(&mut out, &ops, graph)?;
     emit_client_builder(&mut out, graph)?;
     emit_print_helpers(&mut out, graph, model_style)?;
-    emit_handlers(&mut out, graph, model_style)?;
-    emit_parser(&mut out, graph)?;
-    emit_main(&mut out, graph)?;
+    emit_handlers(&mut out, &ops, graph, model_style)?;
+    emit_parser(&mut out, &ops, graph)?;
+    emit_main(&mut out, &ops, graph)?;
     Ok(out)
-}
-
-fn reject_sse_operations(graph: &ApiGraph) -> Result<(), CoreError> {
-    for op in &graph.operations {
-        for response in &op.responses {
-            let success = (200..300).contains(&response.status);
-            if success && response.body_kind == "sse" {
-                return Err(CoreError::SdkGen {
-                    message: format!(
-                        "operation '{}' success response is SSE (text/event-stream); a generated \
-                         CLI cannot print a streaming response. Drop it from the graph with a \
-                         Transform if you want a CLI",
-                        op.id
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 fn has_security(graph: &ApiGraph) -> bool {
@@ -147,8 +129,8 @@ fn has_basic_auth(graph: &ApiGraph) -> bool {
         .any(|scheme| scheme.kind == "http" && scheme.name.eq_ignore_ascii_case("basic"))
 }
 
-fn has_request_body(graph: &ApiGraph) -> Result<bool, CoreError> {
-    for op in &graph.operations {
+fn has_request_body(ops: &[&Operation], graph: &ApiGraph) -> Result<bool, CoreError> {
+    for op in ops {
         if !request_body_models_of(op, graph)?.is_empty() {
             return Ok(true);
         }
@@ -163,9 +145,9 @@ fn has_object_schema(graph: &ApiGraph) -> bool {
         .any(|schema| matches!(schema.body, Type::Object(_)))
 }
 
-fn body_model_names(graph: &ApiGraph) -> Result<BTreeSet<String>, CoreError> {
+fn body_model_names(ops: &[&Operation], graph: &ApiGraph) -> Result<BTreeSet<String>, CoreError> {
     let mut names = BTreeSet::new();
-    for op in &graph.operations {
+    for op in ops {
         for body in request_body_models_of(op, graph)? {
             names.insert(body.model);
         }
@@ -248,6 +230,7 @@ fn scheme_kind_table(graph: &ApiGraph) -> BTreeMap<String, &'static str> {
 
 fn emit_imports(
     out: &mut String,
+    ops: &[&Operation],
     graph: &ApiGraph,
     layout: &SdkFileLayout,
     model_style: PyModelStyle,
@@ -277,7 +260,7 @@ fn emit_imports(
     } else {
         writeln!(out, "from .errors import ApiError").map_err(sink)?;
     }
-    let models = body_model_names(graph)?;
+    let models = body_model_names(ops, graph)?;
     if !models.is_empty() {
         let module = model_module_for(layout);
         writeln!(out, "from .{module} import (").map_err(sink)?;
@@ -290,7 +273,12 @@ fn emit_imports(
     Ok(())
 }
 
-fn emit_constants(out: &mut String, graph: &ApiGraph, cli: &SdkCli) -> Result<(), CoreError> {
+fn emit_constants(
+    out: &mut String,
+    ops: &[&Operation],
+    graph: &ApiGraph,
+    cli: &SdkCli,
+) -> Result<(), CoreError> {
     writeln!(out, "_PROGRAM = {}", py_string_literal(&cli.program)).map_err(sink)?;
     writeln!(
         out,
@@ -340,7 +328,7 @@ fn emit_constants(out: &mut String, graph: &ApiGraph, cli: &SdkCli) -> Result<()
         }
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out, "_COMMAND_BY_ID = {{").map_err(sink)?;
-        for op in &graph.operations {
+        for op in ops {
             writeln!(
                 out,
                 "    {}: {},",
@@ -426,8 +414,12 @@ fn emit_credential_helpers(out: &mut String) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn emit_body_helpers(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
-    if !has_request_body(graph)? {
+fn emit_body_helpers(
+    out: &mut String,
+    ops: &[&Operation],
+    graph: &ApiGraph,
+) -> Result<(), CoreError> {
+    if !has_request_body(ops, graph)? {
         return Ok(());
     }
     writeln!(out, "class _InputError(Exception):").map_err(sink)?;
@@ -591,10 +583,11 @@ fn emit_print_helpers(
 
 fn emit_handlers(
     out: &mut String,
+    ops: &[&Operation],
     graph: &ApiGraph,
     model_style: PyModelStyle,
 ) -> Result<(), CoreError> {
-    for op in &graph.operations {
+    for op in ops {
         emit_handler(out, graph, op, model_style)?;
     }
     Ok(())
@@ -731,7 +724,7 @@ fn operation_scheme_ids(graph: &ApiGraph, op: &Operation) -> Result<Vec<String>,
     Ok(ids.into_iter().collect())
 }
 
-fn emit_parser(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
+fn emit_parser(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(), CoreError> {
     writeln!(out, "def _build_parser() -> argparse.ArgumentParser:").map_err(sink)?;
     writeln!(out, "    parser = argparse.ArgumentParser(").map_err(sink)?;
     writeln!(out, "        prog=_PROGRAM,").map_err(sink)?;
@@ -742,7 +735,7 @@ fn emit_parser(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
     writeln!(out, "        action=\"version\",").map_err(sink)?;
     writeln!(out, "        version=_VERSION,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
-    if graph.operations.is_empty() {
+    if ops.is_empty() {
         writeln!(out, "    return parser").map_err(sink)?;
         writeln!(out).map_err(sink)?;
         writeln!(out).map_err(sink)?;
@@ -755,7 +748,7 @@ fn emit_parser(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
 
     let mut ungrouped: Vec<&Operation> = Vec::new();
     let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
-    for op in &graph.operations {
+    for op in ops.iter().copied() {
         match command_group(op) {
             Some(group) => grouped.entry(group).or_default().push(op),
             None => ungrouped.push(op),
@@ -1033,7 +1026,7 @@ fn literal_python(value: &LiteralValue) -> String {
     }
 }
 
-fn emit_main(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
+fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(), CoreError> {
     writeln!(out, "def main(argv: Optional[list[str]] = None) -> int:").map_err(sink)?;
     writeln!(out, "    parser = _build_parser()").map_err(sink)?;
     writeln!(out, "    args = parser.parse_args(argv)").map_err(sink)?;
@@ -1111,7 +1104,7 @@ fn emit_main(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
         writeln!(out, "        )").map_err(sink)?;
         writeln!(out, "        return 1").map_err(sink)?;
     }
-    if has_request_body(graph)? {
+    if has_request_body(ops, graph)? {
         writeln!(out, "    except _InputError as exc:").map_err(sink)?;
         writeln!(
             out,

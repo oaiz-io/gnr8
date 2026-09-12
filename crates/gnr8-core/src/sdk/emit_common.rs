@@ -11,6 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use gnr8::sdk::SdkCli;
+
 use crate::graph::{ApiGraph, Operation, Param, Prim, Schema, Type};
 use crate::sdk::layout::SdkFileLayout;
 use crate::CoreError;
@@ -162,6 +164,42 @@ pub(crate) const RESERVED_FLAGS: &[&str] = &[
     "body",
     "body-file",
 ];
+
+/// The operations one generated CLI wraps, in graph order.
+///
+/// `SdkCli::commands` selects which facts become commands; it never renames one. An operation left
+/// out is still in the OpenAPI document and still a method on the generated client, so this filter
+/// is a property of the program rather than of the API (CLAUDE.md rule 4).
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when the selector matches no operation, matching every other
+/// selector consumer: a selector that selects nothing is a typo, and a program with no commands is
+/// not a program.
+pub(crate) fn cli_operations<'a>(
+    graph: &'a ApiGraph,
+    cli: &SdkCli,
+) -> Result<Vec<&'a Operation>, CoreError> {
+    let Some(selector) = &cli.commands else {
+        return Ok(graph.operations.iter().collect());
+    };
+    let selected: Vec<&Operation> = graph
+        .operations
+        .iter()
+        .filter(|op| {
+            crate::sdk::builtins::operation_selector_matches(selector, op, &graph.base_path)
+        })
+        .collect();
+    if selected.is_empty() && !graph.operations.is_empty() {
+        return Err(CoreError::Config {
+            message: format!(
+                "CLI {:?} commands selector did not match any operation: {selector:?}",
+                cli.program
+            ),
+        });
+    }
+    Ok(selected)
+}
 
 /// Put `file_name` under an optional relative directory for configurable split layouts.
 ///
@@ -564,9 +602,13 @@ pub(crate) fn check_unique_model_file_names(
 /// Three classes, all [`CoreError::SdkGen`]: two operations kebab to one command in one group; a
 /// top-level command collides with a group name; a flag collides with a reserved global. No
 /// auto-rename table — the user fixes the graph with `RenameOperation` or a source change.
-pub(crate) fn check_cli_names(graph: &ApiGraph, program: &str) -> Result<(), CoreError> {
+pub(crate) fn check_cli_names(
+    ops: &[&Operation],
+    graph: &ApiGraph,
+    program: &str,
+) -> Result<(), CoreError> {
     let mut commands: BTreeMap<(Option<String>, String), &str> = BTreeMap::new();
-    for op in &graph.operations {
+    for op in ops.iter().copied() {
         let group = command_group(op);
         let name = command_name(op);
         if let Some(previous) = commands.insert((group.clone(), name.clone()), op.id.as_str()) {
@@ -583,16 +625,16 @@ pub(crate) fn check_cli_names(graph: &ApiGraph, program: &str) -> Result<(), Cor
         }
     }
 
-    let groups: BTreeSet<String> = graph.operations.iter().filter_map(command_group).collect();
-    for op in &graph.operations {
+    let groups: BTreeSet<String> = ops.iter().copied().filter_map(command_group).collect();
+    for op in ops.iter().copied() {
         if op.group.is_some() {
             continue;
         }
         let name = command_name(op);
         if groups.contains(&name) {
-            let grouped = graph
-                .operations
+            let grouped = ops
                 .iter()
+                .copied()
                 .find(|other| command_group(other).as_deref() == Some(name.as_str()))
                 .map_or(name.as_str(), |other| other.id.as_str());
             return Err(CoreError::SdkGen {
@@ -604,7 +646,7 @@ pub(crate) fn check_cli_names(graph: &ApiGraph, program: &str) -> Result<(), Cor
         }
     }
 
-    for op in &graph.operations {
+    for op in ops.iter().copied() {
         let paging = paging_param_names(graph, op);
         for param in &op.params {
             if paging.contains(&param.name) {
@@ -616,6 +658,34 @@ pub(crate) fn check_cli_names(graph: &ApiGraph, program: &str) -> Result<(), Cor
                     message: format!(
                         "CLI {program:?} operation '{}' parameter '{}' maps to flag '--{flag}', which collides with the reserved global '--{flag}'",
                         op.id, param.name
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject an in-scope operation whose success response is a stream the CLI cannot print.
+///
+/// A `text/event-stream` success has no terminating document to render, and a target has no warning
+/// channel (`Target::generate` takes `&ApiGraph` and `Artifacts` has no diagnostic sink), so the
+/// choice is hard error or silent omission — and silently dropping a command is the worse failure.
+/// The remedy is to leave the operation out of the *program*, not out of the graph: dropping it
+/// from the graph would also remove it from the OpenAPI document and from every SDK, and report
+/// `operation.removed` as a breaking change.
+pub(crate) fn reject_sse_operations(ops: &[&Operation], program: &str) -> Result<(), CoreError> {
+    for op in ops.iter().copied() {
+        for response in &op.responses {
+            let success = (200..300).contains(&response.status);
+            if success && response.body_kind == "sse" {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' success response is SSE \
+                         (text/event-stream); a generated CLI cannot print a streaming response. \
+                         Leave it out of the program with SdkCli::commands(...) — the operation \
+                         stays in the OpenAPI document and stays a method on the generated client",
+                        op.id
                     ),
                 });
             }
@@ -1562,7 +1632,8 @@ mod tests {
             ],
             ..ApiGraph::default()
         };
-        let message = match check_cli_names(&graph, "bookstore") {
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
             Err(error) => error.to_string(),
             Ok(()) => panic!("colliding commands must be rejected"),
         };
@@ -1579,7 +1650,8 @@ mod tests {
             ],
             ..ApiGraph::default()
         };
-        let message = match check_cli_names(&graph, "bookstore") {
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
             Err(error) => error.to_string(),
             Ok(()) => panic!("command/group collision must be rejected"),
         };
@@ -1596,7 +1668,8 @@ mod tests {
             operations: vec![cli_op("getBook", None, vec![cli_param("json")])],
             ..ApiGraph::default()
         };
-        let message = match check_cli_names(&graph, "bookstore") {
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
             Err(error) => error.to_string(),
             Ok(()) => panic!("reserved flag collision must be rejected"),
         };

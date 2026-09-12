@@ -1929,7 +1929,7 @@ impl TransformExec for ApplySecurity {
     }
 }
 
-fn operation_selector_matches(
+pub(crate) fn operation_selector_matches(
     selector: &OperationSelector,
     op: &crate::graph::Operation,
     base_path: &str,
@@ -1953,6 +1953,7 @@ fn operation_selector_matches(
         OperationSelector::All(selectors) => selectors
             .iter()
             .all(|selector| operation_selector_matches(selector, op, base_path)),
+        OperationSelector::Not(selector) => !operation_selector_matches(selector, op, base_path),
     }
 }
 

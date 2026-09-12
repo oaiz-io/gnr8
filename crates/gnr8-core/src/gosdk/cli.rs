@@ -15,9 +15,10 @@ use gnr8::sdk::SdkCli;
 use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type, WellKnown};
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::emit_common::{
-    check_cli_names, command_group, command_name, credential_env_var, flag_name, helper_env_var,
-    http_auth_features, operation_auth_alternatives, operation_prose, quoted_string_literal,
-    request_body_models_of, success_responses_of, OperationAuthScheme, RequestBodyModel,
+    check_cli_names, cli_operations, command_group, command_name, credential_env_var, flag_name,
+    helper_env_var, http_auth_features, operation_auth_alternatives, operation_prose,
+    quoted_string_literal, reject_sse_operations, request_body_models_of, success_responses_of,
+    OperationAuthScheme, RequestBodyModel,
 };
 use crate::CoreError;
 
@@ -49,29 +50,30 @@ pub(crate) fn emit_cli(
     package: &str,
     cli: &SdkCli,
 ) -> Result<String, CoreError> {
-    check_cli_names(graph, &cli.program)?;
-    reject_sse_operations(graph)?;
+    let ops = cli_operations(graph, cli)?;
+    check_cli_names(&ops, graph, &cli.program)?;
+    reject_sse_operations(&ops, &cli.program)?;
     http_auth_features(graph)?;
 
     let mut body = String::new();
     let mut imports = ImportSet::default();
-    emit_constants(&mut body, graph, cli)?;
-    if has_security(graph) && !graph.operations.is_empty() {
+    emit_constants(&mut body, &ops, graph, cli)?;
+    if has_security(graph) && !ops.is_empty() {
         emit_credential_helpers(&mut body, &mut imports)?;
     }
-    if has_request_body(graph)? {
+    if has_request_body(&ops, graph)? {
         emit_body_helpers(&mut body, &mut imports)?;
     }
-    if !graph.operations.is_empty() {
-        emit_shared_helpers(&mut body, graph, &mut imports)?;
+    if !ops.is_empty() {
+        emit_shared_helpers(&mut body, &ops, graph, &mut imports)?;
         emit_client_builder(&mut body, graph, package, &mut imports)?;
         emit_print_helpers(&mut body, &mut imports)?;
-        emit_handlers(&mut body, graph, package, &mut imports)?;
+        emit_handlers(&mut body, &ops, graph, package, &mut imports)?;
     }
-    emit_main(&mut body, graph, package, &mut imports)?;
+    emit_main(&mut body, &ops, graph, package, &mut imports)?;
     imports.add("os");
     imports.add("fmt");
-    if !graph.operations.is_empty() {
+    if !ops.is_empty() {
         imports.sdk = true;
     }
 
@@ -115,25 +117,6 @@ fn render_file(module: &str, package: &str, imports: &ImportSet, body: &str) -> 
     out
 }
 
-fn reject_sse_operations(graph: &ApiGraph) -> Result<(), CoreError> {
-    for op in &graph.operations {
-        for response in &op.responses {
-            let success = (200..300).contains(&response.status);
-            if success && response.body_kind == "sse" {
-                return Err(CoreError::SdkGen {
-                    message: format!(
-                        "operation '{}' success response is SSE (text/event-stream); a generated \
-                         CLI cannot print a streaming response. Drop it from the graph with a \
-                         Transform if you want a CLI",
-                        op.id
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 fn has_security(graph: &ApiGraph) -> bool {
     !graph.security.is_empty()
 }
@@ -156,8 +139,8 @@ fn has_basic_auth(graph: &ApiGraph) -> bool {
         .any(|scheme| scheme.kind == "http" && scheme.name.eq_ignore_ascii_case("basic"))
 }
 
-fn has_request_body(graph: &ApiGraph) -> Result<bool, CoreError> {
-    for op in &graph.operations {
+fn has_request_body(ops: &[&Operation], graph: &ApiGraph) -> Result<bool, CoreError> {
+    for op in ops.iter().copied() {
         if !request_body_models_of(op, graph)?.is_empty() {
             return Ok(true);
         }
@@ -234,8 +217,8 @@ fn scheme_kind_table(graph: &ApiGraph) -> BTreeMap<String, &'static str> {
     table
 }
 
-fn needs_bool_flag(graph: &ApiGraph) -> bool {
-    graph.operations.iter().any(|op| {
+fn needs_bool_flag(ops: &[&Operation], graph: &ApiGraph) -> bool {
+    ops.iter().any(|op| {
         let paging = paging_param_names(graph, op);
         op.params.iter().any(|param| {
             !paging.contains(param.name.as_str())
@@ -244,8 +227,8 @@ fn needs_bool_flag(graph: &ApiGraph) -> bool {
     })
 }
 
-fn needs_string_list(graph: &ApiGraph) -> bool {
-    graph.operations.iter().any(|op| {
+fn needs_string_list(ops: &[&Operation], graph: &ApiGraph) -> bool {
+    ops.iter().any(|op| {
         let paging = paging_param_names(graph, op);
         op.params.iter().any(|param| {
             !paging.contains(param.name.as_str())
@@ -257,8 +240,8 @@ fn needs_string_list(graph: &ApiGraph) -> bool {
     })
 }
 
-fn needs_int_list(graph: &ApiGraph) -> bool {
-    graph.operations.iter().any(|op| {
+fn needs_int_list(ops: &[&Operation], graph: &ApiGraph) -> bool {
+    ops.iter().any(|op| {
         let paging = paging_param_names(graph, op);
         op.params.iter().any(|param| {
             !paging.contains(param.name.as_str())
@@ -267,8 +250,8 @@ fn needs_int_list(graph: &ApiGraph) -> bool {
     })
 }
 
-fn needs_float_list(graph: &ApiGraph) -> bool {
-    graph.operations.iter().any(|op| {
+fn needs_float_list(ops: &[&Operation], graph: &ApiGraph) -> bool {
+    ops.iter().any(|op| {
         let paging = paging_param_names(graph, op);
         op.params.iter().any(|param| {
             !paging.contains(param.name.as_str())
@@ -277,14 +260,19 @@ fn needs_float_list(graph: &ApiGraph) -> bool {
     })
 }
 
-fn emit_constants(out: &mut String, graph: &ApiGraph, cli: &SdkCli) -> Result<(), CoreError> {
+fn emit_constants(
+    out: &mut String,
+    ops: &[&Operation],
+    graph: &ApiGraph,
+    cli: &SdkCli,
+) -> Result<(), CoreError> {
     writeln!(
         out,
         "const program = {}",
         quoted_string_literal(&cli.program)
     )
     .map_err(sink)?;
-    if !graph.operations.is_empty() {
+    if !ops.is_empty() {
         writeln!(
             out,
             "const defaultBaseURL = {}",
@@ -304,7 +292,7 @@ fn emit_constants(out: &mut String, graph: &ApiGraph, cli: &SdkCli) -> Result<()
         quoted_string_literal(&program_description(graph))
     )
     .map_err(sink)?;
-    if has_security(graph) && !graph.operations.is_empty() {
+    if has_security(graph) && !ops.is_empty() {
         writeln!(
             out,
             "const helperEnv = {}",
@@ -334,7 +322,7 @@ fn emit_constants(out: &mut String, graph: &ApiGraph, cli: &SdkCli) -> Result<()
         }
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out, "var commandByID = map[string]string{{").map_err(sink)?;
-        for op in &graph.operations {
+        for op in ops.iter().copied() {
             writeln!(
                 out,
                 "{}: {},",
@@ -345,7 +333,7 @@ fn emit_constants(out: &mut String, graph: &ApiGraph, cli: &SdkCli) -> Result<()
         }
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out, "var alternativesByID = map[string][][]string{{").map_err(sink)?;
-        for op in &graph.operations {
+        for op in ops.iter().copied() {
             let alternatives = operation_auth_alternatives(graph, op)?;
             write!(out, "{}: {{", quoted_string_literal(&op.id)).map_err(sink)?;
             for alternative in alternatives {
@@ -567,10 +555,11 @@ fn emit_body_helpers(out: &mut String, imports: &mut ImportSet) -> Result<(), Co
 )]
 fn emit_shared_helpers(
     out: &mut String,
+    ops: &[&Operation],
     graph: &ApiGraph,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
-    if graph.operations.is_empty() {
+    if ops.is_empty() {
         return Ok(());
     }
     imports.add("errors");
@@ -613,7 +602,7 @@ fn emit_shared_helpers(
     writeln!(out, "return true, 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
-    if any_handler_needs_seen(graph)? {
+    if any_handler_needs_seen(ops, graph)? {
         writeln!(out, "func visited(fs *flag.FlagSet) map[string]bool {{").map_err(sink)?;
         writeln!(out, "seen := map[string]bool{{}}").map_err(sink)?;
         writeln!(
@@ -625,7 +614,7 @@ fn emit_shared_helpers(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
     }
-    if any_missing_flag(graph) {
+    if any_missing_flag(ops, graph) {
         writeln!(out, "func missingFlag(name string) int {{").map_err(sink)?;
         writeln!(
             out,
@@ -636,7 +625,7 @@ fn emit_shared_helpers(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
     }
-    if any_enum_choice(graph) {
+    if any_enum_choice(ops, graph) {
         writeln!(
             out,
             "func checkChoice(name, value string, choices []string) int {{"
@@ -657,7 +646,7 @@ fn emit_shared_helpers(
         writeln!(out).map_err(sink)?;
     }
 
-    if needs_bool_flag(graph) {
+    if needs_bool_flag(ops, graph) {
         writeln!(out, "type storeBool struct {{").map_err(sink)?;
         writeln!(out, "dest **bool").map_err(sink)?;
         writeln!(out, "setTo bool").map_err(sink)?;
@@ -694,7 +683,7 @@ fn emit_shared_helpers(
         .map_err(sink)?;
         writeln!(out).map_err(sink)?;
     }
-    if needs_string_list(graph) {
+    if needs_string_list(ops, graph) {
         imports.add("strings");
         writeln!(out, "type stringValues []string").map_err(sink)?;
         writeln!(
@@ -708,7 +697,7 @@ fn emit_shared_helpers(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
     }
-    if needs_int_list(graph) {
+    if needs_int_list(ops, graph) {
         imports.add("strconv");
         writeln!(out, "type intValues []int64").map_err(sink)?;
         writeln!(out, "func (s *intValues) String() string {{ return \"\" }}").map_err(sink)?;
@@ -722,7 +711,7 @@ fn emit_shared_helpers(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
     }
-    if needs_float_list(graph) {
+    if needs_float_list(ops, graph) {
         imports.add("strconv");
         writeln!(out, "type floatValues []float64").map_err(sink)?;
         writeln!(
@@ -749,9 +738,6 @@ fn emit_client_builder(
     package: &str,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
-    if graph.operations.is_empty() {
-        return Ok(());
-    }
     imports.sdk = true;
     if !has_security(graph) {
         writeln!(out, "func buildClient(baseURL string) *{package}.Client {{").map_err(sink)?;
@@ -838,11 +824,12 @@ fn emit_print_helpers(out: &mut String, imports: &mut ImportSet) -> Result<(), C
 
 fn emit_handlers(
     out: &mut String,
+    ops: &[&Operation],
     graph: &ApiGraph,
     package: &str,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
-    for op in &graph.operations {
+    for op in ops.iter().copied() {
         emit_handler(out, graph, op, package, imports)?;
     }
     Ok(())
@@ -1172,8 +1159,8 @@ fn emit_flag_decl(
     Ok(())
 }
 
-fn any_handler_needs_seen(graph: &ApiGraph) -> Result<bool, CoreError> {
-    for op in &graph.operations {
+fn any_handler_needs_seen(ops: &[&Operation], graph: &ApiGraph) -> Result<bool, CoreError> {
+    for op in ops.iter().copied() {
         let paging = paging_param_names(graph, op);
         let bodies = request_body_models_of(op, graph)?;
         if handler_needs_seen(
@@ -1189,8 +1176,8 @@ fn any_handler_needs_seen(graph: &ApiGraph) -> Result<bool, CoreError> {
     Ok(false)
 }
 
-fn any_missing_flag(graph: &ApiGraph) -> bool {
-    graph.operations.iter().any(|op| {
+fn any_missing_flag(ops: &[&Operation], graph: &ApiGraph) -> bool {
+    ops.iter().any(|op| {
         let paging = paging_param_names(graph, op);
         op.params.iter().any(|param| {
             !paging.contains(param.name.as_str())
@@ -1201,8 +1188,8 @@ fn any_missing_flag(graph: &ApiGraph) -> bool {
     })
 }
 
-fn any_enum_choice(graph: &ApiGraph) -> bool {
-    graph.operations.iter().any(|op| {
+fn any_enum_choice(ops: &[&Operation], graph: &ApiGraph) -> bool {
+    ops.iter().any(|op| {
         let paging = paging_param_names(graph, op);
         op.params.iter().any(|param| {
             !paging.contains(param.name.as_str())
@@ -1513,6 +1500,7 @@ fn emit_body_local(
 
 fn emit_main(
     out: &mut String,
+    ops: &[&Operation],
     graph: &ApiGraph,
     package: &str,
     imports: &mut ImportSet,
@@ -1522,7 +1510,7 @@ fn emit_main(
 
     let mut ungrouped: Vec<&Operation> = Vec::new();
     let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
-    for op in &graph.operations {
+    for op in ops.iter().copied() {
         match command_group(op) {
             Some(group) => grouped.entry(group).or_default().push(op),
             None => ungrouped.push(op),
@@ -1536,7 +1524,7 @@ fn emit_main(
         "fmt.Fprintf(out, \"\\nUsage: %s <command> [flags]\\n\", program)"
     )
     .map_err(sink)?;
-    if !graph.operations.is_empty() {
+    if !ops.is_empty() {
         writeln!(out, "fmt.Fprintln(out, \"\\nCommands:\")").map_err(sink)?;
         for op in &ungrouped {
             writeln!(
@@ -1566,8 +1554,8 @@ fn emit_main(
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
 
-    if !graph.operations.is_empty() {
-        emit_handle_err(out, graph, package, imports)?;
+    if !ops.is_empty() {
+        emit_handle_err(out, ops, graph, package, imports)?;
         for (group, ops) in &grouped {
             emit_group_dispatch(out, group, ops)?;
         }
@@ -1649,6 +1637,7 @@ fn emit_group_dispatch(out: &mut String, group: &str, ops: &[&Operation]) -> Res
 
 fn emit_handle_err(
     out: &mut String,
+    ops: &[&Operation],
     graph: &ApiGraph,
     package: &str,
     imports: &mut ImportSet,
@@ -1700,7 +1689,7 @@ fn emit_handle_err(
         writeln!(out, "return 1").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
     }
-    if has_request_body(graph)? {
+    if has_request_body(ops, graph)? {
         writeln!(out, "var input *inputError").map_err(sink)?;
         writeln!(out, "if errors.As(err, &input) {{").map_err(sink)?;
         writeln!(
