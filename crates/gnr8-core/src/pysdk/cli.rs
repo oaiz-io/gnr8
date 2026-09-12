@@ -15,7 +15,7 @@ use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type};
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, flag_name,
-    helper_env_var, http_auth_features, operation_auth_alternatives, operation_prose,
+    helper_env_var, http_auth_features_for, operation_auth_alternatives, operation_prose,
     reject_sse_operations, request_body_models_of, OperationAuthScheme, RequestBodyModel,
 };
 use crate::sdk::layout::SdkFileLayout;
@@ -90,7 +90,7 @@ pub(crate) fn emit_cli(
     let ops = cli_operations(graph, cli)?;
     check_cli_names(&ops, graph, &cli.program)?;
     reject_sse_operations(&ops, &cli.program)?;
-    http_auth_features(graph)?;
+    http_auth_features_for(&ops, graph)?;
 
     let mut out = String::new();
     emit_imports(&mut out, &ops, graph, layout, model_style)?;
@@ -461,7 +461,7 @@ fn emit_client_builder(out: &mut String, graph: &ApiGraph) -> Result<(), CoreErr
     // Only the credential kinds this graph actually declares are named. A local the graph never
     // reaches is an F841 (`assigned to but never used`) under the `ruff check` gate, and a
     // generated SDK is clean under the language's usual linter with no post-processing step.
-    // `http_auth_features` above rejects every scheme that is not one of these three, so at least
+    // `http_auth_features_for` above rejects every scheme that is not one of these three, so at least
     // one arm is always emitted.
     let api_key = has_api_key_auth(graph);
     let bearer = has_bearer_auth(graph);

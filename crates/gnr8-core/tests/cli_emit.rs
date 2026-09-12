@@ -46,6 +46,35 @@ fn generate_cli_result(graph: &ApiGraph, cli: SdkCli) -> Result<Artifacts, gnr8_
     Ok(out)
 }
 
+/// A graph that advertises servers, so a test can prove the CLI ignores them.
+///
+/// `servers` is what the CLI used to derive its default host from. Every other fixture leaves it
+/// empty, which means the pre-change fallback chain would have reached the hard-coded localhost
+/// constant instead — so a fixture without servers cannot tell the two behaviours apart.
+fn graph_declaring_servers() -> ApiGraph {
+    let mut graph = bookstore_graph();
+    graph.openapi_metadata.servers = vec![
+        OpenApiServer::new("https://advertised.example.com"),
+        OpenApiServer::new("https://second.example.com"),
+    ];
+    graph
+}
+
+/// The body of one `add_argument("--flag", …)` call, and nothing after it.
+///
+/// Slicing from the flag to the end of the file lets any later flag's keyword satisfy the
+/// assertion — `--book-id` emits its own `required=True,` a few lines down.
+fn argument_block<'a>(text: &'a str, flag: &str) -> &'a str {
+    let start = text
+        .find(&format!("\"{flag}\","))
+        .unwrap_or_else(|| panic!("{flag} must be declared in:\n{text}"));
+    let rest = &text[start..];
+    let end = rest
+        .find("\n    )")
+        .unwrap_or_else(|| panic!("unterminated add_argument for {flag} in:\n{rest}"));
+    &rest[..end]
+}
+
 fn gofmt_available() -> bool {
     std::process::Command::new("gofmt")
         .arg("-h")
@@ -1121,21 +1150,59 @@ fn a_selector_matching_nothing_is_a_configuration_error() {
     assert!(message.contains("did not match any operation"), "{message}");
 }
 
+/// Narrowing the CLI must leave every other artifact byte-for-byte identical.
+///
+/// Asserting that two method names still exist proves nothing — `SdkCli` never reaches the client
+/// emitter, so those assertions hold under any implementation. Comparing the whole artifact set
+/// against an unscoped run is the assertion that carries the contract: the operation left out of
+/// the program is still in the document and still a method on the client.
 #[test]
-fn scoping_the_cli_leaves_the_client_and_models_whole() {
-    let mut out = Artifacts::new();
-    PySdk::new()
-        .module("example.com/bookstore/sdk")
-        .to("generated/sdk")
-        .cli(SdkCli::new("bookstore").commands(OperationSelector::operation("getBook")))
-        .generate(&bookstore_graph(), &mut out, &cx())
-        .expect("scoped CLI must generate");
-    let client = artifact(&out, "generated/sdk/client.py");
-    assert!(
-        client.contains("def create_book"),
-        "an operation outside CLI scope must stay a client method:\n{client}"
+fn scoping_the_cli_leaves_every_other_artifact_byte_identical() {
+    let files = |cli: SdkCli| {
+        let mut out = Artifacts::new();
+        PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk")
+            .cli(cli)
+            .generate(&bookstore_graph(), &mut out, &cx())
+            .expect("PySdk with .cli() must generate");
+        out.files()
+            .iter()
+            .map(|file| (file.path.clone(), file.text.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+
+    let unscoped = files(SdkCli::new("bookstore"));
+    let scoped = files(SdkCli::new("bookstore").commands(OperationSelector::operation("getBook")));
+
+    assert_eq!(
+        unscoped.keys().collect::<Vec<_>>(),
+        scoped.keys().collect::<Vec<_>>(),
+        "scope must not add or remove artifacts"
     );
-    assert!(client.contains("def get_book"), "{client}");
+    for (path, unscoped_text) in &unscoped {
+        let scoped_text = &scoped[path];
+        if path.ends_with("cli.py") {
+            assert_ne!(
+                unscoped_text, scoped_text,
+                "the CLI itself must change, or the test proves nothing"
+            );
+            assert!(
+                unscoped_text.contains("\"create-book\"")
+                    && !scoped_text.contains("\"create-book\""),
+                "the out-of-scope operation must lose its command"
+            );
+        } else {
+            assert_eq!(
+                unscoped_text, scoped_text,
+                "{path} must not change when the CLI is scoped"
+            );
+        }
+    }
+    assert!(
+        unscoped.keys().any(|path| path.ends_with("client.py")),
+        "the comparison must actually cover the client"
+    );
 }
 
 #[test]
@@ -1397,10 +1464,7 @@ fn a_source_default_reaches_python_help_and_not_the_request() {
 #[test]
 fn python_defaults_are_bound_as_none_so_argparse_reports_absence() {
     let text = generate_cli_with(&defaults_graph(), SdkCli::new("bookstore"));
-    let verified = text
-        .split("\"--verified\",")
-        .nth(1)
-        .expect("the boolean flag must be declared");
+    let verified = argument_block(&text, "--verified");
     assert!(
         verified.contains("default=None,"),
         "a boolean flag stays tri-state:\n{verified}"
@@ -1570,13 +1634,14 @@ fn without_a_declared_base_url_the_flag_is_required() {
         !text.contains("localhost:8000"),
         "a CLI must not guess a host:\n{text}"
     );
-    let base_url = text
-        .split(r#""--base-url","#)
-        .nth(1)
-        .expect("--base-url must be declared");
+    let base_url = argument_block(&text, "--base-url");
     assert!(
         base_url.contains("required=True,"),
         "the flag must be required when the program has no default:\n{base_url}"
+    );
+    assert!(
+        !base_url.contains("default="),
+        "no default may be compiled in:\n{base_url}"
     );
 }
 
@@ -1663,5 +1728,126 @@ fn a_percent_in_a_default_is_escaped_for_argparse_help() {
     assert!(
         text.contains(r#"help="default: \"100%%\"","#),
         "a percent in a default must be doubled:\n{text}"
+    );
+}
+
+/// The one test that fails if `openapi_metadata.servers` is ever consulted again.
+///
+/// Every other base-URL test uses a fixture with no servers at all, so the pre-change fallback
+/// would have reached the hard-coded localhost constant rather than the servers branch — which
+/// means none of them can tell "servers ignored" from "servers empty".
+#[test]
+fn a_declared_server_is_never_the_clis_default_host() {
+    let graph = graph_declaring_servers();
+
+    let declared = generate_cli_with(
+        &graph,
+        SdkCli::new("bookstore").base_url("https://api.example.com"),
+    );
+    assert!(
+        declared.contains(r#"_DEFAULT_BASE_URL = "https://api.example.com""#),
+        "SdkCli::base_url is the one source:\n{declared}"
+    );
+    assert!(
+        !declared.contains("advertised.example.com"),
+        "the document's server must not reach the program:\n{declared}"
+    );
+
+    let undeclared = generate_cli_with(&graph, SdkCli::new("bookstore"));
+    assert!(
+        !undeclared.contains("advertised.example.com"),
+        "an advertised server must not become the program's default:\n{undeclared}"
+    );
+    assert!(
+        !undeclared.contains("_DEFAULT_BASE_URL"),
+        "no server means no compiled default:\n{undeclared}"
+    );
+    assert!(
+        argument_block(&undeclared, "--base-url").contains("required=True,"),
+        "the flag must be required instead:\n{undeclared}"
+    );
+}
+
+#[test]
+fn go_a_declared_server_is_never_the_clis_default_host() {
+    if skip_go() {
+        return;
+    }
+    let graph = graph_declaring_servers();
+    let undeclared = generate_go_cli(&graph, "bookstore");
+    assert!(
+        !undeclared.contains("advertised.example.com"),
+        "an advertised server must not become the program's default:\n{undeclared}"
+    );
+    assert!(
+        !undeclared.contains("defaultBaseURL"),
+        "no server means no compiled default:\n{undeclared}"
+    );
+    assert!(
+        undeclared.contains(r#"return missingFlag("base-url")"#),
+        "the flag must be required instead:\n{undeclared}"
+    );
+
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(SdkCli::new("bookstore").base_url("https://api.example.com"))
+        .generate(&graph, &mut out, &cx())
+        .expect("a declared base URL must win over an advertised server");
+    let declared = artifact(&out, "generated/sdk-go/cmd/bookstore/main.go");
+    assert!(
+        declared.contains(r#"const defaultBaseURL = "https://api.example.com""#),
+        "{declared}"
+    );
+    assert!(!declared.contains("advertised.example.com"), "{declared}");
+}
+
+fn empty_graph() -> ApiGraph {
+    serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap()
+}
+
+/// A selector that selects nothing is a typo whether or not the graph happens to be empty.
+///
+/// The guard used to exempt a zero-operation graph, which is exactly the case where a selector is
+/// guaranteed not to match — so a mis-wired pipeline that produced no operations answered a typo'd
+/// selector with a silent command-less program instead of the documented error.
+#[test]
+fn a_selector_on_a_graph_with_no_operations_is_still_a_configuration_error() {
+    let error = generate_cli_result(
+        &empty_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::operation("typoOperation")),
+    )
+    .expect_err("a selector that matches nothing must be rejected");
+    assert!(
+        matches!(error, gnr8_engine::CoreError::Config { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("did not match any operation"),
+        "{error}"
+    );
+}
+
+/// Saying nothing about scope over an empty API is not a typo, and still emits a program.
+#[test]
+fn an_empty_graph_without_a_selector_still_emits_a_command_less_program() {
+    let text = generate_cli_with(&empty_graph(), SdkCli::new("bookstore"));
+    assert!(text.contains("def main("), "{text}");
+    assert!(
+        !text.contains("add_parser("),
+        "there are no commands to add:\n{text}"
     );
 }

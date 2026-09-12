@@ -214,7 +214,7 @@ pub(crate) fn cli_operations<'a>(
             crate::sdk::builtins::operation_selector_matches(selector, op, &graph.base_path)
         })
         .collect();
-    if selected.is_empty() && !graph.operations.is_empty() {
+    if selected.is_empty() {
         return Err(CoreError::Config {
             message: format!(
                 "CLI {:?} commands selector did not match any operation: {selector:?}",
@@ -348,9 +348,25 @@ pub(crate) struct HttpAuthFeatures {
 }
 
 /// Resolve which HTTP auth helpers the generated SDK client must expose.
+///
+/// The client wraps every operation, so it validates every operation's auth slots.
 pub(crate) fn http_auth_features(graph: &ApiGraph) -> Result<HttpAuthFeatures, CoreError> {
+    let all: Vec<&Operation> = graph.operations.iter().collect();
+    http_auth_features_for(&all, graph)
+}
+
+/// The same resolution over only the operations one artifact wraps.
+///
+/// A generated CLI wraps the operations `SdkCli::commands` selects, so it must not fail on an auth
+/// declaration belonging to an operation it never emits a command for — that is the class of
+/// failure command scope exists to remove. The scheme check is unconditional either way: it
+/// validates `graph.security`, which the credential plumbing reads whole.
+pub(crate) fn http_auth_features_for(
+    ops: &[&Operation],
+    graph: &ApiGraph,
+) -> Result<HttpAuthFeatures, CoreError> {
     let schemes = supported_security_schemes(graph)?;
-    for op in &graph.operations {
+    for op in ops.iter().copied() {
         validate_operation_auth_slots(graph, op, &schemes)?;
     }
     let mut features = HttpAuthFeatures::default();
@@ -1515,9 +1531,10 @@ mod tests {
 
     use super::{
         check_cli_names, check_unique_model_file_names, command_group, command_name,
-        credential_env_var, file_stem, flag_name, helper_env_var, http_auth_features, kebab,
-        operation_auth_alternatives, split_words, success_responses_of, ApiKeyLocation,
-        HttpAuthScheme, OperationAuthScheme, SuccessResponses,
+        credential_env_var, file_stem, flag_name, helper_env_var, http_auth_features,
+        http_auth_features_for, kebab, operation_auth_alternatives, split_words,
+        success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
+        SuccessResponses,
     };
     use crate::graph::{
         ApiGraph, Operation, OperationSecurityPolicy, Param, Response, SecurityRequirementGroup,
@@ -1809,6 +1826,61 @@ mod tests {
             schema: Type::Primitive(crate::graph::Prim::Bool),
             ..cli_param(name)
         }
+    }
+
+    /// A CLI must not fail on the auth declaration of an operation it never wraps.
+    ///
+    /// The client validates every operation because it wraps every operation. A scoped CLI wraps a
+    /// subset, and this is the one remaining place where the full set used to be walked — the same
+    /// class of failure `SdkCli::commands` exists to remove.
+    #[test]
+    fn scoped_auth_validation_ignores_an_operation_outside_the_program() {
+        let mut graph = ApiGraph {
+            security: vec![
+                SecurityScheme {
+                    id: "BearerAuth".to_string(),
+                    kind: "http".to_string(),
+                    location: String::new(),
+                    name: "bearer".to_string(),
+                    global: false,
+                },
+                SecurityScheme {
+                    id: "BasicAuth".to_string(),
+                    kind: "http".to_string(),
+                    location: String::new(),
+                    name: "basic".to_string(),
+                    global: false,
+                },
+            ],
+            operations: vec![
+                cli_op("listBooks", None, Vec::new()),
+                cli_op("audit", None, Vec::new()),
+            ],
+            ..ApiGraph::default()
+        };
+        // `audit` asks for two schemes that both occupy the Authorization header.
+        graph.operation_security = vec![OperationSecurityPolicy {
+            operation_id: "audit".to_string(),
+            alternatives: vec![SecurityRequirementGroup {
+                schemes: vec!["BearerAuth".to_string(), "BasicAuth".to_string()],
+            }],
+        }];
+
+        let all: Vec<&Operation> = graph.operations.iter().collect();
+        assert!(
+            http_auth_features_for(&all, &graph).is_err(),
+            "the client wraps `audit`, so it must still reject the conflict"
+        );
+
+        let scoped: Vec<&Operation> = graph
+            .operations
+            .iter()
+            .filter(|op| op.id == "listBooks")
+            .collect();
+        assert!(
+            http_auth_features_for(&scoped, &graph).is_ok(),
+            "a program that does not wrap `audit` must not fail on it"
+        );
     }
 
     #[test]

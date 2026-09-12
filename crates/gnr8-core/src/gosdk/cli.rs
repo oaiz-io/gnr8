@@ -16,7 +16,7 @@ use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type, Wel
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, flag_name,
-    helper_env_var, http_auth_features, operation_auth_alternatives, operation_prose,
+    helper_env_var, http_auth_features_for, operation_auth_alternatives, operation_prose,
     quoted_string_literal, reject_sse_operations, request_body_models_of, success_responses_of,
     OperationAuthScheme, RequestBodyModel,
 };
@@ -53,7 +53,7 @@ pub(crate) fn emit_cli(
     let ops = cli_operations(graph, cli)?;
     check_cli_names(&ops, graph, &cli.program)?;
     reject_sse_operations(&ops, &cli.program)?;
-    http_auth_features(graph)?;
+    http_auth_features_for(&ops, graph)?;
 
     let mut body = String::new();
     let mut imports = ImportSet::default();
