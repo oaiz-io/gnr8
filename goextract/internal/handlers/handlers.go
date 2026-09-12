@@ -28,6 +28,8 @@ import (
 	"go/constant"
 	"go/token"
 	gotypes "go/types"
+	"math"
+	"mime"
 	"net/http"
 	"reflect"
 	"sort"
@@ -144,11 +146,14 @@ type helperBinding struct {
 	typeValue      gotypes.Type
 	ginContext     bool
 	responseWriter bool
+	requestBody    bool
+	jsonDecoder    bool
 }
 
 type helperFrame struct {
 	decl     handlerDecl
 	bindings map[gotypes.Object]helperBinding
+	typeArgs map[*gotypes.TypeParam]gotypes.Type
 }
 
 type parameterHint struct {
@@ -234,16 +239,32 @@ type untypedQueryRead struct {
 	line uint32
 }
 
-// rawBodyRead is a GetRawData call whose bytes state neither a media type nor a
-// schema. The diagnostic is deferred rather than reported at the call, because the
-// same read can still resolve: rawJSONRequestSchema derives a free-form JSON body
-// from raw bytes handed to encoding/json, and that runs after the walk. Reporting
-// during the walk states a body is unresolved on an operation that goes on to state
-// one, which is the same fact answered twice in opposite directions.
+// rawBodyRead retains one routed byte-reader location until the bounded native
+// body analysis proves a named decode target or an unchanged application-boundary
+// use. Reporting is deferred so one operation is never told that the same read is
+// simultaneously resolved and unresolved.
 type rawBodyRead struct {
 	subject string
 	file    string
 	line    uint32
+	pos     token.Pos
+	reason  string
+}
+
+type requestBodyEvidence struct {
+	ref          facts.TypeRef
+	schema       *facts.SchemaFact
+	contentTypes []string
+	subject      string
+	fset         *token.FileSet
+	pos          token.Pos
+}
+
+type nativeBodyAnalysis struct {
+	evidence []requestBodyEvidence
+	reads    []rawBodyRead
+	resolved map[token.Pos]bool
+	issues   []rawBodyRead
 }
 
 type contextTraversal struct {
@@ -252,7 +273,6 @@ type contextTraversal struct {
 	seenParam              map[string]bool
 	resolvedParam          map[string]bool
 	untypedQueryReads      *[]untypedQueryRead
-	rawBodyReads           *[]rawBodyRead
 	formFields             map[string]facts.FieldFact
 	boundFormRefs          map[string]bool
 	manualFormFields       map[string]bool
@@ -626,6 +646,54 @@ func helperCallBindings(caller helperFrame, call *ast.CallExpr, fn *gotypes.Func
 	return out
 }
 
+func helperFrameForCall(caller helperFrame, call *ast.CallExpr, fn *gotypes.Func, callee handlerDecl) helperFrame {
+	return helperFrame{
+		decl:     callee,
+		bindings: helperCallBindings(caller, call, fn),
+		typeArgs: helperCallTypeArguments(caller.decl.info, call, fn),
+	}
+}
+
+func helperCallTypeArguments(info *gotypes.Info, call *ast.CallExpr, fn *gotypes.Func) map[*gotypes.TypeParam]gotypes.Type {
+	out := map[*gotypes.TypeParam]gotypes.Type{}
+	if info == nil || call == nil || fn == nil {
+		return out
+	}
+	signature, ok := gotypes.Unalias(fn.Type()).(*gotypes.Signature)
+	if !ok || signature.TypeParams() == nil || signature.TypeParams().Len() == 0 {
+		return out
+	}
+	typeArgs := callTypeArgs(info, call)
+	if len(typeArgs) == 0 {
+		if ident := calledFunctionIdent(call.Fun); ident != nil {
+			if instance, exists := info.Instances[ident]; exists {
+				for index := 0; index < instance.TypeArgs.Len(); index++ {
+					typeArgs = append(typeArgs, instance.TypeArgs.At(index))
+				}
+			}
+		}
+	}
+	for index := 0; index < signature.TypeParams().Len() && index < len(typeArgs); index++ {
+		out[signature.TypeParams().At(index)] = typeArgs[index]
+	}
+	return out
+}
+
+func calledFunctionIdent(expr ast.Expr) *ast.Ident {
+	switch value := expr.(type) {
+	case *ast.IndexExpr:
+		return calledFunctionIdent(value.X)
+	case *ast.IndexListExpr:
+		return calledFunctionIdent(value.X)
+	case *ast.Ident:
+		return value
+	case *ast.SelectorExpr:
+		return value.Sel
+	default:
+		return nil
+	}
+}
+
 func helperBindingFromExpr(frame helperFrame, expr ast.Expr) helperBinding {
 	binding := helperBinding{typeValue: frameTypeOf(frame, expr)}
 	if value := frameLiteralValue(frame, expr); value != nil {
@@ -636,6 +704,8 @@ func helperBindingFromExpr(frame helperFrame, expr ast.Expr) helperBinding {
 	// merely by being passed to another helper.
 	binding.ginContext = isRoutedGinContextExpr(frame, expr)
 	binding.responseWriter = isGinResponseWriterExpr(frame, expr)
+	binding.requestBody = isRoutedRequestBodyExpr(frame, expr)
+	binding.jsonDecoder = isRoutedJSONDecoderExpr(frame, expr)
 	return binding
 }
 
@@ -656,11 +726,37 @@ func frameTypeOf(frame helperFrame, expr ast.Expr) gotypes.Type {
 		return nil
 	}
 	if id, ok := expr.(*ast.Ident); ok {
-		if binding, exists := frame.bindings[frame.decl.info.ObjectOf(id)]; exists && binding.typeValue != nil {
-			return binding.typeValue
+		if object := frame.decl.info.ObjectOf(id); object != nil {
+			if binding, exists := frame.bindings[object]; exists && binding.typeValue != nil && frameObjectKeepsInitialValue(frame, object) {
+				return concreteFrameType(binding.typeValue, frame.typeArgs)
+			}
 		}
 	}
-	return frame.decl.info.TypeOf(expr)
+	return concreteFrameType(frame.decl.info.TypeOf(expr), frame.typeArgs)
+}
+
+func concreteFrameType(t gotypes.Type, arguments map[*gotypes.TypeParam]gotypes.Type) gotypes.Type {
+	if t == nil || len(arguments) == 0 {
+		return t
+	}
+	switch value := gotypes.Unalias(t).(type) {
+	case *gotypes.TypeParam:
+		if concrete := arguments[value]; concrete != nil {
+			return concrete
+		}
+	case *gotypes.Pointer:
+		return gotypes.NewPointer(concreteFrameType(value.Elem(), arguments))
+	case *gotypes.Slice:
+		return gotypes.NewSlice(concreteFrameType(value.Elem(), arguments))
+	case *gotypes.Array:
+		return gotypes.NewArray(concreteFrameType(value.Elem(), arguments), value.Len())
+	case *gotypes.Map:
+		return gotypes.NewMap(
+			concreteFrameType(value.Key(), arguments),
+			concreteFrameType(value.Elem(), arguments),
+		)
+	}
+	return t
 }
 
 func frameLiteralValue(frame helperFrame, expr ast.Expr) *facts.LiteralValue {
@@ -904,8 +1000,6 @@ func (a *Analyzer) analyzeTraversedGinCall(
 		}
 	case "PostFormMap", "GetPostFormMap":
 		a.reportTraversedUnresolvedBody(frame, call, traversal, method, formMapUnrepresentable)
-	case "GetRawData":
-		recordRawBodyRead(traversal.rawBodyReads, frame.decl.fset, call, method)
 	case "BindXML", "ShouldBindXML", "ShouldBindBodyWithXML",
 		"BindYAML", "ShouldBindYAML", "ShouldBindBodyWithYAML",
 		"BindTOML", "ShouldBindTOML", "ShouldBindBodyWithTOML",
@@ -2642,7 +2736,6 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 	seenParam := map[string]bool{}
 	resolvedParam := map[string]bool{}
 	untypedQueryReads := []untypedQueryRead{}
-	rawBodyReads := []rawBodyRead{}
 	seenStatus := map[uint16]bool{}
 	provisionalStatus := map[uint16]bool{}
 	formFields := map[string]facts.FieldFact{}
@@ -2728,7 +2821,6 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 					seenParam:              seenParam,
 					resolvedParam:          resolvedParam,
 					untypedQueryReads:      &untypedQueryReads,
-					rawBodyReads:           &rawBodyReads,
 					formFields:             formFields,
 					boundFormRefs:          boundFormRefs,
 					manualFormFields:       manualFormFields,
@@ -2804,8 +2896,6 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			"BindTOML", "ShouldBindTOML", "ShouldBindBodyWithTOML",
 			"BindPlain", "ShouldBindPlain", "ShouldBindBodyWithPlain":
 			reportDirectUnresolvedBody(diags, h, route, call, name, unsupportedGinBodyBindingReason(name))
-		case "GetRawData":
-			recordRawBodyRead(&rawBodyReads, h.fset, call, name)
 		case "JSON", "AbortWithStatusJSON", "AbortWithStatusPureJSON", "IndentedJSON", "PureJSON", "AsciiJSON":
 			a.analyzeJSON(h, call, route, &cf, seenStatus, provisionalStatus, diags)
 		case "String", "HTML", "SecureJSON", "JSONP", "XML", "YAML", "TOML", "ProtoBuf", "BSON":
@@ -2970,26 +3060,70 @@ func (a *Analyzer) Analyze(route routes.Route, diags *diag.Accumulator) CodeFact
 			a.setRequestBodyFact(&cf, formBody, formContentType, route, diags, h.fset, declPos(h.decl), "form fields")
 		}
 	}
-	if cf.RequestBody == nil {
-		if schema := a.rawJSONRequestSchema(frame, route.Handler); schema != nil {
-			cf.RequestBody = &facts.TypeRef{RefID: schema.ID}
-			cf.RequestBodyContentType = "application/json"
-			cf.Schemas = append(cf.Schemas, *schema)
+	nativeBodies := a.nativeRequestBodies(frame, route.Handler)
+	seenBodySchema := map[string]bool{}
+	for _, schema := range cf.Schemas {
+		seenBodySchema[schema.ID] = true
+	}
+	for _, evidence := range nativeBodies.evidence {
+		if evidence.schema != nil && !seenBodySchema[evidence.schema.ID] {
+			cf.Schemas = append(cf.Schemas, *evidence.schema)
+			seenBodySchema[evidence.schema.ID] = true
+		}
+		if len(evidence.contentTypes) == 0 {
+			a.setRequestBodyFact(
+				&cf,
+				&evidence.ref,
+				"",
+				route,
+				diags,
+				evidence.fset,
+				evidence.pos,
+				evidence.subject,
+			)
+			continue
+		}
+		for _, contentType := range evidence.contentTypes {
+			a.setRequestBodyFact(
+				&cf,
+				&evidence.ref,
+				contentType,
+				route,
+				diags,
+				evidence.fset,
+				evidence.pos,
+				evidence.subject,
+			)
 		}
 	}
 	if hasBodyBind {
 		cf.RequestBodyRequired = !allBodyBindsOptional
 	}
-	if cf.RequestBody == nil && diags != nil {
-		for _, read := range rawBodyReads {
+	if diags != nil {
+		for _, issue := range nativeBodies.issues {
 			diags.RequestBodyUnresolved(
-				read.subject,
+				issue.subject,
 				route.Method,
 				untypedRouteLabel(route),
-				rawGinBodyReason,
-				read.file,
-				read.line,
+				issue.reason,
+				issue.file,
+				issue.line,
 			)
+		}
+		if cf.RequestBody == nil {
+			for _, read := range nativeBodies.reads {
+				if nativeBodies.resolved[read.pos] {
+					continue
+				}
+				diags.RequestBodyUnresolved(
+					read.subject,
+					route.Method,
+					untypedRouteLabel(route),
+					read.reason,
+					read.file,
+					read.line,
+				)
+			}
 		}
 	}
 	if diags != nil {
@@ -3063,16 +3197,6 @@ func reportDirectUnresolvedBody(
 	diags.RequestBodyUnresolved(subject, route.Method, untypedRouteLabel(route), reason, file, line)
 }
 
-// recordRawBodyRead defers one GetRawData read. Analyze reports the whole set once,
-// and only when the operation ends with no body of any kind.
-func recordRawBodyRead(reads *[]rawBodyRead, fset *token.FileSet, call *ast.CallExpr, subject string) {
-	if reads == nil {
-		return
-	}
-	file, line := positionOf(fset, call.Pos())
-	*reads = append(*reads, rawBodyRead{subject: subject, file: file, line: line})
-}
-
 func (a *Analyzer) setRequestBodyFact(
 	cf *CodeFacts,
 	ref *facts.TypeRef,
@@ -3086,6 +3210,12 @@ func (a *Analyzer) setRequestBodyFact(
 	if cf == nil || ref == nil {
 		return
 	}
+	resolvedRef := *ref
+	if resolvedRef.Span == nil {
+		span := spanOf(fset, pos)
+		resolvedRef.Span = &span
+	}
+	ref = &resolvedRef
 	if cf.RequestBody == nil {
 		cf.RequestBody = ref
 		cf.RequestBodyContentType = contentType
@@ -4407,12 +4537,12 @@ func syntheticFormSchemaIdentity(handler string) (id string, name string) {
 	return "__synthetic." + name, name
 }
 
-func syntheticRawJSONRequestSchemaIdentity(handler string) (id string, name string) {
+func syntheticRawRequestSchemaIdentity(handler string) (id string, name string) {
 	base := exportedIdentifier(handler)
 	if base == "" {
 		base = "Request"
 	}
-	name = base + "RawJSONRequest"
+	name = base + "RawRequest"
 	return "__synthetic." + name, name
 }
 
@@ -5738,6 +5868,50 @@ func isGinResponseWriterExpr(frame helperFrame, expr ast.Expr) bool {
 	return ginResponseWriter.proves(frame, expr)
 }
 
+var routedRequestBody = valueProvenance{
+	root: func(frame helperFrame, expr ast.Expr) bool {
+		body, ok := expr.(*ast.SelectorExpr)
+		if !ok || body.Sel == nil || body.Sel.Name != "Body" {
+			return false
+		}
+		request, ok := body.X.(*ast.SelectorExpr)
+		return ok && request.Sel != nil && request.Sel.Name == "Request" &&
+			isRoutedGinContextExpr(frame, request.X)
+	},
+	// Provenance, rather than a broad interface test, is the deciding fact. An
+	// io.Reader parameter and net/http's io.ReadCloser can both carry the same
+	// routed body through a wrapper.
+	carries: func(t gotypes.Type) bool { return t != nil },
+	bound:   func(binding helperBinding) bool { return binding.requestBody },
+}
+
+func isRoutedRequestBodyExpr(frame helperFrame, expr ast.Expr) bool {
+	return routedRequestBody.proves(frame, expr)
+}
+
+var routedJSONDecoder = valueProvenance{
+	root: func(frame helperFrame, expr ast.Expr) bool {
+		call, ok := expr.(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 || !isRoutedRequestBodyExpr(frame, call.Args[0]) {
+			return false
+		}
+		function := calledFuncObject(frame.decl.info, call.Fun)
+		return function != nil && function.Pkg() != nil &&
+			function.Pkg().Path() == "encoding/json" && function.Name() == "NewDecoder"
+	},
+	carries: func(t gotypes.Type) bool {
+		if pointer, ok := gotypes.Unalias(t).(*gotypes.Pointer); ok {
+			t = pointer.Elem()
+		}
+		return isNamedType(t, "encoding/json", "Decoder")
+	},
+	bound: func(binding helperBinding) bool { return binding.jsonDecoder },
+}
+
+func isRoutedJSONDecoderExpr(frame helperFrame, expr ast.Expr) bool {
+	return routedJSONDecoder.proves(frame, expr)
+}
+
 func isGinResponseWriterCall(frame helperFrame, call *ast.CallExpr, method string) bool {
 	selector, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || selector.Sel == nil || selector.Sel.Name != method {
@@ -5974,64 +6148,427 @@ func calledFuncObject(info *gotypes.Info, fun ast.Expr) *gotypes.Func {
 	}
 }
 
-func (a *Analyzer) rawJSONRequestSchema(frame helperFrame, handler string) *facts.SchemaFact {
-	h := frame.decl
-	if !handlerUsesRawJSONBody(frame) {
-		return nil
-	}
-	id, name := syntheticRawJSONRequestSchemaIdentity(handler)
-	return &facts.SchemaFact{
-		ID:   id,
-		Name: name,
-		Body: facts.AnyType(),
-		Span: spanOf(h.fset, declPos(h.decl)),
-	}
+func (a *Analyzer) nativeRequestBodies(frame helperFrame, handler string) nativeBodyAnalysis {
+	analysis := nativeBodyAnalysis{resolved: map[token.Pos]bool{}}
+	a.analyzeNativeBodyFrame(
+		frame,
+		handler,
+		0,
+		map[string]bool{},
+		nil,
+		nil,
+		&analysis,
+	)
+	return analysis
 }
 
-func handlerUsesRawJSONBody(frame helperFrame) bool {
+func (a *Analyzer) analyzeNativeBodyFrame(
+	frame helperFrame,
+	handler string,
+	depth int,
+	stack map[string]bool,
+	inheritedRaw map[gotypes.Object][]rawBodyRead,
+	inheritedMediaTypes []string,
+	analysis *nativeBodyAnalysis,
+) {
 	h := frame.decl
-	if h.decl == nil || h.decl.Body == nil {
-		return false
+	if analysis == nil || h.decl == nil || h.decl.Body == nil || h.info == nil || depth > maxContextHelperDepth {
+		return
 	}
-	rawVars := rawDataVars(frame)
-	if len(rawVars) == 0 {
-		return false
-	}
-	if rawDataUsedByEncodingJSON(h, rawVars) {
-		return true
-	}
-	return hasJSONContentTypeEvidence(frame)
-}
+	rawValues := rawBodyValues(frame, inheritedRaw, analysis)
+	decoderReads := jsonDecoderReadPositions(frame)
+	decoded := map[token.Pos]bool{}
 
-func rawDataVars(frame helperFrame) map[gotypes.Object]bool {
-	h := frame.decl
-	out := map[gotypes.Object]bool{}
-	ast.Inspect(h.decl.Body, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.AssignStmt:
-			for i, rhs := range node.Rhs {
-				if i >= len(node.Lhs) || !isGinGetRawDataCall(frame, rhs) {
-					continue
-				}
-				if id, ok := node.Lhs[i].(*ast.Ident); ok {
-					if obj := h.info.ObjectOf(id); obj != nil {
-						out[obj] = true
-					}
-				}
+	ast.Inspect(h.decl.Body, func(node ast.Node) bool {
+		if _, ok := node.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		mediaTypes := staticRequestMediaTypesAt(frame, call, inheritedMediaTypes)
+		function := calledFuncObject(h.info, call.Fun)
+		if isJSONDecoderDecodeCall(frame, call, function) {
+			for pos := range decoderReads {
+				analysis.resolved[pos] = true
+				decoded[pos] = true
 			}
-		case *ast.ValueSpec:
-			for i, rhs := range node.Values {
-				if i >= len(node.Names) || !isGinGetRawDataCall(frame, rhs) {
-					continue
+			if ref, ok := a.namedRequestTypeRef(frame, call.Args[0]); ok {
+				analysis.evidence = append(analysis.evidence, requestBodyEvidence{
+					ref:          ref,
+					contentTypes: mergeUniqueStrings([]string{"application/json"}, mediaTypes),
+					subject:      "encoding/json.Decoder.Decode",
+					fset:         h.fset,
+					pos:          call.Pos(),
+				})
+			} else {
+				file, line := positionOf(h.fset, call.Pos())
+				analysis.issues = append(analysis.issues, rawBodyRead{
+					subject: "encoding/json.Decoder.Decode",
+					file:    file,
+					line:    line,
+					pos:     call.Pos(),
+					reason:  "JSON decoder target does not resolve to a named schema",
+				})
+			}
+			return true
+		}
+		if isEncodingJSONCall(function, "Unmarshal") && len(call.Args) >= 2 {
+			sources := rawSourcesForExpr(frame, call.Args[0], rawValues)
+			if len(sources) == 0 {
+				return true
+			}
+			if ref, ok := a.namedRequestTypeRef(frame, call.Args[1]); ok {
+				for _, source := range sources {
+					analysis.resolved[source.pos] = true
 				}
-				if obj := h.info.ObjectOf(node.Names[i]); obj != nil {
-					out[obj] = true
+				analysis.evidence = append(analysis.evidence, requestBodyEvidence{
+					ref:          ref,
+					contentTypes: mergeUniqueStrings([]string{"application/json"}, mediaTypes),
+					subject:      "encoding/json.Unmarshal",
+					fset:         h.fset,
+					pos:          call.Pos(),
+				})
+			} else {
+				for _, source := range sources {
+					analysis.resolved[source.pos] = true
+				}
+				file, line := positionOf(h.fset, call.Pos())
+				analysis.issues = append(analysis.issues, rawBodyRead{
+					subject: "encoding/json.Unmarshal",
+					file:    file,
+					line:    line,
+					pos:     call.Pos(),
+					reason:  "JSON unmarshal target does not resolve to a named schema",
+				})
+			}
+			return true
+		}
+
+		callee, hasCallee := a.moduleOwnedCallee(function)
+		childRaw := rawBindingsForHelperCall(frame, call, function, rawValues)
+		if hasCallee && (frameCallPassesGinContext(frame, call) || frameCallPassesRequestBody(frame, call) || len(childRaw) > 0) {
+			key := callee.identityKey()
+			if !stack[key] {
+				stack[key] = true
+				beforeEvidence := len(analysis.evidence)
+				beforeResolved := len(analysis.resolved)
+				a.analyzeNativeBodyFrame(
+					helperFrameForCall(frame, call, function, callee),
+					handler,
+					depth+1,
+					stack,
+					childRaw,
+					mediaTypes,
+					analysis,
+				)
+				delete(stack, key)
+				if len(analysis.evidence) > beforeEvidence || len(analysis.resolved) > beforeResolved {
+					for index := beforeEvidence; index < len(analysis.evidence); index++ {
+						analysis.evidence[index].subject = selectorName(call.Fun)
+						analysis.evidence[index].fset = h.fset
+						analysis.evidence[index].pos = call.Pos()
+					}
+					return true
 				}
 			}
 		}
+
+		if hasCallee || function == nil || function.Pkg() == nil ||
+			!moduleOwnsPackage(a.modulePrefix, function.Pkg().Path()) {
+			return true
+		}
+		sources := rawSourcesPassedUnchanged(frame, call, rawValues)
+		if len(sources) == 0 {
+			return true
+		}
+		for _, source := range sources {
+			analysis.resolved[source.pos] = true
+		}
+		id, name := syntheticRawRequestSchemaIdentity(handler)
+		schema := facts.SchemaFact{
+			ID:   id,
+			Name: name,
+			Body: facts.PrimitiveType(facts.BytesPrim()),
+			Span: spanOf(h.fset, call.Pos()),
+		}
+		analysis.evidence = append(analysis.evidence, requestBodyEvidence{
+			ref:          facts.TypeRef{RefID: id},
+			schema:       &schema,
+			contentTypes: mediaTypes,
+			subject:      selectorName(call.Fun),
+			fset:         h.fset,
+			pos:          call.Pos(),
+		})
+		if len(mediaTypes) == 0 {
+			file, line := positionOf(h.fset, call.Pos())
+			analysis.issues = append(analysis.issues, rawBodyRead{
+				subject: selectorName(call.Fun),
+				file:    file,
+				line:    line,
+				pos:     call.Pos(),
+				reason:  "raw binary body type is known, but its media type is not statically established",
+			})
+		}
 		return true
 	})
-	return out
+
+	for pos, read := range decoderReads {
+		if decoded[pos] || analysis.resolved[pos] {
+			continue
+		}
+		analysis.issues = append(analysis.issues, read)
+	}
+}
+
+func (a *Analyzer) namedRequestTypeRef(frame helperFrame, expr ast.Expr) (facts.TypeRef, bool) {
+	t := frameTypeOf(frame, expr)
+	if pointer, ok := gotypes.Unalias(t).(*gotypes.Pointer); ok {
+		t = pointer.Elem()
+	}
+	id, ok := a.namedTypeID(t)
+	return facts.TypeRef{RefID: id}, ok
+}
+
+func jsonDecoderReadPositions(frame helperFrame) map[token.Pos]rawBodyRead {
+	reads := map[token.Pos]rawBodyRead{}
+	if frame.decl.decl == nil || frame.decl.decl.Body == nil {
+		return reads
+	}
+	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
+		if _, ok := node.(*ast.FuncLit); ok {
+			return false
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 || !isRoutedRequestBodyExpr(frame, call.Args[0]) ||
+			!isEncodingJSONCall(calledFuncObject(frame.decl.info, call.Fun), "NewDecoder") {
+			return true
+		}
+		file, line := positionOf(frame.decl.fset, call.Pos())
+		reads[call.Pos()] = rawBodyRead{
+			subject: "encoding/json.NewDecoder",
+			file:    file,
+			line:    line,
+			pos:     call.Pos(),
+			reason:  "JSON decoder reads the routed request body but no named decode target is statically established",
+		}
+		return true
+	})
+	return reads
+}
+
+func isJSONDecoderDecodeCall(frame helperFrame, call *ast.CallExpr, function *gotypes.Func) bool {
+	if call == nil || len(call.Args) != 1 || !isEncodingJSONCall(function, "Decode") {
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && isRoutedJSONDecoderExpr(frame, selector.X)
+}
+
+func isEncodingJSONCall(function *gotypes.Func, name string) bool {
+	return function != nil && function.Pkg() != nil &&
+		function.Pkg().Path() == "encoding/json" && function.Name() == name
+}
+
+func rawBodyValues(
+	frame helperFrame,
+	inherited map[gotypes.Object][]rawBodyRead,
+	analysis *nativeBodyAnalysis,
+) map[gotypes.Object][]rawBodyRead {
+	h := frame.decl
+	if h.decl == nil || h.decl.Body == nil || h.info == nil {
+		return inherited
+	}
+	type assignment struct {
+		expr  ast.Expr
+		reads []rawBodyRead
+	}
+	assignments := map[gotypes.Object][]assignment{}
+	invalid := map[gotypes.Object]bool{}
+	readByPos := map[token.Pos]rawBodyRead{}
+	recordRead := func(expr ast.Expr) []rawBodyRead {
+		call, subject, ok := rawRequestReadCall(frame, expr)
+		if !ok {
+			return nil
+		}
+		read, exists := readByPos[call.Pos()]
+		if !exists {
+			file, line := positionOf(h.fset, call.Pos())
+			read = rawBodyRead{subject: subject, file: file, line: line, pos: call.Pos(), reason: rawGinBodyReason}
+			readByPos[call.Pos()] = read
+			analysis.reads = append(analysis.reads, read)
+		}
+		return []rawBodyRead{read}
+	}
+	assign := func(target ast.Expr, source ast.Expr, reads []rawBodyRead) {
+		id, ok := target.(*ast.Ident)
+		if !ok || id.Name == "_" {
+			ast.Inspect(target, func(node ast.Node) bool {
+				if ident, ok := node.(*ast.Ident); ok {
+					if object := h.info.ObjectOf(ident); object != nil {
+						invalid[object] = true
+					}
+				}
+				return true
+			})
+			return
+		}
+		object := h.info.ObjectOf(id)
+		if object == nil {
+			return
+		}
+		assignments[object] = append(assignments[object], assignment{expr: source, reads: reads})
+	}
+	ast.Inspect(h.decl.Body, func(node ast.Node) bool {
+		if _, ok := node.(*ast.FuncLit); ok {
+			return false
+		}
+		switch current := node.(type) {
+		case *ast.AssignStmt:
+			if len(current.Rhs) == 1 && len(current.Lhs) > 0 {
+				reads := recordRead(current.Rhs[0])
+				assign(current.Lhs[0], current.Rhs[0], reads)
+				for _, target := range current.Lhs[1:] {
+					assign(target, nil, nil)
+				}
+			} else if len(current.Lhs) == len(current.Rhs) {
+				for index := range current.Lhs {
+					assign(current.Lhs[index], current.Rhs[index], recordRead(current.Rhs[index]))
+				}
+			} else {
+				for _, target := range current.Lhs {
+					assign(target, nil, nil)
+				}
+			}
+		case *ast.ValueSpec:
+			if len(current.Values) == 1 && len(current.Names) > 0 {
+				reads := recordRead(current.Values[0])
+				assign(current.Names[0], current.Values[0], reads)
+				for _, target := range current.Names[1:] {
+					assign(target, nil, nil)
+				}
+			} else if len(current.Names) == len(current.Values) {
+				for index := range current.Names {
+					assign(current.Names[index], current.Values[index], recordRead(current.Values[index]))
+				}
+			} else {
+				for _, target := range current.Names {
+					assign(target, nil, nil)
+				}
+			}
+		case *ast.RangeStmt:
+			assign(current.Key, nil, nil)
+			assign(current.Value, nil, nil)
+		case *ast.IncDecStmt:
+			assign(current.X, nil, nil)
+		case *ast.CallExpr:
+			recordRead(current)
+		}
+		return true
+	})
+
+	values := map[gotypes.Object][]rawBodyRead{}
+	for pass := 0; pass <= len(assignments); pass++ {
+		next := map[gotypes.Object][]rawBodyRead{}
+		for object, reads := range inherited {
+			if !invalid[object] && len(assignments[object]) == 0 {
+				next[object] = append([]rawBodyRead(nil), reads...)
+			}
+		}
+		for object, writes := range assignments {
+			if invalid[object] {
+				continue
+			}
+			reads := append([]rawBodyRead(nil), inherited[object]...)
+			proven := true
+			for _, write := range writes {
+				sources := write.reads
+				if len(sources) == 0 && write.expr != nil {
+					if rawExprObject(frame, write.expr) == object {
+						continue
+					}
+					sources = rawSourcesForExpr(frame, write.expr, values)
+				}
+				if len(sources) == 0 {
+					proven = false
+					break
+				}
+				reads = appendUniqueRawReads(reads, sources...)
+			}
+			if proven && len(reads) > 0 {
+				next[object] = reads
+			}
+		}
+		if rawBodyValueMapsEqual(values, next) {
+			return next
+		}
+		values = next
+	}
+	return values
+}
+
+func rawExprObject(frame helperFrame, expr ast.Expr) gotypes.Object {
+	for {
+		paren, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = paren.X
+	}
+	id, ok := expr.(*ast.Ident)
+	if !ok || frame.decl.info == nil {
+		return nil
+	}
+	return frame.decl.info.ObjectOf(id)
+}
+
+func appendUniqueRawReads(reads []rawBodyRead, additions ...rawBodyRead) []rawBodyRead {
+	seen := make(map[token.Pos]bool, len(reads)+len(additions))
+	for _, read := range reads {
+		seen[read.pos] = true
+	}
+	for _, read := range additions {
+		if !seen[read.pos] {
+			seen[read.pos] = true
+			reads = append(reads, read)
+		}
+	}
+	return reads
+}
+
+func rawBodyValueMapsEqual(left, right map[gotypes.Object][]rawBodyRead) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for object, leftReads := range left {
+		rightReads, ok := right[object]
+		if !ok || len(leftReads) != len(rightReads) {
+			return false
+		}
+		for index := range leftReads {
+			if leftReads[index].pos != rightReads[index].pos {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func rawRequestReadCall(frame helperFrame, expr ast.Expr) (*ast.CallExpr, string, bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil, "", false
+	}
+	if isGinGetRawDataCall(frame, call) {
+		return call, "GetRawData", true
+	}
+	function := calledFuncObject(frame.decl.info, call.Fun)
+	if function != nil && function.Pkg() != nil && function.Pkg().Path() == "io" &&
+		function.Name() == "ReadAll" && len(call.Args) == 1 && isRoutedRequestBodyExpr(frame, call.Args[0]) {
+		return call, "io.ReadAll(Request.Body)", true
+	}
+	return nil, "", false
 }
 
 func isGinGetRawDataCall(frame helperFrame, expr ast.Expr) bool {
@@ -6043,48 +6580,29 @@ func isGinGetRawDataCall(frame helperFrame, expr ast.Expr) bool {
 	return ok && recvPkg == routes.GinPkgPath && name == "GetRawData" && isRoutedGinContextCall(frame, call)
 }
 
-func rawDataUsedByEncodingJSON(h handlerDecl, rawVars map[gotypes.Object]bool) bool {
-	found := false
-	ast.Inspect(h.decl.Body, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		call, ok := n.(*ast.CallExpr)
+func rawSourcesForExpr(frame helperFrame, expr ast.Expr, values map[gotypes.Object][]rawBodyRead) []rawBodyRead {
+	for {
+		paren, ok := expr.(*ast.ParenExpr)
 		if !ok {
-			return true
+			break
 		}
-		fn := calledFuncObject(h.info, call.Fun)
-		if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != "encoding/json" {
-			return true
-		}
-		switch fn.Name() {
-		case "Unmarshal", "Valid":
-			if len(call.Args) > 0 && exprUsesObject(h.info, call.Args[0], rawVars) {
-				found = true
-				return false
-			}
-		case "Compact", "Indent", "HTMLEscape":
-			if len(call.Args) > 1 && exprUsesObject(h.info, call.Args[1], rawVars) {
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return found
+		expr = paren.X
+	}
+	id, ok := expr.(*ast.Ident)
+	if !ok || frame.decl.info == nil {
+		return nil
+	}
+	return values[frame.decl.info.ObjectOf(id)]
 }
 
 func exprUsesObject(info *gotypes.Info, expr ast.Expr, targets map[gotypes.Object]bool) bool {
 	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
+	ast.Inspect(expr, func(node ast.Node) bool {
 		if found {
 			return false
 		}
-		id, ok := n.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		if targets[info.ObjectOf(id)] {
+		ident, ok := node.(*ast.Ident)
+		if ok && targets[info.ObjectOf(ident)] {
 			found = true
 			return false
 		}
@@ -6093,24 +6611,290 @@ func exprUsesObject(info *gotypes.Info, expr ast.Expr, targets map[gotypes.Objec
 	return found
 }
 
-func hasJSONContentTypeEvidence(frame helperFrame) bool {
+func rawSourcesPassedUnchanged(frame helperFrame, call *ast.CallExpr, values map[gotypes.Object][]rawBodyRead) []rawBodyRead {
+	seen := map[token.Pos]bool{}
+	out := []rawBodyRead{}
+	for _, argument := range call.Args {
+		for _, read := range rawSourcesForExpr(frame, argument, values) {
+			if !seen[read.pos] {
+				seen[read.pos] = true
+				out = append(out, read)
+			}
+		}
+	}
+	return out
+}
+
+func rawBindingsForHelperCall(
+	frame helperFrame,
+	call *ast.CallExpr,
+	function *gotypes.Func,
+	values map[gotypes.Object][]rawBodyRead,
+) map[gotypes.Object][]rawBodyRead {
+	out := map[gotypes.Object][]rawBodyRead{}
+	if function == nil {
+		return out
+	}
+	signature, ok := gotypes.Unalias(function.Type()).(*gotypes.Signature)
+	if !ok || signature.Params() == nil {
+		return out
+	}
+	for index, argument := range call.Args {
+		if index >= signature.Params().Len() {
+			break
+		}
+		if reads := rawSourcesForExpr(frame, argument, values); len(reads) > 0 {
+			out[signature.Params().At(index)] = reads
+		}
+	}
+	return out
+}
+
+func frameCallPassesRequestBody(frame helperFrame, call *ast.CallExpr) bool {
+	if call == nil {
+		return false
+	}
+	for _, argument := range call.Args {
+		if isRoutedRequestBodyExpr(frame, argument) {
+			return true
+		}
+	}
+	return false
+}
+
+func staticRequestMediaTypesAt(frame helperFrame, target *ast.CallExpr, inherited []string) []string {
 	h := frame.decl
-	found := false
-	ast.Inspect(h.decl.Body, func(n ast.Node) bool {
-		if found {
-			return false
+	if h.decl == nil || h.decl.Body == nil || h.info == nil || target == nil {
+		return inherited
+	}
+	mediaTypes, found := requestMediaTypesInStatements(
+		frame,
+		h.decl.Body.List,
+		target,
+		requestContentTypeVars(frame),
+		mergeUniqueStrings(nil, inherited),
+	)
+	if !found {
+		return inherited
+	}
+	return mediaTypes
+}
+
+func requestMediaTypesInStatements(
+	frame helperFrame,
+	statements []ast.Stmt,
+	target *ast.CallExpr,
+	contentTypeVars map[gotypes.Object]bool,
+	current []string,
+) ([]string, bool) {
+	for _, statement := range statements {
+		if nodeContainsExactCall(statement, target) {
+			return requestMediaTypesInStatement(frame, statement, target, contentTypeVars, current)
 		}
-		if expr, ok := n.(*ast.BinaryExpr); ok {
-			if exprMentionsGinContentType(frame, expr) && exprHasStringLiteral(expr, "application/json") {
-				found = true
-				return false
+		if restriction, ok := requestMediaTypesAfterGuard(frame, statement, contentTypeVars); ok {
+			current = restrictRequestMediaTypes(current, restriction)
+		}
+	}
+	return current, false
+}
+
+func requestMediaTypesInStatement(
+	frame helperFrame,
+	statement ast.Stmt,
+	target *ast.CallExpr,
+	contentTypeVars map[gotypes.Object]bool,
+	current []string,
+) ([]string, bool) {
+	switch value := statement.(type) {
+	case *ast.BlockStmt:
+		return requestMediaTypesInStatements(frame, value.List, target, contentTypeVars, current)
+	case *ast.IfStmt:
+		if value.Init != nil && nodeContainsExactCall(value.Init, target) || nodeContainsExactCall(value.Cond, target) {
+			return current, true
+		}
+		if nodeContainsExactCall(value.Body, target) {
+			if restriction, ok := requestMediaTypesForCondition(frame, value.Cond, contentTypeVars, true); ok {
+				current = restrictRequestMediaTypes(current, restriction)
+			}
+			return requestMediaTypesInStatements(frame, value.Body.List, target, contentTypeVars, current)
+		}
+		if value.Else != nil && nodeContainsExactCall(value.Else, target) {
+			if restriction, ok := requestMediaTypesForCondition(frame, value.Cond, contentTypeVars, false); ok {
+				current = restrictRequestMediaTypes(current, restriction)
+			}
+			return requestMediaTypesInStatement(frame, value.Else, target, contentTypeVars, current)
+		}
+	case *ast.SwitchStmt:
+		if value.Init != nil && nodeContainsExactCall(value.Init, target) || nodeContainsExactCall(value.Tag, target) {
+			return current, true
+		}
+		if !isRequestContentTypeExpr(frame, value.Tag, contentTypeVars) || value.Body == nil {
+			return current, true
+		}
+		for _, item := range value.Body.List {
+			clause, ok := item.(*ast.CaseClause)
+			if !ok || !nodeContainsExactCall(clause, target) {
+				continue
+			}
+			if restriction, exact := staticMediaTypesForExpressions(frame, clause.List); exact {
+				current = restrictRequestMediaTypes(current, restriction)
+			}
+			return requestMediaTypesInStatements(frame, clause.Body, target, contentTypeVars, current)
+		}
+	case *ast.ForStmt:
+		if nodeContainsExactCall(value.Body, target) {
+			return requestMediaTypesInStatements(frame, value.Body.List, target, contentTypeVars, current)
+		}
+	case *ast.RangeStmt:
+		if nodeContainsExactCall(value.Body, target) {
+			return requestMediaTypesInStatements(frame, value.Body.List, target, contentTypeVars, current)
+		}
+	case *ast.LabeledStmt:
+		return requestMediaTypesInStatement(frame, value.Stmt, target, contentTypeVars, current)
+	}
+	return current, true
+}
+
+func requestMediaTypesAfterGuard(
+	frame helperFrame,
+	statement ast.Stmt,
+	contentTypeVars map[gotypes.Object]bool,
+) ([]string, bool) {
+	switch value := statement.(type) {
+	case *ast.IfStmt:
+		if value.Else == nil && statementsEndWithReturn(value.Body.List) {
+			return requestMediaTypesForCondition(frame, value.Cond, contentTypeVars, false)
+		}
+	case *ast.SwitchStmt:
+		if !isRequestContentTypeExpr(frame, value.Tag, contentTypeVars) || value.Body == nil {
+			return nil, false
+		}
+		defaultTerminates := false
+		accepted := []string{}
+		for _, item := range value.Body.List {
+			clause, ok := item.(*ast.CaseClause)
+			if !ok {
+				return nil, false
+			}
+			if len(clause.List) == 0 {
+				defaultTerminates = statementsEndWithReturn(clause.Body)
+				continue
+			}
+			if statementsContainFallthrough(clause.Body) {
+				return nil, false
+			}
+			if !statementsEndWithReturn(clause.Body) {
+				mediaTypes, exact := staticMediaTypesForExpressions(frame, clause.List)
+				if !exact {
+					return nil, false
+				}
+				accepted = append(accepted, mediaTypes...)
 			}
 		}
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		if defaultTerminates && len(accepted) > 0 {
+			return mergeUniqueStrings(nil, accepted), true
 		}
-		if callSubtreeHasStringLiteral(call, "application/json") && exprMentionsGinContentType(frame, call) {
+	}
+	return nil, false
+}
+
+func requestMediaTypesForCondition(
+	frame helperFrame,
+	expr ast.Expr,
+	contentTypeVars map[gotypes.Object]bool,
+	truth bool,
+) ([]string, bool) {
+	if paren, ok := expr.(*ast.ParenExpr); ok {
+		return requestMediaTypesForCondition(frame, paren.X, contentTypeVars, truth)
+	}
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.NOT {
+		return requestMediaTypesForCondition(frame, unary.X, contentTypeVars, !truth)
+	}
+	binary, ok := expr.(*ast.BinaryExpr)
+	if !ok {
+		return nil, false
+	}
+	if binary.Op == token.LAND || binary.Op == token.LOR {
+		left, leftOK := requestMediaTypesForCondition(frame, binary.X, contentTypeVars, truth)
+		right, rightOK := requestMediaTypesForCondition(frame, binary.Y, contentTypeVars, truth)
+		if !leftOK || !rightOK {
+			return nil, false
+		}
+		union := binary.Op == token.LOR && truth || binary.Op == token.LAND && !truth
+		if union {
+			return mergeUniqueStrings(left, right), true
+		}
+		return intersectRequestMediaTypes(left, right), true
+	}
+	if binary.Op != token.EQL && binary.Op != token.NEQ {
+		return nil, false
+	}
+	var literal ast.Expr
+	switch {
+	case isRequestContentTypeExpr(frame, binary.X, contentTypeVars):
+		literal = binary.Y
+	case isRequestContentTypeExpr(frame, binary.Y, contentTypeVars):
+		literal = binary.X
+	default:
+		return nil, false
+	}
+	equalityHolds := binary.Op == token.EQL && truth || binary.Op == token.NEQ && !truth
+	if !equalityHolds {
+		return nil, false
+	}
+	return staticMediaTypesForExpressions(frame, []ast.Expr{literal})
+}
+
+func staticMediaTypesForExpressions(frame helperFrame, expressions []ast.Expr) ([]string, bool) {
+	if len(expressions) == 0 {
+		return nil, false
+	}
+	out := []string{}
+	for _, expr := range expressions {
+		value, ok := frameStringValue(frame, expr)
+		if !ok {
+			return nil, false
+		}
+		if mediaType, ok := staticMediaType(value); ok {
+			out = append(out, mediaType)
+		} else {
+			return nil, false
+		}
+	}
+	return mergeUniqueStrings(nil, out), true
+}
+
+func restrictRequestMediaTypes(current, restriction []string) []string {
+	if len(current) == 0 {
+		return mergeUniqueStrings(nil, restriction)
+	}
+	return intersectRequestMediaTypes(current, restriction)
+}
+
+func intersectRequestMediaTypes(left, right []string) []string {
+	rightSet := make(map[string]bool, len(right))
+	for _, value := range right {
+		rightSet[value] = true
+	}
+	out := []string{}
+	for _, value := range left {
+		if rightSet[value] {
+			out = append(out, value)
+		}
+	}
+	return mergeUniqueStrings(nil, out)
+}
+
+func nodeContainsExactCall(node ast.Node, target *ast.CallExpr) bool {
+	found := false
+	ast.Inspect(node, func(current ast.Node) bool {
+		if found {
+			return false
+		}
+		if _, ok := current.(*ast.FuncLit); ok {
+			return false
+		}
+		if current == target {
 			found = true
 			return false
 		}
@@ -6119,55 +6903,147 @@ func hasJSONContentTypeEvidence(frame helperFrame) bool {
 	return found
 }
 
-func exprMentionsGinContentType(frame helperFrame, expr ast.Expr) bool {
-	found := false
-	ast.Inspect(expr, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
+func statementsEndWithReturn(statements []ast.Stmt) bool {
+	if len(statements) == 0 {
+		return false
+	}
+	_, ok := statements[len(statements)-1].(*ast.ReturnStmt)
+	return ok
+}
+
+func statementsContainFallthrough(statements []ast.Stmt) bool {
+	for _, statement := range statements {
+		branch, ok := statement.(*ast.BranchStmt)
+		if ok && branch.Tok == token.FALLTHROUGH {
 			return true
 		}
-		name, recvPkg, ok := routes.GinMethod(frame.decl.info, call)
-		if ok && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) && name == "ContentType" {
-			found = true
+	}
+	return false
+}
+
+func requestContentTypeVars(frame helperFrame) map[gotypes.Object]bool {
+	h := frame.decl
+	assignments := map[gotypes.Object][]ast.Expr{}
+	record := func(target ast.Expr, source ast.Expr) {
+		if id, ok := target.(*ast.Ident); ok && id.Name != "_" {
+			if object := h.info.ObjectOf(id); object != nil {
+				assignments[object] = append(assignments[object], source)
+			}
+		}
+	}
+	ast.Inspect(h.decl.Body, func(node ast.Node) bool {
+		if _, ok := node.(*ast.FuncLit); ok {
 			return false
 		}
-		if ok && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) && name == "GetHeader" {
-			key, ok := stringArg(call, 0)
-			if ok && strings.EqualFold(key, "Content-Type") {
-				found = true
-				return false
+		switch value := node.(type) {
+		case *ast.AssignStmt:
+			if len(value.Lhs) != len(value.Rhs) {
+				for _, target := range value.Lhs {
+					record(target, nil)
+				}
+				return true
+			}
+			for index, target := range value.Lhs {
+				record(target, value.Rhs[index])
+			}
+		case *ast.ValueSpec:
+			if len(value.Names) != len(value.Values) {
+				for _, target := range value.Names {
+					record(target, nil)
+				}
+				return true
+			}
+			for index, target := range value.Names {
+				record(target, value.Values[index])
 			}
 		}
 		return true
 	})
-	return found
-}
-
-func exprHasStringLiteral(expr ast.Expr, value string) bool {
-	return callSubtreeHasStringLiteral(expr, value)
-}
-
-func callSubtreeHasStringLiteral(root ast.Node, value string) bool {
-	found := false
-	ast.Inspect(root, func(n ast.Node) bool {
-		if found {
-			return false
+	vars := map[gotypes.Object]bool{}
+	for pass := 0; pass <= len(assignments); pass++ {
+		next := map[gotypes.Object]bool{}
+		for object, writes := range assignments {
+			if len(writes) == 0 {
+				continue
+			}
+			proven := true
+			for _, source := range writes {
+				if source == nil || !isRequestContentTypeExpr(frame, source, vars) {
+					proven = false
+					break
+				}
+			}
+			if proven {
+				next[object] = true
+			}
 		}
-		lit, ok := n.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
+		if len(next) == len(vars) {
+			equal := true
+			for object := range next {
+				if !vars[object] {
+					equal = false
+					break
+				}
+			}
+			if equal {
+				return next
+			}
+		}
+		vars = next
+	}
+	return vars
+}
+
+func isRequestContentTypeExpr(frame helperFrame, expr ast.Expr, vars map[gotypes.Object]bool) bool {
+	if expr == nil {
+		return false
+	}
+	if paren, ok := expr.(*ast.ParenExpr); ok {
+		return isRequestContentTypeExpr(frame, paren.X, vars)
+	}
+	if id, ok := expr.(*ast.Ident); ok && frame.decl.info != nil {
+		return vars[frame.decl.info.ObjectOf(id)]
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	name, recvPkg, ginCall := routes.GinMethod(frame.decl.info, call)
+	if ginCall && recvPkg == routes.GinPkgPath && isRoutedGinContextCall(frame, call) {
+		if name == "ContentType" {
 			return true
 		}
-		unquoted, err := strconv.Unquote(lit.Value)
-		if err == nil && strings.EqualFold(unquoted, value) {
-			found = true
-			return false
+		if name == "GetHeader" {
+			key, ok := frameCallStringArg(frame, call, 0)
+			return ok && strings.EqualFold(key, "Content-Type")
 		}
-		return true
-	})
-	return found
+	}
+	key, matched, resolved := requestHeaderGetInFrame(frame, call)
+	return matched && resolved && strings.EqualFold(key, "Content-Type")
+}
+
+func staticMediaType(value string) (string, bool) {
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil || !strings.Contains(mediaType, "/") || strings.Contains(mediaType, "*") {
+		return "", false
+	}
+	return strings.ToLower(mediaType), true
+}
+
+func mergeUniqueStrings(groups ...[]string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, group := range groups {
+		for _, value := range group {
+			if value == "" || seen[value] {
+				continue
+			}
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func isByteSlice(t gotypes.Type) bool {
@@ -6533,6 +7409,12 @@ func (a *Analyzer) addExtractedParameter(
 			param.Schema = existing.Schema
 			param.Span = existing.Span
 		}
+		if param.Constraints == nil {
+			param.Constraints = existing.Constraints
+		}
+		if param.ItemConstraints == nil {
+			param.ItemConstraints = existing.ItemConstraints
+		}
 		param.Default = firstLiteral(param.Default, existing.Default)
 		if param.Style == "" {
 			param.Style = existing.Style
@@ -6546,6 +7428,7 @@ func (a *Analyzer) addExtractedParameter(
 			existing.Schema = param.Schema
 			existing.Span = param.Span
 		}
+		mergeParameterConstraintFacts(existing, param, route, diags)
 		if existing.Default == nil {
 			existing.Default = param.Default
 		}
@@ -6584,6 +7467,7 @@ func (a *Analyzer) addExtractedParameter(
 		}
 	}
 	existing.Required = existing.Required || param.Required
+	mergeParameterConstraintFacts(existing, param, route, diags)
 	if existing.Default == nil {
 		existing.Default = param.Default
 	} else if param.Default != nil && !reflect.DeepEqual(existing.Default, param.Default) && diags != nil {
@@ -6621,6 +7505,38 @@ func (a *Analyzer) addExtractedParameter(
 		)
 	}
 	existing.AllowReserved = existing.AllowReserved || param.AllowReserved
+}
+
+func mergeParameterConstraintFacts(
+	existing *facts.ParamFact,
+	incoming facts.ParamFact,
+	route routes.Route,
+	diags *diag.Accumulator,
+) {
+	if existing == nil {
+		return
+	}
+	merge := func(label string, destination **facts.Constraints, source *facts.Constraints) {
+		if source == nil {
+			return
+		}
+		if *destination == nil {
+			*destination = source
+			return
+		}
+		if !reflect.DeepEqual(*destination, source) && diags != nil {
+			diags.RequestParameterUnresolved(
+				incoming.Name,
+				route.Method,
+				untypedRouteLabel(route),
+				"conflicting extracted "+label+" constraints for "+incoming.Location+"/"+incoming.Name,
+				incoming.Span.File,
+				incoming.Span.StartLine,
+			)
+		}
+	}
+	merge("parameter", &existing.Constraints, incoming.Constraints)
+	merge("item", &existing.ItemConstraints, incoming.ItemConstraints)
 }
 
 // OpenAPI defines Accept, Content-Type, and Authorization through response/request media types and
@@ -6796,6 +7712,15 @@ func (a *Analyzer) parametersFromBoundType(
 			schema,
 			fset,
 			field.Pos(),
+		)
+		param.Constraints, param.ItemConstraints = parameterValidationConstraints(
+			schema,
+			tag,
+			name,
+			route,
+			diags,
+			file,
+			line,
 		)
 		if defaultText, exists := parameterDefault(tag, options); exists {
 			if schema.Type == facts.TypeArray || schema.Type == facts.TypeMap || schema.Type == facts.TypeObject {
@@ -7001,6 +7926,7 @@ func (t parameterRuleTarget) label() string {
 // source even when the rules themselves are spelled identically.
 type parameterEnumRule struct {
 	scope  tags.Scope
+	nested bool
 	values []string
 	text   string
 }
@@ -7071,6 +7997,19 @@ func schemaWithParameterConstraints(
 ) facts.Type {
 	statedEnums := map[parameterRuleTarget][]parameterEnumRule{}
 	for _, rule := range parameterEnumRules(tag) {
+		if rule.nested {
+			if diags != nil {
+				diags.RequestParameterUnresolved(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"validation rule "+rule.text+" targets a nested value below the parameter IR's item layer",
+					file,
+					line,
+				)
+			}
+			continue
+		}
 		target := parameterRuleTargetOf(schema, rule.scope)
 		if target == parameterRuleTargetNone {
 			continue
@@ -7079,6 +8018,19 @@ func schemaWithParameterConstraints(
 	}
 	statedFormats := map[parameterRuleTarget][]parameterFormatRule{}
 	for _, rule := range parameterFormatRules(tag) {
+		if rule.nested {
+			if diags != nil {
+				diags.RequestParameterUnresolved(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"validation rule "+rule.text+" targets a nested value below the parameter IR's item layer",
+					file,
+					line,
+				)
+			}
+			continue
+		}
 		target := parameterRuleTargetOf(schema, rule.scope)
 		if target == parameterRuleTargetNone {
 			continue
@@ -7148,6 +8100,7 @@ func schemaWithParameterConstraints(
 
 type parameterFormatRule struct {
 	scope  tags.Scope
+	nested bool
 	format string
 	text   string
 }
@@ -7164,7 +8117,7 @@ func parameterFormatRules(tag reflect.StructTag) []parameterFormatRule {
 				format = facts.WellKnownURI
 			}
 			if format != "" {
-				rules = append(rules, parameterFormatRule{scope: token.Scope, format: format, text: quoteTagRule(key, token.Text)})
+				rules = append(rules, parameterFormatRule{scope: token.Scope, nested: token.Nested, format: format, text: quoteTagRule(key, token.Text)})
 			}
 		}
 	}
@@ -7221,7 +8174,7 @@ func parameterEnumRules(tag reflect.StructTag) []parameterEnumRule {
 				continue
 			}
 			if values := strings.Fields(strings.ReplaceAll(value, "|", " ")); len(values) > 0 {
-				rules = append(rules, parameterEnumRule{scope: token.Scope, values: values, text: quoteTagRule(key, token.Text)})
+				rules = append(rules, parameterEnumRule{scope: token.Scope, nested: token.Nested, values: values, text: quoteTagRule(key, token.Text)})
 			}
 		}
 	}
@@ -7250,6 +8203,318 @@ func renderEnumRules(rules []parameterEnumRule) string {
 		spellings = append(spellings, rule.text)
 	}
 	return strings.Join(spellings, ", ")
+}
+
+type parameterConstraintRule struct {
+	target  parameterRuleTarget
+	keyword string
+	size    *uint64
+	number  *string
+	text    string
+}
+
+// parameterValidationConstraints carries the validation rules that refine a
+// parameter schema without changing its Go type. Field-scope rules apply to the
+// parameter itself; rules after one dive apply to the array item or map value.
+// The wire facts intentionally carry exactly one item layer: a second dive is
+// not distinguishable in the shared tag scope and is therefore diagnosed by the
+// rule-to-schema check instead of being guessed onto an arbitrary depth.
+func parameterValidationConstraints(
+	schema facts.Type,
+	tag reflect.StructTag,
+	name string,
+	route routes.Route,
+	diags *diag.Accumulator,
+	file string,
+	line uint32,
+) (*facts.Constraints, *facts.Constraints) {
+	bySlot := map[string][]parameterConstraintRule{}
+	for _, key := range []string{"binding", "validate"} {
+		for _, token := range tags.Scoped(tag.Get(key)) {
+			ruleName, value, hasValue := strings.Cut(token.Text, "=")
+			ruleName = strings.TrimSpace(ruleName)
+			value = strings.TrimSpace(value)
+			if ruleName == "required" && token.Scope == tags.ScopeField {
+				continue
+			}
+			if parameterConstraintTokenHandledElsewhere(ruleName) {
+				continue
+			}
+			if token.Nested {
+				if diags != nil {
+					diags.RequestParameterUnresolved(
+						name,
+						route.Method,
+						untypedRouteLabel(route),
+						"validation rule "+quoteTagRule(key, token.Text)+" targets a nested value below the parameter IR's item layer",
+						file,
+						line,
+					)
+				}
+				continue
+			}
+			target, targetSchema, ok := parameterConstraintTarget(schema, token.Scope)
+			if !ok {
+				if diags != nil {
+					diags.RequestParameterUnresolved(
+						name,
+						route.Method,
+						untypedRouteLabel(route),
+						"validation rule "+quoteTagRule(key, token.Text)+" targets a value whose constraints the parameter IR cannot represent",
+						file,
+						line,
+					)
+				}
+				continue
+			}
+			rule, reason, recognized := parameterConstraintRuleFor(ruleName, value, hasValue, target, targetSchema)
+			if !recognized {
+				if diags != nil {
+					diags.RequestParameterUnresolved(
+						name,
+						route.Method,
+						untypedRouteLabel(route),
+						"validation rule "+quoteTagRule(key, token.Text)+" is consumed by the binding validator but has no exact parameter IR representation",
+						file,
+						line,
+					)
+				}
+				continue
+			}
+			if reason != "" {
+				if diags != nil {
+					diags.RequestParameterUnresolved(
+						name,
+						route.Method,
+						untypedRouteLabel(route),
+						"validation rule "+quoteTagRule(key, token.Text)+" cannot be represented: "+reason,
+						file,
+						line,
+					)
+				}
+				continue
+			}
+			rule.text = quoteTagRule(key, token.Text)
+			slot := strconv.Itoa(int(rule.target)) + "/" + rule.keyword
+			bySlot[slot] = append(bySlot[slot], rule)
+		}
+	}
+
+	self := &facts.Constraints{}
+	item := &facts.Constraints{}
+	slots := make([]string, 0, len(bySlot))
+	for slot := range bySlot {
+		slots = append(slots, slot)
+	}
+	sort.Strings(slots)
+	for _, slot := range slots {
+		rules := bySlot[slot]
+		if len(rules) != 1 {
+			if diags != nil {
+				spellings := make([]string, 0, len(rules))
+				for _, rule := range rules {
+					spellings = append(spellings, rule.text)
+				}
+				diags.RequestParameterAmbiguous(
+					name,
+					route.Method,
+					untypedRouteLabel(route),
+					"constraint stated more than once for "+rules[0].target.label()+" ("+strings.Join(spellings, ", ")+")",
+					file,
+					line,
+				)
+			}
+			continue
+		}
+		destination := self
+		if rules[0].target == parameterRuleTargetElement {
+			destination = item
+		}
+		applyParameterConstraintRule(destination, rules[0])
+	}
+	if constraintsEmpty(self) {
+		self = nil
+	}
+	if constraintsEmpty(item) {
+		item = nil
+	}
+	return self, item
+}
+
+func parameterConstraintTokenHandledElsewhere(name string) bool {
+	switch name {
+	case "omitempty", "oneof", "uuid", "uri":
+		return true
+	case "required":
+		// Field-scope requiredness is carried by ParamFact.Required. Item-scope
+		// required is handled here because a non-empty string has an exact schema.
+		return false
+	default:
+		return false
+	}
+}
+
+func parameterConstraintTarget(schema facts.Type, scope tags.Scope) (parameterRuleTarget, facts.Type, bool) {
+	switch scope {
+	case tags.ScopeField:
+		return parameterRuleTargetSelf, schema, true
+	case tags.ScopeElement:
+		switch value := schema.Of.(type) {
+		case *facts.Type:
+			if schema.Type == facts.TypeArray && value != nil {
+				return parameterRuleTargetElement, *value, true
+			}
+		case *facts.MapType:
+			if schema.Type == facts.TypeMap && value != nil {
+				return parameterRuleTargetElement, value.Value, true
+			}
+		}
+	}
+	return parameterRuleTargetNone, facts.Type{}, false
+}
+
+func parameterConstraintRuleFor(
+	name string,
+	value string,
+	hasValue bool,
+	target parameterRuleTarget,
+	schema facts.Type,
+) (parameterConstraintRule, string, bool) {
+	rule := parameterConstraintRule{target: target}
+	if name == "required" {
+		if target == parameterRuleTargetSelf {
+			return rule, "", true
+		}
+		if parameterSchemaIsStringLike(schema) {
+			one := uint64(1)
+			rule.keyword = "min_length"
+			rule.size = &one
+			return rule, "", true
+		}
+		return rule, "item requiredness is not a contiguous scalar constraint for " + schema.Type, true
+	}
+	if name != "min" && name != "max" && name != "gte" && name != "lte" && name != "gt" && name != "lt" {
+		return rule, "", false
+	}
+	if !hasValue || value == "" {
+		return rule, "a numeric bound value is required", true
+	}
+	if schema.Type == facts.TypeArray || schema.Type == facts.TypeMap || parameterSchemaIsStringLike(schema) {
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return rule, "size bounds must be non-negative integers", true
+		}
+		if name == "gt" {
+			if parsed == math.MaxUint64 {
+				return rule, "strict lower size bound overflows", true
+			}
+			parsed++
+		}
+		if name == "lt" {
+			if parsed == 0 {
+				return rule, "strict upper size bound has no satisfying non-negative size", true
+			}
+			parsed--
+		}
+		rule.size = &parsed
+		lower := name == "min" || name == "gte" || name == "gt"
+		switch schema.Type {
+		case facts.TypeArray:
+			if lower {
+				rule.keyword = "min_items"
+			} else {
+				rule.keyword = "max_items"
+			}
+		case facts.TypeMap:
+			if lower {
+				rule.keyword = "min_properties"
+			} else {
+				rule.keyword = "max_properties"
+			}
+		default:
+			if lower {
+				rule.keyword = "min_length"
+			} else {
+				rule.keyword = "max_length"
+			}
+		}
+		return rule, "", true
+	}
+	if parameterSchemaIsNumeric(schema) {
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil || math.IsInf(parsed, 0) || math.IsNaN(parsed) {
+			return rule, "numeric bounds must be finite numeric literals", true
+		}
+		rule.number = &value
+		switch name {
+		case "min", "gte":
+			rule.keyword = "minimum"
+		case "max", "lte":
+			rule.keyword = "maximum"
+		case "gt":
+			rule.keyword = "exclusive_minimum"
+		case "lt":
+			rule.keyword = "exclusive_maximum"
+		}
+		return rule, "", true
+	}
+	return rule, "the parameter type does not admit this bound", true
+}
+
+func parameterSchemaIsStringLike(schema facts.Type) bool {
+	return isPrimitiveStringType(schema) || schema.Type == facts.TypeEnum
+}
+
+func parameterSchemaIsNumeric(schema facts.Type) bool {
+	if schema.Type != facts.TypePrimitive {
+		return false
+	}
+	primitive, ok := schema.Of.(*facts.Prim)
+	return ok && primitive != nil && (primitive.Prim == facts.PrimInt || primitive.Prim == facts.PrimFloat)
+}
+
+func applyParameterConstraintRule(constraints *facts.Constraints, rule parameterConstraintRule) {
+	if constraints == nil {
+		return
+	}
+	switch rule.keyword {
+	case "min_length":
+		constraints.MinLength = rule.size
+	case "max_length":
+		constraints.MaxLength = rule.size
+	case "min_items":
+		constraints.MinItems = rule.size
+	case "max_items":
+		constraints.MaxItems = rule.size
+	case "min_properties":
+		constraints.MinProperties = rule.size
+	case "max_properties":
+		constraints.MaxProperties = rule.size
+	case "minimum":
+		constraints.Minimum = rule.number
+	case "maximum":
+		constraints.Maximum = rule.number
+	case "exclusive_minimum":
+		constraints.ExclusiveMinimum = rule.number
+	case "exclusive_maximum":
+		constraints.ExclusiveMaximum = rule.number
+	}
+}
+
+func constraintsEmpty(constraints *facts.Constraints) bool {
+	return constraints == nil ||
+		(constraints.MinLength == nil &&
+			constraints.MaxLength == nil &&
+			constraints.MinItems == nil &&
+			constraints.MaxItems == nil &&
+			constraints.MinProperties == nil &&
+			constraints.MaxProperties == nil &&
+			constraints.Minimum == nil &&
+			constraints.Maximum == nil &&
+			constraints.ExclusiveMinimum == nil &&
+			constraints.ExclusiveMaximum == nil &&
+			constraints.Pattern == nil &&
+			len(constraints.EnumValues) == 0)
 }
 
 func parameterDefault(tag reflect.StructTag, options []string) (string, bool) {

@@ -1465,6 +1465,7 @@ mod tests {
                 status: 204,
                 body: Some(crate::graph::SchemaRef {
                     ref_id: "message".to_string(),
+                    provenance: None,
                 }),
                 body_kind: "json".to_string(),
                 content_type: Some("application/json".to_string()),

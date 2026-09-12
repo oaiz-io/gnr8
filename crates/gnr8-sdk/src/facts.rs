@@ -97,9 +97,8 @@ pub struct RouteFact {
     pub span: SourceSpan,
 }
 
-/// One path or query parameter of a route, derived purely from code. Path params
-/// are required; query params default to a string type and not required. There is
-/// no description or enum — those were annotation-only and are gone.
+/// One path, query, header, or cookie parameter of a route, derived purely from code.
+/// Typed binding may supply enums, validation constraints, and serialization.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParamFact {
@@ -111,6 +110,12 @@ pub struct ParamFact {
     pub required: bool,
     /// The parameter's type.
     pub schema: Type,
+    /// Constraints on the parameter value itself.
+    #[serde(default, skip_serializing_if = "Constraints::is_empty")]
+    pub constraints: Constraints,
+    /// Constraints on one array item or map value after a validation `dive`.
+    #[serde(default, skip_serializing_if = "Constraints::is_empty")]
+    pub item_constraints: Constraints,
     /// Source-inferred default value, when a query helper exposes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<LiteralValue>,
@@ -516,6 +521,9 @@ fn is_false(value: &bool) -> bool {
 pub struct TypeRef {
     /// The referenced schema id.
     pub ref_id: String,
+    /// Source location where this reference was established.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 /// One diagnostic (lossy/unsupported pattern) with a source location (D-10).

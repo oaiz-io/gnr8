@@ -38,7 +38,7 @@ mod json;
 pub(crate) mod model;
 mod yaml;
 
-use crate::analyze::facts::LiteralValue;
+use crate::analyze::facts::{Constraints, LiteralValue};
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{
     split_local_component_ref, ApiGraph, Field, Operation as GraphOp, OperationDocsPolicy, Prim,
@@ -571,6 +571,12 @@ fn lower_parameter(
     ref_to_name: &BTreeMap<&str, &str>,
 ) -> Result<Parameter, crate::CoreError> {
     let mut schema = lower_schema_type(&param.schema, ref_to_name, SchemaDirections::REQUEST)?;
+    apply_constraints(&param.constraints, &mut schema);
+    if let Some(items) = &mut schema.items {
+        apply_constraints(&param.item_constraints, items);
+    } else if let Some(value) = &mut schema.additional_properties_schema {
+        apply_constraints(&param.item_constraints, value);
+    }
     schema.default_value.clone_from(&param.default);
     let mut openapi_content = param.openapi_content.clone();
     if let Some(content) = &mut openapi_content {
@@ -947,6 +953,16 @@ fn lower_object(
 
 fn apply_field_meta(field: &Field, prop: &mut SchemaObject) {
     let constraints = &field.meta.constraints;
+    apply_constraints(constraints, prop);
+    if let Some(format) = &field.meta.format {
+        prop.format = Some(format.clone());
+    }
+    prop.default_value.clone_from(&field.meta.default);
+    prop.extensions.clone_from(&field.meta.extensions);
+    prop.extensions.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+fn apply_constraints(constraints: &Constraints, prop: &mut SchemaObject) {
     prop.min_length = constraints.min_length;
     prop.max_length = constraints.max_length;
     prop.min_items = constraints.min_items;
@@ -960,17 +976,11 @@ fn apply_field_meta(field: &Field, prop: &mut SchemaObject) {
     prop.exclusive_maximum
         .clone_from(&constraints.exclusive_maximum);
     prop.pattern.clone_from(&constraints.pattern);
-    if let Some(format) = &field.meta.format {
-        prop.format = Some(format.clone());
-    }
     if !constraints.enum_values.is_empty() {
         let mut enum_values = constraints.enum_values.clone();
         enum_values.sort();
         prop.enum_values = enum_values;
     }
-    prop.default_value.clone_from(&field.meta.default);
-    prop.extensions.clone_from(&field.meta.extensions);
-    prop.extensions.sort_by(|a, b| a.name.cmp(&b.name));
 }
 
 /// Lower a field's neutral [`Type`] applying the field's `nullable` axis: a nullable scalar/array/map
@@ -1447,6 +1457,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parameter_and_item_constraints_lower_from_the_graph() {
+        let mut graph = sample_graph();
+        let param = graph
+            .operations
+            .iter_mut()
+            .find_map(|operation| operation.params.first_mut())
+            .expect("the sample graph has a parameter");
+        param.name = "scores".to_string();
+        param.schema = Type::Array(Box::new(Type::Primitive(Prim::Int {
+            bits: 64,
+            signed: true,
+        })));
+        param.constraints.min_items = Some(1);
+        param.constraints.max_items = Some(5);
+        param.item_constraints.minimum = Some("0".to_string());
+        param.item_constraints.maximum = Some("10".to_string());
+
+        let yaml = to_openapi(&graph, "goalservice", "/goal", &security_config()).unwrap();
+        let parameter = yaml.split("name: scores").nth(1).expect("scores parameter");
+        assert!(parameter.contains("minItems: 1"), "{parameter}");
+        assert!(parameter.contains("maxItems: 5"), "{parameter}");
+        assert!(parameter.contains("minimum: 0"), "{parameter}");
+        assert!(parameter.contains("maximum: 10"), "{parameter}");
+    }
+
     /// A field carrying nothing but the two presence axes, so a test can state the case it means and
     /// nothing else. `SAMPLE`'s schemas index as `CommandMessage` 0, `CreateGoalInput` 1,
     /// `GoalResponse` 2, `TargetDirection` 3 (sorted by id) — `CreateGoalInput` is the only one a
@@ -1615,6 +1651,7 @@ mod tests {
         // Point a request body at a ref_id that is not among the schemas.
         graph.operations[0].request_body = Some(crate::graph::SchemaRef {
             ref_id: "internal/dto.DoesNotExist".to_string(),
+            provenance: None,
         });
         let err = to_openapi(&graph, "goalservice", "/goal", &security_config()).unwrap_err();
         let crate::CoreError::Lowering { message } = err else {

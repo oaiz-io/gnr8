@@ -48,6 +48,9 @@ const (
 type Token struct {
 	Text  string
 	Scope Scope
+	// Nested is true once more than one dive has been crossed. Readers whose
+	// IR carries only one item layer must diagnose rather than flatten it.
+	Nested bool
 }
 
 // Scoped splits a `binding:`/`validate:` value into tokens and marks what each one
@@ -58,7 +61,7 @@ func Scoped(value string) []Token {
 	}
 	parts := strings.Split(value, ",")
 	tokens := make([]Token, 0, len(parts))
-	dived := false
+	diveDepth := 0
 	inKeys := false
 	for _, part := range parts {
 		text := strings.TrimSpace(part)
@@ -67,7 +70,7 @@ func Scoped(value string) []Token {
 			continue
 		case "dive":
 			// One dive already leaves the field; nested dives only descend further.
-			dived = true
+			diveDepth++
 			inKeys = false
 			continue
 		case "keys":
@@ -81,10 +84,10 @@ func Scoped(value string) []Token {
 		switch {
 		case inKeys:
 			scope = ScopeMapKey
-		case dived:
+		case diveDepth > 0:
 			scope = ScopeElement
 		}
-		tokens = append(tokens, Token{Text: text, Scope: scope})
+		tokens = append(tokens, Token{Text: text, Scope: scope, Nested: diveDepth > 1})
 	}
 	return tokens
 }

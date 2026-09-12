@@ -2662,6 +2662,8 @@ mod tests {
             location: "query".to_string(),
             required,
             schema: Type::Primitive(Prim::String),
+            constraints: crate::analyze::facts::Constraints::default(),
+            item_constraints: crate::analyze::facts::Constraints::default(),
             default: None,
             style: None,
             explode: None,
@@ -2702,6 +2704,7 @@ mod tests {
         let mut operation = operation();
         operation.request_body = Some(SchemaRef {
             ref_id: root.to_string(),
+            provenance: None,
         });
         ApiGraph {
             operations: vec![operation],
@@ -2719,7 +2722,10 @@ mod tests {
         let mut operation = operation();
         operation.responses = vec![Response {
             status: 200,
-            body: Some(SchemaRef { ref_id: id }),
+            body: Some(SchemaRef {
+                ref_id: id,
+                provenance: None,
+            }),
             body_kind: "json".to_string(),
             content_type: Some("application/json".to_string()),
             content_types: Vec::new(),
@@ -3239,6 +3245,7 @@ mod tests {
         checked_operation.path = "/checked".to_string();
         checked_operation.request_body = Some(SchemaRef {
             ref_id: "Root::input".to_string(),
+            provenance: None,
         });
         shared_base.operations.push(checked_operation.clone());
         let mut shared_current = exempt_current.clone();
@@ -3300,6 +3307,7 @@ mod tests {
         protected.path = "/books".to_string();
         protected.request_body = Some(SchemaRef {
             ref_id: "Root::input".to_string(),
+            provenance: None,
         });
         let mut advisory = protected.clone();
         advisory.id = "createReport".to_string();
@@ -3400,6 +3408,7 @@ mod tests {
         request.path = "/payload".to_string();
         request.request_body = Some(SchemaRef {
             ref_id: "Payload".to_string(),
+            provenance: None,
         });
         let mut response = operation();
         response.id = "getPayload".to_string();
@@ -3408,6 +3417,7 @@ mod tests {
             status: 200,
             body: Some(SchemaRef {
                 ref_id: "Payload".to_string(),
+                provenance: None,
             }),
             body_kind: "json".to_string(),
             content_type: Some("application/json".to_string()),
@@ -3464,12 +3474,14 @@ mod tests {
         first.path = "/first".to_string();
         first.request_body = Some(SchemaRef {
             ref_id: "Shared::input".to_string(),
+            provenance: None,
         });
         let mut second = operation();
         second.id = "second".to_string();
         second.path = "/second".to_string();
         second.request_body = Some(SchemaRef {
             ref_id: "Shared::input".to_string(),
+            provenance: None,
         });
         let base = ApiGraph {
             operations: vec![first.clone(), second.clone()],
@@ -3515,6 +3527,7 @@ mod tests {
         second.path = "/second".to_string();
         second.request_body = Some(SchemaRef {
             ref_id: "Shared::input".to_string(),
+            provenance: None,
         });
         current.operations.push(second);
 
@@ -3750,12 +3763,14 @@ mod tests {
         base_operation.params = vec![parameter(false)];
         base_operation.request_body = Some(SchemaRef {
             ref_id: "OldBody".to_string(),
+            provenance: None,
         });
         base_operation.request_body_content_type = Some("application/json".to_string());
         base_operation.responses = vec![Response {
             status: 200,
             body: Some(SchemaRef {
                 ref_id: "OldResponse".to_string(),
+                provenance: None,
             }),
             body_kind: "json".to_string(),
             content_type: None,
@@ -3772,6 +3787,7 @@ mod tests {
         }];
         current_operation.request_body = Some(SchemaRef {
             ref_id: "NewBody".to_string(),
+            provenance: None,
         });
         current_operation.request_body_content_type = Some("application/cbor".to_string());
         current_operation.responses = vec![Response {
@@ -3944,6 +3960,7 @@ mod tests {
             status: 200,
             body: Some(SchemaRef {
                 ref_id: "Book".to_string(),
+                provenance: None,
             }),
             body_kind: "json".to_string(),
             content_type: Some("application/json".to_string()),
@@ -3970,6 +3987,7 @@ mod tests {
         current = base.clone();
         current.operations[0].responses[0].body = Some(SchemaRef {
             ref_id: "Book".to_string(),
+            provenance: None,
         });
         assert_eq!(
             change(

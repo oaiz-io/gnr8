@@ -223,6 +223,242 @@ fn assert_graph_request_contracts(graph: &ApiGraph) {
     );
 
     assert_collection_constraints(graph);
+    assert_native_binding_contract(graph);
+    assert_native_body_contracts(graph);
+}
+
+fn operation<'a>(graph: &'a ApiGraph, operation_id: &str) -> &'a gnr8_engine::graph::Operation {
+    graph
+        .operations
+        .iter()
+        .find(|operation| operation.id == operation_id)
+        .unwrap_or_else(|| panic!("missing graph operation {operation_id}"))
+}
+
+fn parameter<'a>(
+    operation: &'a gnr8_engine::graph::Operation,
+    name: &str,
+) -> &'a gnr8_engine::graph::Param {
+    operation
+        .params
+        .iter()
+        .find(|parameter| parameter.name == name)
+        .unwrap_or_else(|| panic!("missing parameter {name}: {operation:#?}"))
+}
+
+fn assert_native_binding_contract(graph: &ApiGraph) {
+    let operation = operation(graph, "nativeBindings");
+    let ids = parameter(operation, "ids");
+    assert!(!ids.required, "{ids:#?}");
+    assert_eq!(ids.style.as_deref(), Some("form"), "{ids:#?}");
+    assert_eq!(ids.explode, Some(false), "{ids:#?}");
+    assert_eq!(
+        ids.schema,
+        Type::Array(Box::new(Type::WellKnown(
+            gnr8_engine::graph::WellKnown::Uuid
+        ))),
+        "{ids:#?}"
+    );
+
+    let statuses = parameter(operation, "statuses");
+    assert_eq!(statuses.style.as_deref(), Some("form"), "{statuses:#?}");
+    assert_eq!(statuses.explode, Some(false), "{statuses:#?}");
+    assert_eq!(
+        statuses.schema,
+        Type::Array(Box::new(Type::Enum(vec![
+            "done".to_string(),
+            "ready".to_string(),
+        ]))),
+        "{statuses:#?}"
+    );
+
+    assert_native_scalar_binding_contract(operation);
+
+    let scores = parameter(operation, "scores");
+    assert_eq!(scores.constraints.min_items, Some(1), "{scores:#?}");
+    assert_eq!(scores.constraints.max_items, Some(5), "{scores:#?}");
+    assert_eq!(
+        scores.item_constraints.minimum.as_deref(),
+        Some("0"),
+        "{scores:#?}"
+    );
+    assert_eq!(
+        scores.item_constraints.maximum.as_deref(),
+        Some("10"),
+        "{scores:#?}"
+    );
+
+    let item_id = parameter(operation, "itemId");
+    assert!(item_id.required, "{item_id:#?}");
+    assert_eq!(item_id.location, "path", "{item_id:#?}");
+    assert_eq!(
+        item_id.schema,
+        Type::WellKnown(gnr8_engine::graph::WellKnown::Uuid),
+        "{item_id:#?}"
+    );
+
+    let header = parameter(operation, "X-Request-ID");
+    assert!(header.required, "{header:#?}");
+    assert_eq!(header.location, "header", "{header:#?}");
+    assert_eq!(header.constraints.max_length, Some(64), "{header:#?}");
+    for parameter in &operation.params {
+        assert!(parameter.provenance.start_line > 0, "{parameter:#?}");
+        assert!(
+            parameter.provenance.file.ends_with("app.go"),
+            "{parameter:#?}"
+        );
+    }
+}
+
+fn assert_native_scalar_binding_contract(operation: &gnr8_engine::graph::Operation) {
+    let limit = parameter(operation, "limit");
+    assert!(!limit.required, "{limit:#?}");
+    assert_eq!(
+        limit.default,
+        Some(gnr8_engine::analyze::facts::LiteralValue::Number(
+            "20".to_string(),
+        )),
+        "{limit:#?}"
+    );
+    assert_eq!(
+        limit.constraints.minimum.as_deref(),
+        Some("1"),
+        "{limit:#?}"
+    );
+    assert_eq!(
+        limit.constraints.maximum.as_deref(),
+        Some("100"),
+        "{limit:#?}"
+    );
+
+    let request_id = parameter(operation, "request_id");
+    assert!(!request_id.required, "{request_id:#?}");
+    assert_eq!(
+        request_id.constraints.max_length,
+        Some(128),
+        "{request_id:#?}"
+    );
+
+    let enabled = parameter(operation, "enabled");
+    assert!(!enabled.required, "{enabled:#?}");
+    assert_eq!(enabled.schema, Type::Primitive(Prim::Bool), "{enabled:#?}");
+
+    let count = parameter(operation, "count");
+    assert_eq!(
+        count.schema,
+        Type::Primitive(Prim::Int {
+            bits: 32,
+            signed: true,
+        }),
+        "{count:#?}"
+    );
+    assert_eq!(
+        count.constraints.minimum.as_deref(),
+        Some("-5"),
+        "{count:#?}"
+    );
+    assert_eq!(
+        count.constraints.maximum.as_deref(),
+        Some("5"),
+        "{count:#?}"
+    );
+
+    let ratio = parameter(operation, "ratio");
+    assert_eq!(
+        ratio.schema,
+        Type::Primitive(Prim::Float { bits: 64 }),
+        "{ratio:#?}"
+    );
+    assert_eq!(
+        ratio.constraints.minimum.as_deref(),
+        Some("0.25"),
+        "{ratio:#?}"
+    );
+    assert_eq!(
+        ratio.constraints.maximum.as_deref(),
+        Some("0.75"),
+        "{ratio:#?}"
+    );
+
+    let at = parameter(operation, "at");
+    assert_eq!(
+        at.schema,
+        Type::WellKnown(gnr8_engine::graph::WellKnown::DateTime),
+        "{at:#?}"
+    );
+}
+
+fn assert_native_body_contracts(graph: &ApiGraph) {
+    for operation_id in ["strictDecoder", "rawJSON"] {
+        let operation = operation(graph, operation_id);
+        assert_eq!(
+            operation.request_body_content_type.as_deref(),
+            Some("application/json"),
+            "{operation:#?}"
+        );
+        let body = operation.request_body.as_ref().expect("named JSON body");
+        let provenance = body
+            .provenance
+            .as_ref()
+            .expect("request-body call-site provenance");
+        assert!(provenance.start_line > 0, "{body:#?}");
+        assert!(provenance.file.ends_with("app.go"), "{body:#?}");
+        let schema = graph
+            .schemas
+            .iter()
+            .find(|schema| schema.id == body.ref_id)
+            .expect("named JSON body schema");
+        assert_eq!(schema.name, "StrictDecoderRequest", "{operation:#?}");
+    }
+
+    let raw_command = operation(graph, "rawCommand");
+    assert_eq!(
+        raw_command.request_body_content_type.as_deref(),
+        Some("application/octet-stream"),
+        "{raw_command:#?}"
+    );
+    assert!(
+        raw_command.request_body_variants.is_empty(),
+        "{raw_command:#?}"
+    );
+    let raw_schema_id = &raw_command
+        .request_body
+        .as_ref()
+        .expect("raw byte body")
+        .ref_id;
+    let raw_provenance = raw_command
+        .request_body
+        .as_ref()
+        .and_then(|body| body.provenance.as_ref())
+        .expect("raw-body call-site provenance");
+    assert!(raw_provenance.start_line > 0, "{raw_command:#?}");
+    assert!(raw_provenance.file.ends_with("app.go"), "{raw_command:#?}");
+    let raw_schema = graph
+        .schemas
+        .iter()
+        .find(|schema| schema.id == *raw_schema_id)
+        .expect("raw byte schema");
+    assert_eq!(
+        raw_schema.body,
+        Type::Primitive(Prim::Bytes),
+        "{raw_schema:#?}"
+    );
+
+    for operation_id in ["rawAmbiguous", "unrelatedDecoder"] {
+        assert!(
+            operation(graph, operation_id).request_body.is_none(),
+            "{operation_id} must not acquire an unrelated body"
+        );
+    }
+    assert!(
+        graph.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "request.body.unresolved"
+                && diagnostic.operation.as_deref() == Some("POST /v1/items/raw-ambiguous")
+                && diagnostic.subject.as_deref() == Some("GetRawData")
+        }),
+        "missing raw-body ambiguity diagnostic: {:#?}",
+        graph.diagnostics
+    );
 }
 
 fn assert_collection_constraints(graph: &ApiGraph) {
@@ -651,6 +887,26 @@ fn assert_openapi_request_contracts(openapi: &str) {
         let operation = path_section(openapi, path);
         assert!(!operation.contains("requestBody:"), "{operation}");
     }
+
+    for path in ["/v1/items/strict-decoder", "/v1/items/raw-json"] {
+        let operation = path_section(openapi, path);
+        assert!(
+            operation.contains("application/json:")
+                && operation.contains("#/components/schemas/StrictDecoderRequest"),
+            "{operation}"
+        );
+    }
+    let raw_command = path_section(openapi, "/v1/items/raw-command");
+    assert!(
+        raw_command.contains("application/octet-stream:")
+            && raw_command.contains("#/components/schemas/RawCommandRawRequest"),
+        "{raw_command}"
+    );
+    assert!(
+        !path_section(openapi, "/v1/items/raw-ambiguous").contains("requestBody:")
+            && !path_section(openapi, "/v1/items/unrelated-decoder").contains("requestBody:"),
+        "ambiguous and unrelated reads must not acquire request bodies"
+    );
 }
 
 fn assert_openapi_response_contracts(openapi: &str) {
@@ -753,6 +1009,37 @@ fn assert_openapi_parameter_contracts(openapi: &str) {
             "shared cookie requiredness mismatch for {path}:\n{operation}"
         );
     }
+
+    let native = path_section(openapi, "/v1/items/{itemId}/native-bindings");
+    assert!(
+        native.contains("name: ids")
+            && native.contains("style: form")
+            && native.contains("explode: false")
+            && native.contains("format: uuid")
+            && native.contains("name: limit")
+            && native.contains("default: 20")
+            && native.contains("minimum: 1")
+            && native.contains("maximum: 100")
+            && native.contains("name: request_id")
+            && native.contains("maxLength: 128")
+            && native.contains("name: count")
+            && native.contains("minimum: -5")
+            && native.contains("maximum: 5")
+            && native.contains("name: ratio")
+            && native.contains("minimum: 0.25")
+            && native.contains("maximum: 0.75")
+            && native.contains("name: at")
+            && native.contains("format: date-time")
+            && native.contains("name: scores")
+            && native.contains("minItems: 1")
+            && native.contains("maxItems: 5")
+            && native.contains("minimum: 0")
+            && native.contains("maximum: 10")
+            && native.contains("name: itemId\n        in: path\n        required: true")
+            && native.contains("name: X-Request-ID\n        in: header\n        required: true")
+            && native.contains("maxLength: 64"),
+        "native binding facts did not reach OpenAPI:\n{native}"
+    );
 }
 
 fn path_section<'a>(openapi: &'a str, path: &str) -> &'a str {
