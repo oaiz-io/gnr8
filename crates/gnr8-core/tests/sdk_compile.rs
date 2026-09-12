@@ -1495,13 +1495,21 @@ fn invalid_go_build_maps_to_go_build_error_not_panic() {
 }
 
 fn materialize_go_cli(label: &str, graph: &gnr8_engine::graph::ApiGraph, program: &str) -> PathBuf {
+    materialize_go_cli_with(label, graph, SdkCli::new(program))
+}
+
+fn materialize_go_cli_with(
+    label: &str,
+    graph: &gnr8_engine::graph::ApiGraph,
+    cli: SdkCli,
+) -> PathBuf {
     let dir = unique_temp_dir(label);
     let mut out = Artifacts::new();
     GoSdk::new()
         .module("example.com/bookstore/sdk")
         .to("sdk")
         .without_contract_tests()
-        .cli(program)
+        .cli(cli)
         .generate(graph, &mut out, &Cx::new(&dir))
         .expect("GoSdk with .cli() must generate");
     for file in out.files() {
@@ -1653,6 +1661,53 @@ fn generated_cli_go_builds() {
     assert!(stderr.is_empty(), "{stderr}");
     let (code, _, stderr) = run_cli(&dir, "bookstore", &[], &[]);
     assert_eq!(code, 2, "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The host a program talks to has one source, and a program without one asks rather than guesses.
+#[test]
+fn generated_cli_go_requires_a_base_url_it_was_not_given() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI base-url check: go toolchain unavailable");
+        return;
+    }
+    let dir = materialize_go_cli("cli-base-url-required", &cli_bookstore_graph(), "bookstore");
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed");
+    let (code, stdout, stderr) = run_cli(&dir, "bookstore", &["get-book", "--book-id", "1"], &[]);
+    assert_eq!(code, 2, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("missing required flag --base-url"),
+        "an undeclared host must be a usage error: {stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A declared base URL is the compiled default, and `--help` shows it.
+#[test]
+fn generated_cli_go_uses_the_declared_base_url() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI base-url default: go toolchain unavailable");
+        return;
+    }
+    let dir = materialize_go_cli_with(
+        "cli-base-url-default",
+        &cli_bookstore_graph(),
+        SdkCli::new("bookstore").base_url("http://127.0.0.1:1"),
+    );
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed");
+    let (code, stdout, stderr) = run_cli(&dir, "bookstore", &["get-book", "--help"], &[]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(
+        stdout.contains("http://127.0.0.1:1"),
+        "--help must show the compiled default: {stdout}"
+    );
+    // With a default compiled in, omitting the flag reaches the network instead of failing usage.
+    let (code, _, stderr) = run_cli(&dir, "bookstore", &["get-book", "--book-id", "1"], &[]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("127.0.0.1:1"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
