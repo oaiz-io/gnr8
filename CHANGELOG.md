@@ -30,6 +30,16 @@ must move the minor version.
   for a flag it never emits. A selector that matches nothing — or a scope that leaves no commands —
   is a configuration error.
 
+### Fixed
+
+- **A streaming operation no longer makes `.cli(...)` unusable for a whole API.** The refusal of a
+  `text/event-stream` success now considers only the operations the program wraps, and its remedy is
+  `SdkCli::commands(...)` rather than "drop it from the graph with a `Transform`" — which would also
+  have removed the operation from `openapi.yaml` and from every SDK and reported
+  `operation.removed` as a breaking change. The two verbatim copies of the check are now one helper.
+  [Response overrides](docs/pipeline/transforms.md) now say which targets consume `event_stream`:
+  the OpenAPI targets do, SDK targets reject a typed event schema, and a CLI cannot print a stream.
+
 ## 0.14.1 — 2026-09-11
 
 ### Fixed

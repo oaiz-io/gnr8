@@ -360,6 +360,14 @@ fn sse_success_response_is_sdk_gen() {
         message.contains("SSE") || message.contains("event-stream"),
         "{message}"
     );
+    assert!(
+        message.contains("SdkCli::commands"),
+        "the remedy must be the program's scope, not a graph edit: {message}"
+    );
+    assert!(
+        !message.contains("Transform"),
+        "dropping the operation from the graph is the wrong remedy: {message}"
+    );
 }
 
 fn assert_auth_kwarg(kind: &str, location: &str, name: &str, expected: &str) {
@@ -791,6 +799,10 @@ fn go_sse_success_response_is_sdk_gen() {
         message.contains("SSE") || message.contains("event-stream"),
         "{message}"
     );
+    assert!(
+        message.contains("SdkCli::commands"),
+        "the remedy must be the program's scope, not a graph edit: {message}"
+    );
 }
 
 fn go_func<'a>(text: &'a str, name: &str) -> &'a str {
@@ -1213,4 +1225,90 @@ fn go_commands_selector_emits_only_the_selected_operations() {
         operations.contains("func (c *Client) GetBook"),
         "an operation outside CLI scope must stay a client method:\n{operations}"
     );
+}
+
+// --- S6: a streaming operation left out of the program generates -----------------------------
+
+fn sse_and_json_graph() -> ApiGraph {
+    serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "getBook",
+              "method": "GET",
+              "path": "/books/{id}",
+              "handler": "getBook",
+              "params": [
+                {
+                  "name": "id",
+                  "location": "path",
+                  "required": true,
+                  "schema": { "type": "primitive", "of": { "prim": "string" } },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            },
+            {
+              "id": "streamEvents",
+              "method": "GET",
+              "path": "/events",
+              "handler": "streamEvents",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "sse" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_sse_operation_out_of_scope_no_longer_blocks_the_whole_cli() {
+    let graph = sse_and_json_graph();
+    generate_cli_result(&graph, SdkCli::new("bookstore"))
+        .expect_err("an in-scope SSE operation must still be rejected");
+    let text = generate_cli_with(
+        &graph,
+        SdkCli::new("bookstore").commands(OperationSelector::not(OperationSelector::operation(
+            "streamEvents",
+        ))),
+    );
+    assert!(text.contains("\"get-book\""), "{text}");
+    assert!(!text.contains("stream-events"), "{text}");
+}
+
+#[test]
+fn go_sse_operation_out_of_scope_no_longer_blocks_the_whole_cli() {
+    if skip_go() {
+        return;
+    }
+    let graph = sse_and_json_graph();
+    generate_go_cli_result(&graph, "bookstore")
+        .expect_err("an in-scope SSE operation must still be rejected");
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(SdkCli::new("bookstore").commands(OperationSelector::not(
+            OperationSelector::operation("streamEvents"),
+        )))
+        .generate(&graph, &mut out, &cx())
+        .expect("a scoped Go CLI over an SSE-carrying graph must generate");
+    let text = artifact(&out, "generated/sdk-go/cmd/bookstore/main.go");
+    assert!(text.contains("\"get-book\""), "{text}");
+    assert!(!text.contains("stream-events"), "{text}");
 }
