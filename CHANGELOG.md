@@ -29,6 +29,8 @@ must move the minor version.
   the selected operations only, so an operation that is not a command can no longer fail generation
   for a flag it never emits. A selector that matches nothing — or a scope that leaves no commands —
   is a configuration error.
+- **`SdkCli::base_url(url)` sets the host a generated CLI talks to by default.** `--base-url`
+  overrides it per invocation. Without it the program has no default and the flag is required.
 
 ### Fixed
 
@@ -60,17 +62,20 @@ must move the minor version.
   only where the operation has a request body; `--limit`/`--all` only where a `PaginationPolicy`
   names it; plus `--no-<flag>` for each boolean. `--version` is bound on the root parser, which is
   not a command, and `--json` is bound by neither emitter, so neither is reserved.
-- **`SdkCli::base_url(url)` is the generated CLI's default host, and the only source for one.** The
-  CLI derived it from the OpenAPI document's `servers` and fell back to `http://localhost:8000`, so
-  a fact about the program depended on a fact about the document: pointing a CLI at production meant
-  publishing a deployment URL in the API description, and an API that declares no `servers` shipped
-  a client aimed at localhost. Without `base_url` the program now has no default and `--base-url` is
-  required. `openapi_metadata.servers` and the localhost constant are no longer consulted.
+- **A generated CLI no longer guesses the host it talks to.** It derived the default from the
+  OpenAPI document's `servers` and fell back to `http://localhost:8000`, so a fact about the program
+  depended on a fact about the document: pointing a CLI at production meant publishing a deployment
+  URL in the API description, and an API that declares no `servers` shipped a client aimed at
+  localhost. `SdkCli::base_url(url)` is now the one source; without it the program has no default
+  and `--base-url` is required. `openapi_metadata.servers` and the localhost constant are no longer
+  consulted.
 
 ### Changed
 
-- The generated CLI no longer guesses a host. Existing `.cli("name")` pipelines keep compiling, but
-  a generated CLI without `SdkCli::base_url` now requires `--base-url` on every invocation.
+- **`PySdk::cli` / `GoSdk::cli` take an `SdkCli` as well as a program name.** Every existing
+  `.cli("name")` call keeps compiling — a name converts into an `SdkCli`.
+- A generated CLI without `SdkCli::base_url` now requires `--base-url` on every invocation, where it
+  previously defaulted to the document's first server or to `http://localhost:8000`.
 
 ## 0.14.1 — 2026-09-11
 
