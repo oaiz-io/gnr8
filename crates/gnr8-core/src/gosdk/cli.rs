@@ -143,6 +143,7 @@ pub(crate) fn emit_cli(
         let mut body = String::new();
         let mut imports = ImportSet::default();
         build(&mut body, &mut imports)?;
+        imports.prune_unused(&body, package);
         Ok(SdkFile {
             name: internal_file(program, stem),
             contents: render_internal(module, package, &imports, &body),
@@ -161,6 +162,7 @@ pub(crate) fn emit_cli(
             let mut body = String::new();
             let mut imports = ImportSet::default();
             emit_main(&mut body, &command_files, &ops, &mut imports)?;
+            imports.prune_unused(&body, package);
             SdkFile {
                 name: internal_file(program, "cli"),
                 contents: render_internal_documented(module, package, program, &imports, &body),
@@ -271,6 +273,26 @@ impl ImportSet {
     fn add(&mut self, name: &'static str) {
         self.stdlib.insert(name);
     }
+
+    /// Drop every import the rendered body does not actually reference.
+    ///
+    /// Go rejects an unused import, and which helpers a command emits depends on the operation —
+    /// a command with no required flag and no enum never reaches `os`. Declaring an import and then
+    /// pruning against the emitted text is the only way to be exact without every emitter
+    /// predicting its own output, and an over-declared import is a compile error rather than a
+    /// silent wart, so this runs on every file.
+    fn prune_unused(&mut self, body: &str, package: &str) {
+        self.stdlib
+            .retain(|path| body.contains(&format!("{}.", go_selector(path))));
+        if self.sdk && !body.contains(&format!("{package}.")) {
+            self.sdk = false;
+        }
+    }
+}
+
+/// The identifier a Go import is referenced by: the last segment of its path.
+fn go_selector(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn render_file_with_clause(

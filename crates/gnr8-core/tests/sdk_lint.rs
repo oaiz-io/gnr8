@@ -327,6 +327,85 @@ fn python_sdk_target_with_cli_is_ruff_clean() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The generated CLI package of a SECURED graph is `ruff` clean.
+///
+/// Credential resolution is the CLI's largest shared module and is emitted only when the graph
+/// declares a scheme, so the unsecured gate above never sees it — which is how an unused import and
+/// two undefined names reached it. Only `<pkg>/cli/**` is linted here: securing the graph also
+/// widens the SDK's own `client.py` past 88 columns, which is debt that predates the CLI.
+#[test]
+fn secured_python_cli_package_is_ruff_clean() {
+    if !tool_available("ruff", &["--version"]) {
+        eprintln!("skipping secured python CLI lint: ruff unavailable");
+        return;
+    }
+    let mut graph = gnr8_engine::analyze::build_graph(PY_FIXTURE)
+        .expect("build_graph must succeed (requires python3 for pyextract)");
+    gnr8_engine::sdk::TransformExec::apply(
+        &gnr8_engine::sdk::prelude::ApplySecurity::api_key("ApiKeyAuth", "X-API-Key"),
+        &mut graph,
+        &gnr8_engine::sdk::Cx::new(std::env::temp_dir()),
+    )
+    .expect("ApplySecurity must apply");
+    let target = gnr8_engine::sdk::prelude::PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("sdk")
+        .cli("bookstore");
+    let mut out = gnr8_engine::sdk::Artifacts::new();
+    gnr8_engine::sdk::TargetExec::generate(
+        &target,
+        &graph,
+        &mut out,
+        &gnr8_engine::sdk::Cx::new(std::env::temp_dir()),
+    )
+    .expect("PySdk with .cli() must generate");
+    let dir = unique_temp_dir("py-cli-secured");
+    for artifact in out.files() {
+        let path = dir.join(&artifact.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &artifact.text).expect("write artifact");
+    }
+    let cli_dir = dir.join("sdk").join("cli");
+    assert!(
+        cli_dir.join("credentials.py").is_file(),
+        "a secured graph must emit credential resolution"
+    );
+    let mut sources: Vec<String> = Vec::new();
+    collect_python_sources(&cli_dir, &mut sources);
+    sources.sort();
+    assert!(
+        sources.len() >= 8,
+        "the CLI package must be linted whole: {sources:?}"
+    );
+
+    let mut check_args = vec![
+        "check",
+        "--isolated",
+        "--no-cache",
+        "--select",
+        "F,I,UP,E",
+        "--ignore",
+        "UP007,UP045",
+    ];
+    check_args.extend(sources.iter().map(String::as_str));
+    let (check_ok, check_out, check_err) = run("ruff", &check_args, &dir, &[]);
+    assert!(
+        check_ok,
+        "ruff check flagged the secured CLI package:\n{check_out}{check_err}"
+    );
+
+    let mut fmt_args = vec!["format", "--isolated", "--no-cache", "--check"];
+    fmt_args.extend(sources.iter().map(String::as_str));
+    let (fmt_ok, fmt_out, fmt_err) = run("ruff", &fmt_args, &dir, &[]);
+    assert!(
+        fmt_ok,
+        "ruff format --check would reformat the secured CLI package:\n{fmt_out}{fmt_err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// TypeScript: the default SDK is Prettier-clean. Prefers the vendored `tsextract` prettier, falling back
 /// to a `PATH` prettier; skips when neither (and when `node`/`tsc` for graph-building is absent).
 #[test]

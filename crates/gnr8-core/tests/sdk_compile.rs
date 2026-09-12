@@ -1664,6 +1664,39 @@ fn generated_cli_go_builds() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The same program over a graph that declares a security scheme.
+///
+/// The credential module is the CLI's largest shared file and is emitted only when a scheme exists,
+/// so the unsecured build above never compiles it.
+fn cli_secured_graph() -> gnr8_engine::graph::ApiGraph {
+    let mut graph = cli_bookstore_graph();
+    gnr8_engine::sdk::TransformExec::apply(
+        &gnr8_engine::sdk::prelude::ApplySecurity::api_key("ApiKeyAuth", "X-API-Key"),
+        &mut graph,
+        &Cx::new(std::env::temp_dir()),
+    )
+    .expect("ApplySecurity must apply");
+    graph
+}
+
+/// A secured CLI project compiles and vets, credential module and all.
+#[test]
+fn generated_cli_go_secured_project_builds_and_vets() {
+    if !go_available() {
+        eprintln!("skipping secured Go CLI build: go toolchain unavailable");
+        return;
+    }
+    let dir = materialize_go_cli("cli-secured", &cli_secured_graph(), "bookstore");
+    assert!(
+        dir.join("cmd/bookstore/internal/cli/credentials.go")
+            .is_file(),
+        "a secured graph must emit credential resolution"
+    );
+    run_go(&["build", "./..."], &dir).expect("go build ./... must succeed");
+    run_go(&["vet", "./..."], &dir).expect("go vet ./... must succeed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A graph whose optional parameters carry source defaults, one of them a boolean.
 fn cli_defaults_graph() -> gnr8_engine::graph::ApiGraph {
     serde_json::from_str(

@@ -344,13 +344,11 @@ fn emit_credentials_module(graph: &ApiGraph) -> Result<String, CoreError> {
         writeln!(out, "import os").map_err(sink)?;
         writeln!(out, "import shlex").map_err(sink)?;
         writeln!(out, "import subprocess").map_err(sink)?;
-        writeln!(out, "from typing import Optional").map_err(sink)?;
+        writeln!(out, "from typing import Any, Optional").map_err(sink)?;
         writeln!(out).map_err(sink)?;
         let mut imports = vec![
             "from ..client import Client".to_string(),
-            "from ..errors import AuthConfigurationError".to_string(),
-            "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELPER_ENV, PROGRAM, SCHEME_KINDS"
-                .to_string(),
+            "from .config import CREDENTIAL_ENV, HELPER_ENV, SCHEME_KINDS".to_string(),
         ];
         emit_relative_imports(&mut out, &mut imports)?;
     } else {
@@ -1413,15 +1411,20 @@ fn emit_main_module(ops: &[&Operation], graph: &ApiGraph) -> Result<String, Core
     writeln!(out, "from typing import Optional").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     let mut imports = vec![
-        "from .config import PROGRAM".to_string(),
         "from .output import print_result".to_string(),
         "from .parser import build_parser".to_string(),
     ];
     if has_security(graph) {
         imports.push("from ..errors import ApiError, AuthConfigurationError".to_string());
         imports.push("from .credentials import HelperError".to_string());
+        // The "no credentials configured" diagnostic names the command and every variable that
+        // would satisfy it, so the tables are read here rather than in credentials.py.
+        imports.push(
+            "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELPER_ENV, PROGRAM".to_string(),
+        );
     } else {
         imports.push("from ..errors import ApiError".to_string());
+        imports.push("from .config import PROGRAM".to_string());
     }
     if has_request_body(ops, graph)? {
         imports.push("from .body import InputError".to_string());
