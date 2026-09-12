@@ -109,8 +109,8 @@ See [OpenAPI generation](../openapi/generation.md).
 
 | Symbol | Use |
 |---|---|
-| `GoSdk` | Go client/model/docs/package/contract-test target; `.cli("bookstore")` emits `cmd/<program>/main.go` |
-| `PySdk` | Python client/model/docs/package/contract-test target; `.cli("bookstore")` emits a generated CLI |
+| `GoSdk` | Go client/model/docs/package/contract-test target; `.cli("bookstore")` emits a `cmd/<program>/` project |
+| `PySdk` | Python client/model/docs/package/contract-test target; `.cli("bookstore")` emits a `cli/` subpackage |
 | `TsSdk` | TypeScript client/model/docs/package/contract-test target |
 | `SdkCli` | generated-CLI program name, command scope, and default host (`PySdk::cli` / `GoSdk::cli`); unrelated to gnr8's own command surface |
 | `SdkFileLayout` | compact/split files, directories, and templates |

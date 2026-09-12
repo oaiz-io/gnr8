@@ -1206,3 +1206,24 @@ Ordered by how much they would change the design if answered differently.
     same function forever.
 11. **Windows.** Everything here is reasoned on Linux; CI is `ubuntu-latest` only. `python -m` works
     everywhere, but the entry-point and PATH story differs.
+
+---
+
+## Addendum, 2026-09-12: the artifact is a project, not a file
+
+§4.1 settled that a generated CLI is an artifact of the SDK target rather than a seventh target, and
+that holds. What it assumed alongside that — one emitted file per language — did not: §4.3's mapping
+produces one module of everything, which reads as generated code rather than as a program someone
+would maintain.
+
+The emitted shape is now a standard project per language; see
+[Generated CLI](../../docs/cli/generated-cli.md#what-is-emitted). Nothing in §4.3's mapping table
+changed: the same graph fact still produces the same CLI element. What changed is which file it lands
+in, which is a presentation decision of exactly the kind §4.1 said belongs to the target that emits
+the artifact.
+
+Worth recording because the survey in §3 did not raise it: splitting a generated program is mostly an
+*imports* problem. One file could accumulate one import set and add the common ones at the end; N
+files each need exactly what they use, and Go makes an over-declared import a compile error. The
+durable answer was to prune each file's import set against its own rendered text rather than have
+every emitter predict its output.

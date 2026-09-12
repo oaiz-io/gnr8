@@ -1016,3 +1016,27 @@ production. A count in the fifties comes from missing the 30 codes returned from
    backslashes would be split wrongly. That needs either a documented "POSIX quoting" contract or a
    platform branch — and a platform branch is a second path, so the documented contract is the likely
    answer.
+
+---
+
+## Addendum, 2026-09-12: the single-file shape was superseded
+
+§6 of this plan specified one file per language — `cli.py` and `cmd/<program>/main.go` — on the
+grounds that a first slice should be small. It shipped that way, and the shape did not survive first
+contact with a real API: 258 lines for the bookstore's four operations, and tens of thousands for a
+218-operation graph, all in one module.
+
+The emitted CLI is now a project in each language's own idiom. Python: a `cli/` subpackage with one
+module per concern and `commands/<group>.py` per group, each exposing `register(subparsers)`. Go:
+`cmd/<program>/main.go` calling `cli.Run`, with everything else in `internal/cli` — which is Go's own
+visibility rule rather than a convention. [Generated CLI](../../docs/cli/generated-cli.md) carries the
+authoritative layout.
+
+Three things that plan got right and this change kept: the command tree still derives from the same
+graph facts (§6.1's mapping is unchanged), credential resolution is still one shared module rather
+than once per command (§4), and the no-rewrite contract still holds — now per file rather than per
+blob, which is what made the split safe.
+
+One decision this plan did not anticipate: `pyproject.toml` is rendered from the SDK's file list, and
+package discovery reads the `__init__.py` files in it. The CLI had to join that list *before* the
+render or a wheel would ship `[project.scripts]` pointing at a module it did not contain.

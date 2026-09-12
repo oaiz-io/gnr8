@@ -187,9 +187,10 @@ GoSdk::new()
 The generated Go SDK uses one ctx-first typed method surface, functional client options, explicit
 request structs, and graph-derived wire behavior.
 
-`.cli("bookstore")` emits `<sdk dir>/cmd/<program>/main.go`, a stdlib `package main` for the same
-operations. Unlike `PySdk::cli`, this does not require package metadata: there is no
-`[project.scripts]` equivalent, and `go build ./cmd/<program>` compiles the binary from that tree.
+`.cli("bookstore")` emits a `<sdk dir>/cmd/<program>/` project for the same operations: a `package
+main` that calls `cli.Run`, and a stdlib `internal/cli` package beside it. Unlike `PySdk::cli`, this
+does not require package metadata: there is no `[project.scripts]` equivalent, and
+`go build ./cmd/<program>` compiles the binary from that tree.
 See [Generated CLI](../cli/generated-cli.md).
 
 Exported Go identifiers are CamelCase of the wire token with Go initialisms applied, including when
@@ -222,8 +223,8 @@ PySdk::new()
 `pydantic()` is the default and emits Pydantic v2 models. `dataclasses()` emits stdlib dataclasses for
 no-dependency consumers. `PyModelStyle` exposes the same choice when a reusable value is needed.
 
-`.cli("bookstore")` emits `<sdk dir>/cli.py`, an argparse client for the same operations, and a
-`[project.scripts]` entry in `pyproject.toml`. It is the CLI gnr8 generates for the user's API, not
+`.cli("bookstore")` emits a `<sdk dir>/cli/` subpackage — an argparse client for the same
+operations, one module per concern — and a `[project.scripts]` entry in `pyproject.toml`. It is the CLI gnr8 generates for the user's API, not
 gnr8's own command surface. See [Generated CLI](../cli/generated-cli.md).
 
 ## TypeScript target controls

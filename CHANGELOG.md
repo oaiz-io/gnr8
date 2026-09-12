@@ -11,17 +11,20 @@ must move the minor version.
 
 ### Added
 
-- **`PySdk::cli("bookstore")` emits a generated argparse CLI beside the Python SDK.** Opt-in: one
-  extra file, `<sdk dir>/cli.py`, derived from the same API graph as the client, plus a
-  `[project.scripts]` entry so `pipx install` / `uv tool install` put the program on PATH. The
-  generated program is the user's API client, not gnr8's own `gnr8 init` / `generate` / `watch`
-  surface. Credentials come from one env var per scheme or one helper command; JSON on stdout; exit
-  codes 0/1/2. See [Generated CLI](docs/cli/generated-cli.md).
-- **`GoSdk::cli("bookstore")` emits a generated stdlib CLI at `<sdk dir>/cmd/<program>/main.go`.**
-  The same graph, naming, credentials, exit codes, and JSON-on-stdout contract as the Python CLI.
-  Unlike Python, `.cli()` does not require package metadata: a Go directory is one package, so the
-  CLI is a standalone `package main` that `go build ./cmd/<program>` compiles. See
+- **`PySdk::cli("bookstore")` emits a generated argparse CLI beside the Python SDK.** Opt-in: a
+  `<sdk dir>/cli/` subpackage derived from the same API graph as the client, plus a
+  `[project.scripts]` entry so `pipx install` / `uv tool install` put the program on PATH. One module
+  per concern — `config`, `credentials`, `output`, `body`, `parser`, `main`, and
+  `commands/<group>.py` per command group, each registering its own subparsers. The generated program
+  is the user's API client, not gnr8's own `gnr8 init` / `generate` / `watch` surface. Credentials
+  come from one env var per scheme or one helper command; JSON on stdout; exit codes 0/1/2. See
   [Generated CLI](docs/cli/generated-cli.md).
+- **`GoSdk::cli("bookstore")` emits a generated stdlib CLI project at `<sdk dir>/cmd/<program>/`.**
+  `main.go` is a `package main` that calls `cli.Run`; everything else is an `internal/cli` package
+  beside it, which Go's own visibility rule keeps importable from that program and nowhere else. The
+  same graph, naming, credentials, exit codes, and JSON-on-stdout contract as the Python CLI. Unlike
+  Python, `.cli()` does not require package metadata: `go build ./cmd/<program>` compiles the binary
+  from that tree. See [Generated CLI](docs/cli/generated-cli.md).
 - **`SdkCli::commands(selector)` chooses which operations become commands.** Scope is a fact about
   the program, not about the API: an operation left out is still in `openapi.yaml` and still a method
   on the generated client. It takes the same `OperationSelector` every selector-taking transform

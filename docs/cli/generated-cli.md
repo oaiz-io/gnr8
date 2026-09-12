@@ -44,39 +44,85 @@ needs nothing but a name says nothing but a name. `SdkCli` is unrelated to gnr8'
 
 **Packaging is not symmetric.** Combining `.cli(...)` with `.source_only()` or
 `.package_metadata(false)` is a configuration error on `PySdk`: without `pyproject.toml` there is
-nowhere for `[project.scripts]` to go. `GoSdk::cli` does **not** require package metadata. A Go
-directory is one package, so the CLI is a standalone `package main` at `cmd/<program>/main.go` that
-`go build ./cmd/<program>` already knows how to produce a binary from. There is no `[project.scripts]`
-equivalent to write.
+nowhere for `[project.scripts]` to go. `GoSdk::cli` does **not** require package metadata: `cmd/<program>`
+is a `package main` that `go build ./cmd/<program>` already knows how to produce a binary from, and
+there is no `[project.scripts]` equivalent to write.
 
 ## What is emitted
 
-### Python
+### Python — a subpackage beside the SDK
 
-One file, `<sdk dir>/cli.py`, plus three lines in `pyproject.toml` when package metadata is on:
+```text
+<sdk dir>/cli/
+  __init__.py          the docstring, and the one symbol [project.scripts] names
+  __main__.py          what `python -m <package>.cli` runs
+  config.py            every fact fixed at generation time
+  credentials.py       env var + helper resolution, and build_client
+  output.py            JSON for a document, raw bytes for a file
+  body.py              --body / --body-file / stdin      (only where a body exists)
+  parser.py            the root parser; nothing about any one command
+  commands/
+    __init__.py
+    <group>.py         one group's subparsers and the calls they make
+    root.py            the commands that sit directly under the program
+  main.py              dispatch and exit codes
+```
+
+Each group module exposes `register(subparsers)`, so `parser.py` does not grow when the API does,
+and how a command parses sits beside how it runs. A command body does two things: turn parsed
+arguments into the client method's keyword arguments, and call it. Everything shared — credentials,
+output, exit codes — lives in one module each, not once per command.
+
+`cli/` is a subpackage, so it cannot shadow the SDK's own `client.py` / `models.py` / `errors.py`.
+It imports the Python standard library, the sibling generated package, and — in the default Pydantic
+model style — the same `pydantic` the models already import. It adds no dependency the SDK did not
+already have; under `.dataclasses()` it is standard library only.
+
+Plus three lines in `pyproject.toml` when package metadata is on:
 
 ```toml
 [project.scripts]
 "bookstore" = "sdk.cli:main"
 ```
 
-The scripts key is the program name. The value's package segment is the same `sdk_package` derivation
-`[tool.setuptools] packages` already uses. The scripts table sits after every `[project]` key
-(including optional description/license/keywords and `[project.urls]`) and before
-`[tool.setuptools]`.
+The scripts key is the program name; the value resolves because `cli/__init__.py` re-exports `main`.
+`[tool.setuptools] packages` gains `sdk.cli` and `sdk.cli.commands` on its own — the CLI files are in
+the file list `pyproject.toml` is rendered from, and package discovery reads the `__init__.py` files
+it finds there.
 
-`cli.py` imports the Python standard library, the sibling generated package, and — in the default
-Pydantic model style — the same `pydantic` the models already import. It adds no dependency the SDK
-did not already have; under `.dataclasses()` it is standard library only.
+### Go — a project under `cmd/<program>`
 
-### Go
+```text
+<sdk dir>/cmd/<program>/
+  main.go                     package main: os.Exit(cli.Run(os.Args[1:]))
+  internal/cli/
+    cli.go                    Run, the dispatch tree, the usage text
+    config.go                 every fact fixed at generation time
+    credentials.go            env var + helper resolution, and buildClient
+    flags.go                  the flag.Value types and the parse helpers
+    output.go                 printResult
+    body.go                   loadBody               (only where a body exists)
+    errors.go                 handleErr: every typed error to its exit code
+    <group>.go                one group's commands
+    commands.go               the commands that sit directly under the program
+```
 
-One file, `<sdk dir>/cmd/<program>/main.go`, `package main`, standard library only plus the sibling
-generated client. `flag.NewFlagSet` per subcommand, `os.Args[1]` dispatch, `encoding/json` on stdout,
-`os/exec` for the credential helper (`CommandContext`, 10s timeout, stdin nil, stderr discarded, first
-stdout line only). The file is `gofmt`-normalized through the same seam the rest of the Go SDK uses.
+`internal/` is Go's own visibility rule, not a convention: the package is importable from
+`cmd/<program>/...` and nowhere else, so splitting the program up does not widen anything's API.
+`Run` is the only exported symbol. Standard library only, plus the sibling generated client.
+`flag.NewFlagSet` per subcommand, `os.Args[1]` dispatch, `encoding/json` on stdout, `os/exec` for the
+credential helper (`CommandContext`, 10s timeout, stdin nil, stderr discarded, first stdout line
+only). Every file is `gofmt`-normalized through the same seam the rest of the Go SDK uses, and
+carries exactly the imports it uses — Go rejects an unused one.
 
 Go has no `[project.scripts]` equivalent. `.cli()` does not write extra package metadata.
+
+### A group name that collides with a shared file
+
+Both layouts reserve the shared file names (`config`, `credentials`, `output`, `parser`, `main`,
+`flags`, `errors`, `cli`, `body`, `commands`, `root`, as each language uses them). A group whose
+module or file name would collide is a generation error naming the group and `GroupOperations` — the
+same remedy every other CLI name collision names.
 
 ## How to run it
 
@@ -91,7 +137,7 @@ uv tool install ./generated/sdk && bookstore --help
 `python3 -m sdk.cli` needs the package's parent on `sys.path`, which is what the subshell's `cd`
 gives it; the installers put the program on `PATH` instead.
 
-No install step is needed for the first line — it works as soon as the file is written. The
+No install step is needed for the first line — it works as soon as the package is written. The
 installer shims need a distribution name other than the default last-segment `sdk` if you want
 `pipx install bookstore-sdk` — set
 `.package(SdkPackageMetadata::new().registry_name("bookstore-sdk"))` on the same `PySdk` stage.
@@ -372,9 +418,16 @@ CLI artifact.
 
 ## Determinism and ownership
 
-Two generations over the same graph produce byte-identical CLI source. Unchanged bytes are not
-rewritten. The file is an ordinary artifact in the SDK output directory, so it inherits manifest
-ownership, `gnr8 check` drift reporting, `--force` protection for hand edits, and deletion when
-`.cli(...)` is removed.
+Two generations over the same graph produce byte-identical CLI source, and the contract is **per
+file**: a module whose bytes did not change is not rewritten, even when a sibling did. Every file is
+an ordinary artifact in the SDK output directory, so each inherits manifest ownership, `gnr8 check`
+drift reporting, `--force` protection for hand edits, and deletion when it stops being produced.
+
+Removing `.cli(...)` therefore deletes the whole tree, one file at a time, and reports each in
+`deleted`. Narrowing the program with `SdkCli::commands(...)` can also drop a module nothing imports
+any more — `body.py` / `body.go` exist only for a command that takes a request body.
+
+gnr8 does not remove the now-empty directory it leaves behind: directory membership is not ownership
+evidence, and an unowned neighbour under an output path is never deleted.
 
 TypeScript generated CLIs are out of this slice.
