@@ -1664,6 +1664,109 @@ fn generated_cli_go_builds() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A graph whose optional parameters carry source defaults, one of them a boolean.
+fn cli_defaults_graph() -> gnr8_engine::graph::ApiGraph {
+    serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "params": [
+                {
+                  "name": "page_size",
+                  "location": "query",
+                  "required": false,
+                  "schema": { "type": "primitive", "of": { "prim": "int", "bits": 64, "signed": true } },
+                  "default": { "type": "number", "value": "10" },
+                  "provenance": { "file": "main.go", "start_line": 1, "end_line": 1 }
+                },
+                {
+                  "name": "verified",
+                  "location": "query",
+                  "required": false,
+                  "schema": { "type": "primitive", "of": { "prim": "bool" } },
+                  "default": { "type": "bool", "value": true },
+                  "provenance": { "file": "main.go", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 204, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.go", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .expect("defaults graph json")
+}
+
+/// A source default is shown in `--help` and absent from the request the CLI actually builds.
+///
+/// The request URL is observable without a server: an unreachable host puts it in the error, which
+/// is the same channel `generated_cli_go_uses_the_declared_base_url` reads.
+#[test]
+fn generated_cli_go_shows_a_default_without_sending_it() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI defaults: go toolchain unavailable");
+        return;
+    }
+    let dir = materialize_go_cli_with(
+        "cli-defaults",
+        &cli_defaults_graph(),
+        SdkCli::new("bookstore").base_url("http://127.0.0.1:1"),
+    );
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed");
+
+    let (code, stdout, stderr) = run_cli(&dir, "bookstore", &["list-books", "--help"], &[]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(
+        stdout.contains("(default 10)"),
+        "flag.PrintDefaults must render the int default: {stdout}"
+    );
+    assert!(
+        stdout.contains("(default true)"),
+        "a boolean default must reach --help through the usage string: {stdout}"
+    );
+
+    let (code, _, stderr) = run_cli(&dir, "bookstore", &["list-books"], &[]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        !stderr.contains("page_size"),
+        "an omitted flag must not put its default on the wire: {stderr}"
+    );
+    assert!(
+        !stderr.contains("verified"),
+        "an omitted boolean must not put its default on the wire: {stderr}"
+    );
+
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["list-books", "--page-size", "5", "--verified"],
+        &[],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("page_size=5"),
+        "a supplied flag must be sent: {stderr}"
+    );
+    assert!(
+        stderr.contains("verified=true"),
+        "a supplied boolean must be sent: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The host a program talks to has one source, and a program without one asks rather than guesses.
 #[test]
 fn generated_cli_go_requires_a_base_url_it_was_not_given() {

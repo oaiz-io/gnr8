@@ -168,7 +168,7 @@ Per-flag prose is not emitted. The one thing a flag's `--help` does carry is a s
 
 | | Where the default appears | Why |
 |---|---|---|
-| Python | `help="default: 10"` | `argparse` shows a default only through the help string |
+| Python | `help="default: 10"` | `argparse` renders a default only from a bound `default=`, which is exactly what must not be bound, so the help string carries it |
 | Go | `(default 10)`, from `flag.PrintDefaults` | `flag` renders the registered default itself, and omits it when it is the zero value for the type |
 | Go, booleans | `(default true)` in the usage string | a `flag.Value` has no default for `PrintDefaults` to render |
 

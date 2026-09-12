@@ -1619,3 +1619,49 @@ fn go_without_a_declared_base_url_the_flag_is_required() {
         "an omitted host must be a usage error, not a request to a relative path:\n{text}"
     );
 }
+
+/// A `%` in a default must survive argparse's unconditional `help % params` expansion.
+///
+/// This is the same hazard `argparse_help_text` exists for on operation prose; a default is the
+/// first *value* to reach a `help=` string, so it needs the same escape.
+#[test]
+fn a_percent_in_a_default_is_escaped_for_argparse_help() {
+    let graph: ApiGraph = serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "params": [
+                {
+                  "name": "discount",
+                  "location": "query",
+                  "required": false,
+                  "schema": { "type": "primitive", "of": { "prim": "string" } },
+                  "default": { "type": "string", "value": "100%" },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap();
+    let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
+    assert!(
+        text.contains(r#"help="default: \"100%%\"","#),
+        "a percent in a default must be doubled:\n{text}"
+    );
+}
