@@ -32,10 +32,10 @@ this checkout**, and the design below uses the corrected versions.
 |---|---|
 | `Response.body_kind` lives at `crates/gnr8-core/src/graph.rs:595` | That file does not exist. `crates/gnr8-core/src/graph/mod.rs:16` is `pub use gnr8::graph::*;`; the type is `crates/gnr8-sdk/src/graph.rs:588-611`. The same correction applies to `RequestParameter`, which is `crates/gnr8-sdk/src/sdk/builtins.rs:626`. |
 | `body_kind` "distinguishes" `sse` as a typed variant | It is a plain `String` with four documented magic values — `"json"`, `"binary"`, `"sse"`, `"empty"` (`crates/gnr8-sdk/src/graph.rs:596-601`). No enum, so no exhaustive match protects a new kind. |
-| the experiment's transform "was placed before targets, which is wrong for that purpose — verify where it must sit" | **There is no correct position.** Every transform runs to exhaustion inside `build_ir` (`crates/gnr8-core/src/pipeline/mod.rs:291-296`) before `run` looks at `plan.targets` at all (`:348`). §1.1. |
-| the CLI targets refuse SSE, so SSE is unsupported | The **CLI** targets refuse it. The **SDK** targets accept it and have since before `.cli()` existed: `"binary" \| "sse"` share one arm in `crates/gnr8-core/src/sdk/emit_common.rs:1089`, and a schema-less SSE success is emitted as a byte-returning method (`:1128`). §1.2. |
+| the experiment's transform "was placed before targets, which is wrong for that purpose — verify where it must sit" | **There is no correct position.** Every transform runs to exhaustion inside `build_ir` (`crates/gnr8-core/src/pipeline/mod.rs:291-296`) before `run` looks at `plan.targets` at all (`:351`). §1.1. |
+| the CLI targets refuse SSE, so SSE is unsupported | The **CLI** targets refuse it. The **SDK** targets accept it and have since before `.cli()` existed: `"binary" \| "sse"` share one arm in `crates/gnr8-core/src/sdk/emit_common.rs:1110`, and a schema-less SSE success is emitted as a byte-returning method (`:1128`). §1.2. |
 | the emitted CLI binds no parameter default | Both emitters bind `param.default` — Go `crates/gnr8-core/src/gosdk/cli.rs:1049-1134`, Python `crates/gnr8-core/src/pysdk/cli.rs:916-918` — and `goextract` reads `form:"limit,default=10"` (`goextract/internal/handlers/handlers.go:7255-7265`). The holes are elsewhere. §1.4. |
-| `RenameOperation` is the only renaming mechanism | It renames the **verb**. `GroupOperations` (`crates/gnr8-core/src/sdk/builtins.rs:2504-2545`) already renames the **noun**, canonically, by path prefix / source prefix / existing group. §1.3. |
+| `RenameOperation` is the only renaming mechanism | It renames the **verb**. `GroupOperations` (`crates/gnr8-core/src/sdk/builtins.rs:2504-2549`) already renames the **noun**, canonically, by path prefix / source prefix / existing group. §1.3. |
 | `RESERVED_FLAGS` costs users a legitimate `--json` | True, and it is worse than one flag: the constant's own doc comment says "a generated CLI always binds" (`crates/gnr8-core/src/sdk/emit_common.rs:154`) and **five of the eight are not always bound**. §1.5. |
 
 ---
@@ -44,7 +44,7 @@ this checkout**, and the design below uses the corrected versions.
 
 `.cli(program)` shipped on two targets during this branch — `PySdk::cli`
 (`crates/gnr8-sdk/src/sdk/builtins.rs:2507`) and `GoSdk::cli` (`:2345`), both storing
-`Option<SdkCli>` (`:2385`, `:2233`). `TsSdk` has no `.cli()`: its struct (`:2535-2545`) has no such
+`Option<SdkCli>` (`:2385`, `:2233`). `TsSdk` has no `.cli()`: its struct (`:2535-2544`) has no such
 field and `impl TargetExec for TsSdk` (`crates/gnr8-core/src/sdk/builtins.rs:3204`) has no CLI branch.
 
 `SdkCli` (`crates/gnr8-sdk/src/sdk/cli.rs:11-17`) has **exactly one field**:
@@ -109,14 +109,14 @@ shipped SSE diagnostic tells users to write one. `pipeline::run`
 ```
 
 `build_ir` drains `plan.transforms` to exhaustion (`:291-296`) before `run` inspects `plan.targets`
-(`:348`). Then one graph is frozen and handed to everything:
+(`:351`). Then one graph is frozen and handed to everything:
 
 ```rust
         // A BUILT-IN target is a pure function of the frozen graph: every one of them only creates
         // files, and not one reads the set it writes into. WHEN it runs is therefore not observable
         // … So they ALL run ahead of the loop that places them
 ```
-(`:364-369`, with `let graph = &generation_ir;` at `:370` and `std::thread::scope` at `:371`).
+(`:364-369`, with `let graph = &generation_ir;` at `:371` and `std::thread::scope` at `:372`).
 
 The four stage kinds live in four separate vectors on `Pipeline`
 (`crates/gnr8-sdk/src/sdk/mod.rs:539-548`) and on `StagePlan`, so "a transform after the OpenAPI
@@ -132,7 +132,7 @@ direction-splitting, not membership — its own header says so:
 
 **So the documented workaround is not merely awkward; it changes the user's published contract.** A
 `Transform` that drops an operation drops it from every artifact. `generated/gnr8.graph.json` is
-written from the same post-transform graph (`pipeline/mod.rs:425-429`) and is *"the sole source of
+written from the same post-transform graph (`pipeline/mod.rs:430-431`) and is *"the sole source of
 historical graph facts for `gnr8 changes`"* (`crates/gnr8-core/src/graph_artifact.rs:3-5`), so the
 next report says `operation.removed` — `ChangeKind::Breaking`, gating
 (`crates/gnr8-core/src/changes/diff.rs:774-778`, and `:2437` asserts the gating). Concretely: keeping
@@ -186,7 +186,7 @@ It scans the whole graph, so one streaming endpoint anywhere makes `.cli(...)` u
 API. `success` is `(200..300)`, so a 3xx/4xx/5xx SSE response passes unnoticed.
 
 **The SDKs do not refuse SSE — they buffer it.** `success_responses_of`
-(`crates/gnr8-core/src/sdk/emit_common.rs:1089-1137`) gives `"binary" | "sse"` one shared arm. An SSE
+(`crates/gnr8-core/src/sdk/emit_common.rs:1064-1165`) gives `"binary" | "sse"` one shared arm (`:1110`). An SSE
 response *with* an event schema is a hard error for every SDK target (`:1112-1120`, *"SDK targets do
 not yet support typed SSE event streams"*); an SSE response *without* one is pushed onto
 `binary_statuses` (`:1128`) and becomes an ordinary opaque-bytes success. That path reads the entire
@@ -264,7 +264,7 @@ Because every artifact derives its own spelling from `op.id`, one rename moves a
 (`crates/gnr8-core/src/sdk/emit_common.rs:112-115`), and the OpenAPI `operationId`
 (`crates/gnr8-core/src/lower/mod.rs:480-482`).
 
-**The noun is renameable too.** `GroupOperations` (`crates/gnr8-core/src/sdk/builtins.rs:2504-2545`)
+**The noun is renameable too.** `GroupOperations` (`crates/gnr8-core/src/sdk/builtins.rs:2504-2549`)
 sets `op.group` by `PathPrefix`, `SourcePrefix` or `ExistingGroup`, and `command_group(op)` is
 `op.group` kebab-cased (`emit_common.rs:120-122`). So both levels of the command tree are already
 user-controllable through one canonical fact each — which is rule 0.4's answer, already shipped.
@@ -360,7 +360,7 @@ the known-inconsistency list in CLAUDE.md rule 0.1, not to this design.)*
 
 The Go CLI does not merely display a default — it changes requiredness with it:
 `let always = param.required || param.default.is_some();` (`gosdk/cli.rs:1371`), and a defaulted
-required parameter is exempt from the missing-flag check (`:1198`, `:1240`, `:1248`, `:1259`).
+required parameter is exempt from the missing-flag check (`:1248`).
 
 **The four verified holes:**
 
@@ -378,7 +378,7 @@ required parameter is exempt from the missing-flag check (`:1198`, `:1240`, `:12
    precise explanation for the experiment's `-limit int` with nothing after it: the bound default
    **was** the zero value. Python builds its parsers with the stock `HelpFormatter` (no
    `formatter_class=` anywhere in `pysdk/cli.rs`) and emits no per-flag `help=` at all
-   (`docs/cli/generated-cli.md:143`), so `argparse` has nothing to expand.
+   (`docs/cli/generated-cli.md:144`), so `argparse` has nothing to expand.
 4. **On the `OpenApi` import path, `Param.default` is inert in the emitted spec.**
    `openapi_source.rs:1069-1071` stores the source parameter's verbatim schema in
    `Param.openapi_fields`, and both writers then take the `has_source_schema` branch and skip
@@ -411,8 +411,8 @@ The doc comment is false for five of the eight. Verified per flag:
 | Flag | Always bound? | Evidence |
 |---|---|---|
 | `help` | yes | Go `gosdk/cli.rs:587-592`, `:1586`, `:1630`; Python implicit — `argparse` adds `-h/--help` to every parser |
-| `base-url` | yes | `gosdk/cli.rs:903-907`, `pysdk/cli.rs:811-816` — per command |
-| `version` | **root parser only** | `gosdk/cli.rs:1589-1591`, `pysdk/cli.rs:739-744` |
+| `base-url` | yes | `gosdk/cli.rs:903-907`, `pysdk/cli.rs:812-816` — per command |
+| `version` | **root parser only** | `gosdk/cli.rs:1589-1591`, `pysdk/cli.rs:740-745` |
 | `body`, `body-file` | **only when the operation has a request body** | `gosdk/cli.rs:918-921`, `pysdk/cli.rs:827-845` |
 | `limit`, `all` | **only when a `PaginationPolicy` names the operation** | `gosdk/cli.rs:922-925`, `pysdk/cli.rs:846-859` |
 | `json` | **never** | zero bindings in either emitter; output is unconditionally JSON — `gosdk/cli.rs:813-836` (`json.NewEncoder(os.Stdout)` + `SetIndent`), `pysdk/cli.rs:577-586` (`json.dump(..., indent=2)`) |
@@ -427,9 +427,10 @@ The check itself is per-parameter and unconditional, minus paging parameters
   that forced a source-side wire rename in the experiment;
 - a `body` or `body-file` parameter on a GET is rejected the same way.
 
-The list is also **incomplete in the other direction** for Go, which binds `no-<flag>` for every
-boolean (`gosdk/cli.rs:1078-1096`) and `-h` (`:587-592`). A boolean parameter literally named
-`no-verified` beside a boolean `verified` collides, and nothing checks it.
+The list is also **incomplete in the other direction**: both emitters bind a `no-<flag>` negation for
+every boolean parameter (`gosdk/cli.rs:1077-1096`, `pysdk/cli.rs:899-906`), and Go additionally binds
+`-h` (`gosdk/cli.rs:587-592`). A boolean parameter literally named `no-verified` beside a boolean
+`verified` collides, and nothing checks it.
 
 ### 1.6 `--base-url` is a document fact doing a program's job
 
@@ -651,7 +652,7 @@ That is a rule-3 problem, not a missing feature: one fact is being derived from 
 fix in all three cases is the same shape and it is the shape gnr8 already uses everywhere else — a
 **per-target policy value on the target that emits the artifact**, exactly as `SdkFileLayout`
 (`crates/gnr8-sdk/src/sdk/layout.rs:9-16`) and `SdkPackageMetadata`
-(`crates/gnr8-sdk/src/sdk/builtins.rs:2650-2660`) already are, and exactly as `SdkCli::program`
+(`crates/gnr8-sdk/src/sdk/builtins.rs:2650-2661`) already are, and exactly as `SdkCli::program`
 already is.
 
 ### 3.1 Requirement 1 — "control what endpoints become CLI commands"
@@ -771,7 +772,7 @@ That is a `goextract` enhancement over Gin's own constructs — rule 0.1 categor
 generated clients read the whole body before returning (§1.2: `io.ReadAll` in Go, `resp.read()` inside
 a closing `with` in Python). Making a response incremental touches, at minimum: the method's return
 type; the retry policy, because a partially consumed stream cannot be retried; and the response hook
-contract, which is handed `context.response_body = raw` (`pysdk/emit.rs:2039-2041`) and has no meaning
+contract, which is handed `context.response_body = raw` (`pysdk/emit.rs:2040`) and has no meaning
 for a body that has not arrived. That is a change to the public shape of every generated client and it
 deserves its own research document, not a paragraph in this one.
 
@@ -869,8 +870,8 @@ should say so at generation time instead of emitting a program that cannot start
 **Workstreams.**
 
 - **S11 (ship gate)** — add class 4 to `check_cli_names`, naming the operation, both parameter names
-  and the shared flag, in the same message shape as the existing three (`emit_common.rs:577`, `:597`,
-  `:615`). Tests for both the two-parameter case and the Go `no-<flag>` case in §1.5.
+  and the shared flag, in the same message shape as the existing three (`emit_common.rs:577`, `:598`,
+  `:615`). Tests for both the two-parameter case and the `no-<flag>` case in §1.5.
 - **S12 (docs)** — a `## Renaming` section in `docs/cli/generated-cli.md` stating the one canonical
   path (`RenameOperation` for the verb, `GroupOperations` for the noun), that aliases are a non-goal,
   and that a shell alias is the answer — rule 0.4's *"here is the one native way"* phrasing.
@@ -887,7 +888,7 @@ emitters bind it (§1.4). But both also **transmit** it:
 - Go: `let always = param.required || param.default.is_some();` (`gosdk/cli.rs:1371`), so a defaulted
   parameter is assigned into the request unconditionally, whether or not the user passed the flag.
 - Python: `add_argument(..., default=<literal>)` (`pysdk/cli.rs:916-918`) leaves `args.<ident>` equal
-  to the literal, so the emitted `if args.{ident} is not None:` (`pysdk/cli.rs:655-663`) is always
+  to the literal, so the emitted `if args.{ident} is not None:` (`pysdk/cli.rs:656-663`) is always
   true.
 
 That is the opposite of what the specification says the keyword means. OpenAPI 3.1.1, on the Schema
@@ -905,10 +906,13 @@ request looks identical to a user who typed `--limit 10` on purpose.
 supplied it. Both standard libraries already split exactly this way (§2.4).
 
 - Go: keep `fs.Int64("limit", 10, "")` so `PrintDefaults` renders `(default 10)`, and gate the
-  assignment on `seen["limit"]` like every other optional flag — i.e. delete `always`. The
-  boolean-with-default path keeps its `--no-<flag>` pair and its tri-state.
-- Python: `default=None`, and carry the value in the help text (`(default: 10)`), which also gives
-  Python the `--help` rendering Go gets for free.
+  assignment on `seen["limit"]` like every other optional flag — i.e. delete `always`
+  (`gosdk/cli.rs:1371`). The boolean-with-default path must also return to the tri-state `*bool` shape
+  it uses when there is no default (`gosdk/cli.rs:1084-1096`), keeping its `--no-<flag>` pair, so that
+  an unsupplied boolean is not transmitted either.
+- Python: `default=None` for every kind including booleans (today `pysdk/cli.rs:886-889` binds `True`
+  or `False`), and carry the value in the help text (`(default: 10)`), which also gives Python the
+  `--help` rendering Go gets for free.
 
 This is also the first per-flag `help=` gnr8 would emit, and it is the one kind that does not reopen
 the rule 0.1 question left open in research §5.1: a default is a **typed fact already in the graph**,
@@ -950,7 +954,7 @@ already has at that point:
 | `version` | the operation is at the program root — where `--version` is bound |
 | `body`, `body-file` | the operation has a request body (`request_body_models_of(op, graph)` is non-empty) |
 | `limit`, `all` | a `PaginationPolicy` names the operation (`pagination_policy(graph, op).is_some()`) |
-| `no-<flag>` | Go only — a boolean parameter of this operation produces the negation |
+| `no-<flag>` | a boolean parameter of this operation produces the negation — both languages |
 | `json` | **never, unless `--json` is bound** |
 
 The `json` entry needs a product decision rather than a computation, and there are three options:
@@ -972,7 +976,7 @@ flag would already exist when SSE lands.
 is to change the server's wire contract. It is also the thing that made requirement 3 look like a
 missing rename feature when it was a bug.
 
-**Workstream S18** — compute the reserved set per command; add the Go `no-<flag>` entries; decide
+**Workstream S18** — compute the reserved set per command; add the `no-<flag>` entries; decide
 `--json`; update the message to name the command rather than the program; update
 `docs/cli/generated-cli.md:133-135`, which currently publishes the flat list.
 
