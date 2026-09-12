@@ -2087,3 +2087,71 @@ fn go_a_group_named_body_is_rejected() {
     assert!(message.contains("internal/cli/body.go"), "{message}");
     assert!(message.contains("GroupOperations"), "{message}");
 }
+
+/// A long operation description wraps correctly, and in time to finish.
+///
+/// The wrap search used to start at the whole remaining string and step back one character at a
+/// time, re-escaping the remainder on every step — quadratic per line, cubic over the description.
+/// A 39 KB description made `gnr8 generate` run for over ten minutes without finishing, while the
+/// same graph without a CLI target took 22 seconds. This description is large enough that a
+/// reintroduced quadratic would not finish inside the CI job's time cap.
+#[test]
+fn a_long_description_wraps_without_quadratic_rescanning() {
+    let description = "This endpoint returns a list of books. ".repeat(400);
+    assert!(description.len() > 15_000, "the guard needs a large input");
+    let graph: ApiGraph = serde_json::from_str(&format!(
+        r#"{{
+          "module": "app",
+          "operations": [
+            {{
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "description": {},
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ {{ "status": 204, "body": null, "body_kind": "empty" }} ],
+              "provenance": {{ "file": "main.py", "start_line": 1, "end_line": 1 }}
+            }}
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }}"#,
+        serde_json::to_string(&description).expect("encode the description")
+    ))
+    .unwrap();
+
+    let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
+    for line in text.lines() {
+        assert!(
+            line.len() <= 88,
+            "every wrapped line must fit ruff format's width: {line:?}"
+        );
+    }
+    // The description must survive the implicit concatenation, not merely fit. The input is plain
+    // ASCII with nothing to escape, so each emitted chunk is verbatim between its quotes.
+    let block = text
+        .split_once("description=(")
+        .and_then(|(_, rest)| rest.split_once("\n        ),"))
+        .map(|(block, _)| block)
+        .expect("the description must be emitted as a wrapped block");
+    let reassembled: String = block
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('"') && line.ends_with('"') && line.len() >= 2)
+        .map(|line| &line[1..line.len() - 1])
+        .collect();
+    // Operation prose is trimmed on the way into the graph, so compare against the trimmed form.
+    let expected = description.trim_end();
+    assert!(
+        reassembled.contains(expected),
+        "the description must round-trip through the wrapping: got {} bytes, want {}",
+        reassembled.len(),
+        expected.len()
+    );
+}

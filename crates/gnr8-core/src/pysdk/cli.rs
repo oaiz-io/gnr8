@@ -128,7 +128,17 @@ fn emit_string_kwarg(
     let mut rest = value;
     while !rest.is_empty() {
         let min = rest.chars().next().map_or(0, char::len_utf8);
-        let mut take = rest.len();
+        // Start at the line's budget, not at the whole remaining string. Escaping only ever grows a
+        // chunk, so a chunk that fits in the line is at most `budget` bytes of source — searching
+        // down from `rest.len()` re-escapes the entire remainder once per byte it steps back, which
+        // is quadratic per line and cubic over a long description. A 39 KB operation description
+        // made `gnr8 generate` run for minutes without finishing; the same graph without a CLI
+        // target takes 22 seconds.
+        let budget = 88usize.saturating_sub(inner.len());
+        let mut take = rest.len().min(budget.max(min));
+        while take > min && !rest.is_char_boundary(take) {
+            take -= 1;
+        }
         loop {
             let chunk = rest.get(..take).unwrap_or(rest);
             let literal = py_string_literal(chunk);
