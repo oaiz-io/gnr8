@@ -13,20 +13,82 @@ use gnr8::sdk::SdkCli;
 
 use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type};
 use crate::lower::DEFAULT_API_VERSION;
+use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    check_cli_names, cli_operations, command_group, command_name, credential_env_var, flag_name,
-    helper_env_var, http_auth_features_for, operation_auth_alternatives, operation_prose,
-    reject_sse_operations, request_body_models_of, OperationAuthScheme, RequestBodyModel,
+    check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
+    flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
+    operation_prose, reject_sse_operations, request_body_models_of, OperationAuthScheme,
+    RequestBodyModel,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
 use crate::CoreError;
 
-use super::emit::{operation_method_name, py_string_literal, resolve_op_args_for};
+use super::emit::{operation_method_name, py_string_literal, resolve_op_args_for, safe_ident};
 use super::model_module_for;
 
 /// The file name the Python SDK's generated CLI is written at.
-pub(crate) const CLI_FILE: &str = "cli.py";
+pub(crate) const CLI_DIR: &str = "cli";
+
+/// Module stems `cli/commands/` reserves for itself.
+///
+/// Ungrouped commands land in `commands/root.py`, so a group whose module name would be `root`
+/// has no file of its own. Rejecting it names the same remedy every other CLI name collision
+/// names — rename the group — instead of emitting two groups into one module.
+const RESERVED_COMMAND_MODULES: &[&str] = &["root"];
+
+/// One emitted `cli/commands/*.py` module: the commands under one group, or the ungrouped ones.
+struct CommandModule<'a> {
+    /// Module stem inside `cli/commands/` (`books`, or `root` for ungrouped commands).
+    stem: String,
+    /// The command group these operations sit under, or `None` at the program root.
+    group: Option<String>,
+    ops: Vec<&'a Operation>,
+}
+
+/// Partition the program's operations into one module per group, ungrouped first.
+fn command_modules<'a>(
+    ops: &[&'a Operation],
+    program: &str,
+) -> Result<Vec<CommandModule<'a>>, CoreError> {
+    let mut ungrouped: Vec<&Operation> = Vec::new();
+    let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
+    for op in ops.iter().copied() {
+        match command_group(op) {
+            Some(group) => grouped.entry(group).or_default().push(op),
+            None => ungrouped.push(op),
+        }
+    }
+    let mut modules = Vec::new();
+    if !ungrouped.is_empty() {
+        modules.push(CommandModule {
+            stem: "root".to_string(),
+            group: None,
+            ops: ungrouped,
+        });
+    }
+    for (group, ops) in grouped {
+        let stem = safe_ident(&file_stem(&group));
+        if RESERVED_COMMAND_MODULES.contains(&stem.as_str()) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} group '{group}' maps to the reserved command module \
+                     'commands/{stem}.py'; rename the group with GroupOperations"
+                ),
+            });
+        }
+        modules.push(CommandModule {
+            stem,
+            group: Some(group),
+            ops,
+        });
+    }
+    Ok(modules)
+}
+
+fn cli_file(stem: &str) -> String {
+    format!("{CLI_DIR}/{stem}")
+}
 
 fn sink(error: std::fmt::Error) -> CoreError {
     CoreError::SdkGen {
@@ -85,26 +147,305 @@ pub(crate) fn emit_cli(
     layout: &SdkFileLayout,
     model_style: PyModelStyle,
     cli: &SdkCli,
-) -> Result<String, CoreError> {
-    let _ = package;
+) -> Result<Vec<SdkFile>, CoreError> {
     let ops = cli_operations(graph, cli)?;
     check_cli_names(&ops, graph, &cli.program)?;
     reject_sse_operations(&ops, &cli.program)?;
     http_auth_features_for(&ops, graph)?;
+    let modules = command_modules(&ops, &cli.program)?;
 
+    let mut files = vec![
+        SdkFile {
+            name: cli_file("__init__.py"),
+            contents: emit_package_init(graph, &cli.program, package)?,
+        },
+        SdkFile {
+            name: cli_file("__main__.py"),
+            contents: emit_package_main()?,
+        },
+        SdkFile {
+            name: cli_file("config.py"),
+            contents: emit_config(&ops, graph, cli)?,
+        },
+        SdkFile {
+            name: cli_file("credentials.py"),
+            contents: emit_credentials_module(graph)?,
+        },
+        SdkFile {
+            name: cli_file("output.py"),
+            contents: emit_output_module(graph, model_style)?,
+        },
+    ];
+    if has_request_body(&ops, graph)? {
+        files.push(SdkFile {
+            name: cli_file("body.py"),
+            contents: emit_body_module()?,
+        });
+    }
+    files.push(SdkFile {
+        name: cli_file("parser.py"),
+        contents: emit_parser_module(&modules, cli)?,
+    });
+    if !modules.is_empty() {
+        files.push(SdkFile {
+            name: cli_file("commands/__init__.py"),
+            contents: emit_commands_init(&modules)?,
+        });
+        for module in &modules {
+            files.push(SdkFile {
+                name: cli_file(&format!("commands/{}.py", module.stem)),
+                contents: emit_command_module(module, graph, cli, layout, model_style)?,
+            });
+        }
+    }
+    files.push(SdkFile {
+        name: cli_file("main.py"),
+        contents: emit_main_module(&ops, graph)?,
+    });
+    Ok(files)
+}
+
+/// `cli/__init__.py` — the package docstring and the one symbol `[project.scripts]` points at.
+fn emit_package_init(graph: &ApiGraph, program: &str, package: &str) -> Result<String, CoreError> {
     let mut out = String::new();
-    emit_imports(&mut out, &ops, graph, layout, model_style)?;
-    emit_constants(&mut out, &ops, graph, cli)?;
+    writeln!(
+        out,
+        "{}",
+        py_docstring(&format!(
+            "Command-line client for {title}.\n\nInstalled, it is `{program}`. From this \
+             package's parent directory it is\n`python -m {package}.cli`.",
+            title = graph.title
+        ))
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from .main import main").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "__all__ = [\"main\"]").map_err(sink)?;
+    Ok(out)
+}
+
+/// `cli/__main__.py` — what `python -m <package>.cli` runs.
+fn emit_package_main() -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(out, "{}", py_docstring("Entry point for `python -m`.")).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from .main import main").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "raise SystemExit(main())").map_err(sink)?;
+    Ok(out)
+}
+
+/// One Python docstring, wrapped in triple quotes and line-broken on its own newlines.
+fn py_docstring(text: &str) -> String {
+    let mut out = String::from("\"\"\"");
+    out.push_str(&text.replace('\\', "\\\\").replace('"', "\\\""));
+    if text.contains('\n') {
+        out.push('\n');
+    }
+    out.push_str("\"\"\"");
+    out
+}
+
+/// Emit `<prefix>a` for one module and a parenthesised block for several.
+///
+/// `ruff format` keeps a trailing comma exploded, so both shapes are already canonical — but one
+/// name on one line is what a person would write.
+fn emit_module_list(
+    out: &mut String,
+    prefix: &str,
+    modules: &[CommandModule<'_>],
+) -> Result<(), CoreError> {
+    if let [single] = modules {
+        writeln!(out, "{prefix}{}", single.stem).map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "{prefix}(").map_err(sink)?;
+    for module in modules {
+        writeln!(out, "    {},", module.stem).map_err(sink)?;
+    }
+    writeln!(out, ")").map_err(sink)?;
+    Ok(())
+}
+
+/// Emit one group of relative imports in the order `ruff check --select I` wants.
+///
+/// isort orders a relative block by decreasing dot depth first — `from ...models` precedes
+/// `from ..body` — then alphabetically inside one depth. Emitting them sorted means the generated
+/// package is import-clean without a post-processing pass.
+fn emit_relative_imports(out: &mut String, imports: &mut [String]) -> Result<(), CoreError> {
+    imports.sort_by(|left, right| {
+        let depth = |line: &str| {
+            line.trim_start_matches("from ")
+                .chars()
+                .take_while(|c| *c == '.')
+                .count()
+        };
+        depth(right).cmp(&depth(left)).then_with(|| left.cmp(right))
+    });
+    for line in imports.iter() {
+        writeln!(out, "{line}").map_err(sink)?;
+    }
+    Ok(())
+}
+
+/// Trim a module down to exactly one trailing newline.
+///
+/// The body emitters are shared with the single-module shape they replaced, where a trailing blank
+/// line separated one section from the next. At the end of a file `ruff format` wants none.
+fn finish(mut out: String) -> String {
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// `cli/config.py` — every fact fixed at generation time, and nothing else.
+fn emit_config(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring("Constants fixed when this client was generated.")
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_constants(&mut out, ops, graph, cli)?;
+    Ok(finish(out))
+}
+
+/// `cli/credentials.py` — where a secret comes from, and the only place a client is built.
+///
+/// Every generated CLI resolves credentials the same way, so the logic lives in one module rather
+/// than once per command. `build_client` is here because wiring a credential into the client is the
+/// same decision as resolving it.
+fn emit_credentials_module(graph: &ApiGraph) -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring(if has_security(graph) {
+            "Credential resolution and client construction.\n\nA secret comes from one \
+             environment variable per security scheme, or from one\nhelper command that prints it \
+             on stdout — selected by configuration, never\nby whichever happens to be set."
+        } else {
+            "Client construction.\n\nThis API declares no security schemes, so there is no \
+             credential to resolve."
+        })
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    if has_security(graph) {
+        writeln!(out, "from __future__ import annotations").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+        writeln!(out, "import os").map_err(sink)?;
+        writeln!(out, "import shlex").map_err(sink)?;
+        writeln!(out, "import subprocess").map_err(sink)?;
+        writeln!(out, "from typing import Optional").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+        let mut imports = vec![
+            "from ..client import Client".to_string(),
+            "from ..errors import AuthConfigurationError".to_string(),
+            "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELPER_ENV, PROGRAM, SCHEME_KINDS"
+                .to_string(),
+        ];
+        emit_relative_imports(&mut out, &mut imports)?;
+    } else {
+        writeln!(out, "from __future__ import annotations").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+        writeln!(out, "from ..client import Client").map_err(sink)?;
+    }
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     if has_security(graph) {
         emit_credential_helpers(&mut out)?;
     }
-    emit_body_helpers(&mut out, &ops, graph)?;
     emit_client_builder(&mut out, graph)?;
+    Ok(finish(out))
+}
+
+/// `cli/output.py` — how a result reaches stdout.
+fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring("Rendering a result on stdout: JSON for a document, raw bytes for a file.")
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from __future__ import annotations").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    if model_style == PyModelStyle::Dataclass && has_object_schema(graph) {
+        writeln!(out, "import dataclasses").map_err(sink)?;
+    }
+    writeln!(out, "import json").map_err(sink)?;
+    writeln!(out, "import sys").map_err(sink)?;
+    writeln!(out, "from typing import Any").map_err(sink)?;
+    if model_style == PyModelStyle::Pydantic && has_object_schema(graph) {
+        writeln!(out).map_err(sink)?;
+        writeln!(out, "from pydantic import BaseModel").map_err(sink)?;
+    }
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     emit_print_helpers(&mut out, graph, model_style)?;
-    emit_handlers(&mut out, &ops, graph, model_style)?;
-    emit_parser(&mut out, &ops, graph, cli)?;
-    emit_main(&mut out, &ops, graph)?;
-    Ok(out)
+    Ok(finish(out))
+}
+
+/// `cli/body.py` — reading a request body from a flag, a file, or stdin.
+fn emit_body_module() -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring(
+            "Reading a request body.\n\n`--body` takes JSON inline; `--body-file` takes a path, \
+             or `-` for stdin."
+        )
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from __future__ import annotations").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "import argparse").map_err(sink)?;
+    writeln!(out, "import json").map_err(sink)?;
+    writeln!(out, "import sys").map_err(sink)?;
+    writeln!(out, "from typing import Any").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_body_helpers_always(&mut out)?;
+    Ok(finish(out))
+}
+
+/// `cli/commands/__init__.py` — the group modules, named so a reader can find one.
+fn emit_commands_init(modules: &[CommandModule<'_>]) -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring("One module per command group; each registers its own subparsers.")
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_module_list(&mut out, "from . import ", modules)?;
+    writeln!(out).map_err(sink)?;
+    let names: Vec<String> = modules
+        .iter()
+        .map(|module| py_string_literal(&module.stem))
+        .collect();
+    if let [single] = names.as_slice() {
+        writeln!(out, "__all__ = [{single}]").map_err(sink)?;
+    } else {
+        writeln!(out, "__all__ = [").map_err(sink)?;
+        for name in &names {
+            writeln!(out, "    {name},").map_err(sink)?;
+        }
+        writeln!(out, "]").map_err(sink)?;
+    }
+    Ok(finish(out))
 }
 
 fn has_security(graph: &ApiGraph) -> bool {
@@ -218,81 +559,36 @@ fn scheme_kind_table(graph: &ApiGraph) -> BTreeMap<String, &'static str> {
     table
 }
 
-fn emit_imports(
-    out: &mut String,
-    ops: &[&Operation],
-    graph: &ApiGraph,
-    layout: &SdkFileLayout,
-    model_style: PyModelStyle,
-) -> Result<(), CoreError> {
-    writeln!(out, "from __future__ import annotations").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
-    writeln!(out, "import argparse").map_err(sink)?;
-    if model_style == PyModelStyle::Dataclass && has_object_schema(graph) {
-        writeln!(out, "import dataclasses").map_err(sink)?;
-    }
-    writeln!(out, "import json").map_err(sink)?;
-    if has_security(graph) {
-        writeln!(out, "import os").map_err(sink)?;
-        writeln!(out, "import shlex").map_err(sink)?;
-        writeln!(out, "import subprocess").map_err(sink)?;
-    }
-    writeln!(out, "import sys").map_err(sink)?;
-    writeln!(out, "from typing import Any, Optional").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
-    if model_style == PyModelStyle::Pydantic && has_object_schema(graph) {
-        writeln!(out, "from pydantic import BaseModel").map_err(sink)?;
-        writeln!(out).map_err(sink)?;
-    }
-    writeln!(out, "from .client import Client").map_err(sink)?;
-    if has_security(graph) {
-        writeln!(out, "from .errors import ApiError, AuthConfigurationError").map_err(sink)?;
-    } else {
-        writeln!(out, "from .errors import ApiError").map_err(sink)?;
-    }
-    let models = body_model_names(ops, graph)?;
-    if !models.is_empty() {
-        let module = model_module_for(layout);
-        writeln!(out, "from .{module} import (").map_err(sink)?;
-        for name in &models {
-            writeln!(out, "    {name},").map_err(sink)?;
-        }
-        writeln!(out, ")").map_err(sink)?;
-    }
-    writeln!(out).map_err(sink)?;
-    Ok(())
-}
-
 fn emit_constants(
     out: &mut String,
     ops: &[&Operation],
     graph: &ApiGraph,
     cli: &SdkCli,
 ) -> Result<(), CoreError> {
-    writeln!(out, "_PROGRAM = {}", py_string_literal(&cli.program)).map_err(sink)?;
+    writeln!(out, "PROGRAM = {}", py_string_literal(&cli.program)).map_err(sink)?;
     if let Some(base_url) = &cli.base_url {
-        writeln!(out, "_DEFAULT_BASE_URL = {}", py_string_literal(base_url)).map_err(sink)?;
+        writeln!(out, "DEFAULT_BASE_URL = {}", py_string_literal(base_url)).map_err(sink)?;
     }
     writeln!(
         out,
-        "_VERSION = {}",
+        "VERSION = {}",
         py_string_literal(&program_version(graph, &cli.program))
     )
     .map_err(sink)?;
     writeln!(
         out,
-        "_DESCRIPTION = {}",
+        "DESCRIPTION = {}",
         py_string_literal(&program_description(graph))
     )
     .map_err(sink)?;
     if has_security(graph) {
         writeln!(
             out,
-            "_HELPER_ENV = {}",
+            "HELPER_ENV = {}",
             py_string_literal(&helper_env_var(&cli.program))
         )
         .map_err(sink)?;
-        writeln!(out, "_CREDENTIAL_ENV = {{").map_err(sink)?;
+        writeln!(out, "CREDENTIAL_ENV = {{").map_err(sink)?;
         for scheme in &graph.security {
             writeln!(
                 out,
@@ -303,7 +599,7 @@ fn emit_constants(
             .map_err(sink)?;
         }
         writeln!(out, "}}").map_err(sink)?;
-        writeln!(out, "_SCHEME_KINDS = {{").map_err(sink)?;
+        writeln!(out, "SCHEME_KINDS = {{").map_err(sink)?;
         for (id, kind) in scheme_kind_table(graph) {
             writeln!(
                 out,
@@ -314,7 +610,7 @@ fn emit_constants(
             .map_err(sink)?;
         }
         writeln!(out, "}}").map_err(sink)?;
-        writeln!(out, "_COMMAND_BY_ID = {{").map_err(sink)?;
+        writeln!(out, "COMMAND_BY_ID = {{").map_err(sink)?;
         for op in ops {
             writeln!(
                 out,
@@ -334,27 +630,27 @@ fn emit_constants(
 }
 
 fn emit_credential_helpers(out: &mut String) -> Result<(), CoreError> {
-    writeln!(out, "class _HelperError(Exception):").map_err(sink)?;
+    writeln!(out, "class HelperError(Exception):").map_err(sink)?;
     writeln!(out, "    def __init__(self, reason: str) -> None:").map_err(sink)?;
     writeln!(out, "        super().__init__(reason)").map_err(sink)?;
     writeln!(out, "        self.reason = reason").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "def _resolve(scheme_id: str) -> Optional[str]:").map_err(sink)?;
-    writeln!(out, "    helper = os.environ.get(_HELPER_ENV)").map_err(sink)?;
+    writeln!(out, "    helper = os.environ.get(HELPER_ENV)").map_err(sink)?;
     writeln!(out, "    if helper:").map_err(sink)?;
     writeln!(out, "        try:").map_err(sink)?;
     writeln!(out, "            command = shlex.split(helper)").map_err(sink)?;
     writeln!(out, "        except ValueError as exc:").map_err(sink)?;
     writeln!(
         out,
-        "            raise _HelperError(f\"cannot parse {{_HELPER_ENV}}: {{exc}}\") from None"
+        "            raise HelperError(f\"cannot parse {{HELPER_ENV}}: {{exc}}\") from None"
     )
     .map_err(sink)?;
     writeln!(out, "        if not command:").map_err(sink)?;
     writeln!(
         out,
-        "            raise _HelperError(f\"{{_HELPER_ENV}} is empty\")"
+        "            raise HelperError(f\"{{HELPER_ENV}} is empty\")"
     )
     .map_err(sink)?;
     writeln!(out, "        argv = command + [scheme_id]").map_err(sink)?;
@@ -368,17 +664,17 @@ fn emit_credential_helpers(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "                check=False,").map_err(sink)?;
     writeln!(out, "            )").map_err(sink)?;
     writeln!(out, "        except subprocess.TimeoutExpired:").map_err(sink)?;
-    writeln!(out, "            raise _HelperError(\"timeout\") from None").map_err(sink)?;
+    writeln!(out, "            raise HelperError(\"timeout\") from None").map_err(sink)?;
     writeln!(out, "        except OSError as exc:").map_err(sink)?;
     writeln!(
         out,
-        "            raise _HelperError(f\"cannot run {{argv[0]!r}}: {{exc}}\") from None"
+        "            raise HelperError(f\"cannot run {{argv[0]!r}}: {{exc}}\") from None"
     )
     .map_err(sink)?;
     writeln!(out, "        if completed.returncode != 0:").map_err(sink)?;
     writeln!(
         out,
-        "            raise _HelperError(f\"exit {{completed.returncode}}\")"
+        "            raise HelperError(f\"exit {{completed.returncode}}\")"
     )
     .map_err(sink)?;
     writeln!(
@@ -387,9 +683,9 @@ fn emit_credential_helpers(out: &mut String) -> Result<(), CoreError> {
     )
     .map_err(sink)?;
     writeln!(out, "        if not line:").map_err(sink)?;
-    writeln!(out, "            raise _HelperError(\"empty stdout\")").map_err(sink)?;
+    writeln!(out, "            raise HelperError(\"empty stdout\")").map_err(sink)?;
     writeln!(out, "        return line").map_err(sink)?;
-    writeln!(out, "    env_name = _CREDENTIAL_ENV.get(scheme_id)").map_err(sink)?;
+    writeln!(out, "    env_name = CREDENTIAL_ENV.get(scheme_id)").map_err(sink)?;
     writeln!(out, "    if env_name is None:").map_err(sink)?;
     writeln!(out, "        return None").map_err(sink)?;
     writeln!(out, "    value = os.environ.get(env_name)").map_err(sink)?;
@@ -401,21 +697,14 @@ fn emit_credential_helpers(out: &mut String) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn emit_body_helpers(
-    out: &mut String,
-    ops: &[&Operation],
-    graph: &ApiGraph,
-) -> Result<(), CoreError> {
-    if !has_request_body(ops, graph)? {
-        return Ok(());
-    }
-    writeln!(out, "class _InputError(Exception):").map_err(sink)?;
+fn emit_body_helpers_always(out: &mut String) -> Result<(), CoreError> {
+    writeln!(out, "class InputError(Exception):").map_err(sink)?;
     writeln!(out, "    def __init__(self, reason: str) -> None:").map_err(sink)?;
     writeln!(out, "        super().__init__(reason)").map_err(sink)?;
     writeln!(out, "        self.reason = reason").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
-    writeln!(out, "def _load_body(args: argparse.Namespace) -> Any:").map_err(sink)?;
+    writeln!(out, "def load_body(args: argparse.Namespace) -> Any:").map_err(sink)?;
     writeln!(out, "    raw = getattr(args, \"body\", None)").map_err(sink)?;
     writeln!(out, "    if raw is None:").map_err(sink)?;
     writeln!(out, "        path = getattr(args, \"body_file\", None)").map_err(sink)?;
@@ -434,7 +723,7 @@ fn emit_body_helpers(
     writeln!(out, "            except OSError as exc:").map_err(sink)?;
     writeln!(
         out,
-        "                raise _InputError(f\"cannot read {{path!r}}: {{exc}}\") from None"
+        "                raise InputError(f\"cannot read {{path!r}}: {{exc}}\") from None"
     )
     .map_err(sink)?;
     writeln!(out, "    try:").map_err(sink)?;
@@ -442,7 +731,7 @@ fn emit_body_helpers(
     writeln!(out, "    except json.JSONDecodeError as exc:").map_err(sink)?;
     writeln!(
         out,
-        "        raise _InputError(f\"body is not valid JSON: {{exc}}\") from None"
+        "        raise InputError(f\"body is not valid JSON: {{exc}}\") from None"
     )
     .map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -452,7 +741,7 @@ fn emit_body_helpers(
 
 fn emit_client_builder(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
     if !has_security(graph) {
-        writeln!(out, "def _build_client(base_url: str) -> Client:").map_err(sink)?;
+        writeln!(out, "def build_client(base_url: str) -> Client:").map_err(sink)?;
         writeln!(out, "    return Client(base_url)").map_err(sink)?;
         writeln!(out).map_err(sink)?;
         writeln!(out).map_err(sink)?;
@@ -468,7 +757,7 @@ fn emit_client_builder(out: &mut String, graph: &ApiGraph) -> Result<(), CoreErr
     let basic = has_basic_auth(graph);
     writeln!(
         out,
-        "def _build_client(base_url: str, scheme_ids: list[str]) -> Client:"
+        "def build_client(base_url: str, scheme_ids: list[str]) -> Client:"
     )
     .map_err(sink)?;
     if api_key {
@@ -484,7 +773,7 @@ fn emit_client_builder(out: &mut String, graph: &ApiGraph) -> Result<(), CoreErr
     writeln!(out, "        secret = _resolve(scheme_id)").map_err(sink)?;
     writeln!(out, "        if secret is None:").map_err(sink)?;
     writeln!(out, "            continue").map_err(sink)?;
-    writeln!(out, "        kind = _SCHEME_KINDS.get(scheme_id)").map_err(sink)?;
+    writeln!(out, "        kind = SCHEME_KINDS.get(scheme_id)").map_err(sink)?;
     let mut branch = "if";
     if api_key {
         writeln!(out, "        {branch} kind == \"apiKey\":").map_err(sink)?;
@@ -553,7 +842,7 @@ fn emit_print_helpers(
     writeln!(out, "    return value").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
-    writeln!(out, "def _print_result(result: Any) -> None:").map_err(sink)?;
+    writeln!(out, "def print_result(result: Any) -> None:").map_err(sink)?;
     writeln!(out, "    if isinstance(result, (bytes, bytearray)):").map_err(sink)?;
     writeln!(out, "        sys.stdout.buffer.write(result)").map_err(sink)?;
     writeln!(out, "        return").map_err(sink)?;
@@ -591,7 +880,7 @@ fn emit_handler(
     let paging = paging_param_names(graph, op);
     let bodies = request_body_models_of(op, graph)?;
     let scheme_ids = operation_scheme_ids(graph, op)?;
-    writeln!(out, "def _cmd_{method}(args: argparse.Namespace) -> Any:").map_err(sink)?;
+    writeln!(out, "def _{method}(args: argparse.Namespace) -> Any:").map_err(sink)?;
     if has_security(graph) {
         let ids = scheme_ids
             .iter()
@@ -599,12 +888,12 @@ fn emit_handler(
             .collect::<Vec<_>>()
             .join(", ");
         if ids.is_empty() {
-            writeln!(out, "    client = _build_client(args.base_url, [])").map_err(sink)?;
+            writeln!(out, "    client = build_client(args.base_url, [])").map_err(sink)?;
         } else {
-            writeln!(out, "    client = _build_client(args.base_url, [{ids}])").map_err(sink)?;
+            writeln!(out, "    client = build_client(args.base_url, [{ids}])").map_err(sink)?;
         }
     } else {
-        writeln!(out, "    client = _build_client(args.base_url)").map_err(sink)?;
+        writeln!(out, "    client = build_client(args.base_url)").map_err(sink)?;
     }
     writeln!(out, "    kwargs: dict[str, Any] = {{}}").map_err(sink)?;
     for param in &op.params {
@@ -662,7 +951,7 @@ fn emit_body_kwargs(
     body: &RequestBodyModel,
     model_style: PyModelStyle,
 ) -> Result<(), CoreError> {
-    writeln!(out, "    payload = _load_body(args)").map_err(sink)?;
+    writeln!(out, "    payload = load_body(args)").map_err(sink)?;
     writeln!(out, "    if payload is not None:").map_err(sink)?;
     match model_style {
         PyModelStyle::Pydantic => {
@@ -702,61 +991,145 @@ fn operation_scheme_ids(graph: &ApiGraph, op: &Operation) -> Result<Vec<String>,
     Ok(ids.into_iter().collect())
 }
 
-fn emit_parser(
-    out: &mut String,
-    ops: &[&Operation],
-    graph: &ApiGraph,
-    cli: &SdkCli,
-) -> Result<(), CoreError> {
-    writeln!(out, "def _build_parser() -> argparse.ArgumentParser:").map_err(sink)?;
+/// `cli/parser.py` — the root parser, and nothing about any individual command.
+///
+/// Each group module registers its own subparsers, so this file does not grow when the API does.
+fn emit_parser_module(modules: &[CommandModule<'_>], cli: &SdkCli) -> Result<String, CoreError> {
+    let _ = cli;
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring("The root argument parser; each command group registers its own subparsers.")
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from __future__ import annotations").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "import argparse").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    if modules.is_empty() {
+        writeln!(out, "from .config import DESCRIPTION, PROGRAM, VERSION").map_err(sink)?;
+    } else {
+        emit_module_list(&mut out, "from .commands import ", modules)?;
+        writeln!(out, "from .config import DESCRIPTION, PROGRAM, VERSION").map_err(sink)?;
+    }
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "def build_parser() -> argparse.ArgumentParser:").map_err(sink)?;
     writeln!(out, "    parser = argparse.ArgumentParser(").map_err(sink)?;
-    writeln!(out, "        prog=_PROGRAM,").map_err(sink)?;
-    writeln!(out, "        description=_DESCRIPTION,").map_err(sink)?;
+    writeln!(out, "        prog=PROGRAM,").map_err(sink)?;
+    writeln!(out, "        description=DESCRIPTION,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
     writeln!(out, "    parser.add_argument(").map_err(sink)?;
     writeln!(out, "        \"--version\",").map_err(sink)?;
     writeln!(out, "        action=\"version\",").map_err(sink)?;
-    writeln!(out, "        version=_VERSION,").map_err(sink)?;
+    writeln!(out, "        version=VERSION,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
-    if ops.is_empty() {
+    if modules.is_empty() {
         writeln!(out, "    return parser").map_err(sink)?;
-        writeln!(out).map_err(sink)?;
-        writeln!(out).map_err(sink)?;
-        return Ok(());
+        return Ok(finish(out));
     }
     writeln!(out, "    subparsers = parser.add_subparsers(").map_err(sink)?;
     writeln!(out, "        dest=\"_command\",").map_err(sink)?;
     writeln!(out, "        required=True,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
-
-    let mut ungrouped: Vec<&Operation> = Vec::new();
-    let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
-    for op in ops.iter().copied() {
-        match command_group(op) {
-            Some(group) => grouped.entry(group).or_default().push(op),
-            None => ungrouped.push(op),
-        }
-    }
-    for op in ungrouped {
-        emit_command_parser(out, graph, cli, op, "subparsers")?;
-    }
-    for (group, ops) in grouped {
-        let ident = format!("group_{}", group.replace('-', "_"));
-        writeln!(
-            out,
-            "    {ident} = subparsers.add_parser({})",
-            py_string_literal(&group)
-        )
-        .map_err(sink)?;
-        writeln!(out, "    {ident}_sub = {ident}.add_subparsers(").map_err(sink)?;
-        writeln!(out, "        dest=\"_subcommand\",").map_err(sink)?;
-        writeln!(out, "        required=True,").map_err(sink)?;
-        writeln!(out, "    )").map_err(sink)?;
-        for op in ops {
-            emit_command_parser(out, graph, cli, op, &format!("{ident}_sub"))?;
-        }
+    for module in modules {
+        writeln!(out, "    {}.register(subparsers)", module.stem).map_err(sink)?;
     }
     writeln!(out, "    return parser").map_err(sink)?;
+    Ok(finish(out))
+}
+
+/// `cli/commands/<group>.py` — one group's subparsers and the calls they make.
+///
+/// A command body does two things: turn parsed arguments into the client method's keyword
+/// arguments, and call it. Everything else — credentials, output, exit codes — is shared.
+fn emit_command_module(
+    module: &CommandModule<'_>,
+    graph: &ApiGraph,
+    cli: &SdkCli,
+    layout: &SdkFileLayout,
+    model_style: PyModelStyle,
+) -> Result<String, CoreError> {
+    let mut out = String::new();
+    let subject = match &module.group {
+        Some(group) => format!("The `{group}` command group."),
+        None => "The commands that sit directly under the program.".to_string(),
+    };
+    writeln!(out, "{}", py_docstring(&subject)).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from __future__ import annotations").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "import argparse").map_err(sink)?;
+    writeln!(out, "from typing import Any").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    let mut imports = vec!["from ..credentials import build_client".to_string()];
+    if has_request_body(&module.ops, graph)? {
+        imports.push("from ..body import load_body".to_string());
+    }
+    if cli.base_url.is_some() {
+        imports.push("from ..config import DEFAULT_BASE_URL".to_string());
+    }
+    let models = body_model_names(&module.ops, graph)?;
+    if !models.is_empty() {
+        let model_module = model_module_for(layout);
+        let mut block = format!("from ...{model_module} import (\n");
+        for name in &models {
+            let _ = writeln!(block, "    {name},");
+        }
+        block.push(')');
+        imports.push(block);
+    }
+    emit_relative_imports(&mut out, &mut imports)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_group_register(&mut out, module, graph, cli)?;
+    emit_handlers(&mut out, &module.ops, graph, model_style)?;
+    Ok(finish(out))
+}
+
+/// The `register(subparsers)` one group module exposes.
+fn emit_group_register(
+    out: &mut String,
+    module: &CommandModule<'_>,
+    graph: &ApiGraph,
+    cli: &SdkCli,
+) -> Result<(), CoreError> {
+    // `subparsers` is argparse's private `_SubParsersAction`; naming it would reach into a private
+    // type, so the annotation stays `Any` and the docstring says what it is.
+    writeln!(out, "def register(subparsers: Any) -> None:").map_err(sink)?;
+    writeln!(
+        out,
+        "    {}",
+        py_docstring(match &module.group {
+            Some(_) => "Add this group and its commands to the program's subparsers.",
+            None => "Add these commands to the program's subparsers.",
+        })
+    )
+    .map_err(sink)?;
+    match &module.group {
+        None => {
+            for op in &module.ops {
+                emit_command_parser(out, graph, cli, op, "subparsers")?;
+            }
+        }
+        Some(group) => {
+            writeln!(
+                out,
+                "    group = subparsers.add_parser({})",
+                py_string_literal(group)
+            )
+            .map_err(sink)?;
+            writeln!(out, "    commands = group.add_subparsers(").map_err(sink)?;
+            writeln!(out, "        dest=\"_subcommand\",").map_err(sink)?;
+            writeln!(out, "        required=True,").map_err(sink)?;
+            writeln!(out, "    )").map_err(sink)?;
+            for op in &module.ops {
+                emit_command_parser(out, graph, cli, op, "commands")?;
+            }
+        }
+    }
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
@@ -790,7 +1163,7 @@ fn emit_command_parser(
     writeln!(out, "        \"--base-url\",").map_err(sink)?;
     writeln!(out, "        dest=\"base_url\",").map_err(sink)?;
     if cli.base_url.is_some() {
-        writeln!(out, "        default=_DEFAULT_BASE_URL,").map_err(sink)?;
+        writeln!(out, "        default=DEFAULT_BASE_URL,").map_err(sink)?;
     } else {
         writeln!(out, "        required=True,").map_err(sink)?;
     }
@@ -836,7 +1209,7 @@ fn emit_command_parser(
         writeln!(out, "        action=\"store_true\",").map_err(sink)?;
         writeln!(out, "    )").map_err(sink)?;
     }
-    writeln!(out, "    {ident}.set_defaults(_handler=_cmd_{method})").map_err(sink)?;
+    writeln!(out, "    {ident}.set_defaults(_handler=_{method})").map_err(sink)?;
     Ok(())
 }
 
@@ -1021,9 +1394,48 @@ fn literal_python(value: &LiteralValue) -> String {
     }
 }
 
+/// `cli/main.py` — parse, dispatch, and map every failure to its exit code.
+fn emit_main_module(ops: &[&Operation], graph: &ApiGraph) -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring(
+            "Dispatch and exit codes.\n\n0 on success, 1 for a failed request, 2 for a usage or \
+             input error."
+        )
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from __future__ import annotations").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "import sys").map_err(sink)?;
+    writeln!(out, "from typing import Optional").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    let mut imports = vec![
+        "from .config import PROGRAM".to_string(),
+        "from .output import print_result".to_string(),
+        "from .parser import build_parser".to_string(),
+    ];
+    if has_security(graph) {
+        imports.push("from ..errors import ApiError, AuthConfigurationError".to_string());
+        imports.push("from .credentials import HelperError".to_string());
+    } else {
+        imports.push("from ..errors import ApiError".to_string());
+    }
+    if has_request_body(ops, graph)? {
+        imports.push("from .body import InputError".to_string());
+    }
+    emit_relative_imports(&mut out, &mut imports)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_main(&mut out, ops, graph)?;
+    Ok(finish(out))
+}
+
 fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(), CoreError> {
     writeln!(out, "def main(argv: Optional[list[str]] = None) -> int:").map_err(sink)?;
-    writeln!(out, "    parser = _build_parser()").map_err(sink)?;
+    writeln!(out, "    parser = build_parser()").map_err(sink)?;
     writeln!(out, "    args = parser.parse_args(argv)").map_err(sink)?;
     writeln!(out, "    handler = getattr(args, \"_handler\", None)").map_err(sink)?;
     writeln!(out, "    if handler is None:").map_err(sink)?;
@@ -1031,13 +1443,13 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "        return 2").map_err(sink)?;
     writeln!(out, "    try:").map_err(sink)?;
     writeln!(out, "        result = handler(args)").map_err(sink)?;
-    writeln!(out, "        _print_result(result)").map_err(sink)?;
+    writeln!(out, "        print_result(result)").map_err(sink)?;
     writeln!(out, "        return 0").map_err(sink)?;
     writeln!(out, "    except ApiError as exc:").map_err(sink)?;
     writeln!(out, "        print(").map_err(sink)?;
     writeln!(
         out,
-        "            f\"{{_PROGRAM}}: {{exc.status_code}} {{exc.message}} ({{exc.slug}})\","
+        "            f\"{{PROGRAM}}: {{exc.status_code}} {{exc.message}} ({{exc.slug}})\","
     )
     .map_err(sink)?;
     writeln!(out, "            file=sys.stderr,").map_err(sink)?;
@@ -1047,13 +1459,13 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
         writeln!(out, "    except AuthConfigurationError as exc:").map_err(sink)?;
         writeln!(
             out,
-            "        command = _COMMAND_BY_ID.get(exc.operation_id, exc.operation_id)"
+            "        command = COMMAND_BY_ID.get(exc.operation_id, exc.operation_id)"
         )
         .map_err(sink)?;
         writeln!(out, "        print(").map_err(sink)?;
         writeln!(
             out,
-            "            f\"{{_PROGRAM}}: no credentials configured for `{{command}}`\","
+            "            f\"{{PROGRAM}}: no credentials configured for `{{command}}`\","
         )
         .map_err(sink)?;
         writeln!(out, "            file=sys.stderr,").map_err(sink)?;
@@ -1064,7 +1476,7 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
         writeln!(out, "            for scheme_id in alternative:").map_err(sink)?;
         writeln!(
             out,
-            "                env_name = _CREDENTIAL_ENV.get(scheme_id)"
+            "                env_name = CREDENTIAL_ENV.get(scheme_id)"
         )
         .map_err(sink)?;
         writeln!(out, "                if env_name is not None:").map_err(sink)?;
@@ -1082,17 +1494,17 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
         writeln!(out, "        print(").map_err(sink)?;
         writeln!(
             out,
-            "            f\"  or set {{_HELPER_ENV}} to a command that prints the secret\","
+            "            f\"  or set {{HELPER_ENV}} to a command that prints the secret\","
         )
         .map_err(sink)?;
         writeln!(out, "            file=sys.stderr,").map_err(sink)?;
         writeln!(out, "        )").map_err(sink)?;
         writeln!(out, "        return 1").map_err(sink)?;
-        writeln!(out, "    except _HelperError as exc:").map_err(sink)?;
+        writeln!(out, "    except HelperError as exc:").map_err(sink)?;
         writeln!(out, "        print(").map_err(sink)?;
         writeln!(
             out,
-            "            f\"{{_PROGRAM}}: credential helper failed ({{exc.reason}})\","
+            "            f\"{{PROGRAM}}: credential helper failed ({{exc.reason}})\","
         )
         .map_err(sink)?;
         writeln!(out, "            file=sys.stderr,").map_err(sink)?;
@@ -1100,10 +1512,10 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
         writeln!(out, "        return 1").map_err(sink)?;
     }
     if has_request_body(ops, graph)? {
-        writeln!(out, "    except _InputError as exc:").map_err(sink)?;
+        writeln!(out, "    except InputError as exc:").map_err(sink)?;
         writeln!(
             out,
-            "        print(f\"{{_PROGRAM}}: {{exc.reason}}\", file=sys.stderr)"
+            "        print(f\"{{PROGRAM}}: {{exc.reason}}\", file=sys.stderr)"
         )
         .map_err(sink)?;
         writeln!(out, "        return 2").map_err(sink)?;
@@ -1114,13 +1526,11 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "    except OSError as exc:").map_err(sink)?;
     writeln!(
         out,
-        "        print(f\"{{_PROGRAM}}: {{exc}}\", file=sys.stderr)"
+        "        print(f\"{{PROGRAM}}: {{exc}}\", file=sys.stderr)"
     )
     .map_err(sink)?;
     writeln!(out, "        return 1").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
-    writeln!(out, "if __name__ == \"__main__\":").map_err(sink)?;
-    writeln!(out, "    sys.exit(main())").map_err(sink)?;
     Ok(())
 }

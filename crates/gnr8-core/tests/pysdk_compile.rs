@@ -1806,22 +1806,41 @@ fn generated_cli_dispatches_get_book_against_stdlib_http_server() {
     let dir = materialize_sdk_target_with_cli("cli-dispatch", &graph, "bookstore");
     let pkg_dir = dir.join(PACKAGE);
     assert!(
-        pkg_dir.join("cli.py").is_file(),
-        "target output must include cli.py"
+        pkg_dir.join("cli").join("main.py").is_file(),
+        "target output must include the CLI package"
     );
-    let cli_path = pkg_dir.join("cli.py");
+    // Compile the whole package, not one module: the CLI is a tree now, and a syntax error in a
+    // command module would otherwise only surface when that command is run.
     let compiled = run_python(
-        &["-m", "py_compile", cli_path.to_str().expect("utf-8 path")],
+        &[
+            "-m",
+            "compileall",
+            "-q",
+            pkg_dir.to_str().expect("utf-8 path"),
+        ],
         &dir,
     );
     assert!(
         compiled.is_ok(),
-        "python3 -m py_compile cli.py must succeed: {compiled:?}"
+        "python3 -m compileall over the package must succeed: {compiled:?}"
     );
+    // Importing the package runs `cli/__init__.py`, which imports `main`, which imports every other
+    // CLI module — so one import exercises the whole tree's import graph.
     let imported = run_python(&["-c", "import bookstore.cli"], &dir);
     assert!(
         imported.is_ok(),
         "python3 -c 'import bookstore.cli' must succeed: {imported:?}"
+    );
+    let entry_point = run_python(
+        &[
+            "-c",
+            "from bookstore.cli import main; assert callable(main)",
+        ],
+        &dir,
+    );
+    assert!(
+        entry_point.is_ok(),
+        "the [project.scripts] entry point `<pkg>.cli:main` must resolve: {entry_point:?}"
     );
 
     let driver = dir.join("cli_dispatch_driver.py");

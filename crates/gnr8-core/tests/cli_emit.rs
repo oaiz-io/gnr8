@@ -1,7 +1,7 @@
 //! Generated CLI surface: text assertions over target output.
 //!
 //! The CLI is opt-in on `PySdk::cli` / `GoSdk::cli`. These tests drive the target, not the bundle
-//! path, so they see `cli.py` and `cmd/<program>/main.go`. Go cases skip when `gofmt` is absent
+//! path, so they see the `cli/` package and the `cmd/<program>/` project. Go cases skip when `gofmt` is absent
 //! (the Go target always formats through that seam).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -22,7 +22,7 @@ fn generate_cli(graph: &ApiGraph, program: &str) -> String {
         .cli(program)
         .generate(graph, &mut out, &cx())
         .expect("PySdk with .cli() must generate");
-    artifact(&out, "generated/sdk/cli.py").to_string()
+    python_cli_source(&out, "generated/sdk")
 }
 
 fn generate_cli_with(graph: &ApiGraph, cli: SdkCli) -> String {
@@ -33,7 +33,7 @@ fn generate_cli_with(graph: &ApiGraph, cli: SdkCli) -> String {
         .cli(cli)
         .generate(graph, &mut out, &cx())
         .expect("PySdk with .cli() must generate");
-    artifact(&out, "generated/sdk/cli.py").to_string()
+    python_cli_source(&out, "generated/sdk")
 }
 
 fn generate_cli_result(graph: &ApiGraph, cli: SdkCli) -> Result<Artifacts, gnr8_engine::CoreError> {
@@ -73,6 +73,23 @@ fn argument_block<'a>(text: &'a str, flag: &str) -> &'a str {
         .find("\n    )")
         .unwrap_or_else(|| panic!("unterminated add_argument for {flag} in:\n{rest}"));
     &rest[..end]
+}
+
+/// Every emitted Python CLI module concatenated in path order.
+///
+/// The CLI is a package now, so a test that asks "does the program bind this flag" has to look
+/// across its modules. `Artifacts::files` is already in ascending path order, so the
+/// concatenation is deterministic without sorting.
+fn python_cli_source(out: &Artifacts, dir: &str) -> String {
+    let prefix = format!("{dir}/cli/");
+    let parts: Vec<&str> = out
+        .files()
+        .iter()
+        .filter(|file| file.path.starts_with(&prefix))
+        .map(|file| file.text.as_str())
+        .collect();
+    assert!(!parts.is_empty(), "no CLI package under {prefix}");
+    parts.join("\n")
 }
 
 fn gofmt_available() -> bool {
@@ -293,8 +310,8 @@ fn absent_cli_emits_no_cli_file() {
         .generate(&graph, &mut out, &cx())
         .expect("PySdk without .cli() must generate");
     assert!(
-        !out.files().iter().any(|file| file.path.ends_with("cli.py")),
-        "cli.py must be absent when .cli() is not set: {:?}",
+        !out.files().iter().any(|file| file.path.contains("/cli/")),
+        "the CLI package must be absent when .cli() is not set: {:?}",
         out.files()
             .iter()
             .map(|file| file.path.as_str())
@@ -314,8 +331,8 @@ fn cli_artifact_is_under_the_output_dir_and_covered_by_anchors() {
     assert!(
         out.files()
             .iter()
-            .any(|file| file.path == "generated/sdk-py/cli.py"),
-        "cli.py must be written under the trimmed output dir"
+            .any(|file| file.path == "generated/sdk-py/cli/__init__.py"),
+        "the CLI package must be written under the trimmed output dir"
     );
     for file in out.files() {
         assert!(
@@ -333,7 +350,7 @@ fn cli_artifact_is_under_the_output_dir_and_covered_by_anchors() {
 #[test]
 fn parser_declares_subcommands_and_flags() {
     let text = generate_cli(&bookstore_graph(), "bookstore");
-    assert!(text.contains("prog=_PROGRAM"), "{text}");
+    assert!(text.contains("prog=PROGRAM"), "{text}");
     assert!(text.contains("\"get-book\""), "{text}");
     assert!(text.contains("\"create-book\""), "{text}");
     assert!(text.contains("\"--book-id\""), "{text}");
@@ -517,11 +534,11 @@ fn auth_matrix_and_and_or() {
     // graph's whole scheme list. Asserting only that the three ids appear somewhere in the file
     // would pass on an emitter that ignored `operation_security` entirely.
     assert!(
-        text.contains("def _cmd_get_and(args: argparse.Namespace) -> Any:\n    client = _build_client(args.base_url, [\"HeaderAuth\", \"QueryAuth\"])"),
+        text.contains("def _get_and(args: argparse.Namespace) -> Any:\n    client = build_client(args.base_url, [\"HeaderAuth\", \"QueryAuth\"])"),
         "{text}"
     );
     assert!(
-        text.contains("def _cmd_get_or(args: argparse.Namespace) -> Any:\n    client = _build_client(args.base_url, [\"BearerAuth\", \"HeaderAuth\"])"),
+        text.contains("def _get_or(args: argparse.Namespace) -> Any:\n    client = build_client(args.base_url, [\"BearerAuth\", \"HeaderAuth\"])"),
         "{text}"
     );
 }
@@ -658,12 +675,12 @@ fn helper_parsing_failures_are_typed_before_anything_is_executed() {
     );
     assert!(text.contains("        except ValueError as exc:"), "{text}");
     assert!(
-        text.contains(r#"raise _HelperError(f"cannot parse {_HELPER_ENV}: {exc}") from None"#),
+        text.contains(r#"raise HelperError(f"cannot parse {HELPER_ENV}: {exc}") from None"#),
         "{text}"
     );
     assert!(text.contains("        if not command:"), "{text}");
     assert!(
-        text.contains(r#"raise _HelperError(f"{_HELPER_ENV} is empty")"#),
+        text.contains(r#"raise HelperError(f"{HELPER_ENV} is empty")"#),
         "{text}"
     );
     let split_at = text
@@ -1176,29 +1193,40 @@ fn scoping_the_cli_leaves_every_other_artifact_byte_identical() {
     let scoped = files(SdkCli::new("bookstore").commands(OperationSelector::operation("getBook")));
 
     assert_eq!(
-        unscoped.keys().collect::<Vec<_>>(),
-        scoped.keys().collect::<Vec<_>>(),
-        "scope must not add or remove artifacts"
+        unscoped
+            .keys()
+            .filter(|path| !path.contains("/cli/"))
+            .collect::<Vec<_>>(),
+        scoped
+            .keys()
+            .filter(|path| !path.contains("/cli/"))
+            .collect::<Vec<_>>(),
+        "scope must not add or remove an artifact outside the CLI package"
     );
+    // Narrowing the program may drop a CLI module nothing imports any more — `body.py` exists only
+    // for a command that takes a request body — so the CLI package itself is allowed to shrink.
     for (path, unscoped_text) in &unscoped {
-        let scoped_text = &scoped[path];
-        if path.ends_with("cli.py") {
-            assert_ne!(
-                unscoped_text, scoped_text,
-                "the CLI itself must change, or the test proves nothing"
-            );
-            assert!(
-                unscoped_text.contains("\"create-book\"")
-                    && !scoped_text.contains("\"create-book\""),
-                "the out-of-scope operation must lose its command"
-            );
-        } else {
-            assert_eq!(
-                unscoped_text, scoped_text,
-                "{path} must not change when the CLI is scoped"
-            );
+        if path.contains("/cli/") {
+            continue;
         }
+        assert_eq!(
+            unscoped_text, &scoped[path],
+            "{path} must not change when the CLI is scoped"
+        );
     }
+    let cli_source = |files: &std::collections::BTreeMap<String, String>| {
+        files
+            .iter()
+            .filter(|(path, _)| path.contains("/cli/"))
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        cli_source(&unscoped).contains("\"create-book\"")
+            && !cli_source(&scoped).contains("\"create-book\""),
+        "the out-of-scope operation must lose its command"
+    );
     assert!(
         unscoped.keys().any(|path| path.ends_with("client.py")),
         "the comparison must actually cover the client"
@@ -1613,10 +1641,10 @@ fn base_url_is_the_programs_default_and_servers_is_not_consulted() {
         SdkCli::new("bookstore").base_url("https://api.example.com"),
     );
     assert!(
-        text.contains(r#"_DEFAULT_BASE_URL = "https://api.example.com""#),
+        text.contains(r#"DEFAULT_BASE_URL = "https://api.example.com""#),
         "{text}"
     );
-    assert!(text.contains("default=_DEFAULT_BASE_URL,"), "{text}");
+    assert!(text.contains("default=DEFAULT_BASE_URL,"), "{text}");
     assert!(
         !text.contains("localhost:8000"),
         "the localhost constant is gone:\n{text}"
@@ -1627,7 +1655,7 @@ fn base_url_is_the_programs_default_and_servers_is_not_consulted() {
 fn without_a_declared_base_url_the_flag_is_required() {
     let text = generate_cli_with(&bookstore_graph(), SdkCli::new("bookstore"));
     assert!(
-        !text.contains("_DEFAULT_BASE_URL"),
+        !text.contains("DEFAULT_BASE_URL"),
         "an undeclared base URL must compile in no default:\n{text}"
     );
     assert!(
@@ -1745,7 +1773,7 @@ fn a_declared_server_is_never_the_clis_default_host() {
         SdkCli::new("bookstore").base_url("https://api.example.com"),
     );
     assert!(
-        declared.contains(r#"_DEFAULT_BASE_URL = "https://api.example.com""#),
+        declared.contains(r#"DEFAULT_BASE_URL = "https://api.example.com""#),
         "SdkCli::base_url is the one source:\n{declared}"
     );
     assert!(
@@ -1759,7 +1787,7 @@ fn a_declared_server_is_never_the_clis_default_host() {
         "an advertised server must not become the program's default:\n{undeclared}"
     );
     assert!(
-        !undeclared.contains("_DEFAULT_BASE_URL"),
+        !undeclared.contains("DEFAULT_BASE_URL"),
         "no server means no compiled default:\n{undeclared}"
     );
     assert!(

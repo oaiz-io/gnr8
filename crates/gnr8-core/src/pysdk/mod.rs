@@ -97,9 +97,6 @@ pub fn generate_with_options(
 /// The file name the Python SDK's contract test is written at, relative to the target's output dir.
 pub(crate) const CONTRACT_TEST_FILE: &str = contract::CONTRACT_TEST_FILE;
 
-/// The file name the Python SDK's generated CLI is written at, relative to the target's output dir.
-pub(crate) const CLI_FILE: &str = cli::CLI_FILE;
-
 /// The module the generated package imports its models from, for one file layout.
 ///
 /// The contract test imports the same module the client does, resolved the one way
@@ -138,7 +135,7 @@ pub(crate) fn generate_cli(
     layout: &SdkFileLayout,
     model_style: PyModelStyle,
     cli: &gnr8::sdk::SdkCli,
-) -> Result<String, crate::CoreError> {
+) -> Result<Vec<crate::sdk::bundle::SdkFile>, crate::CoreError> {
     cli::emit_cli(graph, package, layout, model_style, cli)
 }
 

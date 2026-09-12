@@ -12,7 +12,9 @@ dependencies = ["pydantic>=2"]
 "bookstore" = "sdk.cli:main"
 
 [tool.setuptools]
-packages = ["sdk"]
+packages = ["sdk", "sdk.cli", "sdk.cli.commands"]
 
 [tool.setuptools.package-dir]
 "sdk" = "."
+"sdk.cli" = "cli"
+"sdk.cli.commands" = "cli/commands"

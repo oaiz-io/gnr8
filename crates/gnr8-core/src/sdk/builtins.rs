@@ -2974,6 +2974,19 @@ impl TargetExec for PySdk {
             self.model_style,
         )?;
         append_python_root_exports(&mut files, &self.root_exports)?;
+        // The generated CLI is a SUBPACKAGE, so it has to be in `files` before `pyproject.toml` is
+        // rendered: `pyproject_packages` discovers a package from the `__init__.py` files it finds
+        // here, and a wheel that omits `cli/` would ship a `[project.scripts]` entry point with no
+        // module behind it.
+        if let Some(cli) = &self.cli {
+            files.extend(crate::pysdk::generate_cli(
+                ir,
+                &model.package,
+                &self.layout,
+                self.model_style,
+                cli,
+            )?);
+        }
         if self.package_metadata {
             let dist_name = self.package_info.resolved_name(&model.package)?;
             files.push(super::bundle::SdkFile {
@@ -3008,23 +3021,6 @@ impl TargetExec for PySdk {
                     text,
                 )?;
             }
-        }
-        if let Some(cli) = &self.cli {
-            let text = crate::pysdk::generate_cli(
-                ir,
-                &model.package,
-                &self.layout,
-                self.model_style,
-                cli,
-            )?;
-            out.create(
-                format!(
-                    "{}/{}",
-                    self.dir.trim_end_matches('/'),
-                    crate::pysdk::CLI_FILE
-                ),
-                text,
-            )?;
         }
         write_sdk_docs(
             out,

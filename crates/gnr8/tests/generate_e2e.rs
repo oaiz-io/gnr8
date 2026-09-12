@@ -602,9 +602,27 @@ fn generate_python_cli_is_a_noop_on_second_run() {
         ok,
         "gnr8 generate must write the Python CLI.\nstdout:\n{out}\nstderr:\n{err}"
     );
-    let cli = root.join("sdk").join("cli.py");
-    assert!(cli.is_file(), "generate must write sdk/cli.py");
-    let first = std::fs::read_to_string(&cli).expect("read sdk/cli.py");
+    // The CLI is a package, so the no-rewrite contract has to hold for every module in it.
+    let cli_dir = root.join("sdk").join("cli");
+    let modules = [
+        "__init__.py",
+        "__main__.py",
+        "config.py",
+        "credentials.py",
+        "main.py",
+        "output.py",
+        "parser.py",
+        "commands/root.py",
+    ];
+    let mut first: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for module in modules {
+        let path = cli_dir.join(module);
+        assert!(path.is_file(), "generate must write sdk/cli/{module}");
+        first.push((
+            path.clone(),
+            std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read sdk/cli/{module}")),
+        ));
+    }
 
     let (ok, out, err) = run_gnr8(&root, &["--json", "generate"]);
     assert!(
@@ -620,17 +638,23 @@ fn generate_python_cli_is_a_noop_on_second_run() {
     let unchanged = report["unchanged"]
         .as_array()
         .expect("unchanged is an array");
-    assert!(
-        unchanged
-            .iter()
-            .any(|path| path.as_str() == Some("sdk/cli.py")),
-        "cli.py must be reported unchanged:\n{out}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&cli).expect("re-read sdk/cli.py"),
-        first,
-        "a no-op generate must not rewrite cli.py"
-    );
+    for module in modules {
+        let expected = format!("sdk/cli/{module}");
+        assert!(
+            unchanged
+                .iter()
+                .any(|path| path.as_str() == Some(expected.as_str())),
+            "{expected} must be reported unchanged:\n{out}"
+        );
+    }
+    for (path, before) in &first {
+        assert_eq!(
+            &std::fs::read_to_string(path).expect("re-read a CLI module"),
+            before,
+            "a no-op generate must not rewrite {}",
+            path.display()
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&root);
 }

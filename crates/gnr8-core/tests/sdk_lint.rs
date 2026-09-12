@@ -134,6 +134,21 @@ fn go_sdk_is_gofmt_and_go_vet_clean() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every `.py` file under `dir`, recursively, in no particular order.
+fn collect_python_sources(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_python_sources(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "py") {
+            out.push(path.to_str().expect("utf-8 path").to_string());
+        }
+    }
+}
+
 /// Python: the default (Pydantic v2) SDK is `ruff check` + `ruff format` clean. `--isolated` ignores any
 /// ambient `pyproject.toml`; `--select`/`--ignore` pin exactly the modern rule set we commit to.
 #[test]
@@ -262,27 +277,28 @@ fn python_sdk_target_with_cli_is_ruff_clean() {
     }
     let pkg = dir.join("sdk");
     assert!(
-        pkg.join("cli.py").is_file(),
-        "target output must include cli.py"
+        pkg.join("cli").join("main.py").is_file(),
+        "target output must include the CLI package"
     );
     assert!(
         pkg.join("contract_test.py").is_file(),
         "target output must include contract_test.py"
     );
-    let mut sources: Vec<String> = std::fs::read_dir(&pkg)
-        .expect("read the generated package")
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "py"))
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| name != "contract_test.py")
-        })
-        .map(|path| path.to_str().expect("utf-8 path").to_string())
-        .collect();
+    // Walk the package, not just its root: the generated CLI is a subpackage, and a non-recursive
+    // read would lint the SDK and silently skip every CLI module.
+    let mut sources: Vec<String> = Vec::new();
+    collect_python_sources(&pkg, &mut sources);
+    sources.retain(|path| !path.ends_with("contract_test.py"));
     sources.sort();
     assert!(
-        sources.iter().any(|path| path.ends_with("cli.py")),
-        "the linted set must include cli.py: {sources:?}"
+        sources.iter().any(|path| path.ends_with("cli/main.py")),
+        "the linted set must include the CLI package: {sources:?}"
+    );
+    assert!(
+        sources
+            .iter()
+            .any(|path| path.ends_with("cli/commands/root.py")),
+        "the linted set must reach nested CLI modules: {sources:?}"
     );
 
     let mut check_args = vec![
