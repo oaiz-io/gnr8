@@ -22,6 +22,7 @@ from .models import (
     CreatedMessage,
     ListBooksResponse,
 )
+from .multipart import MultipartFile
 
 #: First transport-error backoff step; doubles per attempt up to the ceiling below.
 BASE_RETRY_DELAY_SECONDS = 0.1
@@ -299,16 +300,26 @@ class Client:
                 if part is None:
                     continue
                 out.extend(f"--{boundary}\r\n".encode())
-                if isinstance(part, (bytes, bytearray)):
+                if isinstance(part, MultipartFile):
+                    filename = part.filename
+                    if not filename:
+                        raise ValueError("multipart filename must not be empty")
+                    if "\r" in filename or "\n" in filename:
+                        raise ValueError("multipart filename must not contain newlines")
+                    filename = filename.replace("\\", "\\\\").replace('"', '\\"')
                     out.extend(
                         (
                             f'Content-Disposition: form-data; name="{key}"; '
-                            f'filename="{key}"\r\n'
+                            f'filename="{filename}"\r\n'
                             "Content-Type: application/octet-stream\r\n\r\n"
                         ).encode()
                     )
-                    out.extend(bytes(part))
+                    out.extend(part.content)
                     out.extend(b"\r\n")
+                elif isinstance(part, (bytes, bytearray)):
+                    raise TypeError(
+                        "multipart binary values must be MultipartFile instances"
+                    )
                 else:
                     out.extend(
                         f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode()

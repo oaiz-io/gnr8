@@ -3,8 +3,9 @@
 //! [`generate`] turns the Phase-2 [`crate::graph::ApiGraph`] into a single deterministic,
 //! Python SDK bundle String (D-06): an `__init__.py` re-export surface, a `client.py`
 //! (an injectable `urllib.request.OpenerDirector`-backed `Client` plus one method per operation), a
-//! typed `errors.py` (`ApiError`), and model files (`pydantic.BaseModel` by default, or stdlib
-//! dataclasses when explicitly configured, plus `enum.Enum` named enums).
+//! typed `errors.py` (`ApiError`), a `multipart.py` file-part value, and model files
+//! (`pydantic.BaseModel` by default, or stdlib dataclasses when explicitly configured, plus
+//! `enum.Enum` named enums).
 //!
 //! This is the structural twin of [`crate::gosdk`], MINUS the `gofmt` normalization step: Python has no
 //! stdlib formatter, so `emit` produces already-correct significant-whitespace Python directly. Each
@@ -32,10 +33,11 @@ use crate::sdk::model_style::PyModelStyle;
 /// Generate the Python SDK as a deterministic multi-file bundle String (D-06, PYSDK-01).
 ///
 /// Emits `__init__.py` (re-exports), `client.py` (the `urllib`-backed `Client` + one method per
-/// operation), `errors.py` (typed `ApiError`), and model files (Pydantic v2 by default, dataclasses
-/// when configured), then frames them into a single `bundle::SdkBundle` String. Generating twice over
-/// the same graph is byte-identical (PYSDK-03). There is NO `gofmt`-style normalization step (Python
-/// has no stdlib formatter) — the emitters produce correct significant-whitespace Python directly.
+/// operation), `errors.py` (typed `ApiError`), `multipart.py` (named file parts), and model files
+/// (Pydantic v2 by default, dataclasses when configured), then frames them into a single
+/// `bundle::SdkBundle` String. Generating twice over the same graph is byte-identical (PYSDK-03).
+/// There is NO `gofmt`-style normalization step (Python has no stdlib formatter) — the emitters
+/// produce correct significant-whitespace Python directly.
 ///
 /// `package` is the SDK's Python package name (derived from the `PySdk` target's module path, the single
 /// source of truth — wired in plan 03-02). `base_path` is the API base/mount path joined to each
@@ -144,8 +146,9 @@ pub(crate) fn generate_files_with_options(
     let mut files: Vec<SdkFile> = Vec::new();
     let auth_credentials = api_key_credential_names(graph)?;
 
-    // Fixed sorted push order (alpha): __init__.py, client.py, errors.py, models.py — the D-06 frame
-    // order the bundle locks. client.py is the client skeleton followed by the operation methods.
+    // Fixed sorted push order (alpha): __init__.py, client.py, errors.py, models.py, multipart.py —
+    // the D-06 frame order the bundle locks. client.py is the client skeleton followed by the
+    // operation methods.
     let model_dir = layout.model_dir_ref().unwrap_or("models");
     let model_module = model_dir.trim_matches('/').replace('/', ".");
 
@@ -198,6 +201,11 @@ pub(crate) fn generate_files_with_options(
     files.push(SdkFile {
         name: "errors.py".to_string(),
         contents: emit::emit_errors(package),
+    });
+
+    files.push(SdkFile {
+        name: "multipart.py".to_string(),
+        contents: emit::emit_multipart(),
     });
 
     if split_operations {
@@ -288,6 +296,7 @@ pub(crate) fn generate_files_with_options(
                 model_style,
                 dep_modules,
                 directions_of(&directions, &schema.id),
+                &python_relative_module(&name, "multipart.py"),
             )?;
             Ok(SdkFile { name, contents })
         })?);
@@ -629,7 +638,7 @@ mod tests {
     use crate::sdk::layout::SdkFileLayout;
 
     /// A facts document covering one body POST and one query GET plus the request/response models +
-    /// a named enum — enough to assert the four-file bundle shape and determinism without a toolchain.
+    /// a named enum — enough to assert the compact bundle shape and determinism without a toolchain.
     const SAMPLE: &[u8] = br#"{
       "module": "app",
       "routes": [
@@ -692,13 +701,14 @@ mod tests {
     }
 
     #[test]
-    fn generate_returns_ok_with_the_four_file_markers() {
+    fn generate_returns_ok_with_the_compact_file_markers() {
         let out = generate(&sample_graph(), "bookstore", "/").unwrap();
         for marker in [
             "// ==== gnr8:file __init__.py ====",
             "// ==== gnr8:file client.py ====",
             "// ==== gnr8:file errors.py ====",
             "// ==== gnr8:file models.py ====",
+            "// ==== gnr8:file multipart.py ====",
         ] {
             assert!(out.contains(marker), "missing {marker}:\n{out}");
         }
@@ -727,13 +737,19 @@ mod tests {
     }
 
     #[test]
-    fn split_bundle_round_trips_to_the_four_files() {
+    fn split_bundle_round_trips_to_the_compact_files() {
         let out = generate(&sample_graph(), "bookstore", "/").unwrap();
         let files = split_bundle(&out);
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            vec!["__init__.py", "client.py", "errors.py", "models.py"]
+            vec![
+                "__init__.py",
+                "client.py",
+                "errors.py",
+                "models.py",
+                "multipart.py"
+            ]
         );
         // The marker line must never appear inside a materialized file's contents.
         for (_, contents) in &files {
@@ -757,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn write_to_dir_materializes_the_four_files() {
+    fn write_to_dir_materializes_the_compact_files() {
         let out = generate(&sample_graph(), "bookstore", "/").unwrap();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -765,7 +781,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gnr8-pysdk-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         write_to_dir(&out, &dir).unwrap();
-        for name in ["__init__.py", "client.py", "errors.py", "models.py"] {
+        for name in [
+            "__init__.py",
+            "client.py",
+            "errors.py",
+            "models.py",
+            "multipart.py",
+        ] {
             assert!(dir.join(name).is_file(), "missing materialized {name}");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -788,6 +810,7 @@ mod tests {
                 "models/book.py",
                 "models/book_format.py",
                 "models/created_message.py",
+                "multipart.py",
             ]
         );
         assert!(

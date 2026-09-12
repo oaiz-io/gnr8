@@ -23,6 +23,7 @@ use gnr8_engine::worker::WorkerPolicy;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// The gnr8 host: parse argv, resolve the trust policy, dispatch.
@@ -1231,15 +1232,18 @@ pub(crate) fn materialize_artifact_group(
 }
 
 fn unique_doctor_temp_dir(label: &str) -> Result<PathBuf, String> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let nanos = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("system clock before Unix epoch: {err}"))?
         .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "gnr8-doctor-readiness-{label}-{}-{nanos}",
-        std::process::id()
+        "gnr8-doctor-readiness-{label}-{}-{nanos}-{sequence}",
+        std::process::id(),
     ));
-    std::fs::create_dir_all(&dir).map_err(|err| {
+    std::fs::create_dir(&dir).map_err(|err| {
         format!(
             "failed to create readiness temp dir '{}': {err}",
             dir.display()

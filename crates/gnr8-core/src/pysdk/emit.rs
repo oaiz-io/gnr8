@@ -23,7 +23,7 @@
 //! iteration). Every un-representable fact (a dangling `$ref`) returns [`crate::CoreError::SdkGen`];
 //! there is no production `unwrap`/`expect`/`panic` (RUST-04).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
@@ -32,9 +32,10 @@ use crate::graph::{
     Prim, RuntimePolicy, Type,
 };
 use crate::sdk::emit_common::{
-    error_response_bodies_of, is_json_object_key, join_path, operation_auth_alternatives,
-    operation_prose, path_tokens, path_tokens_match, quoted_string_literal, request_body_models_of,
-    split_words, success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationApiKeyScheme,
+    binary_value_shape, error_response_bodies_of, is_json_object_key, join_path,
+    operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
+    quoted_string_literal, request_body_models_of, schema_is_multipart_request, split_words,
+    success_responses_of, ApiKeyLocation, BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme,
     OperationAuthScheme, RequestBodyEncoding, RequestBodyModel, SuccessResponses,
     UniqueSchemaNames,
 };
@@ -121,6 +122,8 @@ struct ModelImports {
     literal: bool,
     optional: bool,
     union: bool,
+    /// The generated `MultipartFile` value type is used by a multipart request model.
+    multipart_file: bool,
 }
 
 /// Accumulate the `typing` constructs a `Type` uses into [`ModelImports`] (recursing through
@@ -150,24 +153,27 @@ fn accumulate_type_imports(schema: &Type, m: &mut ModelImports) {
 
 /// Compute the [`ModelImports`] for the given schemas (all schemas for a compact `models.py`; a single
 /// schema for a split model file). `type_checking` is threaded in by the split path when it emits an
-/// `if TYPE_CHECKING:` block. A NON-object/NON-enum schema body is emitted as a module-level string alias
-/// (`X = "Union[..]"`) whose type names live only inside an opaque string literal — `ruff` does not read
-/// them, so it contributes NO `typing` import (importing `Union` for it would be an F401).
+/// `if TYPE_CHECKING:` block. A standalone bytes schema is emitted as the live `bytes` type; other
+/// non-object/non-enum schema bodies retain their existing string forward-reference representation,
+/// so neither form contributes a `typing` import.
 fn compute_model_imports(
-    schemas: &[(&crate::graph::Schema, SchemaDirections)],
+    schemas: &[(&crate::graph::Schema, SchemaDirections, bool)],
     type_checking: bool,
-) -> ModelImports {
+) -> Result<ModelImports, CoreError> {
     let mut m = ModelImports {
         type_checking,
         ..ModelImports::default()
     };
-    for (schema, reached) in schemas {
+    for (schema, reached, multipart_file_schema) in schemas {
         let reached = *reached;
+        m.multipart_file |= *multipart_file_schema;
         match &schema.body {
             Type::Enum(_) => m.enum_class = true,
             Type::Object(fields) => {
                 m.object_model = true;
-                for field in fields {
+                let emissions = py_field_emissions(fields, PyModelStyle::Pydantic)?;
+                for emission in emissions {
+                    let field = emission.field;
                     // Omittability drives `Optional[..]` and the `Field(default=None)` right-hand
                     // side, so it has to be the SAME answer the emitters below reach — an import set
                     // computed off a different question lands an unused (F401) or a missing one.
@@ -175,13 +181,13 @@ fn compute_model_imports(
                     if omittable || reached.field_is_nullable(field) {
                         m.optional = true;
                     }
-                    if needs_alias(field) || omittable {
+                    if needs_alias(field, &emission.ident) || omittable {
                         m.field = true;
                     }
                     accumulate_type_imports(&field.schema, &mut m);
                 }
             }
-            // Alias body: emitted as a string literal — see the doc comment above; no imports.
+            // Alias bodies either use the builtin `bytes` symbol or an opaque string literal.
             _ => {}
         }
     }
@@ -189,11 +195,11 @@ fn compute_model_imports(
     if m.object_model {
         m.any = true;
     }
-    m
+    Ok(m)
 }
 
 /// Assemble the import header for a model file from its computed [`ModelImports`] and style.
-fn model_header(m: &ModelImports, model_style: PyModelStyle) -> String {
+fn model_header(m: &ModelImports, model_style: PyModelStyle, multipart_module: &str) -> String {
     let mut stdlib: Vec<String> = Vec::new();
     if m.enum_class {
         stdlib.push("import enum".to_string());
@@ -218,10 +224,17 @@ fn model_header(m: &ModelImports, model_style: PyModelStyle) -> String {
         }
     }
 
+    let first_party = if m.multipart_file {
+        vec![format!("from {multipart_module} import MultipartFile")]
+    } else {
+        Vec::new()
+    };
+
     import_block(&[
         vec!["from __future__ import annotations".to_string()],
         stdlib,
         third_party,
+        first_party,
     ])
 }
 
@@ -258,6 +271,15 @@ const PY_KEYWORDS: &[&str] = &[
     "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
     "with", "yield",
 ];
+
+/// Builtin identifiers emitted by [`py_type`] in model annotations.
+///
+/// A class field binds its name in the class namespace. Reusing one of these names can therefore
+/// change how Pydantic or `typing.get_type_hints` resolves the field's own postponed annotation (for
+/// example, `bool: Optional[bool]`). These are reserved for MODEL fields for the same reason keywords
+/// are reserved for every Python binding; unrelated builtins such as `id` remain valid field names.
+const PY_MODEL_TYPE_IDENTIFIERS: &[&str] =
+    &["bool", "bytes", "dict", "float", "int", "list", "str"];
 
 /// Reserved argument names a generated method already binds (`self`/`body`), which a path/query param
 /// must not collide with (it would produce a `SyntaxError: duplicate argument` — WR-03).
@@ -299,13 +321,54 @@ pub(crate) fn safe_ident(s: &str) -> String {
     }
 }
 
-/// Whether a Python field identifier differs from its wire key and needs a Pydantic alias.
-fn needs_alias(field: &Field) -> bool {
-    pydantic_field_ident(field) != field.json_name
+/// One collision-free Python attribute allocated for a model field.
+pub(crate) struct PyFieldEmission<'a> {
+    pub(crate) field: &'a Field,
+    pub(crate) ident: String,
 }
 
-fn pydantic_field_ident(field: &Field) -> String {
-    safe_ident(&snake(&field.json_name))
+/// Allocate Python model identifiers in graph order.
+///
+/// Syntax keywords and annotation builtins receive a trailing underscore. If that spelling is already
+/// occupied by another wire field, `_2`, `_3`, ... is appended until the identifier is unique. The
+/// wire name is never changed, and first-seen order makes suffix allocation deterministic.
+pub(crate) fn py_field_emissions(
+    fields: &[Field],
+    model_style: PyModelStyle,
+) -> Result<Vec<PyFieldEmission<'_>>, CoreError> {
+    let mut used = BTreeSet::new();
+    let mut out = Vec::with_capacity(fields.len());
+    for field in fields {
+        let raw = match model_style {
+            PyModelStyle::Pydantic => snake(&field.json_name),
+            PyModelStyle::Dataclass => field.json_name.clone(),
+        };
+        let mut base = safe_ident(&raw);
+        if PY_MODEL_TYPE_IDENTIFIERS.contains(&base.as_str()) {
+            base.push('_');
+        }
+        let ident = if used.insert(base.clone()) {
+            base
+        } else {
+            let mut suffix = 2_u64;
+            loop {
+                let candidate = format!("{base}_{suffix}");
+                if used.insert(candidate.clone()) {
+                    break candidate;
+                }
+                suffix = suffix.checked_add(1).ok_or_else(|| CoreError::SdkGen {
+                    message: format!("could not make Python field identifier {base:?} unique"),
+                })?;
+            }
+        };
+        out.push(PyFieldEmission { field, ident });
+    }
+    Ok(out)
+}
+
+/// Whether a Python field identifier differs from its wire key and needs a Pydantic alias.
+fn needs_alias(field: &Field, ident: &str) -> bool {
+    ident != field.json_name
 }
 
 /// Quote a Python string literal for generated source.
@@ -314,9 +377,9 @@ pub(crate) fn py_string_literal(value: &str) -> String {
 }
 
 /// Emit a field default/metadata expression for a Pydantic v2 model.
-fn pydantic_field_expr(field: &Field, has_default: bool) -> String {
+fn pydantic_field_expr(field: &Field, ident: &str, has_default: bool) -> String {
     let default = if has_default { "default=None" } else { "..." };
-    if needs_alias(field) {
+    if needs_alias(field, ident) {
         format!("{default}, alias={}", py_string_literal(&field.json_name))
     } else if has_default {
         "default=None".to_string()
@@ -326,8 +389,8 @@ fn pydantic_field_expr(field: &Field, has_default: bool) -> String {
 }
 
 /// Build the right-hand side for a Pydantic v2 field declaration.
-fn pydantic_field_rhs(field: &Field, has_default: bool) -> String {
-    let expr = pydantic_field_expr(field, has_default);
+fn pydantic_field_rhs(field: &Field, ident: &str, has_default: bool) -> String {
+    let expr = pydantic_field_expr(field, ident, has_default);
     if expr.is_empty() {
         String::new()
     } else {
@@ -340,9 +403,10 @@ fn optional_default_hint(
     field: &Field,
     graph: &ApiGraph,
     directions: SchemaDirections,
+    multipart_file_schema: bool,
 ) -> Result<String, CoreError> {
     let nullable = directions.field_is_nullable(field);
-    let hint = py_type(&field.schema, nullable, graph)?;
+    let hint = py_model_field_type(&field.schema, nullable, graph, multipart_file_schema)?;
     if nullable {
         Ok(hint)
     } else {
@@ -352,25 +416,34 @@ fn optional_default_hint(
 
 fn pydantic_default_suffix(
     field: &Field,
+    ident: &str,
     graph: &ApiGraph,
     directions: SchemaDirections,
+    multipart_file_schema: bool,
 ) -> Result<String, CoreError> {
     Ok(format!(
         "{}{}",
-        optional_default_hint(field, graph, directions)?,
-        pydantic_field_rhs(field, true)
+        optional_default_hint(field, graph, directions, multipart_file_schema)?,
+        pydantic_field_rhs(field, ident, true)
     ))
 }
 
 fn pydantic_required_suffix(
     field: &Field,
+    ident: &str,
     graph: &ApiGraph,
     directions: SchemaDirections,
+    multipart_file_schema: bool,
 ) -> Result<String, CoreError> {
     Ok(format!(
         "{}{}",
-        py_type(&field.schema, directions.field_is_nullable(field), graph,)?,
-        pydantic_field_rhs(field, false)
+        py_model_field_type(
+            &field.schema,
+            directions.field_is_nullable(field),
+            graph,
+            multipart_file_schema,
+        )?,
+        pydantic_field_rhs(field, ident, false)
     ))
 }
 
@@ -464,6 +537,63 @@ pub(crate) fn py_type(
     }
 }
 
+/// Render a named schema alias, making standalone binary aliases the live `bytes` type.
+///
+/// Other aliases retain their existing whole-expression forward reference. Binary payload aliases are
+/// values callers can pass directly and therefore must not bind their public export to a string.
+fn py_alias_type(schema: &Type, graph: &ApiGraph) -> Result<String, CoreError> {
+    if matches!(schema, Type::Primitive(Prim::Bytes)) {
+        Ok("bytes".to_string())
+    } else {
+        Ok(py_string_literal(&py_type(schema, false, graph)?))
+    }
+}
+
+/// Map a field in a multipart request model to the public value callers must supply.
+///
+/// Binary parts need a filename in addition to their bytes, while the same neutral bytes type remains
+/// plain `bytes` everywhere else (including standalone octet-stream aliases). Arrays preserve that
+/// distinction element-by-element. All non-file fields use the ordinary target type mapping.
+fn py_model_field_type(
+    schema: &Type,
+    nullable: bool,
+    graph: &ApiGraph,
+    multipart_file_schema: bool,
+) -> Result<String, CoreError> {
+    let base = if multipart_file_schema {
+        match binary_value_shape(schema, graph)? {
+            BinaryValueShape::Single => "MultipartFile".to_string(),
+            BinaryValueShape::Repeated => "list[MultipartFile]".to_string(),
+            BinaryValueShape::Other => py_type(schema, false, graph)?,
+        }
+    } else {
+        py_type(schema, false, graph)?
+    };
+    if nullable {
+        Ok(format!("Optional[{base}]"))
+    } else {
+        Ok(base)
+    }
+}
+
+fn is_multipart_file_schema(graph: &ApiGraph, schema_id: &str) -> Result<bool, CoreError> {
+    if !schema_is_multipart_request(graph, schema_id)? {
+        return Ok(false);
+    }
+    let Some(schema) = graph.schemas.iter().find(|schema| schema.id == schema_id) else {
+        return Ok(false);
+    };
+    let Type::Object(fields) = &schema.body else {
+        return Ok(false);
+    };
+    for field in fields {
+        if binary_value_shape(&field.schema, graph)? != BinaryValueShape::Other {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Map a neutral [`Prim`] to its Python type. Integer width is irrelevant in Python (`int` is
 /// arbitrary-precision) and a float is `float`; a byte string maps to `bytes`.
 fn py_primitive(prim: &Prim) -> &'static str {
@@ -502,12 +632,16 @@ pub(crate) fn emit_models_with_style(
     UniqueSchemaNames::check(graph, "Python SDK")?;
 
     let directions = schema_directions(graph);
-    let schema_refs: Vec<(&crate::graph::Schema, SchemaDirections)> = graph
-        .schemas
-        .iter()
-        .map(|schema| (schema, directions_of(&directions, &schema.id)))
-        .collect();
-    let mut out = model_header(&compute_model_imports(&schema_refs, false), model_style);
+    let mut schema_refs = Vec::with_capacity(graph.schemas.len());
+    for schema in &graph.schemas {
+        schema_refs.push((
+            schema,
+            directions_of(&directions, &schema.id),
+            is_multipart_file_schema(graph, &schema.id)?,
+        ));
+    }
+    let imports = compute_model_imports(&schema_refs, false)?;
+    let mut out = model_header(&imports, model_style, ".multipart");
 
     // The first top-level item is separated from the import block by isort's `lines-after-imports`: two
     // blank lines before a class/enum def, but only one before a bare alias assignment (a simple
@@ -523,6 +657,7 @@ pub(crate) fn emit_models_with_style(
             // `json.dumps` serialize the member value as its string — the twin of Go's `type X string`.
             Type::Enum(members) => emit_enum_class(&mut out, &schema.name, members)?,
             Type::Object(fields) => {
+                let multipart_file_schema = is_multipart_file_schema(graph, &schema.id)?;
                 emit_model_class(
                     &mut out,
                     &schema.name,
@@ -530,6 +665,7 @@ pub(crate) fn emit_models_with_style(
                     graph,
                     model_style,
                     directions_of(&directions, &schema.id),
+                    multipart_file_schema,
                 )?;
             }
             // A named NON-object/NON-enum schema (e.g. `BookOrError = Union[Book, OutOfStock]`, or a
@@ -543,15 +679,8 @@ pub(crate) fn emit_models_with_style(
             | Type::Named(_)
             | Type::Union(_)
             | Type::Any {} => {
-                // A module-level alias assignment is evaluated EAGERLY at import time (unlike a
-                // model annotation, which `from __future__ import annotations` keeps lazy). The
-                // schemas are id-sorted, so an alias may reference a class defined LATER in the file
-                // (e.g. `BookOrError = Union[Book, OutOfStock]` precedes `OutOfStock`) — an eager RHS
-                // raises `NameError` at import. Emit the RHS as a PEP-484 string forward reference so
-                // the assignment binds a plain `str` (importable, re-exportable) without evaluating any
-                // forward name. The value stays a valid type alias in annotation position (PYSDK-02).
-                let alias = py_type(&schema.body, false, graph)?;
-                writeln!(out, "{} = \"{alias}\"", schema.name).map_err(sink)?;
+                let alias = py_alias_type(&schema.body, graph)?;
+                writeln!(out, "{} = {alias}", schema.name).map_err(sink)?;
             }
         }
     }
@@ -576,15 +705,20 @@ pub(crate) fn emit_model_schema(
     model_style: PyModelStyle,
     dep_modules: &BTreeMap<String, String>,
     directions: SchemaDirections,
+    multipart_module: &str,
 ) -> Result<String, CoreError> {
-    // Forward-ref imports are needed ONLY for an object model's field types; an enum has none, and an
-    // alias body is a string literal whose names `ruff` never reads (so importing them would be F401).
+    // Forward-ref imports are needed only for an object model's field types. Other aliases are
+    // either the builtin `bytes` type or an opaque string literal.
     let deps = match &schema.body {
         Type::Object(_) => model_dependencies(&schema.body, graph, &schema.name),
         _ => Vec::new(),
     };
-    let imports = compute_model_imports(&[(schema, directions)], !deps.is_empty());
-    let mut out = model_header(&imports, model_style);
+    let multipart_file_schema = is_multipart_file_schema(graph, &schema.id)?;
+    let imports = compute_model_imports(
+        &[(schema, directions, multipart_file_schema)],
+        !deps.is_empty(),
+    )?;
+    let mut out = model_header(&imports, model_style, multipart_module);
     if deps.is_empty() {
         // No forward-ref block: separate the class/enum from the imports by two blank lines, but a bare
         // alias assignment by only one (isort `lines-after-imports`, matching the compact path).
@@ -616,6 +750,7 @@ pub(crate) fn emit_model_schema(
                 graph,
                 model_style,
                 directions,
+                multipart_file_schema,
             )?;
         }
         Type::Primitive(_)
@@ -625,8 +760,8 @@ pub(crate) fn emit_model_schema(
         | Type::Named(_)
         | Type::Union(_)
         | Type::Any {} => {
-            let alias = py_type(&schema.body, false, graph)?;
-            writeln!(out, "{} = \"{alias}\"", schema.name).map_err(sink)?;
+            let alias = py_alias_type(&schema.body, graph)?;
+            writeln!(out, "{} = {alias}", schema.name).map_err(sink)?;
         }
     }
     Ok(out)
@@ -883,10 +1018,15 @@ fn emit_model_class(
     graph: &ApiGraph,
     model_style: PyModelStyle,
     directions: SchemaDirections,
+    multipart_file_schema: bool,
 ) -> Result<(), CoreError> {
     match model_style {
-        PyModelStyle::Pydantic => emit_pydantic_model(out, name, fields, graph, directions),
-        PyModelStyle::Dataclass => emit_dataclass(out, name, fields, graph, directions),
+        PyModelStyle::Pydantic => {
+            emit_pydantic_model(out, name, fields, graph, directions, multipart_file_schema)
+        }
+        PyModelStyle::Dataclass => {
+            emit_dataclass(out, name, fields, graph, directions, multipart_file_schema)
+        }
     }
 }
 
@@ -897,21 +1037,36 @@ fn emit_pydantic_model(
     fields: &[Field],
     graph: &ApiGraph,
     directions: SchemaDirections,
+    multipart_file_schema: bool,
 ) -> Result<(), CoreError> {
     writeln!(out, "class {name}(BaseModel):").map_err(sink)?;
-    writeln!(
-        out,
-        "    model_config = ConfigDict(populate_by_name=True, extra=\"ignore\")"
-    )
-    .map_err(sink)?;
-    for field in fields {
-        let ident = pydantic_field_ident(field);
+    let config = if multipart_file_schema {
+        "ConfigDict(arbitrary_types_allowed=True, populate_by_name=True, extra=\"ignore\")"
+    } else {
+        "ConfigDict(populate_by_name=True, extra=\"ignore\")"
+    };
+    writeln!(out, "    model_config = {config}").map_err(sink)?;
+    let emissions = py_field_emissions(fields, PyModelStyle::Pydantic)?;
+    for emission in &emissions {
+        let field = emission.field;
         let suffix = if directions.model_field_is_optional(field) {
-            pydantic_default_suffix(field, graph, directions)?
+            pydantic_default_suffix(
+                field,
+                &emission.ident,
+                graph,
+                directions,
+                multipart_file_schema,
+            )?
         } else {
-            pydantic_required_suffix(field, graph, directions)?
+            pydantic_required_suffix(
+                field,
+                &emission.ident,
+                graph,
+                directions,
+                multipart_file_schema,
+            )?
         };
-        writeln!(out, "    {ident}: {suffix}").map_err(sink)?;
+        writeln!(out, "    {}: {suffix}", emission.ident).map_err(sink)?;
     }
     writeln!(out).map_err(sink)?;
     writeln!(out, "    @classmethod").map_err(sink)?;
@@ -923,7 +1078,7 @@ fn emit_pydantic_model(
     writeln!(out, "        return cls.model_validate(_data)").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "    def to_dict(self) -> dict[str, Any]:").map_err(sink)?;
-    emit_pydantic_to_dict_body(out, fields, graph, directions)?;
+    emit_pydantic_to_dict_body(out, &emissions, graph, directions, multipart_file_schema)?;
     Ok(())
 }
 
@@ -942,23 +1097,29 @@ fn emit_pydantic_model(
 /// single `if`/`else`, rather than once per repair.
 fn emit_pydantic_to_dict_body(
     out: &mut String,
-    fields: &[Field],
+    fields: &[PyFieldEmission<'_>],
     graph: &ApiGraph,
     directions: SchemaDirections,
+    multipart_file_schema: bool,
 ) -> Result<(), CoreError> {
-    const DUMP: &str = "self.model_dump(mode=\"json\", by_alias=True, exclude_none=True)";
+    let mode = if multipart_file_schema {
+        "python"
+    } else {
+        "json"
+    };
+    let dump = format!("self.model_dump(mode=\"{mode}\", by_alias=True, exclude_none=True)");
     let repairs: Vec<ToDictRepair<'_>> = fields
         .iter()
         .filter_map(|field| ToDictRepair::of(field, graph, directions))
         .collect();
     if repairs.is_empty() {
-        writeln!(out, "        return {DUMP}").map_err(sink)?;
+        writeln!(out, "        return {dump}").map_err(sink)?;
         return Ok(());
     }
-    writeln!(out, "        _data = {DUMP}").map_err(sink)?;
+    writeln!(out, "        _data = {dump}").map_err(sink)?;
     for repair in repairs {
-        let ident = pydantic_field_ident(repair.field);
-        let wire = py_string_literal(&repair.field.json_name);
+        let ident = repair.field.ident.as_str();
+        let wire = py_string_literal(&repair.field.field.json_name);
         match (
             repair.encode,
             repair.dump_may_drop_key,
@@ -995,7 +1156,7 @@ fn emit_pydantic_to_dict_body(
 /// What one key needs putting back after `model_dump(exclude_none=True)`, or `None` for a key the dump
 /// already states correctly.
 struct ToDictRepair<'a> {
-    field: &'a Field,
+    field: &'a PyFieldEmission<'a>,
     /// The nested re-encode, when something below this key owns a `to_dict` rule of its own.
     encode: Option<String>,
     /// Whether `exclude_none` can drop this key, so a re-encode has to ask before touching it.
@@ -1005,11 +1166,14 @@ struct ToDictRepair<'a> {
 }
 
 impl<'a> ToDictRepair<'a> {
-    fn of(field: &'a Field, graph: &ApiGraph, directions: SchemaDirections) -> Option<Self> {
-        let ident = pydantic_field_ident(field);
-        let encode = encode_expr(&field.schema, graph, &format!("self.{ident}"));
-        let optional = directions.model_field_is_optional(field);
-        let nullable = directions.field_is_nullable(field);
+    fn of(
+        field: &'a PyFieldEmission<'a>,
+        graph: &ApiGraph,
+        directions: SchemaDirections,
+    ) -> Option<Self> {
+        let encode = encode_expr(&field.field.schema, graph, &format!("self.{}", field.ident));
+        let optional = directions.model_field_is_optional(field.field);
+        let nullable = directions.field_is_nullable(field.field);
         let repair = Self {
             field,
             encode,
@@ -1026,6 +1190,7 @@ fn emit_dataclass(
     fields: &[Field],
     graph: &ApiGraph,
     directions: SchemaDirections,
+    multipart_file_schema: bool,
 ) -> Result<(), CoreError> {
     writeln!(out, "@dataclass").map_err(sink)?;
     writeln!(out, "class {name}:").map_err(sink)?;
@@ -1042,19 +1207,25 @@ fn emit_dataclass(
     }
     // Partition preserving each group's (already-sorted) relative order: required (no default) first,
     // omittable (defaulted) last — so defaulted fields are contiguous at the end (PITFALL 1).
-    let (required, optional): (Vec<&Field>, Vec<&Field>) = fields
+    let emissions = py_field_emissions(fields, PyModelStyle::Dataclass)?;
+    let (required, optional): (Vec<&PyFieldEmission<'_>>, Vec<&PyFieldEmission<'_>>) = emissions
         .iter()
-        .partition(|f| !directions.model_field_is_optional(f));
-    for field in required {
+        .partition(|emission| !directions.model_field_is_optional(emission.field));
+    for emission in required {
+        let field = emission.field;
         // The Python attribute name is keyword/digit-safe (CR-02); the wire key (`json_name`) is
         // preserved verbatim — only a keyword/leading-digit name is renamed, and the from-dict decode
         // (CR-04) maps the original JSON key onto the (possibly renamed) attribute by position.
-        let ident = safe_ident(&field.json_name);
-        let hint = py_type(&field.schema, directions.field_is_nullable(field), graph)?;
-        writeln!(out, "    {ident}: {hint}").map_err(sink)?;
+        let hint = py_model_field_type(
+            &field.schema,
+            directions.field_is_nullable(field),
+            graph,
+            multipart_file_schema,
+        )?;
+        writeln!(out, "    {}: {hint}", emission.ident).map_err(sink)?;
     }
-    for field in optional {
-        let ident = safe_ident(&field.json_name);
+    for emission in optional {
+        let field = emission.field;
         // An omittable field (the key may be absent) defaults to None so the class imports and a caller
         // may omit it. Widen the hint to Optional[..] for the defaulted form so `= None` is not a
         // type-lie against a non-nullable value type (WR-02): the key-absent axis is
@@ -1062,13 +1233,13 @@ fn emit_dataclass(
         // an already-Optional hint again is avoided by py_type carrying nullable, so only widen when the
         // value is not itself nullable.
         let nullable = directions.field_is_nullable(field);
-        let hint = py_type(&field.schema, nullable, graph)?;
+        let hint = py_model_field_type(&field.schema, nullable, graph, multipart_file_schema)?;
         let defaulted_hint = if nullable {
             hint
         } else {
             format!("Optional[{hint}]")
         };
-        writeln!(out, "    {ident}: {defaulted_hint} = None").map_err(sink)?;
+        writeln!(out, "    {}: {defaulted_hint} = None", emission.ident).map_err(sink)?;
     }
 
     // A forward-compatible from_dict (CR-04): construct only from declared fields (ignore-unknown — a
@@ -1083,8 +1254,9 @@ fn emit_dataclass(
     )
     .map_err(sink)?;
     writeln!(out, "        return cls(").map_err(sink)?;
-    for field in fields {
-        let ident = safe_ident(&field.json_name);
+    for emission in &emissions {
+        let field = emission.field;
+        let ident = &emission.ident;
         let wire = &field.json_name;
         if directions.model_field_is_optional(field) {
             // Omittable: only decode when present (and non-null), else keep the None default. The
@@ -1175,6 +1347,31 @@ class AuthConfigurationError(Exception):
         self.operation_id = operation_id
         self.alternatives = alternatives
 "
+    .to_string()
+}
+
+/// Emit the public value object used for one named multipart file part.
+pub(crate) fn emit_multipart() -> String {
+    r#"from __future__ import annotations
+
+
+class MultipartFile:
+    """A named binary part in a multipart request body."""
+
+    __slots__ = ("filename", "content")
+
+    def __init__(self, filename: str, content: bytes) -> None:
+        if not isinstance(filename, str):
+            raise TypeError("multipart filename must be a string")
+        if not filename:
+            raise ValueError("multipart filename must not be empty")
+        if "\r" in filename or "\n" in filename:
+            raise ValueError("multipart filename must not contain newlines")
+        if not isinstance(content, bytes):
+            raise TypeError("multipart file content must be bytes")
+        self.filename = filename
+        self.content = content
+"#
     .to_string()
 }
 
@@ -1532,6 +1729,7 @@ pub(crate) fn emit_client_with_models(
         import.push(')');
         first_party.push(import);
     }
+    first_party.push("from .multipart import MultipartFile".to_string());
 
     let header = import_block(&[
         vec!["from __future__ import annotations".to_string()],
@@ -1919,16 +2117,26 @@ class Client:
                 if part is None:
                     continue
                 out.extend(f\"--{{boundary}}\\r\\n\".encode())
-                if isinstance(part, (bytes, bytearray)):
+                if isinstance(part, MultipartFile):
+                    filename = part.filename
+                    if not filename:
+                        raise ValueError(\"multipart filename must not be empty\")
+                    if \"\\r\" in filename or \"\\n\" in filename:
+                        raise ValueError(\"multipart filename must not contain newlines\")
+                    filename = filename.replace(\"\\\\\", \"\\\\\\\\\").replace('\"', '\\\\\"')
                     out.extend(
                         (
                             f'Content-Disposition: form-data; name=\"{{key}}\"; '
-                            f'filename=\"{{key}}\"\\r\\n'
+                            f'filename=\"{{filename}}\"\\r\\n'
                             \"Content-Type: application/octet-stream\\r\\n\\r\\n\"
                         ).encode()
                     )
-                    out.extend(bytes(part))
+                    out.extend(part.content)
                     out.extend(b\"\\r\\n\")
+                elif isinstance(part, (bytes, bytearray)):
+                    raise TypeError(
+                        \"multipart binary values must be MultipartFile instances\"
+                    )
                 else:
                     out.extend(
                         f'Content-Disposition: form-data; name=\"{{key}}\"\\r\\n\\r\\n'.encode()
@@ -3251,23 +3459,33 @@ fn py_pagination_info(
                     op.id, next_cursor
                 ),
             })?;
-        Some(py_field_ident(field, model_style))
+        Some(py_field_ident(fields, field, model_style)?)
     } else {
         None
     };
     Ok(PyPaginationInfo {
         page_model,
         item_type: py_type(item_schema, false, graph)?,
-        items_ident: py_field_ident(items, model_style),
+        items_ident: py_field_ident(fields, items, model_style)?,
         next_cursor_ident,
     })
 }
 
-pub(crate) fn py_field_ident(field: &Field, model_style: PyModelStyle) -> String {
-    match model_style {
-        PyModelStyle::Pydantic => pydantic_field_ident(field),
-        PyModelStyle::Dataclass => safe_ident(&field.json_name),
-    }
+pub(crate) fn py_field_ident(
+    fields: &[Field],
+    field: &Field,
+    model_style: PyModelStyle,
+) -> Result<String, CoreError> {
+    py_field_emissions(fields, model_style)?
+        .into_iter()
+        .find(|emission| std::ptr::eq(emission.field, field))
+        .map(|emission| emission.ident)
+        .ok_or_else(|| CoreError::SdkGen {
+            message: format!(
+                "Python field identifier requested for '{}' outside its model",
+                field.json_name
+            ),
+        })
 }
 
 fn pagination_policy_for<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a PaginationPolicy> {
@@ -3364,6 +3582,7 @@ pub(crate) fn emit_init_with_models(
         }
         out.push_str(")\n");
     }
+    out.push_str("from .multipart import MultipartFile\n");
 
     out.push_str("\n__all__ = [\n");
     out.push_str("    \"Client\",\n");
@@ -3372,6 +3591,7 @@ pub(crate) fn emit_init_with_models(
     out.push_str("    \"RequestOptions\",\n");
     out.push_str("    \"ApiError\",\n");
     out.push_str("    \"AuthConfigurationError\",\n");
+    out.push_str("    \"MultipartFile\",\n");
     for name in &names {
         let _ = writeln!(out, "    \"{name}\",");
     }
@@ -4770,9 +4990,10 @@ mod tests {
     /// Regression locks for the four BLOCKERs (CR-01..04) + the hardened warnings (WR-01/02/03/05),
     /// each on an input shape the bookstore fixture does NOT exercise.
     mod regressions {
-        use super::super::safe_ident;
+        use super::super::{py_field_emissions, safe_ident};
         use super::{
-            emit_models, emit_models_with_style, emit_operations, ApiGraph, Operation, PyModelStyle,
+            emit_models, emit_models_with_style, emit_operations, ApiGraph, Operation,
+            PyModelStyle, Type,
         };
 
         fn graph_from(facts: &[u8]) -> ApiGraph {
@@ -4825,6 +5046,38 @@ mod tests {
             assert!(
                 out.contains("alias=\"class\""),
                 "optional wire key preserved as alias:\n{out}"
+            );
+        }
+
+        #[test]
+        fn annotation_names_and_existing_sanitized_names_are_allocated_deterministically() {
+            let graph: ApiGraph = serde_json::from_str(include_str!(
+                "../../../../fixtures/sdk-targets/python-identifiers.json"
+            ))
+            .unwrap();
+            let fields = graph
+                .schemas
+                .iter()
+                .find_map(|schema| match &schema.body {
+                    Type::Object(fields) if schema.name == "IdentifierModel" => Some(fields),
+                    _ => None,
+                })
+                .unwrap();
+            let idents = py_field_emissions(fields, PyModelStyle::Pydantic)
+                .unwrap()
+                .into_iter()
+                .map(|emission| emission.ident)
+                .collect::<Vec<_>>();
+            assert_eq!(idents, ["bool_", "bool__2", "class_", "list_"]);
+
+            let out = emit_models(&graph, "pkg").unwrap();
+            assert!(
+                out.contains("bool_: Optional[bool] = Field(default=None, alias=\"bool\")"),
+                "{out}"
+            );
+            assert!(
+                out.contains("bool__2: Optional[str] = Field(default=None, alias=\"bool_\")"),
+                "{out}"
             );
         }
 

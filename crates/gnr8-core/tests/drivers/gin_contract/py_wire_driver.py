@@ -14,6 +14,7 @@ from example_wire import (
     Client,
     ClientHooks,
     CreateUploadRequest,
+    MultipartFile,
     RequestOptions,
     UploadFileFormRequest,
 )
@@ -74,17 +75,17 @@ def fake_response(
     return response
 
 
-def multipart_parts(request: Any) -> dict[str, list[bytes]]:
+def multipart_parts(request: Any) -> dict[str, list[tuple[str | None, bytes]]]:
     content_type = request.get_header("Content-type")
     assert content_type and content_type.startswith("multipart/form-data; boundary=")
     message = email.parser.BytesParser(policy=email.policy.default).parsebytes(
         b"Content-Type: " + content_type.encode() + b"\r\nMIME-Version: 1.0\r\n\r\n" + request.data
     )
-    parts: dict[str, list[bytes]] = {}
+    parts: dict[str, list[tuple[str | None, bytes]]] = {}
     for part in message.iter_parts():
         name = part.get_param("name", header="content-disposition")
         assert isinstance(name, str)
-        parts.setdefault(name, []).append(part.get_payload(decode=True))
+        parts.setdefault(name, []).append((part.get_filename(), part.get_payload(decode=True)))
     return parts
 
 
@@ -105,15 +106,28 @@ def main() -> None:
 
     cases = [
         UploadFileFormRequest(request='{"name":"multipart"}'),
-        UploadFileFormRequest(request='{"name":"multipart"}', files=[b"one"]),
-        UploadFileFormRequest(request='{"name":"multipart"}', files=[b"one", b"two"]),
+        UploadFileFormRequest(
+            request='{"name":"multipart"}',
+            files=[MultipartFile("one.bin", b"one")],
+        ),
+        UploadFileFormRequest(
+            request='{"name":"multipart"}',
+            files=[
+                MultipartFile("one.bin", b"one"),
+                MultipartFile("two.bin", b"two"),
+            ],
+        ),
     ]
-    expected_files = [[], [b"one"], [b"one", b"two"]]
+    expected_files = [
+        [],
+        [("one.bin", b"one")],
+        [("one.bin", b"one"), ("two.bin", b"two")],
+    ]
     for body, expected in zip(cases, expected_files):
         client.upload_file(("multipart/form-data", body))
         parts = multipart_parts(requests[-1])
         assert parts.get("files", []) == expected, parts
-        assert parts["request"] == [b'{"name":"multipart"}'], parts
+        assert parts["request"] == [(None, b'{"name":"multipart"}')], parts
         if not expected:
             assert "files" not in parts, parts
 

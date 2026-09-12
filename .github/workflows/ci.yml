@@ -62,14 +62,17 @@ jobs:
             needs_go: "false"
             needs_python: "false"
             needs_node: "false"
+            test_args: ""
           - package: gnr8-engine
             needs_go: "true"
             needs_python: "true"
             needs_node: "true"
+            test_args: ""
           - package: gnr8-cli
             needs_go: "true"
             needs_python: "false"
             needs_node: "false"
+            test_args: "-- --test-threads=1"
     steps:
       - uses: actions/checkout@v7
 
@@ -98,16 +101,16 @@ jobs:
         run: npm ci --silent --no-audit
         working-directory: tsextract
 
-      - name: Install independent YAML parser
+      - name: Install Python test dependencies
         if: matrix.needs_python == 'true'
-        run: python -m pip install PyYAML==6.0.2
+        run: python -m pip install PyYAML==6.0.2 pydantic==2.12.5
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: tests-${{ matrix.package }}
 
       - name: Test package
-        run: cargo test -p "${{ matrix.package }}" --all-features
+        run: cargo test -p "${{ matrix.package }}" --all-features ${{ matrix.test_args }}
 
   sidecars:
     name: Language sidecars and action contract

@@ -178,6 +178,13 @@ fn response_graph() -> gnr8_engine::graph::ApiGraph {
     .expect("response graph must deserialize")
 }
 
+fn binary_multipart_graph() -> gnr8_engine::graph::ApiGraph {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/sdk-targets/binary-multipart.json"
+    ))
+    .expect("binary/multipart target fixture must deserialize")
+}
+
 fn command_output(mut command: Command) -> Result<(), String> {
     let output = command.output().map_err(|error| error.to_string())?;
     if output.status.success() {
@@ -323,6 +330,99 @@ void main().catch((error: unknown) => {
 });
 "#;
 
+const BINARY_MULTIPART_DRIVER: &str = r#"import {
+  Client,
+  type MultipartRequest,
+  type Payload,
+} from "./index";
+
+async function blobText(value: FormDataEntryValue | null): Promise<string> {
+  if (!(value instanceof Blob)) throw new Error(`expected Blob, got ${String(value)}`);
+  return new TextDecoder().decode(await value.arrayBuffer());
+}
+
+const transport: typeof fetch = async (input, init) => {
+  const path = new URL(String(input)).pathname;
+  if (path === "/multipart") {
+    if (!(init?.body instanceof FormData)) throw new Error("multipart body was not FormData");
+    const form = init.body;
+    if (form.get("description") !== "mixed fields") {
+      throw new Error(`description=${String(form.get("description"))}`);
+    }
+    if ((await blobText(form.get("requiredFile"))) !== "required-content") {
+      throw new Error("required file content changed");
+    }
+    if ((await blobText(form.get("optionalFile"))) !== "optional-content") {
+      throw new Error("optional file content changed");
+    }
+    if ((await blobText(form.get("aliasedFile"))) !== "alias-content") {
+      throw new Error("aliased file content changed");
+    }
+    const repeated = form.getAll("optionalFiles");
+    if (repeated.length !== 2) throw new Error(`optionalFiles=${repeated.length}`);
+    if ((await blobText(repeated[0])) !== "first-content") {
+      throw new Error("first repeated file content changed");
+    }
+    if ((await blobText(repeated[1])) !== "second-content") {
+      throw new Error("second repeated file content changed");
+    }
+    return new Response(null, { status: 204 });
+  }
+  if (path === "/json" && init?.method === "POST") {
+    if (typeof init.body !== "string") throw new Error("JSON body was not text");
+    const body = JSON.parse(init.body) as { data?: unknown };
+    if (body.data !== "AQI=") throw new Error(`JSON bytes=${String(body.data)}`);
+    return new Response(null, { status: 204 });
+  }
+  if (path === "/binary" && init?.method === "POST") {
+    if (!(init.body instanceof Blob)) throw new Error("binary body was not a Blob");
+    if ((await init.body.text()) !== "request-bytes") {
+      throw new Error("binary request content changed");
+    }
+    return new Response(null, { status: 204 });
+  }
+  if (path === "/binary" && init?.method === "GET") {
+    return new Response(new TextEncoder().encode("response-bytes"), {
+      status: 200,
+      headers: { "content-type": "application/octet-stream" },
+    });
+  }
+  throw new Error(`unexpected request: ${init?.method} ${path}`);
+};
+
+async function main(): Promise<void> {
+  const client = new Client({ baseUrl: "https://api.test", fetch: transport });
+  const requiredOnly: MultipartRequest = {
+    description: "required only",
+    requiredFile: new Uint8Array([1]),
+  };
+  void requiredOnly;
+
+  await client.sendMultipart({
+    description: "mixed fields",
+    requiredFile: new TextEncoder().encode("required-content"),
+    optionalFile: new Blob(["optional-content"]),
+    aliasedFile: new TextEncoder().encode("alias-content"),
+    optionalFiles: [
+      new TextEncoder().encode("first-content"),
+      new TextEncoder().encode("second-content"),
+    ],
+  });
+  await client.sendJsonBytes({ data: "AQI=" });
+  const request: Payload = new TextEncoder().encode("request-bytes");
+  await client.sendBinary(request);
+  const response: Payload = await client.receiveBinary();
+  if ((await response.text()) !== "response-bytes") {
+    throw new Error("binary response content changed");
+  }
+}
+
+void main().catch((error: unknown) => {
+  console.error(error);
+  throw error;
+});
+"#;
+
 #[test]
 fn generated_typescript_request_parameters_match_the_wire_contract() {
     if !toolchain_available() {
@@ -425,5 +525,80 @@ fn generated_typescript_response_decoder_reports_stable_context() {
         "generated TypeScript response driver must report stable decode errors"
     );
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn generated_typescript_preserves_binary_aliases_and_multipart_parts() {
+    if !toolchain_available() {
+        eprintln!("skipping TypeScript binary/multipart test: node/tsc unavailable");
+        return;
+    }
+
+    let graph = binary_multipart_graph();
+    let bundle = gnr8_engine::tssdk::generate(&graph, "binaryapi", &graph.base_path)
+        .expect("generate TypeScript binary/multipart SDK");
+    let dir = unique_temp_dir("binary-multipart");
+    gnr8_engine::sdk::bundle::write_to_dir(&bundle, &dir)
+        .expect("materialize TypeScript binary/multipart SDK");
+    let models = std::fs::read_to_string(dir.join("models.ts")).expect("read models.ts");
+    assert!(
+        models.contains("export type Payload = Blob | ArrayBuffer | Uint8Array;"),
+        "standalone bytes alias must remain byte-capable:\n{models}"
+    );
+    for declaration in [
+        "  requiredFile: Blob | ArrayBuffer | Uint8Array;",
+        "  optionalFile?: Blob | ArrayBuffer | Uint8Array;",
+        "  optionalFiles?: Array<Blob | ArrayBuffer | Uint8Array>;",
+        "  aliasedFile?: Blob | ArrayBuffer | Uint8Array;",
+        "  description: string;",
+    ] {
+        assert!(
+            models.contains(declaration),
+            "multipart model must contain `{declaration}`:\n{models}"
+        );
+    }
+    assert!(
+        models.contains("export interface JsonBytes {\n  data: string;\n}"),
+        "JSON byte fields must retain their textual wire representation:\n{models}"
+    );
+    std::fs::write(dir.join("driver.ts"), BINARY_MULTIPART_DRIVER)
+        .expect("write binary/multipart TypeScript driver");
+
+    let mut compile = Command::new("node");
+    compile
+        .args([
+            TSC,
+            "--strict",
+            "--target",
+            "es2022",
+            "--module",
+            "commonjs",
+            "--moduleResolution",
+            "node",
+            "--lib",
+            "es2022,dom",
+            "--outDir",
+            "dist",
+            "client.ts",
+            "errors.ts",
+            "index.ts",
+            "models.ts",
+            "driver.ts",
+        ])
+        .current_dir(&dir);
+    assert_eq!(
+        command_output(compile),
+        Ok(()),
+        "generated TypeScript binary/multipart SDK must compile"
+    );
+
+    let mut run = Command::new("node");
+    run.arg("dist/driver.js").current_dir(&dir);
+    assert_eq!(
+        command_output(run),
+        Ok(()),
+        "generated TypeScript multipart and binary request bodies must preserve bytes"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
