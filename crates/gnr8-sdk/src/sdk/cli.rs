@@ -23,6 +23,14 @@ pub struct SdkCli {
     /// does not wrap it, the way a hand-written CLI wraps part of the SDK it calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<OperationSelector>,
+    /// The host this program talks to unless `--base-url` says otherwise.
+    ///
+    /// `None` means the program has no default and `--base-url` is required on every command. The
+    /// OpenAPI document's `servers` is deliberately not consulted: what a program points at is a
+    /// fact about the program, and deriving it from what the document advertises made the only way
+    /// to set it a change to the published contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 impl SdkCli {
@@ -32,6 +40,7 @@ impl SdkCli {
         Self {
             program: program.into(),
             commands: None,
+            base_url: None,
         }
     }
 
@@ -42,6 +51,17 @@ impl SdkCli {
     #[must_use]
     pub fn commands(mut self, selector: OperationSelector) -> Self {
         self.commands = Some(selector);
+        self
+    }
+
+    /// The host every command talks to unless `--base-url` overrides it.
+    ///
+    /// Without this the program has no default and `--base-url` is required, which is the honest
+    /// answer: a CLI that silently points a production client at `localhost` is worse than one
+    /// that asks.
+    #[must_use]
+    pub fn base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = Some(url.into());
         self
     }
 }

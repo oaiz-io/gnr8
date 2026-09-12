@@ -1487,3 +1487,135 @@ fn go_a_required_parameter_with_a_default_must_still_be_supplied() {
     );
     assert!(text.contains(r#"return missingFlag("genre")"#), "{text}");
 }
+
+// --- S18/S19: what a command binds, and where it points --------------------------------------
+
+fn one_query_param_graph(name: &str) -> ApiGraph {
+    serde_json::from_str(&format!(
+        r#"{{
+          "module": "app",
+          "operations": [
+            {{
+              "id": "search",
+              "method": "GET",
+              "path": "/items",
+              "handler": "search",
+              "params": [
+                {{
+                  "name": "{name}",
+                  "location": "query",
+                  "required": false,
+                  "schema": {{ "type": "primitive", "of": {{ "prim": "string" }} }},
+                  "provenance": {{ "file": "main.py", "start_line": 1, "end_line": 1 }}
+                }}
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ {{ "status": 204, "body": null }} ],
+              "provenance": {{ "file": "main.py", "start_line": 1, "end_line": 1 }}
+            }}
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }}"#
+    ))
+    .expect("graph json")
+}
+
+#[test]
+fn a_flag_no_command_binds_no_longer_blocks_generation() {
+    // `--json` is bound by neither emitter: output is unconditionally JSON. `--limit`/`--all` are
+    // bound only on a paginated command, `--body`/`--body-file` only where there is a request body,
+    // and `--version` on the root parser, which is not a command. Reserving these unconditionally
+    // cost a legitimate parameter, and the only remedy was changing the API's wire contract.
+    for name in ["json", "limit", "all", "body", "body_file", "version"] {
+        let graph = one_query_param_graph(name);
+        let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
+        let flag = name.replace('_', "-");
+        assert!(
+            text.contains(&format!("\"--{flag}\",")),
+            "--{flag} must be available to a parameter no command shadows:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn base_url_is_the_programs_default_and_servers_is_not_consulted() {
+    let text = generate_cli_with(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").base_url("https://api.example.com"),
+    );
+    assert!(
+        text.contains(r#"_DEFAULT_BASE_URL = "https://api.example.com""#),
+        "{text}"
+    );
+    assert!(text.contains("default=_DEFAULT_BASE_URL,"), "{text}");
+    assert!(
+        !text.contains("localhost:8000"),
+        "the localhost constant is gone:\n{text}"
+    );
+}
+
+#[test]
+fn without_a_declared_base_url_the_flag_is_required() {
+    let text = generate_cli_with(&bookstore_graph(), SdkCli::new("bookstore"));
+    assert!(
+        !text.contains("_DEFAULT_BASE_URL"),
+        "an undeclared base URL must compile in no default:\n{text}"
+    );
+    assert!(
+        !text.contains("localhost:8000"),
+        "a CLI must not guess a host:\n{text}"
+    );
+    let base_url = text
+        .split(r#""--base-url","#)
+        .nth(1)
+        .expect("--base-url must be declared");
+    assert!(
+        base_url.contains("required=True,"),
+        "the flag must be required when the program has no default:\n{base_url}"
+    );
+}
+
+#[test]
+fn go_base_url_is_the_programs_default_and_servers_is_not_consulted() {
+    if skip_go() {
+        return;
+    }
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(SdkCli::new("bookstore").base_url("https://api.example.com"))
+        .generate(&bookstore_graph(), &mut out, &cx())
+        .expect("a Go CLI with a declared base URL must generate");
+    let text = artifact(&out, "generated/sdk-go/cmd/bookstore/main.go");
+    assert!(
+        text.contains(r#"const defaultBaseURL = "https://api.example.com""#),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"fs.String("base-url", defaultBaseURL, "")"#),
+        "{text}"
+    );
+    assert!(!text.contains("localhost:8000"), "{text}");
+}
+
+#[test]
+fn go_without_a_declared_base_url_the_flag_is_required() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(&bookstore_graph(), "bookstore");
+    assert!(!text.contains("defaultBaseURL"), "{text}");
+    assert!(!text.contains("localhost:8000"), "{text}");
+    assert!(text.contains(r#"fs.String("base-url", "", "")"#), "{text}");
+    assert!(
+        text.contains(r#"return missingFlag("base-url")"#),
+        "an omitted host must be a usage error, not a request to a relative path:\n{text}"
+    );
+}

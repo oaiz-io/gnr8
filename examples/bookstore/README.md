@@ -74,7 +74,13 @@ fn main() -> std::process::ExitCode {
             .transform(SetTitle::new("Bookstore API"))          // OpenAPI info.title
             .transform(ApplySecurity::api_key("ApiKeyAuth", "X-API-Key")) // auth (lives in middleware)
             .target(OpenApi31::new().to("generated/openapi.yaml"))
-            .target(GoSdk::new().module("example.com/bookstore/sdk").to("generated/sdk").cli("bookstore"))
+            .target(
+                GoSdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("generated/sdk")
+                    // the program's own facts: its name, and the host it talks to by default
+                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8080")),
+            )
             .post(Header::generated()),                         // "DO NOT EDIT" banner on every .go
     )
 }

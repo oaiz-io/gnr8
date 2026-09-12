@@ -17,7 +17,7 @@ import (
 )
 
 const program = "bookstore"
-const defaultBaseURL = "http://localhost:8000"
+const defaultBaseURL = "http://127.0.0.1:8080"
 const version = "bookstore 0.1.0"
 const description = "Bookstore API"
 const helperEnv = "BOOKSTORE_CREDENTIAL_HELPER"

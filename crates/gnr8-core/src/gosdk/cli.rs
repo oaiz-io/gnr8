@@ -65,10 +65,10 @@ pub(crate) fn emit_cli(
         emit_body_helpers(&mut body, &mut imports)?;
     }
     if !ops.is_empty() {
-        emit_shared_helpers(&mut body, &ops, graph, &mut imports)?;
+        emit_shared_helpers(&mut body, &ops, graph, cli, &mut imports)?;
         emit_client_builder(&mut body, graph, package, &mut imports)?;
         emit_print_helpers(&mut body, &mut imports)?;
-        emit_handlers(&mut body, &ops, graph, package, &mut imports)?;
+        emit_handlers(&mut body, &ops, graph, cli, package, &mut imports)?;
     }
     emit_main(&mut body, &ops, graph, package, &mut imports)?;
     imports.add("os");
@@ -171,16 +171,6 @@ fn pagination_policy<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a Pagi
         .find(|policy| policy.operation_id == op.id)
 }
 
-fn default_base_url(graph: &ApiGraph) -> &str {
-    graph
-        .openapi_metadata
-        .servers
-        .first()
-        .map(|server| server.url.as_str())
-        .filter(|url| !url.is_empty())
-        .unwrap_or("http://localhost:8000")
-}
-
 fn program_version(graph: &ApiGraph, program: &str) -> String {
     let version = graph
         .openapi_metadata
@@ -272,11 +262,11 @@ fn emit_constants(
         quoted_string_literal(&cli.program)
     )
     .map_err(sink)?;
-    if !ops.is_empty() {
+    if let Some(base_url) = &cli.base_url {
         writeln!(
             out,
             "const defaultBaseURL = {}",
-            quoted_string_literal(default_base_url(graph))
+            quoted_string_literal(base_url)
         )
         .map_err(sink)?;
     }
@@ -557,6 +547,7 @@ fn emit_shared_helpers(
     out: &mut String,
     ops: &[&Operation],
     graph: &ApiGraph,
+    cli: &SdkCli,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
     if ops.is_empty() {
@@ -614,7 +605,7 @@ fn emit_shared_helpers(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
     }
-    if any_missing_flag(ops, graph) {
+    if any_missing_flag(ops, graph, cli) {
         writeln!(out, "func missingFlag(name string) int {{").map_err(sink)?;
         writeln!(
             out,
@@ -807,11 +798,12 @@ fn emit_handlers(
     out: &mut String,
     ops: &[&Operation],
     graph: &ApiGraph,
+    cli: &SdkCli,
     package: &str,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
     for op in ops.iter().copied() {
-        emit_handler(out, graph, op, package, imports)?;
+        emit_handler(out, graph, cli, op, package, imports)?;
     }
     Ok(())
 }
@@ -823,6 +815,7 @@ fn emit_handlers(
 fn emit_handler(
     out: &mut String,
     graph: &ApiGraph,
+    cli: &SdkCli,
     op: &Operation,
     package: &str,
     imports: &mut ImportSet,
@@ -868,11 +861,17 @@ fn emit_handler(
     .map_err(sink)?;
     writeln!(out, "fs.PrintDefaults()").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(
-        out,
-        "baseURL := fs.String(\"base-url\", defaultBaseURL, \"\")"
-    )
-    .map_err(sink)?;
+    if cli.base_url.is_some() {
+        writeln!(
+            out,
+            "baseURL := fs.String(\"base-url\", defaultBaseURL, \"\")"
+        )
+        .map_err(sink)?;
+    } else {
+        // No program default, so the host is the user's to state. `flag` has no required-flag
+        // concept, and an empty base URL would otherwise become a request to a relative path.
+        writeln!(out, "baseURL := fs.String(\"base-url\", \"\", \"\")").map_err(sink)?;
+    }
 
     for param in &path_params {
         emit_flag_decl(out, graph, param, imports)?;
@@ -898,6 +897,11 @@ fn emit_handler(
     writeln!(out, "}}").map_err(sink)?;
     if handler_needs_seen(graph, op, &paging, &bodies, paged)? {
         writeln!(out, "seen := visited(fs)").map_err(sink)?;
+    }
+    if cli.base_url.is_none() {
+        writeln!(out, "if *baseURL == \"\" {{").map_err(sink)?;
+        writeln!(out, "return missingFlag(\"base-url\")").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
     }
 
     for param in &path_params {
@@ -1135,13 +1139,15 @@ fn any_handler_needs_seen(ops: &[&Operation], graph: &ApiGraph) -> Result<bool, 
     Ok(false)
 }
 
-fn any_missing_flag(ops: &[&Operation], graph: &ApiGraph) -> bool {
+fn any_missing_flag(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> bool {
+    if cli.base_url.is_none() && !ops.is_empty() {
+        return true;
+    }
     ops.iter().any(|op| {
         let paging = paging_param_names(graph, op);
         op.params.iter().any(|param| {
             !paging.contains(param.name.as_str())
                 && param.required
-                && param.default.is_none()
                 && !matches!(param.schema, Type::Primitive(Prim::Bool))
         })
     })

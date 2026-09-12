@@ -102,7 +102,7 @@ pub(crate) fn emit_cli(
     emit_client_builder(&mut out, graph)?;
     emit_print_helpers(&mut out, graph, model_style)?;
     emit_handlers(&mut out, &ops, graph, model_style)?;
-    emit_parser(&mut out, &ops, graph)?;
+    emit_parser(&mut out, &ops, graph, cli)?;
     emit_main(&mut out, &ops, graph)?;
     Ok(out)
 }
@@ -180,16 +180,6 @@ fn pagination_policy<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a Pagi
         .pagination
         .iter()
         .find(|policy| policy.operation_id == op.id)
-}
-
-fn default_base_url(graph: &ApiGraph) -> &str {
-    graph
-        .openapi_metadata
-        .servers
-        .first()
-        .map(|server| server.url.as_str())
-        .filter(|url| !url.is_empty())
-        .unwrap_or("http://localhost:8000")
 }
 
 fn program_version(graph: &ApiGraph, program: &str) -> String {
@@ -280,12 +270,9 @@ fn emit_constants(
     cli: &SdkCli,
 ) -> Result<(), CoreError> {
     writeln!(out, "_PROGRAM = {}", py_string_literal(&cli.program)).map_err(sink)?;
-    writeln!(
-        out,
-        "_DEFAULT_BASE_URL = {}",
-        py_string_literal(default_base_url(graph))
-    )
-    .map_err(sink)?;
+    if let Some(base_url) = &cli.base_url {
+        writeln!(out, "_DEFAULT_BASE_URL = {}", py_string_literal(base_url)).map_err(sink)?;
+    }
     writeln!(
         out,
         "_VERSION = {}",
@@ -715,7 +702,12 @@ fn operation_scheme_ids(graph: &ApiGraph, op: &Operation) -> Result<Vec<String>,
     Ok(ids.into_iter().collect())
 }
 
-fn emit_parser(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(), CoreError> {
+fn emit_parser(
+    out: &mut String,
+    ops: &[&Operation],
+    graph: &ApiGraph,
+    cli: &SdkCli,
+) -> Result<(), CoreError> {
     writeln!(out, "def _build_parser() -> argparse.ArgumentParser:").map_err(sink)?;
     writeln!(out, "    parser = argparse.ArgumentParser(").map_err(sink)?;
     writeln!(out, "        prog=_PROGRAM,").map_err(sink)?;
@@ -746,7 +738,7 @@ fn emit_parser(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result
         }
     }
     for op in ungrouped {
-        emit_command_parser(out, graph, op, "subparsers")?;
+        emit_command_parser(out, graph, cli, op, "subparsers")?;
     }
     for (group, ops) in grouped {
         let ident = format!("group_{}", group.replace('-', "_"));
@@ -761,7 +753,7 @@ fn emit_parser(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result
         writeln!(out, "        required=True,").map_err(sink)?;
         writeln!(out, "    )").map_err(sink)?;
         for op in ops {
-            emit_command_parser(out, graph, op, &format!("{ident}_sub"))?;
+            emit_command_parser(out, graph, cli, op, &format!("{ident}_sub"))?;
         }
     }
     writeln!(out, "    return parser").map_err(sink)?;
@@ -773,6 +765,7 @@ fn emit_parser(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result
 fn emit_command_parser(
     out: &mut String,
     graph: &ApiGraph,
+    cli: &SdkCli,
     op: &Operation,
     parent: &str,
 ) -> Result<(), CoreError> {
@@ -796,7 +789,11 @@ fn emit_command_parser(
     writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
     writeln!(out, "        \"--base-url\",").map_err(sink)?;
     writeln!(out, "        dest=\"base_url\",").map_err(sink)?;
-    writeln!(out, "        default=_DEFAULT_BASE_URL,").map_err(sink)?;
+    if cli.base_url.is_some() {
+        writeln!(out, "        default=_DEFAULT_BASE_URL,").map_err(sink)?;
+    } else {
+        writeln!(out, "        required=True,").map_err(sink)?;
+    }
     writeln!(out, "    )").map_err(sink)?;
     let idents = resolve_op_args_for(op, graph)?;
     let paging = paging_param_names(graph, op);

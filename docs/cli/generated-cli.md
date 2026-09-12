@@ -118,7 +118,7 @@ there.
 | `action="append"` | an array |
 | `--body` / `--body-file` | request body; `-` on `--body-file` is stdin |
 | `--limit` / `--all` | a `PaginationPolicy` for this operation |
-| `--base-url` | first server URL, else `http://localhost:8000` |
+| `--base-url` | `SdkCli::base_url`, and nothing else |
 
 Ungrouped operations sit at the program root. There is no `"default"` group level.
 
@@ -146,15 +146,37 @@ The last class matters because the emitted program would not start at all: Go's 
 name already in use, and `argparse` raises `ArgumentError` while building the parser, so even
 `--help` fails.
 
-Reserved flags: `help`, `base-url` on every command; `body`/`body-file` where the operation has a
-request body; `limit`/`all` where a `PaginationPolicy` names it; and `no-<flag>` for each boolean
-parameter.
+Reserved flags are computed per command from what that command actually binds: `help` and
+`base-url` always; `body`/`body-file` where the operation has a request body; `limit`/`all` where a
+`PaginationPolicy` names it; and `no-<flag>` for each boolean parameter. Nothing else is reserved —
+`--version` is bound on the root parser, which is not a command, and `--json` is bound by neither
+emitter because output is unconditionally JSON. A parameter named `json`, `limit`, `version` or
+`body` on a command that does not bind that flag is therefore fine.
 
-`--base-url` is declared on each command so it can follow the subcommand:
+## The host the program talks to
+
+`SdkCli::base_url` is the program's default, and the only source for one:
+
+```rust
+.cli(SdkCli::new("bookstore").base_url("https://api.example.com"))
+```
+
+`--base-url` is declared on each command so it can follow the subcommand, and overrides the
+compiled default per invocation:
 
 ```sh
 bookstore get-book --book-id 1 --base-url http://127.0.0.1:8000
 ```
+
+**Without `base_url` the program has no default and `--base-url` is required.** That is deliberate.
+The alternative — deriving it from the OpenAPI document's `servers` and falling back to
+`http://localhost:8000` — made a fact about the program depend on a fact about the document, so the
+only way to point a CLI at production was to publish a deployment URL in the API description; and an
+API that declares no `servers` (a normal choice, because the document then describes a contract
+rather than one deployment) shipped a client aimed at localhost.
+
+There is no environment variable for the host. One value, one source, plus the flag: `--base-url` is
+the user answering at run time, not a second place the fact is written down.
 
 Per-flag prose is not emitted. The one thing a flag's `--help` does carry is a source default:
 
@@ -317,13 +339,18 @@ OAuth2 / OIDC flows and token caches are out of scope. The CLI inherits the SDK'
 kebab-case of the same operation id the SDK already names, so an existing report already says which
 commands moved.
 
+Two things no longer appear in this table because they are no longer graph facts: which operations
+become commands, and the default host. Both live in `.gnr8/`, so changing either is a pipeline edit
+rather than an API change — the CLI artifact's bytes move and `gnr8 check` reports that drift, which
+is correct, because the contract did not move.
+
 | Change class | Codes | CLI effect |
 |---|---|---|
 | command tree | `operation.added` (Additive), `operation.removed`, `operation.name.changed`, `sdk.group.changed` | subcommand appears / disappears / renamed / moves group |
 | flags | `request.parameter.*`, `request.body.*`, `request.enum.value.*`, `request.type.changed` | a flag appears, disappears, or changes requiredness/domain |
 | credential | `security.scheme.*`, `security.operation.*`, `security.global.changed` | which env var the CLI reads |
 | output | `response.*` | what is printed and what is an error |
-| default host | `document.server.*` (Breaking branch), `document.base_path.changed` | the default `--base-url` |
+| path shape | `document.base_path.changed` | the path a command requests |
 | help text only | the 8 `DocOnly` codes | `--help` prose moves; tree, flags, choices and exit codes untouched |
 
 A prose-only change rewrites the generated CLI's `--help` strings. It does not fail the

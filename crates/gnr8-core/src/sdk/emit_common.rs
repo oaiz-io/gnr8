@@ -153,17 +153,41 @@ pub(crate) fn helper_env_var(program: &str) -> String {
     format!("{}_CREDENTIAL_HELPER", screaming_snake(program))
 }
 
-/// Global flags a generated CLI always binds; a parameter kebab-colliding with one is a hard error.
-pub(crate) const RESERVED_FLAGS: &[&str] = &[
-    "json",
-    "help",
-    "version",
-    "base-url",
-    "limit",
-    "all",
-    "body",
-    "body-file",
-];
+/// Global flags every generated command binds, whatever the operation carries.
+///
+/// `--help` is bound by `argparse` on every parser it builds and by the Go dispatcher's own `-h`
+/// handling; `--base-url` is declared on each command so it can follow the subcommand.
+///
+/// Everything else is conditional and computed per command by [`reserved_flags_for`] — reserving a
+/// name no command binds costs a user a legitimate parameter for nothing, and the only remedy
+/// available to them is changing their API's wire contract.
+pub(crate) const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url"];
+
+/// The global flags one command binds, which its parameter flags may not shadow.
+///
+/// Conditional because the emitters are: `--body`/`--body-file` exist only where the operation has
+/// a request body, and `--limit`/`--all` only where a `PaginationPolicy` names it. `--version` is
+/// bound on the root parser, which is not a command, so it is not reserved here. `--json` is bound
+/// by neither emitter — output is unconditionally JSON — so it is not reserved either.
+fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<String>, CoreError> {
+    let mut reserved: BTreeSet<String> = ALWAYS_RESERVED_FLAGS
+        .iter()
+        .map(|flag| (*flag).to_string())
+        .collect();
+    if !request_body_models_of(op, graph)?.is_empty() {
+        reserved.insert("body".to_string());
+        reserved.insert("body-file".to_string());
+    }
+    if graph
+        .pagination
+        .iter()
+        .any(|policy| policy.operation_id == op.id)
+    {
+        reserved.insert("limit".to_string());
+        reserved.insert("all".to_string());
+    }
+    Ok(reserved)
+}
 
 /// The operations one generated CLI wraps, in graph order.
 ///
@@ -653,6 +677,7 @@ pub(crate) fn check_cli_names(
         // both emitters bind for a boolean. Two registrations of one name is not a rendering wart:
         // Go's `flag` panics on a name already in use and argparse raises `ArgumentError` while
         // building the parser, so the emitted program cannot start — not even `--help`.
+        let reserved = reserved_flags_for(op, graph)?;
         let mut bound: BTreeMap<String, FlagOrigin<'_>> = BTreeMap::new();
         for param in &op.params {
             if paging.contains(&param.name) {
@@ -675,7 +700,7 @@ pub(crate) fn check_cli_names(
                 } else {
                     flag.clone()
                 };
-                if RESERVED_FLAGS.contains(&spelling.as_str()) {
+                if reserved.contains(&spelling) {
                     return Err(CoreError::SdkGen {
                         message: format!(
                             "CLI {program:?} operation '{}' {origin} maps to flag '--{spelling}', which collides with the reserved global '--{spelling}'",
@@ -1716,7 +1741,7 @@ mod tests {
     #[test]
     fn reserved_flag_collision_names_operation_parameter_and_global() {
         let graph = ApiGraph {
-            operations: vec![cli_op("getBook", None, vec![cli_param("json")])],
+            operations: vec![cli_op("getBook", None, vec![cli_param("base_url")])],
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
@@ -1725,8 +1750,58 @@ mod tests {
             Ok(()) => panic!("reserved flag collision must be rejected"),
         };
         assert!(message.contains("getBook"), "{message}");
-        assert!(message.contains("json"), "{message}");
-        assert!(message.contains("json"), "{message}");
+        assert!(message.contains("base_url"), "{message}");
+        assert!(message.contains("--base-url"), "{message}");
+    }
+
+    #[test]
+    fn a_flag_no_command_binds_is_not_reserved() -> Result<(), crate::CoreError> {
+        // `--json` is bound by neither emitter, and `--limit`/`--all`/`--body`/`--body-file` are
+        // bound only where the operation carries the fact that produces them. Reserving them
+        // unconditionally rejected APIs whose only remedy was to rename a wire parameter.
+        let graph = ApiGraph {
+            operations: vec![cli_op(
+                "listBooks",
+                None,
+                vec![
+                    cli_param("json"),
+                    cli_param("limit"),
+                    cli_param("all"),
+                    cli_param("body"),
+                    cli_param("body_file"),
+                    cli_param("version"),
+                ],
+            )],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        check_cli_names(&ops, &graph, "bookstore")
+    }
+
+    #[test]
+    fn limit_is_reserved_on_a_paginated_operation() {
+        let graph = ApiGraph {
+            operations: vec![cli_op("listBooks", None, vec![cli_param("limit")])],
+            pagination: vec![crate::graph::PaginationPolicy {
+                operation_id: "listBooks".to_string(),
+                mode: crate::graph::PaginationMode::Offset,
+                items_field: "items".to_string(),
+                cursor_param: None,
+                next_cursor_field: None,
+                page_param: None,
+                page_size_param: None,
+                offset_param: Some("offset".to_string()),
+                limit_param: None,
+                termination: crate::graph::PaginationTermination::EmptyItems,
+            }],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let message = match check_cli_names(&ops, &graph, "bookstore") {
+            Err(error) => error.to_string(),
+            Ok(()) => panic!("--limit is bound on a paginated command"),
+        };
+        assert!(message.contains("--limit"), "{message}");
     }
 
     fn cli_bool_param(name: &str) -> Param {

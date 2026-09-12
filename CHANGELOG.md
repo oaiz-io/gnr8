@@ -53,6 +53,24 @@ must move the minor version.
   shown in `--help` (`help="default: 10"` in Python, `flag.PrintDefaults` in Go) and sent only when
   the flag is supplied, which is what OpenAPI and JSON Schema say the keyword means. A required
   parameter with a default must still be supplied.
+- **Reserved CLI flags are computed per command from what that command binds.** The flat list
+  rejected a parameter named `json`, `limit`, `all`, `body`, `body-file` or `version` on any
+  operation, and the only remedy was renaming a wire parameter — a breaking API change to satisfy a
+  flag spelling. `--help` and `--base-url` are reserved on every command; `--body`/`--body-file`
+  only where the operation has a request body; `--limit`/`--all` only where a `PaginationPolicy`
+  names it; plus `--no-<flag>` for each boolean. `--version` is bound on the root parser, which is
+  not a command, and `--json` is bound by neither emitter, so neither is reserved.
+- **`SdkCli::base_url(url)` is the generated CLI's default host, and the only source for one.** The
+  CLI derived it from the OpenAPI document's `servers` and fell back to `http://localhost:8000`, so
+  a fact about the program depended on a fact about the document: pointing a CLI at production meant
+  publishing a deployment URL in the API description, and an API that declares no `servers` shipped
+  a client aimed at localhost. Without `base_url` the program now has no default and `--base-url` is
+  required. `openapi_metadata.servers` and the localhost constant are no longer consulted.
+
+### Changed
+
+- The generated CLI no longer guesses a host. Existing `.cli("name")` pipelines keep compiling, but
+  a generated CLI without `SdkCli::base_url` now requires `--base-url` on every invocation.
 
 ## 0.14.1 — 2026-09-11
 

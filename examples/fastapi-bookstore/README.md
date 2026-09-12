@@ -64,7 +64,8 @@ fn main() -> std::process::ExitCode {
                 PySdk::new()
                     .module("example.com/bookstore/sdk")
                     .to("generated/sdk")
-                    .cli("bookstore"),
+                    // the program's own facts: its name, and the host it talks to by default
+                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8000")),
             )
             .post(Header::generated()),                         // "DO NOT EDIT" banner on every .py
     )
@@ -113,7 +114,7 @@ paths:
 the schemas.
 
 **Generated CLI** — `generated/sdk/cli.py` is an argparse client for the same operations, opt-in via
-`.cli("bookstore")`. It is not gnr8's own `gnr8 generate` command surface. From this directory:
+`.cli(...)`. It is not gnr8's own `gnr8 generate` command surface. From this directory:
 
 ```sh
 (cd generated && python3 -m sdk.cli --help)          # nothing extra — works as soon as the file is written
@@ -141,5 +142,7 @@ name other than the default last-segment `sdk` if you want `pipx install booksto
   or run, so there is no `pip install` and no runtime dependency.
 - **No TOML.** `.gnr8/src/main.rs` is the entire configuration surface — built-in
   stages composed as code. `gnr8 generate` compiles and runs it.
-- **Generated CLI beside the SDK.** `.cli("bookstore")` emits `cli.py` and a
-  `[project.scripts]` entry; it reads the same graph the client does.
+- **Generated CLI beside the SDK.** `.cli(...)` emits `cli.py` and a `[project.scripts]` entry; it
+  reads the same graph the client does. `SdkCli` carries what the graph cannot: the program name,
+  the host it defaults to, and — via `.commands(selector)` — which operations become commands.
+  Without `.base_url(...)` the program has no default host and `--base-url` is required.

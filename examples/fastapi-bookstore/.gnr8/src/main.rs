@@ -19,7 +19,8 @@
 //!   route prefix      → extracted from APIRouter(prefix="/books")
 //!   title             → SetTitle::new("Bookstore API")
 //!   output.openapi    → OpenApi31::new().to("generated/openapi.yaml")
-//!   output.sdk + module → PySdk::new().module("example.com/bookstore/sdk").to("generated/sdk").cli("bookstore")
+//!   output.sdk + module → PySdk::new().module("example.com/bookstore/sdk").to("generated/sdk")
+//!                              .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8000"))
 //! plus a Header post-process that stamps the generated banner on every .py file.
 //!
 //! The FastAPI app is parsed STATICALLY (pyextract reads the `ast` — it never imports or runs the
@@ -37,7 +38,7 @@ fn main() -> std::process::ExitCode {
                 PySdk::new()
                     .module("example.com/bookstore/sdk")
                     .to("generated/sdk")
-                    .cli("bookstore"),
+                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8000")),
             )
             .post(Header::generated()),
     )

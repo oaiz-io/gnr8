@@ -17,7 +17,8 @@
 //!   title             → SetTitle::new("Bookstore API")
 //!   [[security]]      → ApplySecurity::api_key("ApiKeyAuth", "X-API-Key")
 //!   output.openapi    → OpenApi31::new().to("generated/openapi.yaml")
-//!   output.sdk + module → GoSdk::new().module("example.com/bookstore/sdk").to("generated/sdk").cli("bookstore")
+//!   output.sdk + module → GoSdk::new().module("example.com/bookstore/sdk").to("generated/sdk")
+//!                              .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8080"))
 //! plus a Header post-process that stamps the generated banner on every .go file.
 
 use gnr8::sdk::prelude::*;
@@ -30,7 +31,12 @@ fn main() -> std::process::ExitCode {
             .transform(SetTitle::new("Bookstore API"))
             .transform(ApplySecurity::api_key("ApiKeyAuth", "X-API-Key"))
             .target(OpenApi31::new().to("generated/openapi.yaml"))
-            .target(GoSdk::new().module("example.com/bookstore/sdk").to("generated/sdk").cli("bookstore"))
+            .target(
+                GoSdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .to("generated/sdk")
+                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8080")),
+            )
             .post(Header::generated()),
     )
 }

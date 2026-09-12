@@ -15,7 +15,7 @@ from .models import (
 )
 
 _PROGRAM = "bookstore"
-_DEFAULT_BASE_URL = "http://localhost:8000"
+_DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 _VERSION = "bookstore 0.1.0"
 _DESCRIPTION = "Bookstore API"
 
