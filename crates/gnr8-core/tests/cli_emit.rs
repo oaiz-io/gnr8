@@ -1312,3 +1312,178 @@ fn go_sse_operation_out_of_scope_no_longer_blocks_the_whole_cli() {
     assert!(text.contains("\"get-book\""), "{text}");
     assert!(!text.contains("stream-events"), "{text}");
 }
+
+// --- S13: a source default is annotated, never inserted ---------------------------------------
+
+fn defaults_graph() -> ApiGraph {
+    serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "params": [
+                {
+                  "name": "page_size",
+                  "location": "query",
+                  "required": false,
+                  "schema": { "type": "primitive", "of": { "prim": "int", "bits": 64, "signed": true } },
+                  "default": { "type": "number", "value": "10" },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                },
+                {
+                  "name": "verified",
+                  "location": "query",
+                  "required": false,
+                  "schema": { "type": "primitive", "of": { "prim": "bool" } },
+                  "default": { "type": "bool", "value": true },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_source_default_reaches_python_help_and_not_the_request() {
+    let text = generate_cli_with(&defaults_graph(), SdkCli::new("bookstore"));
+    assert!(
+        text.contains(r#"help="default: 10","#),
+        "the default belongs in --help:\n{text}"
+    );
+    assert!(
+        text.contains(r#"help="default: True","#),
+        "a boolean default belongs in --help too:\n{text}"
+    );
+    assert!(
+        !text.contains("default=10"),
+        "a default must not be bound as a value:\n{text}"
+    );
+    assert!(
+        !text.contains("default=True"),
+        "a boolean default must not be bound as a value:\n{text}"
+    );
+    // Supplied or not is the only thing that decides whether the parameter is sent, and it is the
+    // same guard an undefaulted optional flag gets.
+    assert!(
+        text.contains("if args.page_size is not None:"),
+        "an omitted flag must send nothing:\n{text}"
+    );
+    assert!(
+        text.contains("if args.verified is not None:"),
+        "an omitted boolean must send nothing:\n{text}"
+    );
+    assert!(
+        text.contains("kwargs[\"page_size\"] = args.page_size"),
+        "a supplied flag must still be sent:\n{text}"
+    );
+}
+
+#[test]
+fn python_defaults_are_bound_as_none_so_argparse_reports_absence() {
+    let text = generate_cli_with(&defaults_graph(), SdkCli::new("bookstore"));
+    let verified = text
+        .split("\"--verified\",")
+        .nth(1)
+        .expect("the boolean flag must be declared");
+    assert!(
+        verified.contains("default=None,"),
+        "a boolean flag stays tri-state:\n{verified}"
+    );
+}
+
+#[test]
+fn go_a_source_default_reaches_help_and_not_the_request() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(&defaults_graph(), "bookstore");
+    // `flag` renders a non-zero DefValue as `(default 10)` in PrintDefaults, so an int default
+    // reaches --help through the registration itself.
+    assert!(
+        text.contains(r#"pageSize := fs.Int64("page-size", 10, "")"#),
+        "the default stays the flag's DefValue so --help shows it:\n{text}"
+    );
+    // A flag.Value has no DefValue to print, so a boolean default rides in the usage string.
+    assert!(
+        text.contains(r#""verified", "(default true)""#),
+        "a boolean default must reach --help through the usage string:\n{text}"
+    );
+    assert!(
+        text.contains(r#""no-verified", "(default true)""#),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"if seen["page-size"] {"#),
+        "an omitted flag must send nothing:\n{text}"
+    );
+    assert!(
+        text.contains("if verified != nil {"),
+        "a defaulted boolean stays tri-state:\n{text}"
+    );
+    assert!(
+        !text.contains("storeBoolValue"),
+        "the value-binding boolean helper is gone:\n{text}"
+    );
+}
+
+#[test]
+fn go_a_required_parameter_with_a_default_must_still_be_supplied() {
+    if skip_go() {
+        return;
+    }
+    let graph: ApiGraph = serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "params": [
+                {
+                  "name": "genre",
+                  "location": "query",
+                  "required": true,
+                  "schema": { "type": "primitive", "of": { "prim": "string" } },
+                  "default": { "type": "string", "value": "fiction" },
+                  "provenance": { "file": "main.go", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.go", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap();
+    let text = generate_go_cli(&graph, "bookstore");
+    assert!(
+        text.contains(r#"if !seen["genre"] {"#),
+        "a source default does not excuse a required flag:\n{text}"
+    );
+    assert!(text.contains(r#"return missingFlag("genre")"#), "{text}");
+}

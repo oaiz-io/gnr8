@@ -663,25 +663,6 @@ fn emit_shared_helpers(
         )
         .map_err(sink)?;
         writeln!(out).map_err(sink)?;
-        writeln!(out, "type storeBoolValue struct {{").map_err(sink)?;
-        writeln!(out, "dest *bool").map_err(sink)?;
-        writeln!(out, "setTo bool").map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
-        writeln!(
-            out,
-            "func (s storeBoolValue) String() string {{ return \"\" }}"
-        )
-        .map_err(sink)?;
-        writeln!(out, "func (s storeBoolValue) Set(string) error {{").map_err(sink)?;
-        writeln!(out, "*s.dest = s.setTo").map_err(sink)?;
-        writeln!(out, "return nil").map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
-        writeln!(
-            out,
-            "func (s storeBoolValue) IsBoolFlag() bool {{ return true }}"
-        )
-        .map_err(sink)?;
-        writeln!(out).map_err(sink)?;
     }
     if needs_string_list(ops, graph) {
         imports.add("strings");
@@ -1029,10 +1010,6 @@ fn emit_handler(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "each flag kind is one declaration shape with no shared fallback"
-)]
 fn emit_flag_decl(
     out: &mut String,
     graph: &ApiGraph,
@@ -1044,44 +1021,26 @@ fn emit_flag_decl(
     let kind = flag_kind(graph, &param.schema)?;
     match kind {
         FlagKind::Bool => {
-            let default = match &param.default {
-                Some(LiteralValue::Bool(value)) => Some(*value),
-                _ => None,
-            };
-            if default.is_some() {
-                let start = if default == Some(true) {
-                    "true"
-                } else {
-                    "false"
-                };
-                writeln!(out, "{ident} := {start}").map_err(sink)?;
-                writeln!(
-                    out,
-                    "fs.Var(storeBoolValue{{dest: &{ident}, setTo: true}}, {}, \"\")",
-                    quoted_string_literal(&flag)
-                )
-                .map_err(sink)?;
-                writeln!(
-                    out,
-                    "fs.Var(storeBoolValue{{dest: &{ident}, setTo: false}}, {}, \"\")",
-                    quoted_string_literal(&format!("no-{flag}"))
-                )
-                .map_err(sink)?;
-            } else {
-                writeln!(out, "var {ident} *bool").map_err(sink)?;
-                writeln!(
-                    out,
-                    "fs.Var(storeBool{{dest: &{ident}, setTo: true}}, {}, \"\")",
-                    quoted_string_literal(&flag)
-                )
-                .map_err(sink)?;
-                writeln!(
-                    out,
-                    "fs.Var(storeBool{{dest: &{ident}, setTo: false}}, {}, \"\")",
-                    quoted_string_literal(&format!("no-{flag}"))
-                )
-                .map_err(sink)?;
-            }
+            // A boolean stays tri-state whether or not the source declares a default: unset,
+            // explicitly true, explicitly false. `flag.PrintDefaults` reads `DefValue` off the
+            // registered `flag.Value`, which is empty for a nil `*bool`, so a declared default has
+            // to ride in the usage string to reach `--help` at all.
+            let usage = default_usage(param);
+            writeln!(out, "var {ident} *bool").map_err(sink)?;
+            writeln!(
+                out,
+                "fs.Var(storeBool{{dest: &{ident}, setTo: true}}, {}, {})",
+                quoted_string_literal(&flag),
+                quoted_string_literal(&usage)
+            )
+            .map_err(sink)?;
+            writeln!(
+                out,
+                "fs.Var(storeBool{{dest: &{ident}, setTo: false}}, {}, {})",
+                quoted_string_literal(&format!("no-{flag}")),
+                quoted_string_literal(&usage)
+            )
+            .map_err(sink)?;
         }
         FlagKind::Int => {
             let default = match &param.default {
@@ -1223,16 +1182,13 @@ fn handler_needs_seen(
 }
 
 fn param_uses_seen(graph: &ApiGraph, param: &Param) -> Result<bool, CoreError> {
-    if param.required
-        && param.default.is_none()
-        && !matches!(param.schema, Type::Primitive(Prim::Bool))
-    {
+    if param.required && !matches!(param.schema, Type::Primitive(Prim::Bool)) {
         return Ok(true);
     }
     Ok(match flag_kind(graph, &param.schema)? {
         FlagKind::Enum { .. } | FlagKind::EnumArray { .. } | FlagKind::DateTime => true,
         FlagKind::Bool => false,
-        _ => !param.required && param.default.is_none(),
+        _ => !param.required,
     })
 }
 
@@ -1242,10 +1198,9 @@ fn emit_required_and_choice_checks(
     param: &Param,
 ) -> Result<(), CoreError> {
     let flag = flag_name(param);
-    if param.required
-        && param.default.is_none()
-        && !matches!(param.schema, Type::Primitive(Prim::Bool))
-    {
+    // A required parameter must be supplied. A source default does not excuse it: the default
+    // documents what the server does, not what the CLI sends.
+    if param.required && !matches!(param.schema, Type::Primitive(Prim::Bool)) {
         writeln!(out, "if !seen[{}] {{", quoted_string_literal(&flag)).map_err(sink)?;
         writeln!(out, "return missingFlag({})", quoted_string_literal(&flag)).map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
@@ -1355,7 +1310,10 @@ fn emit_params_assign(
     let ident = flag_ident(param);
     let field = exported(&param.name);
     let kind = flag_kind(graph, &param.schema)?;
-    let always = param.required || param.default.is_some();
+    // An unsupplied flag sends nothing, whatever the source declares as a default: OpenAPI's
+    // `default` documents the receiver's behavior rather than inserting the value into the data, so
+    // the request matches the one the SDK's own method builds and the server applies its default.
+    let always = param.required;
     let pointer = !param.required;
     let assign_value = |out: &mut String, expr: &str| -> Result<(), CoreError> {
         if pointer {
@@ -1366,13 +1324,9 @@ fn emit_params_assign(
     };
 
     if matches!(kind, FlagKind::Bool) {
-        if param.default.is_some() {
-            assign_value(out, &ident)?;
-        } else {
-            writeln!(out, "if {ident} != nil {{").map_err(sink)?;
-            assign_value(out, &format!("*{ident}"))?;
-            writeln!(out, "}}").map_err(sink)?;
-        }
+        writeln!(out, "if {ident} != nil {{").map_err(sink)?;
+        assign_value(out, &format!("*{ident}"))?;
+        writeln!(out, "}}").map_err(sink)?;
         return Ok(());
     }
 
@@ -1731,6 +1685,18 @@ fn operation_scheme_ids(graph: &ApiGraph, op: &Operation) -> Result<Vec<String>,
         }
     }
     Ok(ids.into_iter().collect())
+}
+
+/// A boolean flag's usage string: the source default, or empty.
+///
+/// Every other kind reaches `--help` through `flag`'s own `DefValue` rendering, which prints
+/// `(default 10)` and omits a zero value. A `flag.Value` has no such default to print.
+fn default_usage(param: &Param) -> String {
+    match &param.default {
+        Some(LiteralValue::Bool(true)) => "(default true)".to_string(),
+        Some(LiteralValue::Bool(false)) => "(default false)".to_string(),
+        _ => String::new(),
+    }
 }
 
 fn flag_ident(param: &Param) -> String {

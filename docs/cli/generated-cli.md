@@ -122,8 +122,9 @@ there.
 
 Ungrouped operations sit at the program root. There is no `"default"` group level.
 
-Booleans are two flags sharing one dest: `--verified` and `--no-verified`. An optional boolean
-without a default has three states; the field is sent only when the value is not `None`.
+Booleans are two flags sharing one dest: `--verified` and `--no-verified`. A boolean has three
+states — unset, explicitly true, explicitly false — and is sent only when one of the two flags was
+passed.
 
 Paging parameters named by a `PaginationPolicy` are not ordinary flags. They are replaced by
 `--limit N` / `--all`.
@@ -155,7 +156,23 @@ parameter.
 bookstore get-book --book-id 1 --base-url http://127.0.0.1:8000
 ```
 
-Per-flag `help=` text is not emitted in this slice.
+Per-flag prose is not emitted. The one thing a flag's `--help` does carry is a source default:
+
+| | Where the default appears | Why |
+|---|---|---|
+| Python | `help="default: 10"` | `argparse` shows a default only through the help string |
+| Go | `(default 10)`, from `flag.PrintDefaults` | `flag` renders the registered default itself, and omits it when it is the zero value for the type |
+| Go, booleans | `(default true)` in the usage string | a `flag.Value` has no default for `PrintDefaults` to render |
+
+**A default is shown, never sent.** Omit the flag and the CLI sends nothing, so the request is the
+one the SDK's own method builds and the server applies its own default. This is what the keyword
+means: OpenAPI says the Schema Object's `default` "documents the receiver's behavior rather than
+inserting the value into the data", and JSON Schema files it under annotations. Sending it would
+make an omitted flag indistinguishable from a user who typed the value, and would pin every CLI
+caller to today's value if the server's changed.
+
+A source default does not make a required parameter optional: a required flag must still be
+supplied, and omitting it is a usage error.
 
 ## Command scope
 

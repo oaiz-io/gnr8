@@ -627,18 +627,9 @@ fn emit_handler(
         let Some(ident) = idents.get(&param.name) else {
             continue;
         };
-        if matches!(param.schema, Type::Primitive(Prim::Bool))
-            && !param.required
-            && param.default.is_none()
-        {
-            writeln!(out, "    if args.{ident} is not None:").map_err(sink)?;
-            writeln!(
-                out,
-                "        kwargs[{}] = args.{ident}",
-                py_string_literal(ident)
-            )
-            .map_err(sink)?;
-        } else if param.required {
+        // Every optional flag is sent only when supplied, whatever its kind and whether or not
+        // the source declares a default. A required flag is always present.
+        if param.required {
             writeln!(
                 out,
                 "    kwargs[{}] = args.{ident}",
@@ -872,20 +863,12 @@ fn emit_flag(
 ) -> Result<(), CoreError> {
     let flag = flag_name(param);
     if matches!(param.schema, Type::Primitive(Prim::Bool)) {
-        let default = match &param.default {
-            Some(LiteralValue::Bool(value)) => Some(*value),
-            _ => None,
-        };
-        let default_expr = match default {
-            Some(true) => "True",
-            Some(false) => "False",
-            None => "None",
-        };
         writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
         writeln!(out, "        {},", py_string_literal(&format!("--{flag}"))).map_err(sink)?;
         writeln!(out, "        dest={},", py_string_literal(dest)).map_err(sink)?;
         writeln!(out, "        action=\"store_true\",").map_err(sink)?;
-        writeln!(out, "        default={default_expr},").map_err(sink)?;
+        writeln!(out, "        default=None,").map_err(sink)?;
+        emit_default_help(out, param)?;
         writeln!(out, "    )").map_err(sink)?;
         writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
         writeln!(
@@ -906,10 +889,25 @@ fn emit_flag(
         writeln!(out, "        required=True,").map_err(sink)?;
     }
     emit_flag_type_kwargs(out, graph, &param.schema)?;
-    if let Some(default) = &param.default {
-        writeln!(out, "        default={},", literal_python(default)).map_err(sink)?;
-    }
+    emit_default_help(out, param)?;
     writeln!(out, "    )").map_err(sink)?;
+    Ok(())
+}
+
+/// State a parameter's source default in `--help`, and nowhere else.
+///
+/// `OpenAPI` says the Schema Object's `default` "documents the receiver's behavior rather than
+/// inserting the value into the data", and JSON Schema files it under annotations with no directive
+/// to insert it anywhere. So the CLI shows it and does not send it: an omitted flag produces the
+/// same request the SDK's own method produces, and the server applies its own default. Binding it
+/// as `default=` would make an omitted flag indistinguishable from a user who typed the value, and
+/// would pin every CLI caller to today's value if the server's changed.
+fn emit_default_help(out: &mut String, param: &Param) -> Result<(), CoreError> {
+    let Some(default) = &param.default else {
+        return Ok(());
+    };
+    let text = argparse_help_text(&format!("default: {}", literal_python(default)));
+    writeln!(out, "        help={},", py_string_literal(&text)).map_err(sink)?;
     Ok(())
 }
 

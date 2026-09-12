@@ -46,6 +46,13 @@ must move the minor version.
   building the parser, so the emitted program failed on every invocation including `--help`, while
   `gnr8 generate` reported success. This is now the fourth collision class, naming the operation,
   both subjects, the flag, and which side is a negation.
+- **A generated CLI no longer sends a parameter default the user did not type.** Both emitters bound
+  a source default as the flag's value and then transmitted it, so `bookstore list-books` sent
+  `limit=10` where `client.list_books()` sent nothing — two artifacts of one graph making different
+  requests, with the CLI pinned to the server's default as of generation time. The default is now
+  shown in `--help` (`help="default: 10"` in Python, `flag.PrintDefaults` in Go) and sent only when
+  the flag is supplied, which is what OpenAPI and JSON Schema say the keyword means. A required
+  parameter with a default must still be supplied.
 
 ## 0.14.1 — 2026-09-11
 
