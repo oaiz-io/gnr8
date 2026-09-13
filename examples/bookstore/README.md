@@ -146,12 +146,18 @@ func (c *Client) CreateBook(ctx context.Context, in CreateBookRequest) (Book, er
 }
 ```
 
-**Generated CLI** — `generated/sdk/cmd/bookstore/main.go` is a standard-library command-line client
-over the same graph, opt-in via `.cli(...)`. `go build ./cmd/bookstore` produces the binary:
+**Generated CLI** — `generated/sdk/cmd/bookstore/` is a standard-library command-line client over the
+same graph, opt-in via `.cli(...)`: a `package main` that calls `cli.Run`, over an `internal/cli`
+package beside it. `go build ./cmd/bookstore` produces the binary:
 
 ```sh
-(cd generated/sdk && go build ./cmd/bookstore && ./bookstore books get-book --id 1)
+(cd generated/sdk && go build ./cmd/bookstore &&
+   BOOKSTORE_API_KEY_AUTH=any-key ./bookstore books get-book --id 1)
 ```
+
+Every operation here is behind the `ApiKeyAuth` scheme `.gnr8/src/main.rs` declares, so the program
+asks for one env var per scheme — `BOOKSTORE_API_KEY_AUTH`, named after the program and the scheme.
+Without it the command exits 1 and prints which variables it would accept.
 
 `SdkCli` carries what the graph cannot — facts about the *program* rather than the API:
 

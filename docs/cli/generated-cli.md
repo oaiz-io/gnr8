@@ -119,10 +119,25 @@ Go has no `[project.scripts]` equivalent. `.cli()` does not write extra package 
 
 ### A group name that collides with a shared file
 
-Both layouts reserve the shared file names (`config`, `credentials`, `output`, `parser`, `main`,
-`flags`, `errors`, `cli`, `body`, `commands`, `root`, as each language uses them). A group whose
-module or file name would collide is a generation error naming the group and `GroupOperations` — the
-same remedy every other CLI name collision names.
+What each layout has to reserve follows from where it puts a group's file, so the two lists are not
+the same:
+
+| Layout | Group file | Reserved group names |
+|---|---|---|
+| Go | `internal/cli/<group>.go`, beside every shared file | `body`, `cli`, `commands`, `config`, `credentials`, `errors`, `flags`, `output` |
+| Python | `cli/commands/<group>.py`, one directory below the shared modules | `root` |
+
+Go puts the whole program in one directory, because a Go directory is one package, so a group named
+`config` would claim `config.go`. Python's command modules sit in `cli/commands/`, where the only
+name already taken is `root.py` — the ungrouped commands — so `cli/commands/config.py` and
+`cli/config.py` are different files and a Python group may be called `config`.
+
+Neither reserves `main` (Go's is `cmd/<program>/main.go`, a directory up; Python's is `cli/main.py`,
+also not beside the group modules) nor `parser` (Python's `cli/parser.py`, likewise a directory up;
+Go has no such file).
+
+A group whose module or file name would collide is a generation error naming the group and
+`GroupOperations` — the same remedy every other CLI name collision names.
 
 ## How to run it
 

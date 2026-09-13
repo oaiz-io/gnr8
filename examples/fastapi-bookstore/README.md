@@ -81,7 +81,7 @@ gnr8 generate
 ```
 
 That compiles + runs `.gnr8/`, then writes `generated/openapi.yaml` and
-`generated/sdk/*.py` (including `cli.py`). Running it again over unchanged source is a
+`generated/sdk/*.py` (including the `cli/` package). Running it again over unchanged source is a
 byte-identical no-op.
 
 **No `pip install` is needed.** pyextract parses the source statically with the
@@ -113,8 +113,9 @@ paths:
 **Python SDK** — a typed `urllib` client with a method per operation and Pydantic v2 models that mirror
 the schemas.
 
-**Generated CLI** — `generated/sdk/cli.py` is an argparse client for the same operations, opt-in via
-`.cli(...)`. It is not gnr8's own `gnr8 generate` command surface. From this directory:
+**Generated CLI** — `generated/sdk/cli/` is an argparse client for the same operations, opt-in via
+`.cli(...)`: one module per concern, with a `commands/` subpackage holding the commands themselves.
+It is not gnr8's own `gnr8 generate` command surface. From this directory:
 
 ```sh
 (cd generated && python3 -m sdk.cli --help)          # nothing extra — works as soon as the file is written
@@ -142,7 +143,7 @@ name other than the default last-segment `sdk` if you want `pipx install booksto
   or run, so there is no `pip install` and no runtime dependency.
 - **No TOML.** `.gnr8/src/main.rs` is the entire configuration surface — built-in
   stages composed as code. `gnr8 generate` compiles and runs it.
-- **Generated CLI beside the SDK.** `.cli(...)` emits `cli.py` and a `[project.scripts]` entry; it
+- **Generated CLI beside the SDK.** `.cli(...)` emits the `cli/` subpackage and a `[project.scripts]` entry; it
   reads the same graph the client does. `SdkCli` carries what the graph cannot: the program name,
   the host it defaults to, and — via `.commands(selector)` — which operations become commands.
   Without `.base_url(...)` the program has no default host and `--base-url` is required.

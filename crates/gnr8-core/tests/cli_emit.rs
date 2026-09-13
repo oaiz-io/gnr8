@@ -2461,3 +2461,71 @@ fn paginated_body_graph() -> ApiGraph {
     }];
     graph
 }
+
+/// The two layouts reserve different group names, and the difference is not an oversight.
+///
+/// Go keeps the whole program in `internal/cli/`, because a Go directory is one package, so a group
+/// named `config` would claim `config.go`. Python's command modules sit one directory lower in
+/// `cli/commands/`, where `cli/commands/config.py` and `cli/config.py` are different files — so the
+/// only name Python has to refuse is `root`, the ungrouped commands' own module.
+///
+/// `docs/cli/generated-cli.md` states both lists. This pins them so the prose cannot drift from the
+/// emitters.
+#[test]
+fn the_reserved_group_names_differ_by_layout() {
+    let rejects = |group: &str| {
+        let graph: ApiGraph = serde_json::from_str(&format!(
+            r#"{{
+              "module": "app",
+              "operations": [
+                {{ "id": "upload", "method": "POST", "path": "/upload", "handler": "upload",
+                  "group": "{group}", "params": [], "request_body": null,
+                  "request_body_required": true,
+                  "responses": [ {{ "status": 204, "body": null, "body_kind": "empty" }} ],
+                  "provenance": {{ "file": "main.py", "start_line": 1, "end_line": 1 }} }}
+              ],
+              "schemas": [], "diagnostics": [], "base_path": "/", "title": "API", "security": []
+            }}"#
+        ))
+        .unwrap();
+        (
+            generate_cli_result(&graph, SdkCli::new("bookstore")).is_err(),
+            generate_go_cli_result(&graph, "bookstore").is_err(),
+        )
+    };
+
+    for group in [
+        "body",
+        "cli",
+        "commands",
+        "config",
+        "credentials",
+        "errors",
+        "flags",
+        "output",
+    ] {
+        let (python, go) = rejects(group);
+        assert!(
+            go,
+            "Go must reject the group {group:?}: it would claim internal/cli/{group}.go"
+        );
+        assert!(!python, "Python has no file to lose to the group {group:?}");
+    }
+    let (python, go) = rejects("root");
+    assert!(
+        python,
+        "Python must reject 'root': it is the ungrouped commands' own module"
+    );
+    assert!(
+        !go,
+        "Go's ungrouped commands are in commands.go, so 'root' costs it nothing"
+    );
+    // Named in the docs as reserved by neither, because neither emits a group file beside them.
+    for group in ["main", "parser"] {
+        let (python, go) = rejects(group);
+        assert!(
+            !python && !go,
+            "{group:?} must stay available in both layouts"
+        );
+    }
+}
