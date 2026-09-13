@@ -15,6 +15,10 @@ operations:
     params: []
     request_body:
       ref_id: internal/common/dto.CreateGoalInput
+      provenance:
+        file: internal/goal/ports/handlers.go
+        start_line: 19
+        end_line: 19
     request_body_content_type: application/json
     responses:
       - status: 201
@@ -141,6 +145,10 @@ operations:
           end_line: 67
     request_body:
       ref_id: internal/common/dto.UpdateGoalInput
+      provenance:
+        file: internal/goal/ports/handlers.go
+        start_line: 77
+        end_line: 77
     request_body_content_type: application/json
     responses:
       - status: 200

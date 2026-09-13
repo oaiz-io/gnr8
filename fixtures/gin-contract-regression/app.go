@@ -9,11 +9,49 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 const sessionIDHeader = "X-Session-ID"
 
 type Handler struct{}
+
+type NativeStatus string
+
+const (
+	NativeStatusReady NativeStatus = "ready"
+	NativeStatusDone  NativeStatus = "done"
+)
+
+type NativeQuery struct {
+	IDs       []uuid.UUID    `form:"ids,parser=encoding.TextUnmarshaler" collection_format:"csv"`
+	Statuses  []NativeStatus `form:"statuses" collection_format:"csv"`
+	Limit     uint           `form:"limit,default=20" binding:"min=1,max=100"`
+	RequestID string         `form:"request_id" binding:"omitempty,max=128"`
+	Enabled   *bool          `form:"enabled"`
+	Count     int32          `form:"count" binding:"gte=-5,lte=5"`
+	Ratio     float64        `form:"ratio" binding:"min=0.25,max=0.75"`
+	Scores    []int          `form:"scores" binding:"min=1,max=5,dive,gte=0,lte=10"`
+	At        time.Time      `form:"at"`
+}
+
+type NativeURI struct {
+	ItemID uuid.UUID `uri:"itemId,parser=encoding.TextUnmarshaler" binding:"required"`
+}
+
+type NativeHeaders struct {
+	RequestID string `header:"X-Request-ID" binding:"required,max=64"`
+}
+
+type StrictDecoderRequest struct {
+	Name string `json:"name" binding:"required"`
+}
+
+type RawCommand interface {
+	Execute([]byte) error
+}
+
+var rawCommand RawCommand
 
 type LoginRequest struct {
 	Email string `json:"email" binding:"required"`
@@ -143,6 +181,7 @@ func RegisterRoutes(r *gin.Engine, h *Handler) {
 	items.GET("/query-required", h.queryRequired)
 	items.GET("/query-optional", h.queryOptional)
 	items.GET("/request-observations", h.requestObservations)
+	items.GET("/:itemId/native-bindings", h.nativeBindings)
 	items.GET("/attendance", h.attendance)
 	items.GET("/events", h.itemEvents)
 	items.GET("/raw-stream", h.rawStream)
@@ -156,7 +195,72 @@ func RegisterRoutes(r *gin.Engine, h *Handler) {
 	items.GET("/cookie-rejected", h.cookieRejected)
 	items.GET("/cookie-unresolved", h.cookieUnresolved)
 	items.POST("/queueable", h.queueable)
+	items.POST("/strict-decoder", h.strictDecoder)
+	items.POST("/raw-json", h.rawJSON)
+	items.POST("/raw-command", h.rawCommand)
+	items.POST("/raw-ambiguous", h.rawAmbiguous)
+	items.POST("/unrelated-decoder", h.unrelatedDecoder)
 	items.DELETE("/:itemId", h.deleteItem)
+}
+
+func (h *Handler) nativeBindings(c *gin.Context) {
+	var query NativeQuery
+	var uri NativeURI
+	var headers NativeHeaders
+	_ = c.ShouldBindQuery(&query)
+	_ = c.ShouldBindUri(&uri)
+	_ = c.ShouldBindHeader(&headers)
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) strictDecoder(c *gin.Context) {
+	var request StrictDecoderRequest
+	if err := decodeStrictJSON(c, &request); err != nil {
+		c.JSON(http.StatusBadRequest, MessageResponse{Message: err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func decodeStrictJSON(c *gin.Context, target any) error {
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
+
+func (h *Handler) rawJSON(c *gin.Context) {
+	raw, _ := c.GetRawData()
+	var request StrictDecoderRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		c.JSON(http.StatusBadRequest, MessageResponse{Message: err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) rawCommand(c *gin.Context) {
+	raw, _ := io.ReadAll(c.Request.Body)
+	switch c.ContentType() {
+	case "application/octet-stream":
+		_ = rawCommand.Execute(raw)
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) rawAmbiguous(c *gin.Context) {
+	raw, _ := c.GetRawData()
+	_ = raw
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) unrelatedDecoder(c *gin.Context) {
+	var request StrictDecoderRequest
+	_ = decodeReader(strings.NewReader("{}"), &request)
+	c.Status(http.StatusNoContent)
+}
+
+func decodeReader(reader io.Reader, target any) error {
+	return json.NewDecoder(reader).Decode(target)
 }
 
 // queueable answers a typed body on one success and plain text on another, the shape a

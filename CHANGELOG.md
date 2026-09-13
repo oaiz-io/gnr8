@@ -9,6 +9,23 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **Native Gin binding and body flow now carry the request facts the application actually
+  enforces.** Query, URI, and header structs retain scalar widths, pointer optionality, defaults,
+  named string enums, UUID/time formats, CSV array serialization, scalar bounds, collection
+  cardinality, and one layer of `dive` item constraints in the graph and OpenAPI output. Direct and
+  shared `encoding/json.Decoder` calls resolve a statically typed target even when a helper accepts
+  it as `any`, and bounded generic and wrapper calls preserve the same result at their operation call
+  sites. `GetRawData` and `io.ReadAll(Request.Body)` resolve a named JSON body only through a typed
+  `json.Unmarshal`; unchanged bytes passed to an application boundary resolve as binary and retain
+  every statically proven accepted request media type. Dynamic media values, untyped decode targets,
+  and transformed or otherwise ambiguous raw bytes remain diagnosed instead of acquiring guessed
+  facts.
+- **`gnr8 changes` reports a parameter's validation bounds.** A tightened or loosened bound on a
+  bound query, URI, or header parameter is a `request.parameter.constraints.changed` breaking
+  finding, the counterpart of `request.property.constraints.changed` for a schema field.
+
 ## 0.15.0 — 2026-09-13
 
 ### Breaking

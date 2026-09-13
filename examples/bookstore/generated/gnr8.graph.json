@@ -57,7 +57,12 @@
         "group": "books",
         "params": [],
         "request_body": {
-          "ref_id": "CreateBookRequest"
+          "ref_id": "CreateBookRequest",
+          "provenance": {
+            "file": "main.go",
+            "start_line": 37,
+            "end_line": 37
+          }
         },
         "request_body_content_type": "application/json",
         "responses": [
@@ -208,7 +213,12 @@
           }
         ],
         "request_body": {
-          "ref_id": "UpdateBookRequest"
+          "ref_id": "UpdateBookRequest",
+          "provenance": {
+            "file": "main.go",
+            "start_line": 70,
+            "end_line": 70
+          }
         },
         "request_body_content_type": "application/json",
         "responses": [

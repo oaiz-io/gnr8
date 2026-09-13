@@ -92,6 +92,13 @@ Recognized route facts include:
   supply schemas, and enforced `uuid`/`uri` validation rules refine string formats. URI-bound
   parameters enrich matching route or `Param` evidence rather than creating duplicates; conflicting
   typed schemas are diagnosed.
+- Typed query, URI, and header binding keeps the Go scalar width and signedness, pointer
+  optionality, `time.Time`, `uuid.UUID`, named string constants as enum members, `form` defaults,
+  and array serialization. A query slice with `collection_format:"csv"` is form-style with
+  `explode: false`. Field-scope `min`, `max`, `gte`, `lte`, `gt`, and `lt` rules become string,
+  numeric, or collection bounds according to the field type. Rules after `dive` become item bounds
+  when one item layer can carry them exactly. A consumed rule with no exact parameter
+  representation stays visible as `request.parameter.unresolved`.
 - JSON responses from `JSON`, `AbortWithStatusJSON`, `AbortWithStatusPureJSON`, `IndentedJSON`,
   `PureJSON`, and `AsciiJSON`;
   response status/media facts; constant redirects; response headers; Go structs; nested types; and
@@ -170,10 +177,20 @@ Gin's XML, YAML, TOML, and plain-text request binders are diagnosed as
 schema gnr8 extracts, so publishing that schema under a different media type would claim a wire
 shape the source types do not state. The same applies to a binder selected dynamically or to a
 similarly named value outside Gin's own `binding` package.
-`GetRawData` states neither a media type nor a schema on its own. Raw bytes handed to
-`encoding/json`, or read alongside JSON content-type evidence, still resolve into a free-form
-`application/json` body; the read is reported as `request.body.unresolved` only when the operation
-ends with no body at all, so one operation is never told its body is both stated and unresolved.
+
+`encoding/json.Decoder` calls over the routed `Request.Body` produce a named JSON request body when
+their `Decode` target is statically typed. The proof follows bounded module-owned helpers, including
+an `any` target whose concrete address is supplied by the handler, an explicit generic type
+argument, and simple wrappers. A decoder over another reader contributes no request fact. Successful
+helper inference retains the handler call site as the body reference's source span.
+
+`GetRawData` and `io.ReadAll(c.Request.Body)` are raw byte reads. A following `json.Unmarshal` into
+a named type proves that named `application/json` body. Passing the exact byte value to a
+module-owned application boundary proves a binary body; static branches that reach that boundary
+over the routed request content type supply its media types, including more than one accepted type. An
+untyped JSON target, a transformed byte value, a dynamic media value, or a bare read remains
+`request.body.unresolved`. A content-type string alone never turns raw bytes into JSON, and a
+runtime-only header value never becomes a media-type fact.
 
 ### Direct Gin query requiredness
 

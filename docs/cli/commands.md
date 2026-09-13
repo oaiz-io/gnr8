@@ -262,6 +262,7 @@ request.body.schema.changed
 request.enum.value.added
 request.enum.value.removed
 request.parameter.added
+request.parameter.constraints.changed
 request.parameter.default.changed
 request.parameter.documentation.changed
 request.parameter.removed
