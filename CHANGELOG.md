@@ -9,6 +9,15 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **The host/worker protocol is now version 8.** `WorkerMessage::ArtifactChanges` carries the
+  diagnostics a run raised alongside the artifacts it changed, which is how a warning from a stage
+  in your `.gnr8/` crate reaches the user at all. Both sides refuse to proceed on a version
+  mismatch, so a `.gnr8/` crate pinned to an older `gnr8` fails the handshake with an actionable
+  error instead of decoding a frame it does not understand; move the pin. Custom Rust that matches
+  `WorkerMessage::ArtifactChanges` exhaustively must bind or ignore the new field.
+
 ### Added
 
 - **`PySdk::cli("bookstore")` emits a generated argparse CLI beside the Python SDK.** Opt-in: a
@@ -34,6 +43,15 @@ must move the minor version.
   is a configuration error.
 - **`SdkCli::base_url(url)` sets the host a generated CLI talks to by default.** `--base-url`
   overrides it per invocation. Without it the program has no default and the flag is required.
+- **`Error` is in `gnr8::sdk::prelude`.** Every stage trait returns `Result<_, Error>`, so writing
+  the first custom stage needed a second import to name the type the trait already mentions.
+- **Changing generated output is documented.** [Generated CLI](docs/cli/generated-cli.md) gains a
+  "Changing what is emitted" section: adding your own file beside the generated ones (gnr8 owns the
+  paths it wrote and nothing else, so yours survives `generate`, `check`, and `--force` alike), and
+  replacing an emitted file with a `PostProcess` using `Artifacts::overlay` — which keeps the file
+  gnr8-owned, `gnr8 check`-able, and byte-identical run over run, with your text in it. The
+  mechanism already shipped; it had no documentation, and `grep` for it across the docs returned
+  nothing.
 
 ### Fixed
 
@@ -72,6 +90,13 @@ must move the minor version.
   localhost. `SdkCli::base_url(url)` is now the one source; without it the program has no default
   and `--base-url` is required. `openapi_metadata.servers` and the localhost constant are no longer
   consulted.
+
+- **A `PostProcess` whose `rewrite` changed nothing now says so.** `Artifacts::rewrite` takes an
+  opaque closure and cannot tell a deliberate no-op from a pattern that stopped matching because the
+  emitted text moved underneath it — both return the text unchanged, both reported success, and the
+  result is still a valid file, so a customization could silently stop applying with no error and no
+  suspicious diff. It now raises an `artifact.rewrite_no_op` WARN naming the file and the stage.
+  `overlay` already failed loudly on a path it could not find; this closes the asymmetry.
 
 ### Changed
 

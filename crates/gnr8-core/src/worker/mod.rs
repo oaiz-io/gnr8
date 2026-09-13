@@ -31,7 +31,7 @@ use gnr8::protocol::{
     HostMessage, Patched, WorkerMessage, PROTOCOL_VERSION,
 };
 
-use crate::graph::ApiGraph;
+use crate::graph::{ApiGraph, Diagnostic};
 use crate::pipeline::StageRunner;
 use crate::sdk::{Artifact, Cx, StagePlan};
 use crate::store::Store;
@@ -177,6 +177,8 @@ pub struct WorkerSession {
     held_graph: HeldGraph,
     /// The artifact set the worker holds — what every artifact patch is measured against.
     held_artifacts: Vec<Artifact>,
+    /// Diagnostics the worker's stages raised, accumulated until the pipeline collects them.
+    stage_diagnostics: Vec<Diagnostic>,
 }
 
 impl WorkerSession {
@@ -262,6 +264,7 @@ impl WorkerSession {
             origin: WorkerOrigin::Reused,
             held_graph: HeldGraph::default(),
             held_artifacts: Vec::new(),
+            stage_diagnostics: Vec::new(),
         };
         session.plan = session.handshake(&workspace.project_root)?;
         Ok(session)
@@ -466,7 +469,11 @@ impl WorkerSession {
         self.held_artifacts = artifacts;
         self.send(make_request(patch))?;
         match self.receive()? {
-            WorkerMessage::ArtifactChanges { changed } => {
+            WorkerMessage::ArtifactChanges {
+                changed,
+                diagnostics,
+            } => {
+                self.stage_diagnostics.extend(diagnostics);
                 let merged =
                     merge_artifact_changes(std::mem::take(&mut self.held_artifacts), changed);
                 self.held_artifacts.clone_from(&merged);
@@ -574,6 +581,10 @@ impl StageRunner for WorkerSession {
             indices,
             artifacts,
         })
+    }
+
+    fn take_stage_diagnostics(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.stage_diagnostics)
     }
 }
 

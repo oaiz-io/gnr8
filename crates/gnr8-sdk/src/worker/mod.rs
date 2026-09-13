@@ -280,10 +280,14 @@ fn dispatch(
 /// The accumulator itself knows which paths the run reached, so nothing here compares the finished
 /// set against a copy of the one it started from — on a five-thousand-file project that copy, and
 /// the walk over it, cost more than the two files a post-processor actually rewrote.
-fn answer_with_changes(session: &mut Held, out: Artifacts) -> WorkerMessage {
+fn answer_with_changes(session: &mut Held, mut out: Artifacts) -> WorkerMessage {
     let changed = out.changes();
+    let diagnostics = out.take_diagnostics();
     session.artifacts = out.into_files();
-    WorkerMessage::ArtifactChanges { changed }
+    WorkerMessage::ArtifactChanges {
+        changed,
+        diagnostics,
+    }
 }
 
 fn unknown_stage(kind: &str, index: usize) -> Error {
@@ -436,7 +440,10 @@ mod tests {
             "Base::marked"
         );
         assert!(matches!(messages[2], WorkerMessage::Done));
-        let WorkerMessage::ArtifactChanges { changed: artifacts } = &messages[3] else {
+        let WorkerMessage::ArtifactChanges {
+            changed: artifacts, ..
+        } = &messages[3]
+        else {
             panic!("expected artifact changes, got {:?}", messages[3]);
         };
         assert_eq!(artifacts.len(), 1);
@@ -508,7 +515,10 @@ mod tests {
         };
         // The worker's `Cx` is the project root the host declared in its handshake.
         assert_eq!(resolved(graph, &HeldGraph::default()).title, "/repo");
-        let WorkerMessage::ArtifactChanges { changed: artifacts } = &messages[2] else {
+        let WorkerMessage::ArtifactChanges {
+            changed: artifacts, ..
+        } = &messages[2]
+        else {
             panic!("expected artifact changes, got {:?}", messages[2]);
         };
         assert_eq!(artifacts.len(), 1, "only the rewritten artifact comes back");
@@ -541,7 +551,7 @@ mod tests {
             ],
         );
         assert!(result.is_ok());
-        let WorkerMessage::ArtifactChanges { changed } = &replies(&output)[1] else {
+        let WorkerMessage::ArtifactChanges { changed, .. } = &replies(&output)[1] else {
             panic!("expected artifact changes");
         };
         assert_eq!(changed.len(), 1, "{changed:?}");

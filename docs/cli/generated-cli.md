@@ -446,3 +446,77 @@ gnr8 does not remove the now-empty directory it leaves behind: directory members
 evidence, and an unowned neighbour under an output path is never deleted.
 
 TypeScript generated CLIs are out of this slice.
+
+## Changing what is emitted
+
+Every emitted file says `DO NOT EDIT`, and it means it: a hand edit is protected, reported, and then
+in your way on every run — `gnr8 generate` refuses to overwrite it and exits non-zero until you pass
+`--force` or put the file back. That is the ownership contract working, not a wall. The supported way
+to ship different code is to own the *pipeline* rather than the file, which keeps `gnr8 check` green
+and the output deterministic.
+
+### Add a file beside the generated ones
+
+The cheapest customization is not a customization at all. gnr8 owns the paths it wrote and nothing
+else, so a new file in the same package is simply yours:
+
+```text
+generated/sdk/cli/
+  main.py            gnr8's, and rewritten whenever the graph moves
+  commands/
+    books.py         gnr8's
+  my_helpers.py      yours — untouched by generate, check, and --force alike
+```
+
+Import it from your own code freely. Directory membership is not ownership evidence: `--force`
+overwrites gnr8's own files and leaves yours, and `gnr8 check` never mentions them. The one thing to
+avoid is a name the emitter might claim later — see the reserved names above.
+
+### Replace an emitted file with a `PostProcess`
+
+To change a file gnr8 owns, hand the pipeline a stage that produces the version you want.
+`Artifacts::overlay` replaces one artifact's text wholesale, after every target has run:
+
+```rust
+use gnr8::sdk::prelude::*;
+
+/// Our CLI prints NDJSON, because our log pipeline reads stdout.
+struct NdjsonOutput;
+
+impl PostProcess for NdjsonOutput {
+    fn run(&self, out: &mut Artifacts, _cx: &Cx) -> Result<(), Error> {
+        out.overlay(
+            "generated/sdk/cli/output.py",
+            include_str!("../cli/output_ndjson.py"),
+        )
+    }
+}
+
+// …
+.target(PySdk::new().module("example.com/bookstore/sdk").to("generated/sdk").cli("bookstore"))
+.post(Custom(NdjsonOutput))
+```
+
+The file stays gnr8-owned — it is still written by the pipeline, still byte-identical run over run,
+still `gnr8 check`-able — and the text is yours. `overlay` on a path no target produced is a hard
+error naming the path, so a rename in a future gnr8 version cannot silently drop your replacement.
+
+`Artifacts::rewrite` transforms the existing text instead of replacing it, which suits a small
+insertion:
+
+```rust
+out.rewrite("generated/sdk/cli/output.py", |text| {
+    text.replace("import json", "import json
+import sys")
+})
+```
+
+Prefer `overlay` where you can. `rewrite` takes an opaque closure, so it cannot distinguish a
+deliberate no-op from a pattern that stopped matching because the emitter's output moved — and the
+result is still a valid file, so nothing downstream looks wrong. gnr8 raises a
+`artifact.rewrite_no_op` WARN naming the file and the stage when a rewrite returns the text it was
+given, which turns that silent loss into a visible one; it is still a warning you have to read.
+
+Both run in your `.gnr8/` crate, which is the only extension surface (rule 4) — there is no template
+override, no ignore file, and no adoption of a generated file into hand ownership. What you get
+instead is that the generated tree is always exactly what the pipeline says it is.

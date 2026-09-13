@@ -54,7 +54,7 @@ use crate::Error;
 /// Bumped on any breaking change to the frame or message shape. Both sides refuse to proceed on a
 /// mismatch, so a `.gnr8/` crate built against a skewed SDK fails with an actionable error rather
 /// than a confusing parse failure or silently-wrong output.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// The frame magic. A stream that does not start with it is not this protocol.
 pub const FRAME_MAGIC: [u8; 4] = *b"GN8F";
@@ -431,6 +431,13 @@ pub enum WorkerMessage {
     ArtifactChanges {
         /// The artifacts the run created or changed, sorted by path.
         changed: Vec<Artifact>,
+        /// Diagnostics the stages raised while producing those changes.
+        ///
+        /// A custom stage runs in the worker, so a warning it raises — a `rewrite` whose pattern
+        /// stopped matching, say — has no other way back to the user. Additive like `changed`: an
+        /// empty vector is the common case and costs one JSON field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<Diagnostic>,
     },
     /// Acknowledgement of [`HostMessage::Shutdown`].
     Done,
@@ -446,7 +453,7 @@ impl WorkerMessage {
     #[must_use]
     pub fn into_frame(mut self) -> Frame<Self> {
         let bodies = match &mut self {
-            Self::ArtifactChanges { changed } => take_bodies(changed),
+            Self::ArtifactChanges { changed, .. } => take_bodies(changed),
             Self::Ready { .. } | Self::Graph { .. } | Self::Done | Self::Failed { .. } => {
                 Vec::new()
             }
@@ -471,7 +478,7 @@ impl Frame<WorkerMessage> {
             bodies,
         } = self;
         match &mut message {
-            WorkerMessage::ArtifactChanges { changed } => put_bodies(changed, bodies)?,
+            WorkerMessage::ArtifactChanges { changed, .. } => put_bodies(changed, bodies)?,
             WorkerMessage::Ready { .. }
             | WorkerMessage::Graph { .. }
             | WorkerMessage::Done
@@ -909,6 +916,7 @@ mod tests {
         write_frame(
             &mut bytes,
             &WorkerMessage::ArtifactChanges {
+                diagnostics: Vec::new(),
                 changed: vec![Artifact::new("sdk/patched.ts", "export const x = \"1\";\n")],
             }
             .into_frame(),
@@ -918,7 +926,7 @@ mod tests {
             .unwrap()
             .into_message()
             .unwrap();
-        let WorkerMessage::ArtifactChanges { changed } = back else {
+        let WorkerMessage::ArtifactChanges { changed, .. } = back else {
             panic!("expected artifact changes");
         };
         assert_eq!(changed[0].text, "export const x = \"1\";\n");

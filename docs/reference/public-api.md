@@ -24,6 +24,7 @@ the feature pages for behavior and examples; use rustdoc for complete method sig
 | `Target` | trait for graph → artifacts |
 | `PostProcess` | trait for artifact transformation after targets |
 | `Cx` | stage context containing project root |
+| `Error` | the typed error every stage trait returns (`#[non_exhaustive]`) |
 | `Artifact` | one project-relative UTF-8 generated file plus ownership metadata |
 | `Artifacts` | sorted artifact set with explicit ownership plus borrow/consume/restore helpers |
 | `ArtifactMetadata` | artifact path and content hash without text |
@@ -145,7 +146,6 @@ See [SDK generation](../sdk/generation.md).
 | `gnr8::protocol::{read_frame, write_frame, HostMessage, WorkerMessage}` | the frame wire format |
 | `gnr8::sdk::StagePlan` | the ordered plan a worker reports to the host |
 | `gnr8::graph::ApiGraph` | neutral extracted/transformed API graph |
-| `gnr8::Error` | typed stage error enum (`#[non_exhaustive]`) |
 
 Prefer the CLI for lifecycle operations. Direct module APIs are useful for custom tooling and tests.
 
