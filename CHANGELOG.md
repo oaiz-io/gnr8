@@ -22,6 +22,9 @@ must move the minor version.
   every statically proven accepted request media type. Dynamic media values, untyped decode targets,
   and transformed or otherwise ambiguous raw bytes remain diagnosed instead of acquiring guessed
   facts.
+- **`gnr8 changes` reports a parameter's validation bounds.** A tightened or loosened bound on a
+  bound query, URI, or header parameter is a `request.parameter.constraints.changed` breaking
+  finding, the counterpart of `request.property.constraints.changed` for a schema field.
 
 ## 0.15.0 — 2026-09-13
 

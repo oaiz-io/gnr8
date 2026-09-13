@@ -1099,6 +1099,18 @@ fn compare_existing_parameter(
             format!("parameter `{}` default changed", base.name),
         );
     }
+    // The validation bounds a bound parameter carries are part of what callers must satisfy, the
+    // same public fact `*.property.constraints.changed` reports for a schema field.
+    if base.constraints != current.constraints || base.item_constraints != current.item_constraints
+    {
+        out.push(
+            scope,
+            ChangeKind::Breaking,
+            "request.parameter.constraints.changed",
+            Some(subject.to_string()),
+            format!("parameter `{}` constraints changed", base.name),
+        );
+    }
     let base_openapi = parameter_openapi_value(base);
     let current_openapi = parameter_openapi_value(current);
     let mut base_structural = base_openapi.clone();
@@ -4177,6 +4189,31 @@ mod tests {
         assert_eq!(report.changes.len(), 1, "{:?}", report.changes);
         let finding = change(&report, "request.parameter.serialization.changed");
         assert_eq!(finding.kind, ChangeKind::Breaking);
+    }
+
+    #[test]
+    fn parameter_validation_bounds_are_a_breaking_change() {
+        let mut base = graph_with_tags(&[]);
+        base.operations[0].params.push(parameter(false));
+        base.operations[0].params[0].constraints.max_length = Some(128);
+        let mut current = base.clone();
+        current.operations[0].params[0].constraints.max_length = Some(16);
+
+        let report = diff_graphs(&base, &current, &BTreeSet::new());
+        assert_eq!(report.changes.len(), 1, "{:?}", report.changes);
+        let finding = change(&report, "request.parameter.constraints.changed");
+        assert_eq!(finding.kind, ChangeKind::Breaking);
+
+        let mut item_current = base.clone();
+        item_current.operations[0].params[0]
+            .item_constraints
+            .maximum = Some("10".to_string());
+        let item_report = diff_graphs(&base, &item_current, &BTreeSet::new());
+        assert_eq!(item_report.changes.len(), 1, "{:?}", item_report.changes);
+        assert_eq!(
+            change(&item_report, "request.parameter.constraints.changed").kind,
+            ChangeKind::Breaking
+        );
     }
 
     #[test]

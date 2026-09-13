@@ -5878,11 +5878,20 @@ var routedRequestBody = valueProvenance{
 		return ok && request.Sel != nil && request.Sel.Name == "Request" &&
 			isRoutedGinContextExpr(frame, request.X)
 	},
-	// Provenance, rather than a broad interface test, is the deciding fact. An
-	// io.Reader parameter and net/http's io.ReadCloser can both carry the same
-	// routed body through a wrapper.
-	carries: func(t gotypes.Type) bool { return t != nil },
-	bound:   func(binding helperBinding) bool { return binding.requestBody },
+	// Provenance, not the exact interface, is the deciding fact: an io.Reader
+	// parameter and net/http's io.ReadCloser both carry the same routed body
+	// through a wrapper, so neither one may be demanded. What every carrier does
+	// share is that `c.Request.Body` is assignable to it, and an io.ReadCloser is
+	// only assignable to an interface — which is the filter this needs, and which
+	// keeps the assignment walk off every unrelated identifier in the body.
+	carries: func(t gotypes.Type) bool {
+		if t == nil {
+			return false
+		}
+		_, ok := gotypes.Unalias(t).Underlying().(*gotypes.Interface)
+		return ok
+	},
+	bound: func(binding helperBinding) bool { return binding.requestBody },
 }
 
 func isRoutedRequestBodyExpr(frame helperFrame, expr ast.Expr) bool {
@@ -6157,6 +6166,7 @@ func (a *Analyzer) nativeRequestBodies(frame helperFrame, handler string) native
 		map[string]bool{},
 		nil,
 		nil,
+		nil,
 		&analysis,
 	)
 	return analysis
@@ -6168,6 +6178,7 @@ func (a *Analyzer) analyzeNativeBodyFrame(
 	depth int,
 	stack map[string]bool,
 	inheritedRaw map[gotypes.Object][]rawBodyRead,
+	inheritedDecoders map[token.Pos]bool,
 	inheritedMediaTypes []string,
 	analysis *nativeBodyAnalysis,
 ) {
@@ -6176,8 +6187,30 @@ func (a *Analyzer) analyzeNativeBodyFrame(
 		return
 	}
 	rawValues := rawBodyValues(frame, inheritedRaw, analysis)
-	decoderReads := jsonDecoderReadPositions(frame)
-	decoded := map[token.Pos]bool{}
+	decoderReads := recordJSONDecoderReads(frame, analysis)
+	// A decoder built here can be decoded in a helper the caller hands it to, so
+	// the reads a decode in this frame answers for include the ones it inherited.
+	pendingDecoders := map[token.Pos]bool{}
+	for pos := range inheritedDecoders {
+		pendingDecoders[pos] = true
+	}
+	for pos := range decoderReads {
+		pendingDecoders[pos] = true
+	}
+	// The media types in force at a call are read only by the calls that carry a
+	// body fact, and reading them walks the whole function. Deriving that for
+	// every call in the body — nearly all of which state nothing about the request
+	// — makes analysis quadratic in handler size, so both the per-frame content-
+	// type locals and the per-call answer are derived on first demand.
+	var contentTypeVars map[gotypes.Object]bool
+	contentTypeVarsRead := false
+	mediaTypesAt := func(call *ast.CallExpr) []string {
+		if !contentTypeVarsRead {
+			contentTypeVars = requestContentTypeVars(frame)
+			contentTypeVarsRead = true
+		}
+		return staticRequestMediaTypesAt(frame, call, contentTypeVars, inheritedMediaTypes)
+	}
 
 	ast.Inspect(h.decl.Body, func(node ast.Node) bool {
 		if _, ok := node.(*ast.FuncLit); ok {
@@ -6187,17 +6220,15 @@ func (a *Analyzer) analyzeNativeBodyFrame(
 		if !ok {
 			return true
 		}
-		mediaTypes := staticRequestMediaTypesAt(frame, call, inheritedMediaTypes)
 		function := calledFuncObject(h.info, call.Fun)
 		if isJSONDecoderDecodeCall(frame, call, function) {
-			for pos := range decoderReads {
+			for pos := range pendingDecoders {
 				analysis.resolved[pos] = true
-				decoded[pos] = true
 			}
 			if ref, ok := a.namedRequestTypeRef(frame, call.Args[0]); ok {
 				analysis.evidence = append(analysis.evidence, requestBodyEvidence{
 					ref:          ref,
-					contentTypes: mergeUniqueStrings([]string{"application/json"}, mediaTypes),
+					contentTypes: mergeUniqueStrings([]string{"application/json"}, mediaTypesAt(call)),
 					subject:      "encoding/json.Decoder.Decode",
 					fset:         h.fset,
 					pos:          call.Pos(),
@@ -6225,7 +6256,7 @@ func (a *Analyzer) analyzeNativeBodyFrame(
 				}
 				analysis.evidence = append(analysis.evidence, requestBodyEvidence{
 					ref:          ref,
-					contentTypes: mergeUniqueStrings([]string{"application/json"}, mediaTypes),
+					contentTypes: mergeUniqueStrings([]string{"application/json"}, mediaTypesAt(call)),
 					subject:      "encoding/json.Unmarshal",
 					fset:         h.fset,
 					pos:          call.Pos(),
@@ -6248,19 +6279,26 @@ func (a *Analyzer) analyzeNativeBodyFrame(
 
 		callee, hasCallee := a.moduleOwnedCallee(function)
 		childRaw := rawBindingsForHelperCall(frame, call, function, rawValues)
-		if hasCallee && (frameCallPassesGinContext(frame, call) || frameCallPassesRequestBody(frame, call) || len(childRaw) > 0) {
+		passesDecoder := frameCallPassesJSONDecoder(frame, call)
+		if hasCallee && (frameCallPassesGinContext(frame, call) || frameCallPassesRequestBody(frame, call) ||
+			passesDecoder || len(childRaw) > 0) {
 			key := callee.identityKey()
 			if !stack[key] {
 				stack[key] = true
 				beforeEvidence := len(analysis.evidence)
 				beforeResolved := len(analysis.resolved)
+				childDecoders := map[token.Pos]bool{}
+				if passesDecoder {
+					childDecoders = pendingDecoders
+				}
 				a.analyzeNativeBodyFrame(
 					helperFrameForCall(frame, call, function, callee),
 					handler,
 					depth+1,
 					stack,
 					childRaw,
-					mediaTypes,
+					childDecoders,
+					mediaTypesAt(call),
 					analysis,
 				)
 				delete(stack, key)
@@ -6286,6 +6324,7 @@ func (a *Analyzer) analyzeNativeBodyFrame(
 		for _, source := range sources {
 			analysis.resolved[source.pos] = true
 		}
+		mediaTypes := mediaTypesAt(call)
 		id, name := syntheticRawRequestSchemaIdentity(handler)
 		schema := facts.SchemaFact{
 			ID:   id,
@@ -6313,13 +6352,6 @@ func (a *Analyzer) analyzeNativeBodyFrame(
 		}
 		return true
 	})
-
-	for pos, read := range decoderReads {
-		if decoded[pos] || analysis.resolved[pos] {
-			continue
-		}
-		analysis.issues = append(analysis.issues, read)
-	}
 }
 
 func (a *Analyzer) namedRequestTypeRef(frame helperFrame, expr ast.Expr) (facts.TypeRef, bool) {
@@ -6331,31 +6363,38 @@ func (a *Analyzer) namedRequestTypeRef(frame helperFrame, expr ast.Expr) (facts.
 	return facts.TypeRef{RefID: id}, ok
 }
 
-func jsonDecoderReadPositions(frame helperFrame) map[token.Pos]rawBodyRead {
-	reads := map[token.Pos]rawBodyRead{}
+// recordJSONDecoderReads defers every decoder this frame opens over the routed
+// body and returns their positions for the decode bookkeeping. A decoder is a
+// byte read of the request exactly as GetRawData is, so it is deferred on the
+// same terms: reported only when the operation ends with no body at all, so one
+// operation is never told a body is both stated and unresolved.
+func recordJSONDecoderReads(frame helperFrame, analysis *nativeBodyAnalysis) map[token.Pos]bool {
+	positions := map[token.Pos]bool{}
 	if frame.decl.decl == nil || frame.decl.decl.Body == nil {
-		return reads
+		return positions
 	}
 	ast.Inspect(frame.decl.decl.Body, func(node ast.Node) bool {
 		if _, ok := node.(*ast.FuncLit); ok {
 			return false
 		}
 		call, ok := node.(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 || !isRoutedRequestBodyExpr(frame, call.Args[0]) ||
+		if !ok || len(call.Args) != 1 || positions[call.Pos()] ||
+			!isRoutedRequestBodyExpr(frame, call.Args[0]) ||
 			!isEncodingJSONCall(calledFuncObject(frame.decl.info, call.Fun), "NewDecoder") {
 			return true
 		}
+		positions[call.Pos()] = true
 		file, line := positionOf(frame.decl.fset, call.Pos())
-		reads[call.Pos()] = rawBodyRead{
+		analysis.reads = append(analysis.reads, rawBodyRead{
 			subject: "encoding/json.NewDecoder",
 			file:    file,
 			line:    line,
 			pos:     call.Pos(),
 			reason:  "JSON decoder reads the routed request body but no named decode target is statically established",
-		}
+		})
 		return true
 	})
-	return reads
+	return positions
 }
 
 func isJSONDecoderDecodeCall(frame helperFrame, call *ast.CallExpr, function *gotypes.Func) bool {
@@ -6402,6 +6441,11 @@ func rawBodyValues(
 		return []rawBodyRead{read}
 	}
 	assign := func(target ast.Expr, source ast.Expr, reads []rawBodyRead) {
+		// `for i := range xs` states no value and `for range xs` states neither,
+		// so an absent target writes nothing and invalidates nothing.
+		if target == nil {
+			return
+		}
 		id, ok := target.(*ast.Ident)
 		if !ok || id.Name == "_" {
 			ast.Inspect(target, func(node ast.Node) bool {
@@ -6662,7 +6706,27 @@ func frameCallPassesRequestBody(frame helperFrame, call *ast.CallExpr) bool {
 	return false
 }
 
-func staticRequestMediaTypesAt(frame helperFrame, target *ast.CallExpr, inherited []string) []string {
+// frameCallPassesJSONDecoder reports whether a call hands a helper the decoder
+// already reading the routed body. The decoder is the read, so the call carries
+// the request fact exactly as passing the body itself does.
+func frameCallPassesJSONDecoder(frame helperFrame, call *ast.CallExpr) bool {
+	if call == nil {
+		return false
+	}
+	for _, argument := range call.Args {
+		if isRoutedJSONDecoderExpr(frame, argument) {
+			return true
+		}
+	}
+	return false
+}
+
+func staticRequestMediaTypesAt(
+	frame helperFrame,
+	target *ast.CallExpr,
+	contentTypeVars map[gotypes.Object]bool,
+	inherited []string,
+) []string {
 	h := frame.decl
 	if h.decl == nil || h.decl.Body == nil || h.info == nil || target == nil {
 		return inherited
@@ -6671,7 +6735,7 @@ func staticRequestMediaTypesAt(frame helperFrame, target *ast.CallExpr, inherite
 		frame,
 		h.decl.Body.List,
 		target,
-		requestContentTypeVars(frame),
+		contentTypeVars,
 		mergeUniqueStrings(nil, inherited),
 	)
 	if !found {
@@ -6725,7 +6789,8 @@ func requestMediaTypesInStatement(
 			return requestMediaTypesInStatement(frame, value.Else, target, contentTypeVars, current)
 		}
 	case *ast.SwitchStmt:
-		if value.Init != nil && nodeContainsExactCall(value.Init, target) || nodeContainsExactCall(value.Tag, target) {
+		if value.Init != nil && nodeContainsExactCall(value.Init, target) ||
+			value.Tag != nil && nodeContainsExactCall(value.Tag, target) {
 			return current, true
 		}
 		if !isRequestContentTypeExpr(frame, value.Tag, contentTypeVars) || value.Body == nil {
@@ -6886,6 +6951,11 @@ func intersectRequestMediaTypes(left, right []string) []string {
 }
 
 func nodeContainsExactCall(node ast.Node, target *ast.CallExpr) bool {
+	// A statement's optional parts (a tagless switch's `Tag`, an absent `Init`)
+	// arrive here as a nil node, and ast.Inspect panics on one.
+	if node == nil {
+		return false
+	}
 	found := false
 	ast.Inspect(node, func(current ast.Node) bool {
 		if found {
@@ -8461,8 +8531,22 @@ func parameterConstraintRuleFor(
 	return rule, "the parameter type does not admit this bound", true
 }
 
+// parameterSchemaIsStringLike answers the same question the field-constraint
+// reader answers in internal/types (`schemaIsStringLike`), and must keep answering
+// it the same way: one struct can be bound as a parameter set and serialized as a
+// body, so `binding:"uri,max=2048"` on a formatted string states one length bound
+// whichever side reads it. A well-known format is a string that carries a format,
+// and `maxLength` beside `format` is exactly how OpenAPI states that.
 func parameterSchemaIsStringLike(schema facts.Type) bool {
-	return isPrimitiveStringType(schema) || schema.Type == facts.TypeEnum
+	if schema.Type == facts.TypeWellKnown || schema.Type == facts.TypeEnum {
+		return true
+	}
+	if schema.Type != facts.TypePrimitive {
+		return false
+	}
+	primitive, ok := schema.Of.(*facts.Prim)
+	return ok && primitive != nil &&
+		(primitive.Prim == facts.PrimString || primitive.Prim == facts.PrimBytes)
 }
 
 func parameterSchemaIsNumeric(schema facts.Type) bool {

@@ -1773,6 +1773,9 @@ func (s Server) Register() {
 	s.R.POST("/any", s.anyTarget)
 	s.R.POST("/generic", s.generic)
 	s.R.POST("/wrapper", s.wrapper)
+	s.R.POST("/shared", s.shared)
+	s.R.POST("/sharedWithContext", s.sharedWithContext)
+	s.R.POST("/aliasedBody", s.aliasedBody)
 	s.R.POST("/unrelated", s.unrelated)
 }
 
@@ -1801,10 +1804,40 @@ func (s Server) wrapper(c *gin.Context) {
 	c.JSON(200, Result{OK: true})
 }
 
+func (s Server) shared(c *gin.Context) {
+	var request Payload
+	decoder := json.NewDecoder(c.Request.Body)
+	_ = decodeWith(decoder, &request)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) sharedWithContext(c *gin.Context) {
+	var request Payload
+	decoder := json.NewDecoder(c.Request.Body)
+	_ = decodeWithContext(c, decoder, &request)
+	c.JSON(200, Result{OK: true})
+}
+
+func (s Server) aliasedBody(c *gin.Context) {
+	var request Payload
+	body := c.Request.Body
+	_ = decodeReader(body, &request)
+	c.JSON(200, Result{OK: true})
+}
+
 func (s Server) unrelated(c *gin.Context) {
 	var request Payload
 	_ = decodeReader(strings.NewReader("{}"), &request)
 	c.JSON(200, Result{OK: true})
+}
+
+func decodeWith(decoder *json.Decoder, target any) error {
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
+
+func decodeWithContext(c *gin.Context, decoder *json.Decoder, target any) error {
+	return decoder.Decode(target)
 }
 
 func decodeStrictJSON(c *gin.Context, target any) error {
@@ -1839,7 +1872,7 @@ func decodeReader(reader io.Reader, target any) error {
 	for _, route := range routes.Recognize(res) {
 		got[route.Handler] = analyzer.Analyze(route, diags)
 	}
-	for _, handler := range []string{"direct", "anyTarget", "generic", "wrapper"} {
+	for _, handler := range []string{"direct", "anyTarget", "generic", "wrapper", "shared", "sharedWithContext", "aliasedBody"} {
 		code := got[handler]
 		assertBodySuffix(t, code.RequestBody, "Payload")
 		if code.RequestBodyContentType != "application/json" || !code.RequestBodyRequired {
@@ -2115,9 +2148,11 @@ replace github.com/gin-gonic/gin => ./ginstub
 	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
 	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
 
+import "net/http"
+
 type HandlerFunc func(*Context)
 type Engine struct{}
-type Context struct{}
+type Context struct{ Request *http.Request }
 
 func (e *Engine) POST(string, HandlerFunc) {}
 func (c *Context) ShouldBindJSON(any) error { return nil }
@@ -2126,7 +2161,11 @@ func (c *Context) JSON(int, any) {}
 `)
 	mustWrite(t, filepath.Join(dir, "app.go"), `package rawhelper
 
-import "github.com/gin-gonic/gin"
+import (
+	"encoding/json"
+
+	"github.com/gin-gonic/gin"
+)
 
 type Server struct{ R *gin.Engine }
 type Payload struct { Name string `+"`"+`json:"name"`+"`"+` }
@@ -2134,7 +2173,25 @@ type Result struct { OK bool `+"`"+`json:"ok"`+"`"+` }
 
 func (s Server) Register() {
 	s.R.POST("/typed", s.typed)
+	s.R.POST("/typed-decoder", s.typedDecoder)
 	s.R.POST("/raw-only", s.rawOnly)
+	s.R.POST("/decoder-only", s.decoderOnly)
+}
+
+// A decoder opened over the routed body is a byte read of it, so an unconsumed
+// one answers to the same rule GetRawData does.
+func (s Server) typedDecoder(c *gin.Context) {
+	var payload Payload
+	_ = c.ShouldBindJSON(&payload)
+	decoder := json.NewDecoder(c.Request.Body)
+	_ = decoder
+	c.JSON(200, Result{})
+}
+
+func (s Server) decoderOnly(c *gin.Context) {
+	decoder := json.NewDecoder(c.Request.Body)
+	_ = decoder
+	c.JSON(200, Result{})
 }
 
 func readRaw(c *gin.Context) []byte {
@@ -2170,8 +2227,11 @@ func (s Server) rawOnly(c *gin.Context) {
 	}
 
 	assertBodySuffix(t, got["typed"].RequestBody, "Payload")
-	if got["rawOnly"].RequestBody != nil {
-		t.Fatalf("a helper raw read states no body: %+v", got["rawOnly"])
+	assertBodySuffix(t, got["typedDecoder"].RequestBody, "Payload")
+	for _, handler := range []string{"rawOnly", "decoderOnly"} {
+		if got[handler].RequestBody != nil {
+			t.Fatalf("an unconsumed %s read states no body: %+v", handler, got[handler])
+		}
 	}
 	unresolved := map[string]bool{}
 	for _, item := range diagnostics.Items() {
@@ -2179,11 +2239,95 @@ func (s Server) rawOnly(c *gin.Context) {
 			unresolved[item.Operation] = true
 		}
 	}
-	if unresolved["POST /typed"] {
-		t.Fatalf("a stated body must not also be diagnosed as unresolved: %+v", diagnostics.Items())
+	for _, operation := range []string{"POST /typed", "POST /typed-decoder"} {
+		if unresolved[operation] {
+			t.Fatalf("a stated body must not also be diagnosed as unresolved: %+v", diagnostics.Items())
+		}
 	}
-	if !unresolved["POST /raw-only"] {
-		t.Fatalf("an unresolved helper raw read must stay visible: %+v", diagnostics.Items())
+	for _, operation := range []string{"POST /raw-only", "POST /decoder-only"} {
+		if !unresolved[operation] {
+			t.Fatalf("an unresolved %s read must stay visible: %+v", operation, diagnostics.Items())
+		}
+	}
+}
+
+// A tagless `switch` states no tag, `for i := range xs` states no range value and
+// `for range xs` states neither. The native body walk reaches every statement of
+// every routed handler, so a part the source left out must read as absent rather
+// than reach go/ast as a nil node.
+func TestStatementPartsTheSourceOmitsAreAnalyzed(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/taglessswitch
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+import "net/http"
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{ Request *http.Request }
+
+func (e *Engine) POST(string, HandlerFunc) {}
+func (c *Context) ContentType() string { return "" }
+func (c *Context) GetRawData() ([]byte, error) { return nil, nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package taglessswitch
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ R *gin.Engine }
+type Result struct { OK bool `+"`"+`json:"ok"`+"`"+` }
+
+type Store interface{ Save([]byte) error }
+
+var store Store
+
+func (s Server) Register() {
+	s.R.POST("/tagless", s.tagless)
+}
+
+func (s Server) tagless(c *gin.Context) {
+	raw, _ := c.GetRawData()
+	seen := 0
+	for i := range raw {
+		seen += i
+	}
+	for range raw {
+		seen++
+	}
+	switch {
+	case seen > 0:
+		_ = store.Save(raw)
+	}
+	c.JSON(200, Result{})
+}
+`)
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load tagless switch fixture: %v", err)
+	}
+	for _, loadErr := range res.Errors {
+		t.Fatalf("tagless switch fixture must type-check: %+v", loadErr)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/taglessswitch", diagnostics)
+	for _, route := range routes.Recognize(res) {
+		code := analyzer.Analyze(route, diagnostics)
+		if code.RequestBodyContentType != "" {
+			t.Fatalf("a tagless switch states no media type: %+v", code)
+		}
 	}
 }
 
@@ -2368,6 +2512,7 @@ type Query struct {
 	Ratio     float64     `+"`form:\"ratio\" binding:\"min=0.25,max=0.75\"`"+`
 	Scores    []int       `+"`form:\"scores\" binding:\"min=1,max=5,dive,gte=0,lte=10\"`"+`
 	Labels    []string    `+"`form:\"labels\" binding:\"dive,min=2,max=20\"`"+`
+	Link      string      `+"`form:\"link\" binding:\"uri,max=2048\"`"+`
 	At        time.Time   `+"`form:\"at\"`"+`
 }
 
@@ -2460,6 +2605,12 @@ func (s Server) bindAliases(c *gin.Context) {
 		labels, _ := paramByName(code.Params, "labels")
 		if labels.ItemConstraints == nil || uintPointerValue(labels.ItemConstraints.MinLength) != 2 || uintPointerValue(labels.ItemConstraints.MaxLength) != 20 {
 			t.Fatalf("%s string item constraints mismatch: %+v", handler, labels)
+		}
+		// A format and a length bound describe the same string, so the format must
+		// not cost the bound — exactly as it does not on a body field.
+		link, _ := paramByName(code.Params, "link")
+		if link.Schema.Type != facts.TypeWellKnown || link.Schema.Of != facts.WellKnownURI || link.Constraints == nil || uintPointerValue(link.Constraints.MaxLength) != 2048 {
+			t.Fatalf("%s formatted string bound mismatch: %+v", handler, link)
 		}
 		at, _ := paramByName(code.Params, "at")
 		if at.Schema.Type != facts.TypeWellKnown || at.Schema.Of != facts.WellKnownDateTime {
