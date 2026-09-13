@@ -71,6 +71,14 @@ pub trait StageRunner {
         indices: &[usize],
         artifacts: Vec<Artifact>,
     ) -> Result<Vec<Artifact>, CoreError>;
+
+    /// Diagnostics the runner's stages raised, taken once.
+    ///
+    /// Defaulted to empty so a runner that cannot raise one — every in-process test double — says
+    /// nothing rather than restating it.
+    fn take_stage_diagnostics(&mut self) -> Vec<Diagnostic> {
+        Vec::new()
+    }
 }
 
 /// One contiguous span of a plan's stages that runs in one place.
@@ -341,7 +349,7 @@ pub fn run(
     store: Option<&Store>,
 ) -> Result<PipelineOutcome, CoreError> {
     let ir = build_ir(plan, cx, runner, store)?;
-    let diagnostics: Vec<Diagnostic> = ir.diagnostics.clone();
+    let mut diagnostics: Vec<Diagnostic> = ir.diagnostics.clone();
     let source_files = distinct_source_files(&ir);
 
     // Projection belongs at the artifact boundary. The graph artifact is always emitted, including
@@ -421,6 +429,12 @@ pub fn run(
             }
         }
     }
+
+    // Stages raise diagnostics on the set they were handed, so both sides report: built-in posts
+    // ran against this accumulator in-process, and a custom post ran in the worker and sent its
+    // own back with the artifacts it changed.
+    diagnostics.append(&mut artifacts.take_diagnostics());
+    diagnostics.extend(runner.take_stage_diagnostics());
 
     // This internal artifact is intentionally created after post-processors. Formatters and banner
     // writers apply to user-configured target output; the versioned graph must remain exact JSON.

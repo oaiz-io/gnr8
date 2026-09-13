@@ -49,6 +49,7 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod builtins;
+pub mod cli;
 pub mod docs;
 pub mod layout;
 pub mod model_style;
@@ -57,9 +58,13 @@ pub mod stage;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::graph::{ApiGraph, Diagnostic};
+use crate::graph::{ApiGraph, Diagnostic, DiagnosticCategory, SourceSpan};
 use crate::Error;
 
+pub use cli::SdkCli;
+pub use docs::SdkDocs;
+pub use layout::{OperationFileSplit, SdkFileLayout};
+pub use model_style::PyModelStyle;
 pub use stage::{
     BuiltinPost, BuiltinSource, BuiltinTarget, BuiltinTransform, Custom, PostStage, SourceStage,
     StagePlan, TargetStage, TransformStage,
@@ -190,6 +195,8 @@ pub struct Artifacts {
     /// keeping a second copy of every file: only a path a stage actually touched is remembered, and
     /// only the one value it replaced.
     replaced: BTreeMap<String, Option<Artifact>>,
+    /// Diagnostics raised while stages worked on this set, in the order they were raised.
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl Default for Artifacts {
@@ -198,6 +205,7 @@ impl Default for Artifacts {
             files: Vec::new(),
             current_producer: "direct".to_string(),
             replaced: BTreeMap::new(),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -329,17 +337,26 @@ impl Artifacts {
                     "rewrite requires an existing artifact".to_string(),
                 )
             })?;
-        let text = self
+        let previous = self
             .files
             .get(index)
-            .map(|artifact| rewrite(&artifact.text))
+            .map(|artifact| artifact.text.clone())
             .ok_or_else(|| {
                 self.ownership_error(
                     "artifact.rewrite_missing",
-                    path,
+                    path.clone(),
                     "rewrite requires an existing artifact".to_string(),
                 )
             })?;
+        let text = rewrite(&previous);
+        // `rewrite` takes an opaque `FnOnce(&str) -> String` and so cannot tell a deliberate no-op
+        // from a pattern that stopped matching because the emitter's output moved. Both return the
+        // text unchanged and both report success, and the result is still a valid file — so a
+        // customization that quietly stopped applying leaves no error and no suspicious diff.
+        // `overlay` fails loudly on a path it cannot find; this is the same fact for `rewrite`.
+        if text == previous {
+            self.diagnostics.push(self.rewrite_no_op(&path));
+        }
         self.replace_at(index, text, ArtifactOwnership::Rewritten);
         Ok(())
     }
@@ -361,6 +378,39 @@ impl Artifacts {
                 producer: self.current_producer.clone(),
             });
         }
+    }
+
+    /// The WARN a no-op `rewrite` raises, naming the path and the stage that reached it.
+    fn rewrite_no_op(&self, path: &str) -> Diagnostic {
+        Diagnostic {
+            code: "artifact.rewrite_no_op".to_string(),
+            severity: "WARN".to_string(),
+            category: DiagnosticCategory::Artifact,
+            message: format!(
+                "{} rewrote {path} to the text it already had; if this was a pattern, it no longer \
+                 matches and the change it used to make is gone",
+                self.current_producer
+            ),
+            file: path.to_string(),
+            line: 1,
+            span: SourceSpan {
+                file: path.to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+            operation: None,
+            schema: None,
+            subject: None,
+        }
+    }
+
+    /// Take the diagnostics stages raised while working on this set.
+    ///
+    /// Draining rather than cloning: each set is reported once, and a set that crosses the
+    /// host/worker boundary is rebuilt from files on the far side, so a second read would either
+    /// duplicate a warning or lose it.
+    pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.diagnostics)
     }
 
     fn ownership_error(&self, code: &str, path: String, message: String) -> Error {
@@ -399,6 +449,7 @@ impl Artifacts {
             files,
             current_producer: "restored".to_string(),
             replaced: BTreeMap::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -640,6 +691,23 @@ pub fn graph_diagnostics(ir: &ApiGraph) -> Vec<Diagnostic> {
 }
 
 /// The composition surface a `.gnr8/` pipeline imports: `use gnr8::sdk::prelude::*;`.
+///
+/// Every stage trait returns `Result<_, Error>`, so the prelude carries [`Error`](crate::Error) too
+/// — writing the first custom stage should not require a second import to name the type the trait
+/// you are implementing already mentions:
+///
+/// ```no_run
+/// use gnr8::sdk::prelude::*;
+/// use gnr8::graph::ApiGraph;
+///
+/// struct DropDebugRoutes;
+/// impl Transform for DropDebugRoutes {
+///     fn apply(&self, ir: &mut ApiGraph, _cx: &Cx) -> Result<(), Error> {
+///         ir.operations.retain(|op| !op.path.starts_with("/debug"));
+///         Ok(())
+///     }
+/// }
+/// ```
 pub mod prelude {
     pub use super::builtins::{
         ApiOverrides, ApplySecurity, ConfigurePagination, ConfigureSdkRuntime, DiagnosticPolicy,
@@ -650,6 +718,7 @@ pub mod prelude {
         SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticFiles, TsSdk,
     };
+    pub use super::cli::SdkCli;
     pub use super::docs::SdkDocs;
     pub use super::layout::{OperationFileSplit, SdkFileLayout};
     pub use super::model_style::PyModelStyle;
@@ -661,13 +730,14 @@ pub mod prelude {
         DiagnosticCategory, OpenApiContact, OpenApiLicense, OpenApiServer, PaginationMode,
         PaginationTermination, RuntimeHookKind, SchemaUse, SecurityScheme, Type,
     };
+    pub use crate::Error;
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{Artifacts, Custom, Cx, Pipeline, Source, Target, Transform};
+    use super::{Artifacts, Custom, Cx, DiagnosticCategory, Pipeline, Source, Target, Transform};
     use crate::graph::ApiGraph;
 
     #[test]
@@ -699,6 +769,41 @@ mod tests {
         assert_eq!(changed.len(), 1);
         assert_eq!(changed[0].text, "a");
         assert_eq!(changed[0].producer, "post[0]:Noop");
+    }
+
+    /// …and it is also a WARN, because `rewrite` cannot tell a deliberate no-op from a pattern that
+    /// stopped matching, and the second one silently loses a customization.
+    #[test]
+    fn a_rewrite_that_changed_nothing_warns_and_names_path_and_producer() {
+        let mut out = Artifacts::from_files(vec![super::Artifact::new("cli/output.py", "body")]);
+        out.begin_stage("post[0]:AddFlagHelp");
+        out.rewrite("cli/output.py", |text| text.replace("no-such-pattern", "x"))
+            .unwrap();
+        let raised = out.take_diagnostics();
+        assert_eq!(raised.len(), 1, "{raised:?}");
+        assert_eq!(raised[0].code, "artifact.rewrite_no_op");
+        assert_eq!(raised[0].severity, "WARN");
+        assert_eq!(raised[0].category, DiagnosticCategory::Artifact);
+        assert!(
+            raised[0].message.contains("cli/output.py"),
+            "{:?}",
+            raised[0]
+        );
+        assert!(
+            raised[0].message.contains("post[0]:AddFlagHelp"),
+            "the warning has to name the stage whose pattern stopped matching: {:?}",
+            raised[0]
+        );
+        assert!(out.take_diagnostics().is_empty(), "taking drains");
+    }
+
+    /// A rewrite that did change the text is silent — the warning must mean something.
+    #[test]
+    fn a_rewrite_that_changed_the_text_raises_nothing() {
+        let mut out = Artifacts::from_files(vec![super::Artifact::new("a.txt", "a")]);
+        out.begin_stage("post[0]:Real");
+        out.rewrite("a.txt", |text| format!("{text}!")).unwrap();
+        assert!(out.take_diagnostics().is_empty());
     }
 
     #[test]

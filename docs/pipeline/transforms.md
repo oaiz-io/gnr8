@@ -254,6 +254,14 @@ additional `media_type` values. Convenience methods on `ApiOverrides` are `json_
 `binary_response`, `sse_response`/`event_schema`, and `default_error_response`. Duplicate overrides
 for one operation/status are rejected.
 
+**Which targets consume `event_stream` today.** The OpenAPI targets emit the `text/event-stream`
+media type, with the `event_schema` when one is declared. SDK targets do not: a `text/event-stream`
+success **with** an event schema is a generation error (`SDK targets do not yet support typed SSE
+event streams`), and one **without** a schema is emitted as an opaque byte-returning method. A
+generated CLI cannot print a stream at all — leave that operation out of the program with
+[`SdkCli::commands`](../cli/generated-cli.md#command-scope) rather than out of the graph, so it
+stays in the document and stays a client method.
+
 ## Naming and grouping
 
 ```rust

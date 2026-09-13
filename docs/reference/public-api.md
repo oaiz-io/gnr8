@@ -24,6 +24,7 @@ the feature pages for behavior and examples; use rustdoc for complete method sig
 | `Target` | trait for graph → artifacts |
 | `PostProcess` | trait for artifact transformation after targets |
 | `Cx` | stage context containing project root |
+| `Error` | the typed error every stage trait returns (`#[non_exhaustive]`) |
 | `Artifact` | one project-relative UTF-8 generated file plus ownership metadata |
 | `Artifacts` | sorted artifact set with explicit ownership plus borrow/consume/restore helpers |
 | `ArtifactMetadata` | artifact path and content hash without text |
@@ -67,7 +68,7 @@ See [Transforms and overrides](../pipeline/transforms.md).
 
 | Symbol | Use |
 |---|---|
-| `OperationSelector` | reusable exact/prefix/method/middleware/boolean selector |
+| `OperationSelector` | reusable exact/prefix/method/middleware/boolean selector, including `not` |
 | `ApiOverrides` | checked field presence/nullability, schema-use root, parameter, body, response, and security corrections |
 | `SchemaUse` | name the input or output payload position a correction or root applies to |
 | `RequestParameter` | typed query/header/path/cookie parameter builder |
@@ -109,9 +110,10 @@ See [OpenAPI generation](../openapi/generation.md).
 
 | Symbol | Use |
 |---|---|
-| `GoSdk` | Go client/model/docs/package/contract-test target |
-| `PySdk` | Python client/model/docs/package/contract-test target |
+| `GoSdk` | Go client/model/docs/package/contract-test target; `.cli("bookstore")` emits a `cmd/<program>/` project |
+| `PySdk` | Python client/model/docs/package/contract-test target; `.cli("bookstore")` emits a `cli/` subpackage |
 | `TsSdk` | TypeScript client/model/docs/package/contract-test target |
+| `SdkCli` | generated-CLI program name, command scope, and default host (`PySdk::cli` / `GoSdk::cli`); unrelated to gnr8's own command surface |
 | `SdkFileLayout` | compact/split files, directories, and templates |
 | `OperationFileSplit` | compact/per-tag/per-endpoint operation layout enum |
 | `SdkDocs` | none/reference generated docs policy |
@@ -122,7 +124,8 @@ See [OpenAPI generation](../openapi/generation.md).
 | `ReadinessKind` | choose the OpenAPI, Go, Python, or TypeScript readiness validator |
 
 Each SDK target emits a contract test `gnr8 verify` runs with that language's own test tool;
-`without_contract_tests()` stops it.
+`without_contract_tests()` stops it. `PySdk::cli("name")` and `GoSdk::cli("name")` are the opt-in
+generated command-line clients; see [Generated CLI](../cli/generated-cli.md).
 
 See [SDK generation](../sdk/generation.md).
 
@@ -143,7 +146,6 @@ See [SDK generation](../sdk/generation.md).
 | `gnr8::protocol::{read_frame, write_frame, HostMessage, WorkerMessage}` | the frame wire format |
 | `gnr8::sdk::StagePlan` | the ordered plan a worker reports to the host |
 | `gnr8::graph::ApiGraph` | neutral extracted/transformed API graph |
-| `gnr8::Error` | typed stage error enum (`#[non_exhaustive]`) |
 
 Prefer the CLI for lifecycle operations. Direct module APIs are useful for custom tooling and tests.
 

@@ -66,7 +66,7 @@ gates:
 	cargo test -p gnr8
 	cargo test -p gnr8-engine
 	cargo test -p gnr8-cli
-	cargo test -p gnr8-engine --test snapshot_graph --test snapshot_diagnostics --test snapshot_openapi --test snapshot_sdk --test determinism --test sdk_compile --test pysdk_compile --test tssdk_compile --test sdk_pipeline --test lifecycle --test operation_prose
+	cargo test -p gnr8-engine --test snapshot_graph --test snapshot_diagnostics --test snapshot_openapi --test snapshot_sdk --test determinism --test sdk_compile --test pysdk_compile --test tssdk_compile --test sdk_pipeline --test lifecycle --test operation_prose --test cli_emit
 	cargo test -p gnr8-engine --test snapshot_nestjs_graph --test snapshot_nestjs_openapi
 	cargo test -p gnr8-engine --test sdk_lint
 
