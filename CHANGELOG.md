@@ -9,6 +9,21 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.16.0 — 2026-09-13
+
+### Breaking
+
+- **The public request graph now carries parameter constraints and request-body reference
+  provenance.** `Param` / `ParamFact` gain `constraints` and `item_constraints`, while `SchemaRef`
+  gains `provenance` and `TypeRef` gains `span`. Older serialized graphs remain readable because the
+  new fields default to empty or absent, but Rust code constructing or exhaustively matching these
+  public structs must account for them.
+- **Generated multipart and raw-binary inputs now use byte-capable values.** Python multipart file
+  fields take the exported `MultipartFile(filename, content)` value instead of anonymous `bytes`,
+  while TypeScript raw-binary bodies and multipart file fields take
+  `Blob | ArrayBuffer | Uint8Array` instead of text. Python and TypeScript callers of those generated
+  methods must update their arguments; JSON byte fields retain their textual wire representation.
+
 ### Added
 
 - **Native Gin binding and body flow now carry the request facts the application actually
@@ -25,6 +40,14 @@ must move the minor version.
 - **`gnr8 changes` reports a parameter's validation bounds.** A tightened or loosened bound on a
   bound query, URI, or header parameter is a `request.parameter.constraints.changed` breaking
   finding, the counterpart of `request.property.constraints.changed` for a schema field.
+
+### Fixed
+
+- **Generated SDKs keep binary, multipart, and JSON representations in their correct positions.**
+  Go byte aliases remain `[]byte`; TypeScript aliases reachable from JSON remain strings; and Python
+  multipart models serialize non-file enum fields by their wire values while preserving supplied
+  filenames and file bytes. Python model names that collide with language keywords or emitted
+  annotation names now receive deterministic safe identifiers without changing their wire aliases.
 
 ## 0.15.0 — 2026-09-13
 
