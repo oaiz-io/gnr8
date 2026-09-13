@@ -28,6 +28,7 @@ def register(subparsers: Any) -> None:
     cmd_list_books.add_argument(
         "--base-url",
         dest="base_url",
+        help="host to send requests to (default: http://127.0.0.1:8000)",
         default=DEFAULT_BASE_URL,
     )
     cmd_list_books.add_argument(
@@ -55,16 +56,19 @@ def register(subparsers: Any) -> None:
     cmd_create_book.add_argument(
         "--base-url",
         dest="base_url",
+        help="host to send requests to (default: http://127.0.0.1:8000)",
         default=DEFAULT_BASE_URL,
     )
     cmd_create_book_body = cmd_create_book.add_mutually_exclusive_group(required=True)
     cmd_create_book_body.add_argument(
         "--body",
         dest="body",
+        help="request body, as an inline JSON document",
     )
     cmd_create_book_body.add_argument(
         "--body-file",
         dest="body_file",
+        help="read the request body from a file, or - for stdin",
     )
     cmd_create_book.set_defaults(_handler=_create_book)
     cmd_get_book = subparsers.add_parser(
@@ -78,6 +82,7 @@ def register(subparsers: Any) -> None:
     cmd_get_book.add_argument(
         "--base-url",
         dest="base_url",
+        help="host to send requests to (default: http://127.0.0.1:8000)",
         default=DEFAULT_BASE_URL,
     )
     cmd_get_book.add_argument(
@@ -103,6 +108,7 @@ def register(subparsers: Any) -> None:
     cmd_update_book.add_argument(
         "--base-url",
         dest="base_url",
+        help="host to send requests to (default: http://127.0.0.1:8000)",
         default=DEFAULT_BASE_URL,
     )
     cmd_update_book.add_argument(
@@ -115,10 +121,12 @@ def register(subparsers: Any) -> None:
     cmd_update_book_body.add_argument(
         "--body",
         dest="body",
+        help="request body, as an inline JSON document",
     )
     cmd_update_book_body.add_argument(
         "--body-file",
         dest="body_file",
+        help="read the request body from a file, or - for stdin",
     )
     cmd_update_book.set_defaults(_handler=_update_book)
 

@@ -18,7 +18,8 @@ use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
     flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
     operation_prose, reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
-    OperationAuthScheme, RequestBodyModel,
+    OperationAuthScheme, RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP,
+    LIMIT_HELP,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -1186,9 +1187,20 @@ fn emit_command_parser(
     writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
     writeln!(out, "        \"--base-url\",").map_err(sink)?;
     writeln!(out, "        dest=\"base_url\",").map_err(sink)?;
-    if cli.base_url.is_some() {
+    // Go's `flag.PrintDefaults` prints `(default "...")` on its own; argparse prints a default only
+    // when the help text asks for it, so the host a command talks to unasked is named here or
+    // nowhere. `%(default)s` would be argparse's own spelling, but `help` is `%`-expanded against a
+    // dict that has no `default` key on a required argument, so the value is written in directly.
+    if let Some(url) = &cli.base_url {
+        emit_string_kwarg(
+            out,
+            8,
+            "help",
+            &argparse_help_text(&format!("{BASE_URL_HELP} (default: {url})")),
+        )?;
         writeln!(out, "        default=DEFAULT_BASE_URL,").map_err(sink)?;
     } else {
+        emit_string_kwarg(out, 8, "help", &argparse_help_text(BASE_URL_HELP))?;
         writeln!(out, "        required=True,").map_err(sink)?;
     }
     writeln!(out, "    )").map_err(sink)?;
@@ -1215,10 +1227,12 @@ fn emit_command_parser(
         writeln!(out, "    {ident}_body.add_argument(").map_err(sink)?;
         writeln!(out, "        \"--body\",").map_err(sink)?;
         writeln!(out, "        dest=\"body\",").map_err(sink)?;
+        emit_string_kwarg(out, 8, "help", &argparse_help_text(BODY_HELP))?;
         writeln!(out, "    )").map_err(sink)?;
         writeln!(out, "    {ident}_body.add_argument(").map_err(sink)?;
         writeln!(out, "        \"--body-file\",").map_err(sink)?;
         writeln!(out, "        dest=\"body_file\",").map_err(sink)?;
+        emit_string_kwarg(out, 8, "help", &argparse_help_text(BODY_FILE_HELP))?;
         writeln!(out, "    )").map_err(sink)?;
     }
     if pagination_policy(graph, op).is_some() {
@@ -1226,11 +1240,13 @@ fn emit_command_parser(
         writeln!(out, "        \"--limit\",").map_err(sink)?;
         writeln!(out, "        dest=\"limit\",").map_err(sink)?;
         writeln!(out, "        type=int,").map_err(sink)?;
+        emit_string_kwarg(out, 8, "help", &argparse_help_text(LIMIT_HELP))?;
         writeln!(out, "    )").map_err(sink)?;
         writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
         writeln!(out, "        \"--all\",").map_err(sink)?;
         writeln!(out, "        dest=\"all\",").map_err(sink)?;
         writeln!(out, "        action=\"store_true\",").map_err(sink)?;
+        emit_string_kwarg(out, 8, "help", &argparse_help_text(ALL_HELP))?;
         writeln!(out, "    )").map_err(sink)?;
     }
     writeln!(out, "    {ident}.set_defaults(_handler=_{method})").map_err(sink)?;

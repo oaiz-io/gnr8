@@ -19,7 +19,8 @@ use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
     flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
     operation_prose, quoted_string_literal, reject_duplicate_command_files, reject_sse_operations,
-    request_body_models_of, success_responses_of, OperationAuthScheme, RequestBodyModel,
+    request_body_models_of, success_responses_of, OperationAuthScheme, RequestBodyModel, ALL_HELP,
+    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, LIMIT_HELP,
 };
 use crate::CoreError;
 
@@ -1100,13 +1101,19 @@ fn emit_handler(
     if cli.base_url.is_some() {
         writeln!(
             out,
-            "baseURL := fs.String(\"base-url\", defaultBaseURL, \"\")"
+            "baseURL := fs.String(\"base-url\", defaultBaseURL, {})",
+            quoted_string_literal(BASE_URL_HELP)
         )
         .map_err(sink)?;
     } else {
         // No program default, so the host is the user's to state. `flag` has no required-flag
         // concept, and an empty base URL would otherwise become a request to a relative path.
-        writeln!(out, "baseURL := fs.String(\"base-url\", \"\", \"\")").map_err(sink)?;
+        writeln!(
+            out,
+            "baseURL := fs.String(\"base-url\", \"\", {})",
+            quoted_string_literal(BASE_URL_HELP)
+        )
+        .map_err(sink)?;
     }
 
     for param in &path_params {
@@ -1119,12 +1126,32 @@ fn emit_handler(
         emit_flag_decl(out, graph, param, imports)?;
     }
     if !bodies.is_empty() {
-        writeln!(out, "body := fs.String(\"body\", \"\", \"\")").map_err(sink)?;
-        writeln!(out, "bodyFile := fs.String(\"body-file\", \"\", \"\")").map_err(sink)?;
+        writeln!(
+            out,
+            "body := fs.String(\"body\", \"\", {})",
+            quoted_string_literal(BODY_HELP)
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "bodyFile := fs.String(\"body-file\", \"\", {})",
+            quoted_string_literal(BODY_FILE_HELP)
+        )
+        .map_err(sink)?;
     }
     if paged {
-        writeln!(out, "limit := fs.Int64(\"limit\", 0, \"\")").map_err(sink)?;
-        writeln!(out, "all := fs.Bool(\"all\", false, \"\")").map_err(sink)?;
+        writeln!(
+            out,
+            "limit := fs.Int64(\"limit\", 0, {})",
+            quoted_string_literal(LIMIT_HELP)
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "all := fs.Bool(\"all\", false, {})",
+            quoted_string_literal(ALL_HELP)
+        )
+        .map_err(sink)?;
     }
 
     writeln!(out, "parsed, code := parseFlags(fs, args)").map_err(sink)?;

@@ -18,7 +18,7 @@ func cmdListBooks(args []string) int {
 		fmt.Fprintf(fs.Output(), "Usage: %s books list-books [flags]\n", program)
 		fs.PrintDefaults()
 	}
-	baseURL := fs.String("base-url", defaultBaseURL, "")
+	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	genre := fs.String("genre", "", "")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
@@ -48,9 +48,9 @@ func cmdCreateBook(args []string) int {
 		fmt.Fprintf(fs.Output(), "Usage: %s books create-book [flags]\n", program)
 		fs.PrintDefaults()
 	}
-	baseURL := fs.String("base-url", defaultBaseURL, "")
-	body := fs.String("body", "", "")
-	bodyFile := fs.String("body-file", "", "")
+	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
+	body := fs.String("body", "", "request body, as an inline JSON document")
+	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -95,7 +95,7 @@ func cmdDeleteBook(args []string) int {
 		fmt.Fprintf(fs.Output(), "Usage: %s books delete-book [flags]\n", program)
 		fs.PrintDefaults()
 	}
-	baseURL := fs.String("base-url", defaultBaseURL, "")
+	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	id := fs.String("id", "", "")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
@@ -125,7 +125,7 @@ func cmdGetBook(args []string) int {
 		fmt.Fprintf(fs.Output(), "Usage: %s books get-book [flags]\n", program)
 		fs.PrintDefaults()
 	}
-	baseURL := fs.String("base-url", defaultBaseURL, "")
+	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	id := fs.String("id", "", "")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
@@ -155,10 +155,10 @@ func cmdUpdateBook(args []string) int {
 		fmt.Fprintf(fs.Output(), "Usage: %s books update-book [flags]\n", program)
 		fs.PrintDefaults()
 	}
-	baseURL := fs.String("base-url", defaultBaseURL, "")
+	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	id := fs.String("id", "", "")
-	body := fs.String("body", "", "")
-	bodyFile := fs.String("body-file", "", "")
+	body := fs.String("body", "", "request body, as an inline JSON document")
+	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code

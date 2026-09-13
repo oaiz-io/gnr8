@@ -163,6 +163,18 @@ pub(crate) fn helper_env_var(program: &str) -> String {
 /// available to them is changing their API's wire contract.
 const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url"];
 
+/// What each reserved flag does, in the words both emitters print.
+///
+/// These describe the generated *program*, not the API, so nothing here is derived from the graph
+/// and both languages say it identically — one fact, one spelling. Without them `--help` lists a
+/// flag and says nothing about it, and Go's `flag.PrintDefaults` renders the empty usage string as
+/// a line holding only whitespace.
+pub(crate) const BASE_URL_HELP: &str = "host to send requests to";
+pub(crate) const BODY_HELP: &str = "request body, as an inline JSON document";
+pub(crate) const BODY_FILE_HELP: &str = "read the request body from a file, or - for stdin";
+pub(crate) const LIMIT_HELP: &str = "stop after this many items";
+pub(crate) const ALL_HELP: &str = "keep following pages until the last one";
+
 /// The global flags one command binds, which its parameter flags may not shadow.
 ///
 /// Conditional because the emitters are: `--body`/`--body-file` exist only where the operation has

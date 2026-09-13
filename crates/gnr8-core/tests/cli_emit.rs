@@ -1718,7 +1718,7 @@ fn go_base_url_is_the_programs_default_and_servers_is_not_consulted() {
         "{text}"
     );
     assert!(
-        text.contains(r#"fs.String("base-url", defaultBaseURL, "")"#),
+        text.contains(r#"fs.String("base-url", defaultBaseURL, "host to send requests to")"#),
         "{text}"
     );
     assert!(!text.contains("localhost:8000"), "{text}");
@@ -1732,7 +1732,10 @@ fn go_without_a_declared_base_url_the_flag_is_required() {
     let text = generate_go_cli(&bookstore_graph(), "bookstore");
     assert!(!text.contains("defaultBaseURL"), "{text}");
     assert!(!text.contains("localhost:8000"), "{text}");
-    assert!(text.contains(r#"fs.String("base-url", "", "")"#), "{text}");
+    assert!(
+        text.contains(r#"fs.String("base-url", "", "host to send requests to")"#),
+        "{text}"
+    );
     assert!(
         text.contains(r#"return missingFlag("base-url")"#),
         "an omitted host must be a usage error, not a request to a relative path:\n{text}"
@@ -2173,4 +2176,288 @@ fn a_grouped_command_prints_its_group_in_the_usage_line() {
         text.contains(r"Usage: %s ping [flags]\n"),
         "ungrouped command must print the bare leaf; got:\n{text}"
     );
+}
+
+/// One pipeline can carry a Python CLI and a Go CLI, and the two programs do not collide.
+///
+/// Each emitter was only ever driven alone. The two write into one `Artifacts`, so the question is
+/// whether they can share it: Python claims `<dir>/cli/`, Go claims `<dir>/cmd/<program>/`, and
+/// nothing else either target writes is shared once the targets have their own `to(...)`. The same
+/// program name on both is deliberate — one API, one command name, two implementations of it.
+#[test]
+fn a_python_cli_and_a_go_cli_can_be_emitted_side_by_side() {
+    if skip_go() {
+        return;
+    }
+    let graph = mixed_group_graph();
+    let mut out = Artifacts::new();
+    PySdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/py")
+        .cli("bookstore")
+        .generate(&graph, &mut out, &cx())
+        .expect("PySdk with .cli() must generate");
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/go")
+        .without_contract_tests()
+        .cli("bookstore")
+        .generate(&graph, &mut out, &cx())
+        .expect("GoSdk with .cli() must generate beside a Python CLI");
+
+    let mut paths: Vec<&str> = out.files().iter().map(|file| file.path.as_str()).collect();
+    paths.sort_unstable();
+    let total = paths.len();
+    paths.dedup();
+    assert_eq!(
+        total,
+        paths.len(),
+        "two CLI targets must not claim one path"
+    );
+    assert!(
+        paths.contains(&"generated/py/cli/main.py"),
+        "the Python CLI package must be emitted; got {paths:?}"
+    );
+    assert!(
+        paths.contains(&"generated/go/cmd/bookstore/main.go"),
+        "the Go CLI project must be emitted; got {paths:?}"
+    );
+}
+
+/// A default on a scoped-out operation reaches neither the help text nor the flags.
+///
+/// Defaults and scope were each tested alone. Together they are the case where a fact about an
+/// operation the program does not wrap could still leak into it — the default is read while
+/// binding flags, which only the selected operations reach.
+#[test]
+fn a_default_on_an_out_of_scope_operation_reaches_nothing() {
+    let text = generate_cli_with(
+        &scoped_defaults_graph(),
+        SdkCli::new("bookstore").commands(OperationSelector::operation("getBook")),
+    );
+    assert!(
+        text.contains("get-book"),
+        "the selected command must be there"
+    );
+    assert!(
+        !text.contains("list-books"),
+        "the scoped-out command must not be:\n{text}"
+    );
+    assert!(
+        !text.contains("page-size") && !text.contains("page_size"),
+        "the scoped-out operation's parameter must not bind a flag:\n{text}"
+    );
+    assert!(
+        !text.contains("default: 10"),
+        "the scoped-out operation's default must not reach help:\n{text}"
+    );
+}
+
+/// `listBooks` carries a default and is scoped out; `getBook` carries none and is selected.
+fn scoped_defaults_graph() -> ApiGraph {
+    serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "params": [
+                {
+                  "name": "page_size",
+                  "location": "query",
+                  "required": false,
+                  "schema": { "type": "primitive", "of": { "prim": "int", "bits": 64, "signed": true } },
+                  "default": { "type": "number", "value": "10" },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            },
+            {
+              "id": "getBook",
+              "method": "GET",
+              "path": "/books/{id}",
+              "handler": "getBook",
+              "params": [
+                {
+                  "name": "id",
+                  "location": "path",
+                  "required": true,
+                  "schema": { "type": "primitive", "of": { "prim": "string" } },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": null, "body_kind": "empty" } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap()
+}
+
+/// The reserved flags say what they do, in both languages, in the same words.
+///
+/// Their meaning is a fact about the generated program rather than about the API, so the emitters
+/// know it statically and there is no reason for `--help` to list a flag and explain nothing. Go
+/// cares twice over: `flag.PrintDefaults` renders an empty usage string as a line holding only
+/// whitespace, so the text is what removes the wart.
+#[test]
+fn the_reserved_flags_document_themselves() {
+    let graph = paginated_body_graph();
+    let python = generate_cli_with(
+        &graph,
+        SdkCli::new("bookstore").base_url("https://api.test"),
+    );
+    for expected in [
+        "host to send requests to",
+        "request body, as an inline JSON document",
+        "read the request body from a file, or - for stdin",
+        "stop after this many items",
+        "keep following pages until the last one",
+    ] {
+        assert!(
+            python.contains(expected),
+            "Python help missing {expected:?}:\n{python}"
+        );
+    }
+    assert!(
+        !python.contains("help=\"\""),
+        "an empty help string is worse than none:\n{python}"
+    );
+    // Go's `flag.PrintDefaults` prints the default host by itself; argparse never does, so the
+    // Python help has to name it or the two programs answer `--help` differently.
+    assert!(
+        python.contains("host to send requests to (default: https://api.test)"),
+        "the Python help must name the configured host:\n{python}"
+    );
+
+    if skip_go() {
+        return;
+    }
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(SdkCli::new("bookstore").base_url("https://api.test"))
+        .generate(&graph, &mut out, &cx())
+        .expect("GoSdk with .cli() must generate");
+    let go = go_cli_source(&out, "generated/sdk-go", "bookstore");
+    for expected in [
+        r#"fs.String("base-url", defaultBaseURL, "host to send requests to")"#,
+        r#"fs.String("body", "", "request body, as an inline JSON document")"#,
+        r#"fs.String("body-file", "", "read the request body from a file, or - for stdin")"#,
+        r#"fs.Int64("limit", 0, "stop after this many items")"#,
+        r#"fs.Bool("all", false, "keep following pages until the last one")"#,
+    ] {
+        assert!(go.contains(expected), "Go help missing {expected}:\n{go}");
+    }
+}
+
+/// One operation that both carries a request body and is paginated, so every reserved flag binds.
+fn paginated_body_graph() -> ApiGraph {
+    let mut graph: ApiGraph = serde_json::from_str(
+        r#"{
+          "module": "app",
+          "operations": [
+            {
+              "id": "listBooks",
+              "method": "POST",
+              "path": "/books/search",
+              "handler": "listBooks",
+              "params": [
+                {
+                  "name": "offset",
+                  "location": "query",
+                  "required": false,
+                  "schema": { "type": "primitive", "of": { "prim": "int", "bits": 64, "signed": true } },
+                  "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+                }
+              ],
+              "request_body": { "ref_id": "app.Query" },
+              "request_body_required": true,
+              "responses": [ { "status": 200, "body": { "ref_id": "app.Page" } } ],
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "schemas": [
+            {
+              "id": "app.Query",
+              "name": "Query",
+              "body": {
+                "type": "object",
+                "of": [
+                  {
+                    "json_name": "text",
+                    "serializer_may_omit": false,
+                    "deserializer_accepts_absent": false,
+                    "deserializer_accepts_null": false,
+                    "serializer_may_emit_null": false,
+                    "validator_requires_presence": true,
+                    "validator_rejects_null": true,
+                    "schema": { "type": "primitive", "of": { "prim": "string" } },
+                    "description": null,
+                    "example": null
+                  }
+                ]
+              },
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            },
+            {
+              "id": "app.Page",
+              "name": "Page",
+              "body": {
+                "type": "object",
+                "of": [
+                  {
+                    "json_name": "items",
+                    "serializer_may_omit": false,
+                    "deserializer_accepts_absent": false,
+                    "deserializer_accepts_null": false,
+                    "serializer_may_emit_null": false,
+                    "validator_requires_presence": true,
+                    "validator_rejects_null": true,
+                    "schema": { "type": "array", "of": { "type": "primitive", "of": { "prim": "string" } } },
+                    "description": null,
+                    "example": null
+                  }
+                ]
+              },
+              "provenance": { "file": "main.py", "start_line": 1, "end_line": 1 }
+            }
+          ],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": []
+        }"#,
+    )
+    .unwrap();
+    graph.pagination = vec![gnr8_engine::graph::PaginationPolicy {
+        operation_id: "listBooks".to_string(),
+        mode: gnr8_engine::graph::PaginationMode::Offset,
+        items_field: "items".to_string(),
+        cursor_param: None,
+        next_cursor_field: None,
+        page_param: None,
+        page_size_param: None,
+        offset_param: Some("offset".to_string()),
+        limit_param: None,
+        termination: gnr8_engine::graph::PaginationTermination::EmptyItems,
+    }];
+    graph
 }
