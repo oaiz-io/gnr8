@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.15.0 — 2026-09-13
+
 ### Breaking
 
 - **The host/worker protocol is now version 8.** `WorkerMessage::ArtifactChanges` carries the
