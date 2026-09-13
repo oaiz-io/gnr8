@@ -35,6 +35,9 @@ The current research question:
   ([implementation plan](2026-09-11-cli-generation-plan.md))
 - [Pre-ship requirements for generated CLIs](2026-09-11-cli-pre-ship-requirements.md)
   — the four owner requirements gating a release with `.cli()`: command scope, SSE, renaming, defaults
+- [Editing generated CLI code](2026-09-11-cli-code-editability.md)
+  — what a hand-edit costs today, why every surveyed generator overwrites rather than merges, and the
+  pipeline-owned mechanism gnr8 already ships but does not document
 
 ## Current Position
 
