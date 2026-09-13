@@ -30,11 +30,11 @@ use crate::graph::{
     RuntimePolicy, Schema, Type, WellKnown,
 };
 use crate::sdk::emit_common::{
-    error_response_bodies_of, join_path, operation_auth_alternatives, operation_prose, path_tokens,
-    path_tokens_match, quoted_string_literal, request_body_models_of, split_words,
-    success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationApiKeyScheme,
-    OperationAuthScheme, RequestBodyEncoding, RequestBodyModel, SuccessResponses,
-    UniqueSchemaNames,
+    binary_value_shape, error_response_bodies_of, join_path, operation_auth_alternatives,
+    operation_prose, path_tokens, path_tokens_match, quoted_string_literal, request_body_models_of,
+    schema_is_multipart_request, split_words, success_responses_of, ApiKeyLocation,
+    BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme, OperationAuthScheme,
+    RequestBodyEncoding, RequestBodyModel, SuccessResponses, UniqueSchemaNames,
 };
 use crate::CoreError;
 
@@ -338,7 +338,7 @@ pub(crate) fn emit_models(graph: &ApiGraph, package: &str) -> Result<String, Cor
                     &schema.name,
                     fields,
                     graph,
-                    is_multipart_request_schema(graph, &schema.id)?,
+                    schema_is_multipart_request(graph, &schema.id)?,
                     directions_of(&directions, &schema.id),
                 )?;
             }
@@ -389,7 +389,7 @@ pub(crate) fn emit_model_schema(
                 &schema.name,
                 fields,
                 graph,
-                is_multipart_request_schema(graph, &schema.id)?,
+                schema_is_multipart_request(graph, &schema.id)?,
                 directions,
             )?;
         }
@@ -528,30 +528,15 @@ pub(crate) fn go_struct_field_type(
     Ok(go_ty)
 }
 
-fn is_multipart_request_schema(graph: &ApiGraph, schema_id: &str) -> Result<bool, CoreError> {
-    for operation in &graph.operations {
-        for body in request_body_models_of(operation, graph)? {
-            if body.schema_id == schema_id && body.encoding == RequestBodyEncoding::Multipart {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
 fn go_multipart_field_type(
     schema: &Type,
     nullable: bool,
     graph: &ApiGraph,
 ) -> Result<String, CoreError> {
-    match schema {
-        Type::Primitive(Prim::Bytes) => {
-            Ok(maybe_pointer("MultipartFile".to_string(), nullable, true))
-        }
-        Type::Array(items) if matches!(items.as_ref(), Type::Primitive(Prim::Bytes)) => {
-            Ok("[]MultipartFile".to_string())
-        }
-        _ => go_type(schema, nullable, graph),
+    match binary_value_shape(schema, graph)? {
+        BinaryValueShape::Single => Ok(maybe_pointer("MultipartFile".to_string(), nullable, true)),
+        BinaryValueShape::Repeated => Ok("[]MultipartFile".to_string()),
+        BinaryValueShape::Other => go_type(schema, nullable, graph),
     }
 }
 
@@ -5114,7 +5099,8 @@ mod tests {
             let graph = graph_with_named_alias(true, false, Type::Primitive(Prim::Bytes));
             let out = emit_models(&graph, "svc").unwrap();
             assert!(
-                out.contains("Value Alias `json:\"value,omitempty\"`"),
+                out.contains("type Alias = []byte")
+                    && out.contains("Value Alias `json:\"value,omitempty\"`"),
                 "a named byte-slice alias must not gain a pointer for optionality alone:\n{out}"
             );
         }

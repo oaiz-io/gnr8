@@ -35,9 +35,10 @@ use crate::graph::{
     Prim, RuntimePolicy, Type,
 };
 use crate::sdk::emit_common::{
-    error_response_bodies_of, is_json_object_key, join_path, operation_auth_alternatives,
-    operation_prose, path_tokens, path_tokens_match, quoted_string_literal, request_body_models_of,
-    split_words, success_responses_of, ApiKeyLocation, ErrorResponseBody, HttpAuthScheme,
+    binary_value_shape, error_response_bodies_of, is_json_object_key, join_path,
+    operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
+    quoted_string_literal, request_body_models_of, schema_is_multipart_request, split_words,
+    success_responses_of, ApiKeyLocation, BinaryValueShape, ErrorResponseBody, HttpAuthScheme,
     OperationApiKeyScheme, OperationAuthScheme, RequestBodyEncoding, RequestBodyModel,
     SuccessResponses, UniqueSchemaNames,
 };
@@ -236,11 +237,13 @@ pub(crate) fn ts_type(
 
 /// Map a neutral [`Prim`] to its TypeScript type. There is a single numeric type (`number`), so integer
 /// width and float width are irrelevant; a byte string carries base64 on the wire as a `string`.
+/// Raw-binary POSITIONS (an octet-stream body, a binary response, a multipart file part) are spelled by
+/// their own emitters from the operation's media semantics, never by a named type this maps.
 ///
 /// The arm-per-variant match is deliberate even though several arms share a body (Int/Float → `number`,
-/// String/Bytes → `string`): an exhaustive, one-arm-per-`Prim` match means a future `Prim` variant fails
-/// to compile here until its TS mapping is chosen (rule 3) — the same exhaustiveness discipline as
-/// `ts_type`. `match_same_arms` is allowed locally to preserve that property.
+/// integer/float widths → `number`): an exhaustive, one-arm-per-`Prim` match means a future `Prim`
+/// variant fails to compile here until its TS mapping is chosen (rule 3) — the same exhaustiveness
+/// discipline as `ts_type`. `match_same_arms` is allowed locally to preserve that property.
 #[allow(clippy::match_same_arms)]
 fn ts_primitive(prim: &Prim) -> &'static str {
     match prim {
@@ -290,6 +293,7 @@ pub(crate) fn emit_models(graph: &ApiGraph, package: &str) -> Result<String, Cor
                 graph,
                 "",
                 directions_of(&directions, &schema.id),
+                schema_is_multipart_request(graph, &schema.id)?,
             )?,
             // A named NON-object/NON-enum schema (e.g. `BookOrError = Book | OutOfStock`, or a
             // scalar/array/map alias) → a plain `type` alias. This is the load-bearing divergence from
@@ -304,6 +308,14 @@ pub(crate) fn emit_models(graph: &ApiGraph, package: &str) -> Result<String, Cor
             | Type::Union(_)
             | Type::Any {} => {
                 // models.ts references its sibling symbols BARE (no namespace prefix).
+                //
+                // A named BYTES schema keeps its JSON spelling (`string`) here even when some operation
+                // also carries it as an octet-stream body. TS has no single type that is both the
+                // base64 text a JSON field carries and the byte buffer a raw body takes, and this one
+                // exported name is reachable from BOTH positions — a JSON model field, a JSON response
+                // model, and the alias a caller imports. The binary spelling therefore lives only where
+                // the position is known to be binary (the operation signature, the multipart field),
+                // and never on the shared alias, which would silently mistype every JSON use of it.
                 let alias = ts_type(&schema.body, false, graph, "")?;
                 writeln!(out, "export type {} = {alias};", schema.name).map_err(sink)?;
             }
@@ -334,6 +346,7 @@ pub(crate) fn emit_model_schema(
                 graph,
                 "models.",
                 directions,
+                schema_is_multipart_request(graph, &schema.id)?,
             )?;
         }
         Type::Primitive(_)
@@ -427,6 +440,7 @@ fn emit_interface(
     graph: &ApiGraph,
     ns: &str,
     directions: SchemaDirections,
+    multipart_request: bool,
 ) -> Result<(), CoreError> {
     if fields.is_empty() {
         // eslint/tsc dislikes `{}` as a type; an empty record is the precise zero-field shape.
@@ -446,7 +460,7 @@ fn emit_interface(
         } else {
             ts_string_literal(&field.json_name)
         };
-        let hint = ts_field_type(field, graph, ns, directions)?;
+        let hint = ts_field_type(field, graph, ns, directions, multipart_request)?;
         let opt = if directions.model_field_is_optional(field) {
             "?"
         } else {
@@ -463,8 +477,12 @@ fn ts_field_type(
     graph: &ApiGraph,
     ns: &str,
     directions: SchemaDirections,
+    multipart_request: bool,
 ) -> Result<String, CoreError> {
     let nullable = directions.field_is_nullable(field);
+    if multipart_request && binary_value_shape(&field.schema, graph)? != BinaryValueShape::Other {
+        return ts_multipart_field_type(&field.schema, nullable, graph, ns);
+    }
     if matches!(field.schema, Type::Primitive(Prim::String))
         && !field.meta.constraints.enum_values.is_empty()
     {
@@ -3196,6 +3214,7 @@ fn ts_multipart_request_body_arg_type(
             &field.schema,
             SchemaDirections::REQUEST.field_is_nullable(field),
             graph,
+            "models.",
         )?;
         parts.push(format!("{key}{optional}: {ty}"));
     }
@@ -3206,13 +3225,12 @@ fn ts_multipart_field_type(
     schema: &Type,
     nullable: bool,
     graph: &ApiGraph,
+    ns: &str,
 ) -> Result<String, CoreError> {
-    let mut ty = match schema {
-        Type::Primitive(Prim::Bytes) => "Blob | ArrayBuffer | Uint8Array".to_string(),
-        Type::Array(items) if matches!(items.as_ref(), Type::Primitive(Prim::Bytes)) => {
-            "Array<Blob | ArrayBuffer | Uint8Array>".to_string()
-        }
-        _ => ts_type(schema, false, graph, "models.")?,
+    let mut ty = match binary_value_shape(schema, graph)? {
+        BinaryValueShape::Single => "Blob | ArrayBuffer | Uint8Array".to_string(),
+        BinaryValueShape::Repeated => "Array<Blob | ArrayBuffer | Uint8Array>".to_string(),
+        BinaryValueShape::Other => ts_type(schema, false, graph, ns)?,
     };
     if nullable {
         ty.push_str(" | null");
@@ -3820,7 +3838,8 @@ mod tests {
                 ts_type(&Type::Primitive(Prim::Float { bits: 64 }), false, &g, "").unwrap(),
                 "number"
             );
-            // a bytes primitive carries base64 as a string.
+            // A bytes primitive in an ordinary JSON shape carries as a string; media-aware aliases
+            // and multipart fields select binary platform types.
             assert_eq!(
                 ts_type(&Type::Primitive(Prim::Bytes), false, &g, "").unwrap(),
                 "string"

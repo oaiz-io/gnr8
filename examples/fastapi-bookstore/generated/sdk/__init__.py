@@ -12,6 +12,7 @@ from .models import (
     ListBooksResponse,
     OutOfStock,
 )
+from .multipart import MultipartFile
 
 __all__ = [
     "Client",
@@ -20,6 +21,7 @@ __all__ = [
     "RequestOptions",
     "ApiError",
     "AuthConfigurationError",
+    "MultipartFile",
     "Author",
     "Book",
     "BookFilters",

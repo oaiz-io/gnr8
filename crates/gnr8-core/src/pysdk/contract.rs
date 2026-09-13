@@ -282,7 +282,7 @@ fn emit_field_assertion(
     else {
         return Ok(());
     };
-    let Some(ident) = py_model_field(graph, model, &field.json_name, model_style) else {
+    let Some(ident) = py_model_field(graph, model, &field.json_name, model_style)? else {
         writeln!(out, "        del result").map_err(sink)?;
         return Ok(());
     };
@@ -311,15 +311,17 @@ fn py_model_field(
     model: &str,
     json_name: &str,
     model_style: PyModelStyle,
-) -> Option<String> {
-    let schema = graph.schemas.iter().find(|schema| schema.name == model)?;
-    let Type::Object(fields) = &schema.body else {
-        return None;
+) -> Result<Option<String>, CoreError> {
+    let Some(schema) = graph.schemas.iter().find(|schema| schema.name == model) else {
+        return Ok(None);
     };
-    fields
-        .iter()
-        .find(|field| field.json_name == json_name)
-        .map(|field| py_field_ident(field, model_style))
+    let Type::Object(fields) = &schema.body else {
+        return Ok(None);
+    };
+    let Some(field) = fields.iter().find(|field| field.json_name == json_name) else {
+        return Ok(None);
+    };
+    py_field_ident(fields, field, model_style).map(Some)
 }
 
 fn py_header_dict(headers: &[(String, String)]) -> String {
@@ -523,7 +525,7 @@ fn py_literal(
                         };
                         rendered.push(format!(
                             "{}={}",
-                            py_field_ident(field, model_style),
+                            py_field_ident(fields, field, model_style)?,
                             py_literal(&field.schema, entry, graph, model_style, models)?
                         ));
                     }
