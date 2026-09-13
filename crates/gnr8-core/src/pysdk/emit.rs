@@ -679,7 +679,7 @@ pub(crate) fn emit_models_with_style(
     // statement). Every LATER item gets two blank lines (`ruff format` around defs). Getting the first
     // gap right is what keeps a leading alias I001-clean.
     let mut first = true;
-    for schema in &graph.schemas {
+    for (schema, schema_directions, multipart_file_schema) in &schema_refs {
         let is_def = matches!(&schema.body, Type::Enum(_) | Type::Object(_));
         out.push_str(top_level_separator(first, is_def));
         first = false;
@@ -688,15 +688,14 @@ pub(crate) fn emit_models_with_style(
             // `json.dumps` serialize the member value as its string — the twin of Go's `type X string`.
             Type::Enum(members) => emit_enum_class(&mut out, &schema.name, members)?,
             Type::Object(fields) => {
-                let multipart_file_schema = is_multipart_file_schema(graph, &schema.id)?;
                 emit_model_class(
                     &mut out,
                     &schema.name,
                     fields,
                     graph,
                     model_style,
-                    directions_of(&directions, &schema.id),
-                    multipart_file_schema,
+                    *schema_directions,
+                    *multipart_file_schema,
                 )?;
             }
             // A named NON-object/NON-enum schema (e.g. `BookOrError = Union[Book, OutOfStock]`, or a
@@ -1071,12 +1070,25 @@ fn emit_pydantic_model(
     multipart_file_schema: bool,
 ) -> Result<(), CoreError> {
     writeln!(out, "class {name}(BaseModel):").map_err(sink)?;
-    let config = if multipart_file_schema {
-        "ConfigDict(arbitrary_types_allowed=True, populate_by_name=True, extra=\"ignore\")"
+    // The multipart form needs `arbitrary_types_allowed` for its `MultipartFile` values, which pushes
+    // the call past `ruff format`'s line budget — so it is emitted already wrapped the way ruff wraps
+    // it (arguments on one inner line, no trailing comma, which is what keeps ruff from exploding it
+    // one-per-line). The short form stays on one line.
+    if multipart_file_schema {
+        writeln!(out, "    model_config = ConfigDict(").map_err(sink)?;
+        writeln!(
+            out,
+            "        arbitrary_types_allowed=True, populate_by_name=True, extra=\"ignore\""
+        )
+        .map_err(sink)?;
+        writeln!(out, "    )").map_err(sink)?;
     } else {
-        "ConfigDict(populate_by_name=True, extra=\"ignore\")"
-    };
-    writeln!(out, "    model_config = {config}").map_err(sink)?;
+        writeln!(
+            out,
+            "    model_config = ConfigDict(populate_by_name=True, extra=\"ignore\")"
+        )
+        .map_err(sink)?;
+    }
     let emissions = py_field_emissions(fields, PyModelStyle::Pydantic)?;
     for emission in &emissions {
         let field = emission.field;
@@ -1126,6 +1138,11 @@ fn emit_pydantic_model(
 /// A model needing neither keeps the single-expression form. Both repairs can land on ONE key — a
 /// required nullable nested model is the case — so a field is emitted once, as a single statement or a
 /// single `if`/`else`, rather than once per repair.
+///
+/// A multipart file part is the one value `mode="json"` cannot render, so it is EXCLUDED from the dump
+/// and re-attached verbatim afterwards. The dump mode itself stays `"json"` for every model: it is what
+/// turns an enum member into its wire value, and dumping a whole multipart model in `"python"` mode to
+/// keep its file objects would put `Fmt.HARDCOVER` on the wire where the server expects `hardcover`.
 fn emit_pydantic_to_dict_body(
     out: &mut String,
     fields: &[PyFieldEmission<'_>],
@@ -1133,21 +1150,52 @@ fn emit_pydantic_to_dict_body(
     directions: SchemaDirections,
     multipart_file_schema: bool,
 ) -> Result<(), CoreError> {
-    let mode = if multipart_file_schema {
-        "python"
-    } else {
-        "json"
-    };
-    let dump = format!("self.model_dump(mode=\"{mode}\", by_alias=True, exclude_none=True)");
+    const DUMP: &str = "self.model_dump(mode=\"json\", by_alias=True, exclude_none=True)";
+
+    let mut is_file = vec![false; fields.len()];
+    if multipart_file_schema {
+        for (slot, emission) in is_file.iter_mut().zip(fields) {
+            *slot = binary_value_shape(&emission.field.schema, graph)? != BinaryValueShape::Other;
+        }
+    }
+    let file_fields: Vec<&PyFieldEmission<'_>> = fields
+        .iter()
+        .zip(&is_file)
+        .filter_map(|(emission, is_file)| is_file.then_some(emission))
+        .collect();
     let repairs: Vec<ToDictRepair<'_>> = fields
         .iter()
-        .filter_map(|field| ToDictRepair::of(field, graph, directions))
+        .zip(&is_file)
+        .filter(|(_, is_file)| !**is_file)
+        .filter_map(|(field, _)| ToDictRepair::of(field, graph, directions))
         .collect();
-    if repairs.is_empty() {
-        writeln!(out, "        return {dump}").map_err(sink)?;
+    if repairs.is_empty() && file_fields.is_empty() {
+        writeln!(out, "        return {DUMP}").map_err(sink)?;
         return Ok(());
     }
-    writeln!(out, "        _data = {dump}").map_err(sink)?;
+    if file_fields.is_empty() {
+        writeln!(out, "        _data = {DUMP}").map_err(sink)?;
+    } else {
+        // The `exclude` set pushes the call past `ruff format`'s line budget, so the call is emitted
+        // already wrapped one argument per line. The set itself is expanded with a magic trailing
+        // comma, which is what keeps ruff from collapsing it back onto one (possibly over-long) line
+        // however many file fields the model has.
+        writeln!(out, "        _data = self.model_dump(").map_err(sink)?;
+        writeln!(out, "            mode=\"json\",").map_err(sink)?;
+        writeln!(out, "            by_alias=True,").map_err(sink)?;
+        writeln!(out, "            exclude_none=True,").map_err(sink)?;
+        writeln!(out, "            exclude={{").map_err(sink)?;
+        for emission in &file_fields {
+            writeln!(
+                out,
+                "                {},",
+                py_string_literal(&emission.ident)
+            )
+            .map_err(sink)?;
+        }
+        writeln!(out, "            }},").map_err(sink)?;
+        writeln!(out, "        )").map_err(sink)?;
+    }
     for repair in repairs {
         let ident = repair.field.ident.as_str();
         let wire = py_string_literal(&repair.field.field.json_name);
@@ -1178,6 +1226,24 @@ fn emit_pydantic_to_dict_body(
                 writeln!(out, "        if self.{ident} is None:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
             }
+        }
+    }
+    // Re-attach the file parts the dump was told to skip, under the same two rules the repairs above
+    // apply: `exclude_none` drops an absent part, and a REQUIRED nullable part keeps its explicit null.
+    for emission in file_fields {
+        let ident = emission.ident.as_str();
+        let wire = py_string_literal(&emission.field.json_name);
+        let optional = directions.model_field_is_optional(emission.field);
+        let nullable = directions.field_is_nullable(emission.field);
+        if optional || nullable {
+            writeln!(out, "        if self.{ident} is not None:").map_err(sink)?;
+            writeln!(out, "            _data[{wire}] = self.{ident}").map_err(sink)?;
+            if !optional {
+                writeln!(out, "        else:").map_err(sink)?;
+                writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
+            }
+        } else {
+            writeln!(out, "        _data[{wire}] = self.{ident}").map_err(sink)?;
         }
     }
     writeln!(out, "        return _data").map_err(sink)?;

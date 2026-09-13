@@ -63,6 +63,18 @@
         "type": "object",
         "of": [
           {
+            "json_name": "aliasedData",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": false,
+            "schema": { "type": "named", "of": "sdk.Payload" },
+            "description": null,
+            "example": null
+          },
+          {
             "json_name": "data",
             "serializer_may_omit": false,
             "deserializer_accepts_absent": false,
@@ -106,6 +118,18 @@
             "validator_requires_presence": true,
             "validator_rejects_null": false,
             "schema": { "type": "primitive", "of": { "prim": "string" } },
+            "description": null,
+            "example": null
+          },
+          {
+            "json_name": "kind",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": false,
+            "schema": { "type": "named", "of": "sdk.UploadKind" },
             "description": null,
             "example": null
           },
@@ -159,6 +183,13 @@
       "body": { "type": "primitive", "of": { "prim": "bytes" } },
       "enum_source_order": [],
       "provenance": { "file": "models.src", "start_line": 3, "end_line": 3 }
+    },
+    {
+      "id": "sdk.UploadKind",
+      "name": "UploadKind",
+      "body": { "type": "enum", "of": ["archive", "primary"] },
+      "enum_source_order": [],
+      "provenance": { "file": "models.src", "start_line": 4, "end_line": 4 }
     }
   ],
   "diagnostics": [],

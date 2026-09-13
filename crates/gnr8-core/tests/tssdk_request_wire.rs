@@ -332,6 +332,7 @@ void main().catch((error: unknown) => {
 
 const BINARY_MULTIPART_DRIVER: &str = r#"import {
   Client,
+  type JsonBytes,
   type MultipartRequest,
   type Payload,
 } from "./index";
@@ -348,6 +349,9 @@ const transport: typeof fetch = async (input, init) => {
     const form = init.body;
     if (form.get("description") !== "mixed fields") {
       throw new Error(`description=${String(form.get("description"))}`);
+    }
+    if (form.get("kind") !== "primary") {
+      throw new Error(`kind=${String(form.get("kind"))}`);
     }
     if ((await blobText(form.get("requiredFile"))) !== "required-content") {
       throw new Error("required file content changed");
@@ -370,8 +374,11 @@ const transport: typeof fetch = async (input, init) => {
   }
   if (path === "/json" && init?.method === "POST") {
     if (typeof init.body !== "string") throw new Error("JSON body was not text");
-    const body = JSON.parse(init.body) as { data?: unknown };
+    const body = JSON.parse(init.body) as { data?: unknown; aliasedData?: unknown };
     if (body.data !== "AQI=") throw new Error(`JSON bytes=${String(body.data)}`);
+    if (body.aliasedData !== "AwQ=") {
+      throw new Error(`JSON aliased bytes=${String(body.aliasedData)}`);
+    }
     return new Response(null, { status: 204 });
   }
   if (path === "/binary" && init?.method === "POST") {
@@ -394,12 +401,14 @@ async function main(): Promise<void> {
   const client = new Client({ baseUrl: "https://api.test", fetch: transport });
   const requiredOnly: MultipartRequest = {
     description: "required only",
+    kind: "primary",
     requiredFile: new Uint8Array([1]),
   };
   void requiredOnly;
 
   await client.sendMultipart({
     description: "mixed fields",
+    kind: "primary",
     requiredFile: new TextEncoder().encode("required-content"),
     optionalFile: new Blob(["optional-content"]),
     aliasedFile: new TextEncoder().encode("alias-content"),
@@ -408,10 +417,15 @@ async function main(): Promise<void> {
       new TextEncoder().encode("second-content"),
     ],
   });
-  await client.sendJsonBytes({ data: "AQI=" });
-  const request: Payload = new TextEncoder().encode("request-bytes");
+  // A bytes alias reached through a JSON field is base64 text, not a byte buffer.
+  const json: JsonBytes = { data: "AQI=", aliasedData: "AwQ=" };
+  const aliasedIsText: Payload = json.aliasedData;
+  void aliasedIsText.length;
+  await client.sendJsonBytes(json);
+
+  const request = new TextEncoder().encode("request-bytes");
   await client.sendBinary(request);
-  const response: Payload = await client.receiveBinary();
+  const response: Blob = await client.receiveBinary();
   if ((await response.text()) !== "response-bytes") {
     throw new Error("binary response content changed");
   }
@@ -542,9 +556,12 @@ fn generated_typescript_preserves_binary_aliases_and_multipart_parts() {
     gnr8_engine::sdk::bundle::write_to_dir(&bundle, &dir)
         .expect("materialize TypeScript binary/multipart SDK");
     let models = std::fs::read_to_string(dir.join("models.ts")).expect("read models.ts");
+    // The alias is reachable from a JSON model field, so it keeps the JSON spelling of a byte string.
+    // The byte-capable spelling belongs to the positions that are known to be binary — the operation
+    // signature and the multipart file fields asserted below.
     assert!(
-        models.contains("export type Payload = Blob | ArrayBuffer | Uint8Array;"),
-        "standalone bytes alias must remain byte-capable:\n{models}"
+        models.contains("export type Payload = string;"),
+        "a named bytes alias reachable from JSON must keep its JSON spelling:\n{models}"
     );
     for declaration in [
         "  requiredFile: Blob | ArrayBuffer | Uint8Array;",
@@ -552,6 +569,7 @@ fn generated_typescript_preserves_binary_aliases_and_multipart_parts() {
         "  optionalFiles?: Array<Blob | ArrayBuffer | Uint8Array>;",
         "  aliasedFile?: Blob | ArrayBuffer | Uint8Array;",
         "  description: string;",
+        "  kind: UploadKind;",
     ] {
         assert!(
             models.contains(declaration),
@@ -559,8 +577,15 @@ fn generated_typescript_preserves_binary_aliases_and_multipart_parts() {
         );
     }
     assert!(
-        models.contains("export interface JsonBytes {\n  data: string;\n}"),
+        models
+            .contains("export interface JsonBytes {\n  aliasedData: Payload;\n  data: string;\n}"),
         "JSON byte fields must retain their textual wire representation:\n{models}"
+    );
+    let client = std::fs::read_to_string(dir.join("client.ts")).expect("read client.ts");
+    assert!(
+        client.contains("async sendBinary(\n    body: Blob | ArrayBuffer | Uint8Array,")
+            && client.contains("async receiveBinary(options?: RequestOptions): Promise<Blob> {"),
+        "raw binary positions must state the byte-capable types themselves:\n{client}"
     );
     std::fs::write(dir.join("driver.ts"), BINARY_MULTIPART_DRIVER)
         .expect("write binary/multipart TypeScript driver");

@@ -236,8 +236,9 @@ pub(crate) fn ts_type(
 }
 
 /// Map a neutral [`Prim`] to its TypeScript type. There is a single numeric type (`number`), so integer
-/// width and float width are irrelevant; a byte string in an ordinary JSON shape carries as a string.
-/// Raw-binary aliases and multipart fields select platform binary types from their media semantics.
+/// width and float width are irrelevant; a byte string carries base64 on the wire as a `string`.
+/// Raw-binary POSITIONS (an octet-stream body, a binary response, a multipart file part) are spelled by
+/// their own emitters from the operation's media semantics, never by a named type this maps.
 ///
 /// The arm-per-variant match is deliberate even though several arms share a body (Int/Float → `number`,
 /// integer/float widths → `number`): an exhaustive, one-arm-per-`Prim` match means a future `Prim`
@@ -307,7 +308,15 @@ pub(crate) fn emit_models(graph: &ApiGraph, package: &str) -> Result<String, Cor
             | Type::Union(_)
             | Type::Any {} => {
                 // models.ts references its sibling symbols BARE (no namespace prefix).
-                let alias = ts_alias_type(&schema.body, graph, "")?;
+                //
+                // A named BYTES schema keeps its JSON spelling (`string`) here even when some operation
+                // also carries it as an octet-stream body. TS has no single type that is both the
+                // base64 text a JSON field carries and the byte buffer a raw body takes, and this one
+                // exported name is reachable from BOTH positions — a JSON model field, a JSON response
+                // model, and the alias a caller imports. The binary spelling therefore lives only where
+                // the position is known to be binary (the operation signature, the multipart field),
+                // and never on the shared alias, which would silently mistype every JSON use of it.
+                let alias = ts_type(&schema.body, false, graph, "")?;
                 writeln!(out, "export type {} = {alias};", schema.name).map_err(sink)?;
             }
         }
@@ -347,7 +356,7 @@ pub(crate) fn emit_model_schema(
         | Type::Named(_)
         | Type::Union(_)
         | Type::Any {} => {
-            let alias = ts_alias_type(&schema.body, graph, "models.")?;
+            let alias = ts_type(&schema.body, false, graph, "models.")?;
             writeln!(body, "export type {} = {alias};", schema.name).map_err(sink)?;
         }
     }
@@ -491,14 +500,6 @@ fn ts_field_type(
         return Ok(hint);
     }
     ts_type(&field.schema, nullable, graph, ns)
-}
-
-fn ts_alias_type(schema: &Type, graph: &ApiGraph, ns: &str) -> Result<String, CoreError> {
-    if matches!(schema, Type::Primitive(Prim::Bytes)) {
-        Ok("Blob | ArrayBuffer | Uint8Array".to_string())
-    } else {
-        ts_type(schema, false, graph, ns)
-    }
 }
 
 /// Emit `errors.ts`: the typed `ApiError extends Error` carrying status, response metadata, and body.

@@ -291,16 +291,22 @@ JSON, `application/*+json`, form, multipart, text, and binary choices use the sa
 classification in every target. Multipart array fields become repeated parts; absent or null fields
 are omitted.
 
-Raw binary values stay byte-capable throughout each generated SDK. Go uses `[]byte`; Python uses
-`bytes` for raw binary bodies and exported aliases; TypeScript request aliases and multipart fields
-use `Blob | ArrayBuffer | Uint8Array`, while binary responses return `Blob`. A bytes field carried in
-JSON retains its JSON representation rather than being reclassified as a multipart file.
+Raw binary values stay byte-capable throughout each generated SDK. Go uses `[]byte` and Python uses
+`bytes` — both for raw binary bodies and for an exported alias of a bytes schema, because in each of
+those languages the byte-capable type is also the one a JSON field of that schema uses. TypeScript has
+no single such type, so the byte-capable spelling belongs to the position rather than to a named type:
+an octet-stream request body takes `Blob | ArrayBuffer | Uint8Array`, a binary response returns `Blob`,
+and a multipart file field takes `Blob | ArrayBuffer | Uint8Array`. A TypeScript alias of a bytes
+schema stays `string`, because the same exported name is also reachable from JSON model fields, where
+text is what goes on the wire. A bytes field carried in JSON retains its JSON representation in every
+target rather than being reclassified as a binary payload.
 
 Python multipart file fields use the exported `MultipartFile(filename: str, content: bytes)` value so
 the encoder can emit a real filename in `Content-Disposition`. Single and repeated file fields use
 `MultipartFile` and `list[MultipartFile]` respectively, with request optionality preserved. Empty
-filenames and filenames containing carriage returns or newlines are rejected. TypeScript multipart
-file fields accept the same byte-capable platform types as raw binary bodies.
+filenames and filenames containing carriage returns or newlines are rejected. A Pydantic multipart
+model still dumps every non-file field through `mode="json"`, so an enum part carries its wire value;
+only the file parts are held back from the dump and re-attached.
 
 ## Success return types
 

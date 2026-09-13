@@ -1304,6 +1304,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "multipart/form-data; boundary="
             )
             assert b'name="description"' in body and b"mixed fields" in body, body
+            assert b'name="kind"\r\n\r\nprimary\r\n' in body, body
+            assert b"UploadKind" not in body, body
             assert b'name="requiredFile"; filename="required.bin"' in body, body
             assert b"required-content" in body, body
             assert b'name="optionalFile"; filename="optional.bin"' in body, body
@@ -1347,6 +1349,7 @@ def main():
         # Optional single/repeated file fields can both be omitted.
         omitted = bookstore.MultipartRequest(
             description="only required",
+            kind=bookstore.UploadKind.PRIMARY,
             required_file=bookstore.MultipartFile("required.bin", b"required-content"),
         )
         assert omitted.optional_file is None
@@ -1354,6 +1357,7 @@ def main():
 
         request = bookstore.MultipartRequest(
             description="mixed fields",
+            kind=bookstore.UploadKind.PRIMARY,
             required_file=bookstore.MultipartFile("required.bin", b"required-content"),
             optional_file=bookstore.MultipartFile("optional.bin", b"optional-content"),
             optional_files=[
@@ -1363,6 +1367,8 @@ def main():
             aliased_file=bookstore.MultipartFile("alias.bin", b"alias-content"),
         )
         dumped = request.to_dict()
+        # Holding the file parts back from the dump must not cost the other keys their JSON form.
+        assert dumped["kind"] == "primary", dumped
         assert dumped["requiredFile"].filename == "required.bin", dumped
         assert dumped["optionalFiles"][1].content == b"second-content", dumped
         assert client.send_multipart(request) is None
@@ -1691,6 +1697,7 @@ fn generated_sdk_preserves_binary_aliases_and_named_multipart_files() {
         "    optional_files: Optional[list[MultipartFile]] = Field(default=None, alias=\"optionalFiles\")",
         "    aliased_file: Optional[MultipartFile] = Field(default=None, alias=\"aliasedFile\")",
         "    description: str",
+        "    kind: UploadKind",
     ] {
         assert!(
             models.contains(declaration),
@@ -1747,6 +1754,7 @@ fn generated_sdk_preserves_binary_aliases_and_named_multipart_files() {
         .expect("read dataclass models");
     for declaration in [
         "    requiredFile: MultipartFile",
+        "    kind: UploadKind",
         "    optionalFile: Optional[MultipartFile] = None",
         "    optionalFiles: Optional[list[MultipartFile]] = None",
     ] {
