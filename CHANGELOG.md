@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.16.1 — 2026-09-14
+
 ### Breaking
 
 - **The public graph carries group documentation, and `GroupOperations` carries the entries that
