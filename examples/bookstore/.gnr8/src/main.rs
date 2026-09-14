@@ -30,6 +30,9 @@ fn main() -> std::process::ExitCode {
             .transform(SetBasePath::new("/"))
             .transform(SetTitle::new("Bookstore API"))
             .transform(ApplySecurity::api_key("ApiKeyAuth", "X-API-Key"))
+            // The router states which operations sit together; what sitting together means is a
+            // sentence only this config can state. The generated CLI prints it beside the group.
+            .transform(GroupOperations::new().describe("books", "Browse and manage the catalogue"))
             .target(OpenApi31::new().to("generated/openapi.yaml"))
             .target(
                 GoSdk::new()

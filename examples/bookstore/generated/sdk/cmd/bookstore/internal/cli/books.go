@@ -14,8 +14,9 @@ import (
 func cmdListBooks(args []string) int {
 	fs := flag.NewFlagSet("list-books", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "list-books: Returns every book in the catalogue.")
-		fmt.Fprintf(fs.Output(), "Usage: %s books list-books [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books list-books — Returns every book in the catalogue.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books list-books [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
@@ -44,8 +45,9 @@ func cmdListBooks(args []string) int {
 func cmdCreateBook(args []string) int {
 	fs := flag.NewFlagSet("create-book", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "create-book: Adds a book to the catalogue.")
-		fmt.Fprintf(fs.Output(), "Usage: %s books create-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books create-book — Adds a book to the catalogue.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books create-book [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
@@ -91,12 +93,13 @@ func cmdCreateBook(args []string) int {
 func cmdDeleteBook(args []string) int {
 	fs := flag.NewFlagSet("delete-book", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "delete-book: Permanently removes one book from the catalogue.")
-		fmt.Fprintf(fs.Output(), "Usage: %s books delete-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books delete-book — Permanently removes one book from the catalogue.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books delete-book [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "")
+	id := fs.String("id", "", "required")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -121,12 +124,13 @@ func cmdDeleteBook(args []string) int {
 func cmdGetBook(args []string) int {
 	fs := flag.NewFlagSet("get-book", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "get-book: Returns one book by its identifier.")
-		fmt.Fprintf(fs.Output(), "Usage: %s books get-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books get-book — Returns one book by its identifier.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books get-book [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "")
+	id := fs.String("id", "", "required")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -151,12 +155,13 @@ func cmdGetBook(args []string) int {
 func cmdUpdateBook(args []string) int {
 	fs := flag.NewFlagSet("update-book", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "update-book: Replaces the mutable fields of one book.")
-		fmt.Fprintf(fs.Output(), "Usage: %s books update-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books update-book — Replaces the mutable fields of one book.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books update-book [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "")
+	id := fs.String("id", "", "required")
 	body := fs.String("body", "", "request body, as an inline JSON document")
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
 	parsed, code := parseFlags(fs, args)

@@ -2556,8 +2556,46 @@ impl TransformExec for GroupOperations {
                 }
             }
         }
-        Ok(())
+        record_group_docs(self, ir)
     }
+}
+
+/// Write the described group prose onto the graph, in sorted order.
+///
+/// Validation is fail-closed on both sides of rule 3: a name that no operation carries is a
+/// typo that would silently print nothing, and a name already described is a second source for
+/// one fact. Neither is recoverable by picking a winner, so neither is recovered.
+fn record_group_docs(transform: &GroupOperations, ir: &mut ApiGraph) -> Result<(), CoreError> {
+    if transform.docs.is_empty() {
+        return Ok(());
+    }
+    let groups: BTreeSet<&str> = ir
+        .operations
+        .iter()
+        .filter_map(|op| op.group.as_deref())
+        .collect();
+    for doc in &transform.docs {
+        if !groups.contains(doc.name.as_str()) {
+            return Err(CoreError::Config {
+                message: format!(
+                    "GroupOperations describes group {:?}, which no operation belongs to",
+                    doc.name
+                ),
+            });
+        }
+        if ir
+            .group_docs
+            .iter()
+            .any(|existing| existing.name == doc.name)
+        {
+            return Err(CoreError::Config {
+                message: format!("group {:?} is described twice", doc.name),
+            });
+        }
+        ir.group_docs.push(doc.clone());
+    }
+    ir.group_docs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -6133,6 +6171,98 @@ mod tests {
         assert_eq!(ir.operations[0].group.as_deref(), Some("session"));
         assert_eq!(ir.operations[1].group.as_deref(), Some("downloads"));
         assert_eq!(ir.operations[2].group.as_deref(), Some("backoffice"));
+    }
+
+    #[test]
+    fn describing_a_group_records_prose_sorted_by_name() {
+        let mut ir = ApiGraph {
+            operations: vec![
+                grouped_test_operation("listBooks", "GET", "/books", Some("books"), "books.py"),
+                grouped_test_operation("listAuthors", "GET", "/authors", Some("authors"), "a.py"),
+            ],
+            ..ApiGraph::default()
+        };
+
+        GroupOperations::new()
+            .describe("books", "Everything about books")
+            .describe("authors", "Everything about authors")
+            .apply(&mut ir, &cx())
+            .unwrap();
+
+        let names: Vec<&str> = ir.group_docs.iter().map(|doc| doc.name.as_str()).collect();
+        assert_eq!(names, vec!["authors", "books"]);
+        assert_eq!(ir.group_docs[1].summary, "Everything about books");
+    }
+
+    #[test]
+    fn describing_a_group_no_operation_belongs_to_fails() {
+        let mut ir = ApiGraph {
+            operations: vec![grouped_test_operation(
+                "listBooks",
+                "GET",
+                "/books",
+                Some("books"),
+                "books.py",
+            )],
+            ..ApiGraph::default()
+        };
+
+        let error = GroupOperations::new()
+            .describe("bookz", "A typo nobody sees at runtime")
+            .apply(&mut ir, &cx())
+            .expect_err("unknown group");
+
+        assert!(
+            error.to_string().contains("which no operation belongs to"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn describing_one_group_twice_fails_instead_of_picking_a_winner() {
+        let mut ir = ApiGraph {
+            operations: vec![grouped_test_operation(
+                "listBooks",
+                "GET",
+                "/books",
+                Some("books"),
+                "books.py",
+            )],
+            ..ApiGraph::default()
+        };
+
+        let error = GroupOperations::new()
+            .describe("books", "One sentence")
+            .describe("books", "A different sentence")
+            .apply(&mut ir, &cx())
+            .expect_err("described twice");
+
+        assert!(error.to_string().contains("is described twice"), "{error}");
+    }
+
+    #[test]
+    fn describing_a_group_the_spec_already_described_fails() {
+        let mut ir = ApiGraph {
+            operations: vec![grouped_test_operation(
+                "listBooks",
+                "GET",
+                "/books",
+                Some("books"),
+                "books.py",
+            )],
+            group_docs: vec![crate::graph::GroupDocsPolicy {
+                name: "books".to_string(),
+                summary: "Imported from the document's own tag".to_string(),
+            }],
+            ..ApiGraph::default()
+        };
+
+        let error = GroupOperations::new()
+            .describe("books", "Config says something else")
+            .apply(&mut ir, &cx())
+            .expect_err("two sources");
+
+        assert!(error.to_string().contains("is described twice"), "{error}");
     }
 
     #[test]

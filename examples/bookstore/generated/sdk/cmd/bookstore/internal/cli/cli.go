@@ -5,28 +5,164 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 )
+
+// One command and the prose its handler states.
+type cliCommand struct {
+	name    string
+	summary string
+}
+
+// One command group and the commands under it.
+type cliGroup struct {
+	name     string
+	summary  string
+	commands []cliCommand
+}
+
+var cliGroups = []cliGroup{
+	{
+		name:    "books",
+		summary: "Browse and manage the catalogue",
+		commands: []cliCommand{
+			{name: "list-books", summary: "Returns every book in the catalogue."},
+			{name: "create-book", summary: "Adds a book to the catalogue."},
+			{name: "delete-book", summary: "Permanently removes one book from the catalogue."},
+			{name: "get-book", summary: "Returns one book by its identifier."},
+			{name: "update-book", summary: "Replaces the mutable fields of one book."},
+		},
+	},
+}
+
+// columnWidth is the width of the widest name in one help column.
+func columnWidth(names []string) int {
+	width := 0
+	for _, name := range names {
+		if len(name) > width {
+			width = len(name)
+		}
+	}
+	return width
+}
+
+// printEntries prints one aligned name/summary column, omitting the column for an
+// entry whose source states no prose.
+func printEntries(out *os.File, indent string, entries []cliCommand) {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.name)
+	}
+	width := columnWidth(names)
+	for _, entry := range entries {
+		if entry.summary == "" {
+			fmt.Fprintf(out, "%s%s\n", indent, entry.name)
+			continue
+		}
+		fmt.Fprintf(out, "%s%-*s  %s\n", indent, width, entry.name, entry.summary)
+	}
+}
 
 func printRootUsage(out *os.File) {
 	fmt.Fprintln(out, description)
 	fmt.Fprintf(out, "\nUsage: %s <command> [flags]\n", program)
+	fmt.Fprintln(out, "\nCommand groups:")
+	groups := make([]cliCommand, 0, len(cliGroups))
+	for _, group := range cliGroups {
+		groups = append(groups, cliCommand{name: group.name, summary: group.summary})
+	}
+	printEntries(out, "  ", groups)
+	fmt.Fprintf(out, "\nRun `%s <group>` for its commands, `%s <group> <command> --help` for its flags.\n", program, program)
+}
+
+func printGroupUsage(out *os.File, group cliGroup) {
+	if group.summary == "" {
+		fmt.Fprintf(out, "%s %s\n", program, group.name)
+	} else {
+		fmt.Fprintf(out, "%s %s — %s\n", program, group.name, group.summary)
+	}
+	fmt.Fprintf(out, "\nUsage: %s %s <command> [flags]\n", program, group.name)
 	fmt.Fprintln(out, "\nCommands:")
-	fmt.Fprintln(out, "  books")
-	fmt.Fprintln(out, "    list-books")
-	fmt.Fprintln(out, "    create-book")
-	fmt.Fprintln(out, "    delete-book")
-	fmt.Fprintln(out, "    get-book")
-	fmt.Fprintln(out, "    update-book")
+	printEntries(out, "  ", group.commands)
+	fmt.Fprintf(out, "\nRun `%s %s <command> --help` for its flags.\n", program, group.name)
+}
+
+// cliGroupNamed returns the table entry for a group the dispatch tree names. Every
+// caller is generated beside the table, so the name is always present.
+func cliGroupNamed(name string) cliGroup {
+	for _, group := range cliGroups {
+		if group.name == name {
+			return group
+		}
+	}
+	return cliGroup{name: name}
+}
+
+// suggestCommand names the command in this group closest to a mistyped one,
+// or "" when nothing is close enough to print.
+func suggestCommand(input string, commands []cliCommand) string {
+	names := make([]string, 0, len(commands))
+	for _, command := range commands {
+		names = append(names, command.name)
+	}
+	return suggestName(input, names)
+}
+
+// suggestTopLevel names the group closest to a mistyped first argument.
+func suggestTopLevel(input string) string {
+	names := make([]string, 0, len(cliGroups))
+	for _, group := range cliGroups {
+		names = append(names, group.name)
+	}
+	return suggestName(input, names)
+}
+
+func suggestName(input string, names []string) string {
+	best := ""
+	bestDistance := 3
+	for _, name := range names {
+		if strings.HasPrefix(name, input) {
+			return name
+		}
+		if distance := editDistance(input, name); distance < bestDistance {
+			best, bestDistance = name, distance
+		}
+	}
+	return best
+}
+
+// editDistance is the Levenshtein distance between two command names.
+func editDistance(from, to string) int {
+	previous := make([]int, len(to)+1)
+	current := make([]int, len(to)+1)
+	for column := range previous {
+		previous[column] = column
+	}
+	for row := 1; row <= len(from); row++ {
+		current[0] = row
+		for column := 1; column <= len(to); column++ {
+			cost := 1
+			if from[row-1] == to[column-1] {
+				cost = 0
+			}
+			current[column] = min(previous[column]+1, min(current[column-1]+1, previous[column-1]+cost))
+		}
+		copy(previous, current)
+	}
+	return previous[len(to)]
 }
 
 func dispatchBooks(args []string) int {
+	group := cliGroupNamed("books")
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "%s: missing command under %s\n", program, "books")
+		fmt.Fprintf(os.Stderr, "%s: missing command under %s\n", program, group.name)
+		fmt.Fprintln(os.Stderr)
+		printGroupUsage(os.Stderr, group)
 		return 2
 	}
 	switch args[0] {
 	case "-h", "-help", "--help":
-		printRootUsage(os.Stdout)
+		printGroupUsage(os.Stdout, group)
 		return 0
 	case "list-books":
 		return cmdListBooks(args[1:])
@@ -39,7 +175,12 @@ func dispatchBooks(args []string) int {
 	case "update-book":
 		return cmdUpdateBook(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "%s: unknown command %q\n", program, args[0])
+		fmt.Fprintf(os.Stderr, "%s: unknown command %q under %s\n", program, args[0], group.name)
+		if hint := suggestCommand(args[0], group.commands); hint != "" {
+			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s %s`?\n", program, group.name, hint)
+		}
+		fmt.Fprintln(os.Stderr)
+		printGroupUsage(os.Stderr, group)
 		return 2
 	}
 }
@@ -61,6 +202,10 @@ func Run(args []string) int {
 		return dispatchBooks(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "%s: unknown command %q\n", program, args[0])
+		if hint := suggestTopLevel(args[0]); hint != "" {
+			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s`?\n", program, hint)
+		}
+		fmt.Fprintln(os.Stderr)
 		printRootUsage(os.Stderr)
 		return 2
 	}

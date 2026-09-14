@@ -97,6 +97,9 @@ pub struct ApiGraph {
     /// Operation documentation metadata, keyed by operation id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operation_docs: Vec<OperationDocsPolicy>,
+    /// Group documentation metadata, keyed by group name and sorted by it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_docs: Vec<GroupDocsPolicy>,
     /// Non-HTTP input/output roots configured by user code. These roots participate in the same
     /// transitive payload-direction analysis as operation bodies without inventing HTTP routes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -131,6 +134,7 @@ impl Default for ApiGraph {
             operation_runtime: Vec::new(),
             pagination: Vec::new(),
             operation_docs: Vec::new(),
+            group_docs: Vec::new(),
             schema_uses: Vec::new(),
         }
     }
@@ -388,6 +392,24 @@ pub enum PaginationTermination {
     NoNextCursor,
     /// Stop when the configured items field is empty.
     EmptyItems,
+}
+
+/// Prose for one command/operation group, configured in Rust.
+///
+/// A group is a name that source routing states or [`crate::sdk::builtins::GroupOperations`]
+/// assigns. Nothing in typed source states what a group is *for* — the grouping construct carries
+/// members, not a sentence about them — so the one line that describes a group is a cross-cutting
+/// fact from config (CLAUDE.md rule 4), the way security schemes and the document title are.
+///
+/// A group with no entry here has no prose. Targets render the name alone; they never derive a
+/// stand-in sentence from the name, because that would be a second way to state the same fact
+/// (CLAUDE.md rule 3).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GroupDocsPolicy {
+    /// The group name this prose applies to, exactly as [`Operation::group`] carries it.
+    pub name: String,
+    /// One line stating what the group is for.
+    pub summary: String,
 }
 
 /// Operation documentation metadata configured by code-as-config transforms.
@@ -931,6 +953,7 @@ impl ApiGraph {
             operation_runtime: Vec::new(),
             pagination: Vec::new(),
             operation_docs: Vec::new(),
+            group_docs: Vec::new(),
             schema_uses: Vec::new(),
         }
     }

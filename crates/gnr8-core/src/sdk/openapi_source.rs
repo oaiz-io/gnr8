@@ -297,6 +297,8 @@ impl Importer {
         self.diagnostics
             .sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.line.cmp(&b.line)));
 
+        let group_docs = self.group_docs(&operations);
+
         Ok(ApiGraph {
             module: self
                 .root
@@ -323,6 +325,7 @@ impl Importer {
             operation_runtime: Vec::new(),
             pagination: Vec::new(),
             operation_docs: std::mem::take(&mut self.operation_docs),
+            group_docs,
             schema_uses: Vec::new(),
         })
     }
@@ -657,6 +660,48 @@ impl Importer {
         for (id, schema) in raw {
             self.raw_schemas.entry(id).or_insert(schema);
         }
+    }
+
+    /// Group prose for an imported document: the spec's own `tags[].description`.
+    ///
+    /// An imported operation's group is its first tag, so the tag object that names the group is
+    /// where the document already says what the group is for. Reading it here is the imported half
+    /// of the rule operation prose follows — the spec for imported APIs, config for source-extracted
+    /// ones (CLAUDE.md rule 3). A `GroupOperations::describe` that targets a group already described
+    /// by the spec is a hard error, not an override.
+    ///
+    /// Only tags an operation actually groups under are carried: a document may declare tags it
+    /// never uses, and a group nothing belongs to is not a group.
+    fn group_docs(&self, operations: &[Operation]) -> Vec<crate::graph::GroupDocsPolicy> {
+        let grouped: BTreeSet<&str> = operations
+            .iter()
+            .filter_map(|op| op.group.as_deref())
+            .collect();
+        let mut docs: Vec<crate::graph::GroupDocsPolicy> = self
+            .root
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|tag| {
+                let name = tag.get("name").and_then(Value::as_str)?;
+                if !grouped.contains(name) {
+                    return None;
+                }
+                let summary = tag.get("description").and_then(Value::as_str)?.trim();
+                if summary.is_empty() {
+                    return None;
+                }
+                Some(crate::graph::GroupDocsPolicy {
+                    name: name.to_string(),
+                    summary: summary.to_string(),
+                })
+            })
+            .collect();
+        docs.sort_by(|a, b| a.name.cmp(&b.name));
+        docs.dedup_by(|a, b| a.name == b.name);
+        docs
     }
 
     fn base_path(&self) -> String {
