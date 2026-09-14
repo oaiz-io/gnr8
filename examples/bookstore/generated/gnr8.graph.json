@@ -894,6 +894,12 @@
         "location": "header",
         "name": "X-API-Key"
       }
+    ],
+    "group_docs": [
+      {
+        "name": "books",
+        "summary": "Browse and manage the catalogue"
+      }
     ]
   }
 }

@@ -1140,12 +1140,24 @@ fn emit_group_register(
             }
         }
         Some(group) => {
-            writeln!(
-                out,
-                "    group = subparsers.add_parser({})",
-                py_string_literal(group)
-            )
-            .map_err(sink)?;
+            // A group states what it is for in exactly one place (`GroupDocsPolicy`); argparse
+            // shows it in the program's own `--help` and again at the top of the group's page.
+            let summary = group_summary(graph, &module.ops);
+            if summary.is_empty() {
+                writeln!(
+                    out,
+                    "    group = subparsers.add_parser({})",
+                    py_string_literal(group)
+                )
+                .map_err(sink)?;
+            } else {
+                writeln!(out, "    group = subparsers.add_parser(").map_err(sink)?;
+                writeln!(out, "        {},", py_string_literal(group)).map_err(sink)?;
+                writeln!(out, "        help={},", py_string_literal(summary)).map_err(sink)?;
+                writeln!(out, "        description={},", py_string_literal(summary))
+                    .map_err(sink)?;
+                writeln!(out, "    )").map_err(sink)?;
+            }
             writeln!(out, "    commands = group.add_subparsers(").map_err(sink)?;
             writeln!(out, "        dest=\"_subcommand\",").map_err(sink)?;
             writeln!(out, "        required=True,").map_err(sink)?;
@@ -1158,6 +1170,22 @@ fn emit_group_register(
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
+}
+
+/// The one line a group states about itself, or nothing.
+///
+/// `GroupDocsPolicy` is the single source, keyed by the group name exactly as the operation carries
+/// it. A group with no entry renders its name alone: a sentence derived from the name would be a
+/// second way to state the fact (CLAUDE.md rule 3).
+fn group_summary<'a>(graph: &'a ApiGraph, ops: &[&Operation]) -> &'a str {
+    let Some(name) = ops.first().and_then(|op| op.group.as_deref()) else {
+        return "";
+    };
+    graph
+        .group_docs
+        .iter()
+        .find(|doc| doc.name == name)
+        .map_or("", |doc| doc.summary.as_str())
 }
 
 fn emit_command_parser(

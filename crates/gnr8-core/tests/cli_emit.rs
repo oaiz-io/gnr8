@@ -188,6 +188,71 @@ fn op_graph(id: &str, extra: &str) -> ApiGraph {
     .expect("graph json")
 }
 
+/// Two grouped operations, optionally with prose for one group.
+fn grouped_graph(group_docs: &str) -> ApiGraph {
+    serde_json::from_str(&format!(
+        r#"{{
+          "module": "app",
+          "operations": [
+            {{
+              "id": "listBooks",
+              "method": "GET",
+              "path": "/books",
+              "handler": "listBooks",
+              "summary": "List books in one genre.",
+              "group": "books",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ {{ "status": 204, "body": null }} ],
+              "provenance": {{ "file": "main.py", "start_line": 1, "end_line": 1 }}
+            }},
+            {{
+              "id": "getBook",
+              "method": "GET",
+              "path": "/books/{{id}}",
+              "handler": "getBook",
+              "summary": "Fetch one book by its identifier.",
+              "group": "books",
+              "params": [
+                {{
+                  "name": "id",
+                  "location": "path",
+                  "required": true,
+                  "schema": {{ "type": "primitive", "of": {{ "prim": "string" }} }},
+                  "provenance": {{ "file": "main.py", "start_line": 2, "end_line": 2 }}
+                }}
+              ],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ {{ "status": 204, "body": null }} ],
+              "provenance": {{ "file": "main.py", "start_line": 2, "end_line": 2 }}
+            }},
+            {{
+              "id": "listAuthors",
+              "method": "GET",
+              "path": "/authors",
+              "handler": "listAuthors",
+              "summary": "List every author.",
+              "group": "authors",
+              "params": [],
+              "request_body": null,
+              "request_body_required": true,
+              "responses": [ {{ "status": 204, "body": null }} ],
+              "provenance": {{ "file": "main.py", "start_line": 3, "end_line": 3 }}
+            }}
+          ],
+          "schemas": [],
+          "diagnostics": [],
+          "base_path": "/",
+          "title": "API",
+          "security": [],
+          "group_docs": [{group_docs}]
+        }}"#
+    ))
+    .expect("graph json")
+}
+
 fn secured_graph(scheme: &str, kind: &str, location: &str, name: &str) -> ApiGraph {
     serde_json::from_str(&format!(
         r#"{{
@@ -2168,12 +2233,12 @@ fn a_long_description_wraps_without_quadratic_rescanning() {
 fn a_grouped_command_prints_its_group_in_the_usage_line() {
     let text = generate_go_cli(&mixed_group_graph(), "bookstore");
     assert!(
-        text.contains(r"Usage: %s books list-books [flags]\n"),
+        text.contains(r"\nUsage: %s books list-books [flags]\n"),
         "grouped command must print its group; got:\n{text}"
     );
     // An ungrouped command is reached as `bookstore ping`, so it must NOT gain a group segment.
     assert!(
-        text.contains(r"Usage: %s ping [flags]\n"),
+        text.contains(r"\nUsage: %s ping [flags]\n"),
         "ungrouped command must print the bare leaf; got:\n{text}"
     );
 }
@@ -2528,4 +2593,271 @@ fn the_reserved_group_names_differ_by_layout() {
             "{group:?} must stay available in both layouts"
         );
     }
+}
+
+// --- Help: an index, a page per group, and a name for a typo -----------------------------------
+
+#[test]
+fn go_the_root_help_states_what_each_group_is_for() {
+    if skip_go() {
+        return;
+    }
+    let graph = grouped_graph(
+        r#"{"name": "books", "summary": "Everything about books"},
+           {"name": "authors", "summary": "Everything about authors"}"#,
+    );
+
+    let text = generate_go_cli(&graph, "bookstore");
+
+    assert!(
+        text.contains("summary: \"Everything about books\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("summary: \"Everything about authors\""),
+        "{text}"
+    );
+    // Command prose is the handler's own sentence, carried into the table.
+    assert!(
+        text.contains("{name: \"list-books\", summary: \"List books in one genre.\"}"),
+        "{text}"
+    );
+    assert!(text.contains("Command groups:"), "{text}");
+    assert!(text.contains("Run `%s <group>` for its commands"), "{text}");
+}
+
+#[test]
+fn go_a_group_answers_the_questions_asked_at_its_own_level() {
+    if skip_go() {
+        return;
+    }
+    let graph = grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#);
+
+    let text = generate_go_cli(&graph, "bookstore");
+
+    // `--help`, a bare group, and an unknown command are all answered by the group's own page.
+    assert_eq!(text.matches("printGroupUsage(os.Stdout, group)").count(), 2);
+    assert_eq!(text.matches("printGroupUsage(os.Stderr, group)").count(), 4);
+    // Only `Run` still prints the root index.
+    assert_eq!(text.matches("printRootUsage(os.Stdout)").count(), 1);
+    assert!(
+        text.contains("func printGroupUsage(out *os.File, group cliGroup)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn go_an_unknown_command_names_the_nearest_one() {
+    if skip_go() {
+        return;
+    }
+    let graph = grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#);
+
+    let text = generate_go_cli(&graph, "bookstore");
+
+    assert!(
+        text.contains("func suggestCommand(input string, commands []cliCommand) string"),
+        "{text}"
+    );
+    assert!(
+        text.contains("func suggestTopLevel(input string) string"),
+        "{text}"
+    );
+    assert!(
+        text.contains("func editDistance(from, to string) int"),
+        "{text}"
+    );
+    assert!(text.contains("Did you mean `%s %s %s`?"), "{text}");
+    assert!(text.contains("Did you mean `%s %s`?"), "{text}");
+}
+
+#[test]
+fn go_a_group_without_prose_renders_its_name_alone() {
+    if skip_go() {
+        return;
+    }
+    let graph = grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#);
+
+    let text = generate_go_cli(&graph, "bookstore");
+
+    // `authors` is described nowhere, so it carries no sentence — and nothing invents one from
+    // the name (CLAUDE.md rule 3).
+    let table = text
+        .split("var cliGroups")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("group table");
+    assert!(table.contains("authors"), "{table}");
+    assert!(
+        table.contains("summary: \"\","),
+        "authors carries no invented sentence: {table}"
+    );
+    assert!(!text.contains("summary: \"Authors\""), "{text}");
+}
+
+#[test]
+fn go_a_required_flag_says_so_in_help() {
+    if skip_go() {
+        return;
+    }
+    let graph = grouped_graph("");
+
+    let text = generate_go_cli(&graph, "bookstore");
+
+    assert!(
+        text.contains("fs.String(\"id\", \"\", \"required\")"),
+        "{text}"
+    );
+}
+
+#[test]
+fn go_a_program_without_groups_emits_no_group_machinery() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(&bookstore_graph(), "bookstore");
+
+    // Every command sits at the root, so there is no group table and no group page.
+    assert!(!text.contains("cliGroups"), "{text}");
+    assert!(!text.contains("printGroupUsage"), "{text}");
+    assert!(!text.contains("func suggestCommand"), "{text}");
+    // The root index still carries each command's own prose, and a mistyped root command is
+    // still worth a suggestion — the names to compare against are right there.
+    assert!(
+        text.contains("var cliRootCommands = []cliCommand{"),
+        "{text}"
+    );
+    assert!(
+        text.contains("func suggestTopLevel(input string) string"),
+        "{text}"
+    );
+    assert!(
+        text.contains("for _, command := range cliRootCommands {"),
+        "a program with no groups suggests among its root commands: {text}"
+    );
+}
+
+#[test]
+fn python_group_help_states_what_the_group_is_for() {
+    let graph = grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#);
+
+    let text = generate_cli(&graph, "bookstore");
+
+    assert!(text.contains("help=\"Everything about books\""), "{text}");
+    assert!(
+        text.contains("description=\"Everything about books\""),
+        "{text}"
+    );
+    // A group with no prose is still registered, by name alone.
+    assert!(
+        text.contains("subparsers.add_parser(\"authors\")"),
+        "{text}"
+    );
+}
+
+/// The emitted program must compile at the language version the config asks for.
+///
+/// `GoSdk::go_version` lets a user name a version older than the one this machine runs, so a
+/// generated helper may not reach for a builtin that postdates it. `min` is Go 1.21; an edit
+/// distance is three comparisons either way.
+#[test]
+fn go_help_uses_no_builtin_newer_than_the_configured_language_version() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(
+        &grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#),
+        "bookstore",
+    );
+
+    assert!(!text.contains("min("), "{text}");
+    assert!(!text.contains("max("), "{text}");
+    assert!(text.contains("best := previous[column] + 1"), "{text}");
+}
+
+/// A mistyped first argument is answered whether the name would have been a group or a command.
+#[test]
+fn go_a_mixed_program_suggests_among_root_commands_and_groups() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(&mixed_group_graph(), "bookstore");
+
+    let body = text
+        .split("func suggestTopLevel")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("suggestTopLevel body");
+    assert!(
+        body.contains("range cliRootCommands"),
+        "an ungrouped command is a name the program answers to: {body}"
+    );
+    assert!(body.contains("range cliGroups"), "so is a group: {body}");
+}
+
+/// An empty argument resembles every name, and resembling everything is not a suggestion.
+#[test]
+fn go_an_empty_argument_suggests_nothing() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(
+        &grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#),
+        "bookstore",
+    );
+
+    let body = text
+        .split("func suggestName")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("suggestName body");
+    assert!(body.contains("if input == \"\" {"), "{body}");
+}
+
+/// The dispatch tree indexes the table it is generated beside.
+///
+/// A name lookup would need a not-found branch that no generated caller can reach, and an
+/// unreachable second path is the defect rule 3 forbids — not a safety net.
+#[test]
+fn go_a_dispatcher_indexes_the_group_table_directly() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(
+        &grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#),
+        "bookstore",
+    );
+
+    assert!(text.contains("group := cliGroups[1]"), "{text}");
+    assert!(!text.contains("cliGroupNamed"), "{text}");
+}
+
+/// A group is described by the name the operation carries, not by the name the CLI prints.
+///
+/// `GroupOperations::describe` validates against `op.group`, so the emitters have to read the same
+/// spelling. Matching a re-cased name here would accept a spelling that fails generation, and
+/// reject one that passes it.
+#[test]
+fn a_group_is_described_by_the_name_its_operations_carry() {
+    if skip_go() {
+        return;
+    }
+    let mut graph = grouped_graph("");
+    // The source states `EventType`; the CLI prints `event-type`.
+    for op in &mut graph.operations {
+        op.group = Some("EventType".to_string());
+    }
+    graph.group_docs = vec![gnr8::graph::GroupDocsPolicy {
+        name: "EventType".to_string(),
+        summary: "Event type definitions".to_string(),
+    }];
+
+    let text = generate_go_cli(&graph, "bookstore");
+
+    // gofmt aligns struct keys, so match on the value rather than the spacing.
+    assert!(text.contains("\"event-type\","), "{text}");
+    assert!(
+        text.contains("\"Event type definitions\","),
+        "the source spelling of the group is what carries its prose: {text}"
+    );
 }

@@ -171,7 +171,7 @@ pub(crate) fn emit_cli(
         {
             let mut body = String::new();
             let mut imports = ImportSet::default();
-            emit_main(&mut body, &command_files, &ops, &mut imports)?;
+            emit_main(&mut body, &command_files, graph, &mut imports)?;
             imports.prune_unused(&body, package);
             SdkFile {
                 name: internal_file(program, "cli"),
@@ -1072,14 +1072,6 @@ fn emit_handler(
     )
     .map_err(sink)?;
     writeln!(out, "fs.Usage = func() {{").map_err(sink)?;
-    if let Some(summary) = &prose.summary {
-        writeln!(
-            out,
-            "fmt.Fprintln(fs.Output(), {})",
-            quoted_string_literal(&format!("{command}: {summary}"))
-        )
-        .map_err(sink)?;
-    }
     // The group segment is part of the invocation: `bookstore books list-books`, never `bookstore
     // list-books`. Printing the leaf alone hands the reader a line that exits 2 with `unknown
     // command`, which is worse than no usage line at all.
@@ -1087,15 +1079,29 @@ fn emit_handler(
         Some(group) => format!("{group} {command}"),
         None => command.clone(),
     };
+    // One shape at every level: what this is, how to invoke it, then its flags.
+    if let Some(summary) = &prose.summary {
+        writeln!(
+            out,
+            "fmt.Fprintf(fs.Output(), {}, program)",
+            quoted_string_literal(&format!(
+                "%s {} \u{2014} {}\n",
+                invocation.replace('%', "%%"),
+                summary.replace('%', "%%")
+            ))
+        )
+        .map_err(sink)?;
+    }
     writeln!(
         out,
         "fmt.Fprintf(fs.Output(), {}, program)",
         quoted_string_literal(&format!(
-            "Usage: %s {} [flags]\n",
+            "\nUsage: %s {} [flags]\n",
             invocation.replace('%', "%%")
         ))
     )
     .map_err(sink)?;
+    writeln!(out, "fmt.Fprintln(fs.Output(), \"\\nFlags:\")").map_err(sink)?;
     writeln!(out, "fs.PrintDefaults()").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     if cli.base_url.is_some() {
@@ -1287,28 +1293,7 @@ fn emit_flag_decl(
     let ident = flag_ident(param);
     let kind = flag_kind(graph, &param.schema)?;
     match kind {
-        FlagKind::Bool => {
-            // A boolean stays tri-state whether or not the source declares a default: unset,
-            // explicitly true, explicitly false. `flag.PrintDefaults` reads `DefValue` off the
-            // registered `flag.Value`, which is empty for a nil `*bool`, so a declared default has
-            // to ride in the usage string to reach `--help` at all.
-            let usage = default_usage(param);
-            writeln!(out, "var {ident} *bool").map_err(sink)?;
-            writeln!(
-                out,
-                "fs.Var(storeBool{{dest: &{ident}, setTo: true}}, {}, {})",
-                quoted_string_literal(&flag),
-                quoted_string_literal(&usage)
-            )
-            .map_err(sink)?;
-            writeln!(
-                out,
-                "fs.Var(storeBool{{dest: &{ident}, setTo: false}}, {}, {})",
-                quoted_string_literal(&format!("no-{flag}")),
-                quoted_string_literal(&usage)
-            )
-            .map_err(sink)?;
-        }
+        FlagKind::Bool => emit_bool_flag_decl(out, param, &flag, &ident)?,
         FlagKind::Int => {
             let default = match &param.default {
                 Some(LiteralValue::Number(value)) => value.clone(),
@@ -1316,8 +1301,9 @@ fn emit_flag_decl(
             };
             writeln!(
                 out,
-                "{ident} := fs.Int64({}, {default}, \"\")",
-                quoted_string_literal(&flag)
+                "{ident} := fs.Int64({}, {default}, {})",
+                quoted_string_literal(&flag),
+                quoted_string_literal(&flag_usage(param))
             )
             .map_err(sink)?;
         }
@@ -1340,8 +1326,9 @@ fn emit_flag_decl(
             };
             writeln!(
                 out,
-                "{ident} := fs.String({}, {default}, \"\")",
-                quoted_string_literal(&flag)
+                "{ident} := fs.String({}, {default}, {})",
+                quoted_string_literal(&flag),
+                quoted_string_literal(&flag_usage(param))
             )
             .map_err(sink)?;
         }
@@ -1349,8 +1336,9 @@ fn emit_flag_decl(
             imports.add("time");
             writeln!(
                 out,
-                "{ident} := fs.String({}, \"\", \"\")",
-                quoted_string_literal(&flag)
+                "{ident} := fs.String({}, \"\", {})",
+                quoted_string_literal(&flag),
+                quoted_string_literal(&flag_usage(param))
             )
             .map_err(sink)?;
         }
@@ -1358,8 +1346,9 @@ fn emit_flag_decl(
             writeln!(out, "var {ident} stringValues").map_err(sink)?;
             writeln!(
                 out,
-                "fs.Var(&{ident}, {}, \"\")",
-                quoted_string_literal(&flag)
+                "fs.Var(&{ident}, {}, {})",
+                quoted_string_literal(&flag),
+                quoted_string_literal(&flag_usage(param))
             )
             .map_err(sink)?;
         }
@@ -1367,8 +1356,9 @@ fn emit_flag_decl(
             writeln!(out, "var {ident} intValues").map_err(sink)?;
             writeln!(
                 out,
-                "fs.Var(&{ident}, {}, \"\")",
-                quoted_string_literal(&flag)
+                "fs.Var(&{ident}, {}, {})",
+                quoted_string_literal(&flag),
+                quoted_string_literal(&flag_usage(param))
             )
             .map_err(sink)?;
         }
@@ -1376,8 +1366,9 @@ fn emit_flag_decl(
             writeln!(out, "var {ident} floatValues").map_err(sink)?;
             writeln!(
                 out,
-                "fs.Var(&{ident}, {}, \"\")",
-                quoted_string_literal(&flag)
+                "fs.Var(&{ident}, {}, {})",
+                quoted_string_literal(&flag),
+                quoted_string_literal(&flag_usage(param))
             )
             .map_err(sink)?;
         }
@@ -1726,7 +1717,7 @@ fn emit_body_local(
 fn emit_main(
     out: &mut String,
     command_files: &[CommandFile<'_>],
-    ops: &[&Operation],
+    graph: &ApiGraph,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
     imports.add("fmt");
@@ -1746,46 +1737,18 @@ fn emit_main(
         })
         .collect();
 
-    writeln!(out, "func printRootUsage(out *os.File) {{").map_err(sink)?;
-    writeln!(out, "fmt.Fprintln(out, description)").map_err(sink)?;
-    writeln!(
-        out,
-        "fmt.Fprintf(out, \"\\nUsage: %s <command> [flags]\\n\", program)"
-    )
-    .map_err(sink)?;
-    if !ops.is_empty() {
-        writeln!(out, "fmt.Fprintln(out, \"\\nCommands:\")").map_err(sink)?;
-        for op in &ungrouped {
-            writeln!(
-                out,
-                "fmt.Fprintln(out, {})",
-                quoted_string_literal(&format!("  {}", command_name(op)))
-            )
-            .map_err(sink)?;
-        }
-        for (group, ops) in &grouped {
-            writeln!(
-                out,
-                "fmt.Fprintln(out, {})",
-                quoted_string_literal(&format!("  {group}"))
-            )
-            .map_err(sink)?;
-            for op in ops {
-                writeln!(
-                    out,
-                    "fmt.Fprintln(out, {})",
-                    quoted_string_literal(&format!("    {}", command_name(op)))
-                )
-                .map_err(sink)?;
-            }
-        }
+    emit_help_tables(out, &ungrouped, &grouped, graph)?;
+    emit_help_printers(out, &ungrouped, &grouped)?;
+    let has_root = !ungrouped.is_empty();
+    let has_groups = !grouped.is_empty();
+    if has_root || has_groups {
+        imports.add("strings");
+        emit_suggestions(out, has_root, has_groups)?;
     }
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
 
     // `handleErr` lives in errors.go now; only the dispatch tree belongs beside Run.
-    for (group, ops) in &grouped {
-        emit_group_dispatch(out, group, ops)?;
+    for (index, (group, ops)) in grouped.iter().enumerate() {
+        emit_group_dispatch(out, group, index, ops)?;
     }
 
     writeln!(
@@ -1819,32 +1782,411 @@ fn emit_main(
         "fmt.Fprintf(os.Stderr, \"%s: unknown command %q\\n\", program, args[0])"
     )
     .map_err(sink)?;
+    if has_root || has_groups {
+        writeln!(out, "if hint := suggestTopLevel(args[0]); hint != \"\" {{").map_err(sink)?;
+        writeln!(
+            out,
+            "fmt.Fprintf(os.Stderr, \"\\nDid you mean `%s %s`?\\n\", program, hint)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "fmt.Fprintln(os.Stderr)").map_err(sink)?;
+    }
     writeln!(out, "printRootUsage(os.Stderr)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     Ok(())
 }
 
-fn emit_group_dispatch(out: &mut String, group: &str, ops: &[&Operation]) -> Result<(), CoreError> {
+/// The help text as Go data, not as a sequence of print calls.
+///
+/// The emitter knows the command tree and every command's prose; keeping that as a table means one
+/// renderer prints the root index, another prints a group, and a typo suggestion reads the same
+/// names the help just listed. Flattening it into `Fprintln` calls would leave each of those to
+/// re-derive the tree.
+fn emit_help_tables(
+    out: &mut String,
+    ungrouped: &[&Operation],
+    grouped: &BTreeMap<String, Vec<&Operation>>,
+    graph: &ApiGraph,
+) -> Result<(), CoreError> {
+    writeln!(out, "// One command and the prose its handler states.").map_err(sink)?;
+    writeln!(out, "type cliCommand struct {{").map_err(sink)?;
+    writeln!(out, "name string").map_err(sink)?;
+    writeln!(out, "summary string").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+
+    if !grouped.is_empty() {
+        writeln!(out, "// One command group and the commands under it.").map_err(sink)?;
+        writeln!(out, "type cliGroup struct {{").map_err(sink)?;
+        writeln!(out, "name string").map_err(sink)?;
+        writeln!(out, "summary string").map_err(sink)?;
+        writeln!(out, "commands []cliCommand").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+    }
+
+    if !ungrouped.is_empty() {
+        writeln!(out, "var cliRootCommands = []cliCommand{{").map_err(sink)?;
+        for op in ungrouped {
+            emit_command_entry(out, op)?;
+        }
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+    }
+
+    if !grouped.is_empty() {
+        writeln!(out, "var cliGroups = []cliGroup{{").map_err(sink)?;
+        for (group, ops) in grouped {
+            writeln!(out, "{{").map_err(sink)?;
+            writeln!(out, "name: {},", quoted_string_literal(group)).map_err(sink)?;
+            writeln!(
+                out,
+                "summary: {},",
+                quoted_string_literal(group_summary(graph, ops))
+            )
+            .map_err(sink)?;
+            writeln!(out, "commands: []cliCommand{{").map_err(sink)?;
+            for op in ops {
+                emit_command_entry(out, op)?;
+            }
+            writeln!(out, "}},").map_err(sink)?;
+            writeln!(out, "}},").map_err(sink)?;
+        }
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+    }
+    Ok(())
+}
+
+fn emit_command_entry(out: &mut String, op: &Operation) -> Result<(), CoreError> {
+    let prose = operation_prose(op, &[], "");
+    writeln!(
+        out,
+        "{{name: {}, summary: {}}},",
+        quoted_string_literal(&command_name(op)),
+        quoted_string_literal(prose.summary.as_deref().unwrap_or_default())
+    )
+    .map_err(sink)?;
+    Ok(())
+}
+
+/// The one line a group states about itself, or nothing.
+///
+/// `GroupDocsPolicy` is the single source, keyed by the group name exactly as the operation carries
+/// it — the same spelling `GroupOperations::describe` validates against, so one spelling is right
+/// everywhere rather than one at generation time and another at render time. A group with no entry
+/// renders its name alone: a sentence derived from the name would be a second way to state the fact
+/// (CLAUDE.md rule 3).
+fn group_summary<'a>(graph: &'a ApiGraph, ops: &[&Operation]) -> &'a str {
+    let Some(name) = ops.first().and_then(|op| op.group.as_deref()) else {
+        return "";
+    };
+    graph
+        .group_docs
+        .iter()
+        .find(|doc| doc.name == name)
+        .map_or("", |doc| doc.summary.as_str())
+}
+
+fn emit_help_printers(
+    out: &mut String,
+    ungrouped: &[&Operation],
+    grouped: &BTreeMap<String, Vec<&Operation>>,
+) -> Result<(), CoreError> {
+    emit_entry_printer(out, ungrouped, grouped)?;
+    emit_root_usage(out, ungrouped, grouped)?;
+    emit_group_usage(out, grouped)
+}
+
+/// The one aligned name/summary column both pages print.
+fn emit_entry_printer(
+    out: &mut String,
+    ungrouped: &[&Operation],
+    grouped: &BTreeMap<String, Vec<&Operation>>,
+) -> Result<(), CoreError> {
+    if !ungrouped.is_empty() || !grouped.is_empty() {
+        writeln!(
+            out,
+            "// columnWidth is the width of the widest name in one help column."
+        )
+        .map_err(sink)?;
+        writeln!(out, "func columnWidth(names []string) int {{").map_err(sink)?;
+        writeln!(out, "width := 0").map_err(sink)?;
+        writeln!(out, "for _, name := range names {{").map_err(sink)?;
+        writeln!(out, "if len(name) > width {{").map_err(sink)?;
+        writeln!(out, "width = len(name)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "return width").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+
+        writeln!(
+            out,
+            "// printEntries prints one aligned name/summary column, omitting the column for an"
+        )
+        .map_err(sink)?;
+        writeln!(out, "// entry whose source states no prose.").map_err(sink)?;
+        writeln!(
+            out,
+            "func printEntries(out *os.File, indent string, entries []cliCommand) {{"
+        )
+        .map_err(sink)?;
+        writeln!(out, "names := make([]string, 0, len(entries))").map_err(sink)?;
+        writeln!(out, "for _, entry := range entries {{").map_err(sink)?;
+        writeln!(out, "names = append(names, entry.name)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "width := columnWidth(names)").map_err(sink)?;
+        writeln!(out, "for _, entry := range entries {{").map_err(sink)?;
+        writeln!(out, "if entry.summary == \"\" {{").map_err(sink)?;
+        writeln!(out, "fmt.Fprintf(out, \"%s%s\\n\", indent, entry.name)").map_err(sink)?;
+        writeln!(out, "continue").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(
+            out,
+            "fmt.Fprintf(out, \"%s%-*s  %s\\n\", indent, width, entry.name, entry.summary)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+    }
+    Ok(())
+}
+
+/// The program index: root commands, then groups, each with the sentence that describes it.
+///
+/// Not the whole tree. A group states its own commands on its own page, so the index stays the
+/// answer to "what is this program for" no matter how many operations it wraps.
+fn emit_root_usage(
+    out: &mut String,
+    ungrouped: &[&Operation],
+    grouped: &BTreeMap<String, Vec<&Operation>>,
+) -> Result<(), CoreError> {
+    writeln!(out, "func printRootUsage(out *os.File) {{").map_err(sink)?;
+    writeln!(out, "fmt.Fprintln(out, description)").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(out, \"\\nUsage: %s <command> [flags]\\n\", program)"
+    )
+    .map_err(sink)?;
+    if !ungrouped.is_empty() {
+        writeln!(out, "fmt.Fprintln(out, \"\\nCommands:\")").map_err(sink)?;
+        writeln!(out, "printEntries(out, \"  \", cliRootCommands)").map_err(sink)?;
+    }
+    if !grouped.is_empty() {
+        writeln!(out, "fmt.Fprintln(out, \"\\nCommand groups:\")").map_err(sink)?;
+        writeln!(out, "groups := make([]cliCommand, 0, len(cliGroups))").map_err(sink)?;
+        writeln!(out, "for _, group := range cliGroups {{").map_err(sink)?;
+        writeln!(
+            out,
+            "groups = append(groups, cliCommand{{name: group.name, summary: group.summary}})"
+        )
+        .map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "printEntries(out, \"  \", groups)").map_err(sink)?;
+        writeln!(
+            out,
+            "fmt.Fprintf(out, \"\\nRun `%s <group>` for its commands, `%s <group> <command> --help` for its flags.\\n\", program, program)"
+        )
+        .map_err(sink)?;
+    }
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
+/// One group's page.
+fn emit_group_usage(
+    out: &mut String,
+    grouped: &BTreeMap<String, Vec<&Operation>>,
+) -> Result<(), CoreError> {
+    if !grouped.is_empty() {
+        writeln!(out, "func printGroupUsage(out *os.File, group cliGroup) {{").map_err(sink)?;
+        writeln!(out, "if group.summary == \"\" {{").map_err(sink)?;
+        writeln!(out, "fmt.Fprintf(out, \"%s %s\\n\", program, group.name)").map_err(sink)?;
+        writeln!(out, "}} else {{").map_err(sink)?;
+        writeln!(
+            out,
+            "fmt.Fprintf(out, \"%s %s \u{2014} %s\\n\", program, group.name, group.summary)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(
+            out,
+            "fmt.Fprintf(out, \"\\nUsage: %s %s <command> [flags]\\n\", program, group.name)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "fmt.Fprintln(out, \"\\nCommands:\")").map_err(sink)?;
+        writeln!(out, "printEntries(out, \"  \", group.commands)").map_err(sink)?;
+        writeln!(
+            out,
+            "fmt.Fprintf(out, \"\\nRun `%s %s <command> --help` for its flags.\\n\", program, group.name)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+
+        writeln!(out).map_err(sink)?;
+    }
+    Ok(())
+}
+
+/// A mistyped name is a typo far more often than an unknown intent, and the program already holds
+/// every name it would compare against.
+fn emit_suggestions(out: &mut String, has_root: bool, has_groups: bool) -> Result<(), CoreError> {
+    if has_groups {
+        writeln!(
+            out,
+            "// suggestCommand names the command in this group closest to a mistyped one,"
+        )
+        .map_err(sink)?;
+        writeln!(out, "// or \"\" when nothing is close enough to print.").map_err(sink)?;
+        writeln!(
+            out,
+            "func suggestCommand(input string, commands []cliCommand) string {{"
+        )
+        .map_err(sink)?;
+        writeln!(out, "names := make([]string, 0, len(commands))").map_err(sink)?;
+        writeln!(out, "for _, command := range commands {{").map_err(sink)?;
+        writeln!(out, "names = append(names, command.name)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "return suggestName(input, names)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+    }
+
+    writeln!(
+        out,
+        "// suggestTopLevel names the root command or group closest to a mistyped first argument."
+    )
+    .map_err(sink)?;
+    writeln!(out, "func suggestTopLevel(input string) string {{").map_err(sink)?;
+    writeln!(out, "var names []string").map_err(sink)?;
+    if has_root {
+        writeln!(out, "for _, command := range cliRootCommands {{").map_err(sink)?;
+        writeln!(out, "names = append(names, command.name)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
+    if has_groups {
+        writeln!(out, "for _, group := range cliGroups {{").map_err(sink)?;
+        writeln!(out, "names = append(names, group.name)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
+    writeln!(out, "return suggestName(input, names)").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+
+    writeln!(
+        out,
+        "func suggestName(input string, names []string) string {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "if input == \"\" {{").map_err(sink)?;
+    writeln!(out, "return \"\"").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "best := \"\"").map_err(sink)?;
+    writeln!(out, "bestDistance := 3").map_err(sink)?;
+    writeln!(out, "for _, name := range names {{").map_err(sink)?;
+    writeln!(out, "if strings.HasPrefix(name, input) {{").map_err(sink)?;
+    writeln!(out, "return name").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if distance := editDistance(input, name); distance < bestDistance {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "best, bestDistance = name, distance").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return best").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+
+    emit_edit_distance(out)
+}
+
+/// Levenshtein distance over two command names.
+fn emit_edit_distance(out: &mut String) -> Result<(), CoreError> {
+    writeln!(
+        out,
+        "// editDistance is the Levenshtein distance between two command names."
+    )
+    .map_err(sink)?;
+    writeln!(out, "func editDistance(from, to string) int {{").map_err(sink)?;
+    writeln!(out, "previous := make([]int, len(to)+1)").map_err(sink)?;
+    writeln!(out, "current := make([]int, len(to)+1)").map_err(sink)?;
+    writeln!(out, "for column := range previous {{").map_err(sink)?;
+    writeln!(out, "previous[column] = column").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "for row := 1; row <= len(from); row++ {{").map_err(sink)?;
+    writeln!(out, "current[0] = row").map_err(sink)?;
+    writeln!(out, "for column := 1; column <= len(to); column++ {{").map_err(sink)?;
+    writeln!(out, "cost := 1").map_err(sink)?;
+    writeln!(out, "if from[row-1] == to[column-1] {{").map_err(sink)?;
+    writeln!(out, "cost = 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    // Not `min`: that builtin is Go 1.21, and `GoSdk::go_version` lets a user ask for older.
+    writeln!(out, "best := previous[column] + 1").map_err(sink)?;
+    writeln!(
+        out,
+        "if insertion := current[column-1] + 1; insertion < best {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "best = insertion").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if substitution := previous[column-1] + cost; substitution < best {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "best = substitution").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "current[column] = best").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "copy(previous, current)").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return previous[len(to)]").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
+/// One group's dispatcher.
+///
+/// Every question asked at this level is answered at this level: `--help` and a bare group print
+/// this group's commands, and an unknown command names the nearest one before printing them. The
+/// root index answers a different question and is not the answer to any of these.
+fn emit_group_dispatch(
+    out: &mut String,
+    group: &str,
+    index: usize,
+    ops: &[&Operation],
+) -> Result<(), CoreError> {
     writeln!(
         out,
         "func dispatch{}(args []string) int {{",
         exported(group)
     )
     .map_err(sink)?;
+    writeln!(out, "group := cliGroups[{index}]").map_err(sink)?;
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"%s: missing command under %s\\n\", program, {})",
-        quoted_string_literal(group)
+        "fmt.Fprintf(os.Stderr, \"%s: missing command under %s\\n\", program, group.name)"
     )
     .map_err(sink)?;
+    writeln!(out, "fmt.Fprintln(os.Stderr)").map_err(sink)?;
+    writeln!(out, "printGroupUsage(os.Stderr, group)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "switch args[0] {{").map_err(sink)?;
     writeln!(out, "case \"-h\", \"-help\", \"--help\":").map_err(sink)?;
-    writeln!(out, "printRootUsage(os.Stdout)").map_err(sink)?;
+    writeln!(out, "printGroupUsage(os.Stdout, group)").map_err(sink)?;
     writeln!(out, "return 0").map_err(sink)?;
     for op in ops {
         writeln!(out, "case {}:", quoted_string_literal(&command_name(op))).map_err(sink)?;
@@ -1853,9 +2195,22 @@ fn emit_group_dispatch(out: &mut String, group: &str, ops: &[&Operation]) -> Res
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"%s: unknown command %q\\n\", program, args[0])"
+        "fmt.Fprintf(os.Stderr, \"%s: unknown command %q under %s\\n\", program, args[0], group.name)"
     )
     .map_err(sink)?;
+    writeln!(
+        out,
+        "if hint := suggestCommand(args[0], group.commands); hint != \"\" {{"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"\\nDid you mean `%s %s %s`?\\n\", program, group.name, hint)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "fmt.Fprintln(os.Stderr)").map_err(sink)?;
+    writeln!(out, "printGroupUsage(os.Stderr, group)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
@@ -1969,6 +2324,54 @@ fn operation_scheme_ids(graph: &ApiGraph, op: &Operation) -> Result<Vec<String>,
 ///
 /// Every other kind reaches `--help` through `flag`'s own `DefValue` rendering, which prints
 /// `(default 10)` and omits a zero value. A `flag.Value` has no such default to print.
+/// The two flags one boolean parameter binds.
+///
+/// A boolean stays tri-state whether or not the source declares a default: unset, explicitly true,
+/// explicitly false. `flag.PrintDefaults` reads `DefValue` off the registered `flag.Value`, which is
+/// empty for a nil `*bool`, so a declared default has to ride in the usage string to reach `--help`
+/// at all.
+fn emit_bool_flag_decl(
+    out: &mut String,
+    param: &Param,
+    flag: &str,
+    ident: &str,
+) -> Result<(), CoreError> {
+    let usage = flag_usage(param);
+    writeln!(out, "var {ident} *bool").map_err(sink)?;
+    writeln!(
+        out,
+        "fs.Var(storeBool{{dest: &{ident}, setTo: true}}, {}, {})",
+        quoted_string_literal(flag),
+        quoted_string_literal(&usage)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "fs.Var(storeBool{{dest: &{ident}, setTo: false}}, {}, {})",
+        quoted_string_literal(&format!("no-{flag}")),
+        quoted_string_literal(&usage)
+    )
+    .map_err(sink)?;
+    Ok(())
+}
+
+/// The usage string for one parameter flag.
+///
+/// `flag.PrintDefaults` renders the registered default itself, so the only fact the usage string
+/// has to carry is whether omitting the flag is an error. The command already refuses to run
+/// without a required flag; saying so in `--help` puts that where the reader is looking instead of
+/// one failed invocation later. A source default still rides along for a `flag.Value`, which has no
+/// default for `PrintDefaults` to read.
+fn flag_usage(param: &Param) -> String {
+    let default = default_usage(param);
+    match (param.required, default.is_empty()) {
+        (false, true) => String::new(),
+        (false, false) => default,
+        (true, true) => "required".to_string(),
+        (true, false) => format!("required {default}"),
+    }
+}
+
 fn default_usage(param: &Param) -> String {
     match &param.default {
         Some(LiteralValue::Bool(true)) => "(default true)".to_string(),

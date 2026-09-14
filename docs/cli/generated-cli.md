@@ -179,6 +179,7 @@ there.
 | top-level description | graph title, plus `openapi_metadata.description` when present |
 | `--version` | `openapi_metadata.version`, else `0.1.0` — the same default `info.version` takes |
 | group subparser | `op.group`, kebab-cased, only when `Some` |
+| group prose | `group_docs`, from `GroupOperations::describe` or an imported `tags[].description` |
 | command subparser | kebab-case of `op.id` |
 | `--help` / `description=` | the handler's own doc-comment synopsis and remainder |
 | `--flag` per parameter | kebab-case of the wire name; all four locations |
@@ -191,6 +192,58 @@ there.
 | `--base-url` | `SdkCli::base_url`, and nothing else |
 
 Ungrouped operations sit at the program root. There is no `"default"` group level.
+
+## Help
+
+Help is one page per question, and every page states prose the source already carries.
+
+`--help` on the program is an index: each root command and each group on one line, with the
+sentence that describes it. It does not list every command of every group — that is the group's
+page, one level down.
+
+```text
+bookstore <command> [flags]
+
+Command groups:
+  authors  Everything about authors
+  books    Everything about books
+
+Run `bookstore <group>` for its commands, `bookstore <group> <command> --help` for its flags.
+```
+
+`--help` on a group, and a bare group, print that group's commands. A group answers the questions
+asked at its own level; the root index is the answer to a different question.
+
+```text
+bookstore books — Everything about books
+
+Usage: bookstore books <command> [flags]
+
+Commands:
+  get-book    Fetch one book by its identifier.
+  list-books  List books in one genre.
+```
+
+An unrecognized name prints the closest one it could have meant, then the page the reader wanted:
+
+```text
+bookstore: unknown command "lst" under books
+
+Did you mean `bookstore books list-books`?
+```
+
+A group's sentence comes from `GroupOperations::describe`, or from the `tags[].description` of an
+imported document. A group described in neither renders its name alone: nothing derives a sentence
+from the name, because a derived sentence would be a second way to state the same fact (rule 3).
+
+```rust
+GroupOperations::new()
+    .by_path_prefix("/books", "books")
+    .describe("books", "Everything about books")
+```
+
+Python gets the same facts through `argparse`: the group subparser carries `help=` and
+`description=`, so `--help` at either level renders them without a second code path.
 
 Booleans are two flags sharing one dest: `--verified` and `--no-verified`. A boolean has three
 states — unset, explicitly true, explicitly false — and is sent only when one of the two flags was
@@ -225,7 +278,17 @@ emitter because output is unconditionally JSON. A parameter named `json`, `limit
 
 ## Flag defaults in `--help`
 
-Per-flag prose is not emitted. The one thing a flag's `--help` does carry is a source default:
+Per-flag prose is not emitted: a parameter's own description is not a fact the graph carries. What a
+flag's `--help` does carry is whether omitting it is an error, and a source default.
+
+A required flag says `required`. The command already refuses to run without it; saying so in
+`--help` puts that where the reader is looking instead of one failed invocation later. Python states
+the same fact through `argparse`'s own `required=True`.
+
+```text
+  -id string
+    	required
+```
 
 | | Where the default appears | Why |
 |---|---|---|

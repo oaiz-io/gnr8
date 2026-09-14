@@ -1807,6 +1807,7 @@ impl RenameType {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GroupOperations {
     pub rules: Vec<GroupRule>,
+    pub docs: Vec<crate::graph::GroupDocsPolicy>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1860,6 +1861,24 @@ impl GroupOperations {
         self.rules.push(GroupRule::Operation {
             id: id.into(),
             group: group.into(),
+        });
+        self
+    }
+
+    /// State in one line what a group is for.
+    ///
+    /// Grouping decides which operations sit together; this states what sitting together means.
+    /// Targets that render a group — the generated CLI's resource index and its per-resource page —
+    /// print this beside the name. A group with no `describe` prints its name alone.
+    ///
+    /// `group` must name a group that exists once every rule has run, whether this transform
+    /// assigned it or the source did. Describing a group that no operation belongs to is a typo,
+    /// and describing one twice is two sources for one fact; both fail generation (CLAUDE.md rule 3).
+    #[must_use]
+    pub fn describe(mut self, group: impl Into<String>, summary: impl Into<String>) -> Self {
+        self.docs.push(crate::graph::GroupDocsPolicy {
+            name: group.into(),
+            summary: summary.into(),
         });
         self
     }

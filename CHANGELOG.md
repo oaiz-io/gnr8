@@ -9,6 +9,33 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **The public graph carries group documentation, and `GroupOperations` carries the entries that
+  set it.** `ApiGraph` gains `group_docs` and `GroupOperations` gains `docs`. Older serialized
+  graphs remain readable because the new field defaults to empty, but Rust code that constructs
+  either struct with a literal and no `..Default::default()`, or matches one exhaustively, must
+  account for them.
+
+### Added
+
+- **A generated CLI's help is now an index, a page per group, and a named suggestion for a typo.**
+  Each command in `--help` carries the prose its own handler states, groups carry the one line
+  `GroupOperations::describe` gives them, and a group answers `--help`, a bare invocation, and an
+  unknown command with its own commands instead of the whole program's. An unrecognized name prints
+  the closest one it could have meant. A required flag now says `required` in `--help` rather than
+  only at the moment a command refuses to run.
+- **`GroupOperations::describe(group, summary)` states in one line what a group is for.** Grouping
+  already decides which operations sit together; this states what sitting together means, for the
+  generated CLI's index and its per-group page. The prose lands on the graph as `group_docs`, so it
+  is one fact both CLI emitters read. Describing a group no operation belongs to, or describing one
+  twice, fails generation instead of printing nothing or silently picking a winner.
+- **An imported document's `tags[].description` becomes that group's prose.** An imported
+  operation's group is its first tag, so the tag object that names the group is where the document
+  already says what it is for. Config and the spec remain one source between them: a `describe` that
+  targets a group the spec already described is a hard error, never an override.
+
+
 ## 0.16.0 — 2026-09-13
 
 ### Breaking
