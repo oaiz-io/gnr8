@@ -1739,14 +1739,16 @@ fn emit_main(
 
     emit_help_tables(out, &ungrouped, &grouped, graph)?;
     emit_help_printers(out, &ungrouped, &grouped)?;
-    if !grouped.is_empty() {
+    let has_root = !ungrouped.is_empty();
+    let has_groups = !grouped.is_empty();
+    if has_root || has_groups {
         imports.add("strings");
-        emit_suggestions(out)?;
+        emit_suggestions(out, has_root, has_groups)?;
     }
 
     // `handleErr` lives in errors.go now; only the dispatch tree belongs beside Run.
-    for (group, ops) in &grouped {
-        emit_group_dispatch(out, group, ops)?;
+    for (index, (group, ops)) in grouped.iter().enumerate() {
+        emit_group_dispatch(out, group, index, ops)?;
     }
 
     writeln!(
@@ -1780,7 +1782,7 @@ fn emit_main(
         "fmt.Fprintf(os.Stderr, \"%s: unknown command %q\\n\", program, args[0])"
     )
     .map_err(sink)?;
-    if !grouped.is_empty() {
+    if has_root || has_groups {
         writeln!(out, "if hint := suggestTopLevel(args[0]); hint != \"\" {{").map_err(sink)?;
         writeln!(
             out,
@@ -2024,24 +2026,6 @@ fn emit_group_usage(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
 
-        writeln!(
-            out,
-            "// cliGroupNamed returns the table entry for a group the dispatch tree names. Every"
-        )
-        .map_err(sink)?;
-        writeln!(
-            out,
-            "// caller is generated beside the table, so the name is always present."
-        )
-        .map_err(sink)?;
-        writeln!(out, "func cliGroupNamed(name string) cliGroup {{").map_err(sink)?;
-        writeln!(out, "for _, group := range cliGroups {{").map_err(sink)?;
-        writeln!(out, "if group.name == name {{").map_err(sink)?;
-        writeln!(out, "return group").map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
-        writeln!(out, "return cliGroup{{name: name}}").map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
     }
     Ok(())
@@ -2049,36 +2033,45 @@ fn emit_group_usage(
 
 /// A mistyped name is a typo far more often than an unknown intent, and the program already holds
 /// every name it would compare against.
-fn emit_suggestions(out: &mut String) -> Result<(), CoreError> {
-    writeln!(
-        out,
-        "// suggestCommand names the command in this group closest to a mistyped one,"
-    )
-    .map_err(sink)?;
-    writeln!(out, "// or \"\" when nothing is close enough to print.").map_err(sink)?;
-    writeln!(
-        out,
-        "func suggestCommand(input string, commands []cliCommand) string {{"
-    )
-    .map_err(sink)?;
-    writeln!(out, "names := make([]string, 0, len(commands))").map_err(sink)?;
-    writeln!(out, "for _, command := range commands {{").map_err(sink)?;
-    writeln!(out, "names = append(names, command.name)").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "return suggestName(input, names)").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
+fn emit_suggestions(out: &mut String, has_root: bool, has_groups: bool) -> Result<(), CoreError> {
+    if has_groups {
+        writeln!(
+            out,
+            "// suggestCommand names the command in this group closest to a mistyped one,"
+        )
+        .map_err(sink)?;
+        writeln!(out, "// or \"\" when nothing is close enough to print.").map_err(sink)?;
+        writeln!(
+            out,
+            "func suggestCommand(input string, commands []cliCommand) string {{"
+        )
+        .map_err(sink)?;
+        writeln!(out, "names := make([]string, 0, len(commands))").map_err(sink)?;
+        writeln!(out, "for _, command := range commands {{").map_err(sink)?;
+        writeln!(out, "names = append(names, command.name)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "return suggestName(input, names)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+    }
 
     writeln!(
         out,
-        "// suggestTopLevel names the group closest to a mistyped first argument."
+        "// suggestTopLevel names the root command or group closest to a mistyped first argument."
     )
     .map_err(sink)?;
     writeln!(out, "func suggestTopLevel(input string) string {{").map_err(sink)?;
-    writeln!(out, "names := make([]string, 0, len(cliGroups))").map_err(sink)?;
-    writeln!(out, "for _, group := range cliGroups {{").map_err(sink)?;
-    writeln!(out, "names = append(names, group.name)").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "var names []string").map_err(sink)?;
+    if has_root {
+        writeln!(out, "for _, command := range cliRootCommands {{").map_err(sink)?;
+        writeln!(out, "names = append(names, command.name)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
+    if has_groups {
+        writeln!(out, "for _, group := range cliGroups {{").map_err(sink)?;
+        writeln!(out, "names = append(names, group.name)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
     writeln!(out, "return suggestName(input, names)").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -2088,6 +2081,9 @@ fn emit_suggestions(out: &mut String) -> Result<(), CoreError> {
         "func suggestName(input string, names []string) string {{"
     )
     .map_err(sink)?;
+    writeln!(out, "if input == \"\" {{").map_err(sink)?;
+    writeln!(out, "return \"\"").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "best := \"\"").map_err(sink)?;
     writeln!(out, "bestDistance := 3").map_err(sink)?;
     writeln!(out, "for _, name := range names {{").map_err(sink)?;
@@ -2106,6 +2102,11 @@ fn emit_suggestions(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
 
+    emit_edit_distance(out)
+}
+
+/// Levenshtein distance over two command names.
+fn emit_edit_distance(out: &mut String) -> Result<(), CoreError> {
     writeln!(
         out,
         "// editDistance is the Levenshtein distance between two command names."
@@ -2124,11 +2125,23 @@ fn emit_suggestions(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "if from[row-1] == to[column-1] {{").map_err(sink)?;
     writeln!(out, "cost = 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
+    // Not `min`: that builtin is Go 1.21, and `GoSdk::go_version` lets a user ask for older.
+    writeln!(out, "best := previous[column] + 1").map_err(sink)?;
     writeln!(
         out,
-        "current[column] = min(previous[column]+1, min(current[column-1]+1, previous[column-1]+cost))"
+        "if insertion := current[column-1] + 1; insertion < best {{"
     )
     .map_err(sink)?;
+    writeln!(out, "best = insertion").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if substitution := previous[column-1] + cost; substitution < best {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "best = substitution").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "current[column] = best").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "copy(previous, current)").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
@@ -2143,19 +2156,19 @@ fn emit_suggestions(out: &mut String) -> Result<(), CoreError> {
 /// Every question asked at this level is answered at this level: `--help` and a bare group print
 /// this group's commands, and an unknown command names the nearest one before printing them. The
 /// root index answers a different question and is not the answer to any of these.
-fn emit_group_dispatch(out: &mut String, group: &str, ops: &[&Operation]) -> Result<(), CoreError> {
+fn emit_group_dispatch(
+    out: &mut String,
+    group: &str,
+    index: usize,
+    ops: &[&Operation],
+) -> Result<(), CoreError> {
     writeln!(
         out,
         "func dispatch{}(args []string) int {{",
         exported(group)
     )
     .map_err(sink)?;
-    writeln!(
-        out,
-        "group := cliGroupNamed({})",
-        quoted_string_literal(group)
-    )
-    .map_err(sink)?;
+    writeln!(out, "group := cliGroups[{index}]").map_err(sink)?;
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(
         out,

@@ -87,17 +87,6 @@ func printGroupUsage(out *os.File, group cliGroup) {
 	fmt.Fprintf(out, "\nRun `%s %s <command> --help` for its flags.\n", program, group.name)
 }
 
-// cliGroupNamed returns the table entry for a group the dispatch tree names. Every
-// caller is generated beside the table, so the name is always present.
-func cliGroupNamed(name string) cliGroup {
-	for _, group := range cliGroups {
-		if group.name == name {
-			return group
-		}
-	}
-	return cliGroup{name: name}
-}
-
 // suggestCommand names the command in this group closest to a mistyped one,
 // or "" when nothing is close enough to print.
 func suggestCommand(input string, commands []cliCommand) string {
@@ -108,9 +97,9 @@ func suggestCommand(input string, commands []cliCommand) string {
 	return suggestName(input, names)
 }
 
-// suggestTopLevel names the group closest to a mistyped first argument.
+// suggestTopLevel names the root command or group closest to a mistyped first argument.
 func suggestTopLevel(input string) string {
-	names := make([]string, 0, len(cliGroups))
+	var names []string
 	for _, group := range cliGroups {
 		names = append(names, group.name)
 	}
@@ -118,6 +107,9 @@ func suggestTopLevel(input string) string {
 }
 
 func suggestName(input string, names []string) string {
+	if input == "" {
+		return ""
+	}
 	best := ""
 	bestDistance := 3
 	for _, name := range names {
@@ -145,7 +137,14 @@ func editDistance(from, to string) int {
 			if from[row-1] == to[column-1] {
 				cost = 0
 			}
-			current[column] = min(previous[column]+1, min(current[column-1]+1, previous[column-1]+cost))
+			best := previous[column] + 1
+			if insertion := current[column-1] + 1; insertion < best {
+				best = insertion
+			}
+			if substitution := previous[column-1] + cost; substitution < best {
+				best = substitution
+			}
+			current[column] = best
 		}
 		copy(previous, current)
 	}
@@ -153,7 +152,7 @@ func editDistance(from, to string) int {
 }
 
 func dispatchBooks(args []string) int {
-	group := cliGroupNamed("books")
+	group := cliGroups[0]
 	if len(args) == 0 {
 		fmt.Fprintf(os.Stderr, "%s: missing command under %s\n", program, group.name)
 		fmt.Fprintln(os.Stderr)

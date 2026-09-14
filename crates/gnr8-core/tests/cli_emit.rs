@@ -2717,16 +2717,23 @@ fn go_a_program_without_groups_emits_no_group_machinery() {
     }
     let text = generate_go_cli(&bookstore_graph(), "bookstore");
 
-    // Every command sits at the root, so there is no group table, no group page, and no reason
-    // to import strings for a suggestion between groups that do not exist.
+    // Every command sits at the root, so there is no group table and no group page.
     assert!(!text.contains("cliGroups"), "{text}");
     assert!(!text.contains("printGroupUsage"), "{text}");
-    assert!(!text.contains("suggestTopLevel"), "{text}");
-    assert!(!text.contains("\"strings\""), "{text}");
-    // The root index still carries each command's own prose.
+    assert!(!text.contains("func suggestCommand"), "{text}");
+    // The root index still carries each command's own prose, and a mistyped root command is
+    // still worth a suggestion — the names to compare against are right there.
     assert!(
         text.contains("var cliRootCommands = []cliCommand{"),
         "{text}"
+    );
+    assert!(
+        text.contains("func suggestTopLevel(input string) string"),
+        "{text}"
+    );
+    assert!(
+        text.contains("for _, command := range cliRootCommands {"),
+        "a program with no groups suggests among its root commands: {text}"
     );
 }
 
@@ -2746,4 +2753,81 @@ fn python_group_help_states_what_the_group_is_for() {
         text.contains("subparsers.add_parser(\"authors\")"),
         "{text}"
     );
+}
+
+/// The emitted program must compile at the language version the config asks for.
+///
+/// `GoSdk::go_version` lets a user name a version older than the one this machine runs, so a
+/// generated helper may not reach for a builtin that postdates it. `min` is Go 1.21; an edit
+/// distance is three comparisons either way.
+#[test]
+fn go_help_uses_no_builtin_newer_than_the_configured_language_version() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(
+        &grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#),
+        "bookstore",
+    );
+
+    assert!(!text.contains("min("), "{text}");
+    assert!(!text.contains("max("), "{text}");
+    assert!(text.contains("best := previous[column] + 1"), "{text}");
+}
+
+/// A mistyped first argument is answered whether the name would have been a group or a command.
+#[test]
+fn go_a_mixed_program_suggests_among_root_commands_and_groups() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(&mixed_group_graph(), "bookstore");
+
+    let body = text
+        .split("func suggestTopLevel")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("suggestTopLevel body");
+    assert!(
+        body.contains("range cliRootCommands"),
+        "an ungrouped command is a name the program answers to: {body}"
+    );
+    assert!(body.contains("range cliGroups"), "so is a group: {body}");
+}
+
+/// An empty argument resembles every name, and resembling everything is not a suggestion.
+#[test]
+fn go_an_empty_argument_suggests_nothing() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(
+        &grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#),
+        "bookstore",
+    );
+
+    let body = text
+        .split("func suggestName")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("suggestName body");
+    assert!(body.contains("if input == \"\" {"), "{body}");
+}
+
+/// The dispatch tree indexes the table it is generated beside.
+///
+/// A name lookup would need a not-found branch that no generated caller can reach, and an
+/// unreachable second path is the defect rule 3 forbids — not a safety net.
+#[test]
+fn go_a_dispatcher_indexes_the_group_table_directly() {
+    if skip_go() {
+        return;
+    }
+    let text = generate_go_cli(
+        &grouped_graph(r#"{"name": "books", "summary": "Everything about books"}"#),
+        "bookstore",
+    );
+
+    assert!(text.contains("group := cliGroups[1]"), "{text}");
+    assert!(!text.contains("cliGroupNamed"), "{text}");
 }
