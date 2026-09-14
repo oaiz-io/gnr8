@@ -9,6 +9,14 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **The public graph carries group documentation, and `GroupOperations` carries the entries that
+  set it.** `ApiGraph` gains `group_docs` and `GroupOperations` gains `docs`. Older serialized
+  graphs remain readable because the new field defaults to empty, but Rust code that constructs
+  either struct with a literal and no `..Default::default()`, or matches one exhaustively, must
+  account for them.
+
 ### Added
 
 - **A generated CLI's help is now an index, a page per group, and a named suggestion for a typo.**
