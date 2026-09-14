@@ -2831,3 +2831,33 @@ fn go_a_dispatcher_indexes_the_group_table_directly() {
     assert!(text.contains("group := cliGroups[1]"), "{text}");
     assert!(!text.contains("cliGroupNamed"), "{text}");
 }
+
+/// A group is described by the name the operation carries, not by the name the CLI prints.
+///
+/// `GroupOperations::describe` validates against `op.group`, so the emitters have to read the same
+/// spelling. Matching a re-cased name here would accept a spelling that fails generation, and
+/// reject one that passes it.
+#[test]
+fn a_group_is_described_by_the_name_its_operations_carry() {
+    if skip_go() {
+        return;
+    }
+    let mut graph = grouped_graph("");
+    // The source states `EventType`; the CLI prints `event-type`.
+    for op in &mut graph.operations {
+        op.group = Some("EventType".to_string());
+    }
+    graph.group_docs = vec![gnr8::graph::GroupDocsPolicy {
+        name: "EventType".to_string(),
+        summary: "Event type definitions".to_string(),
+    }];
+
+    let text = generate_go_cli(&graph, "bookstore");
+
+    // gofmt aligns struct keys, so match on the value rather than the spacing.
+    assert!(text.contains("\"event-type\","), "{text}");
+    assert!(
+        text.contains("\"Event type definitions\","),
+        "the source spelling of the group is what carries its prose: {text}"
+    );
+}

@@ -17,7 +17,7 @@ use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
-    flag_name, helper_env_var, http_auth_features_for, kebab, operation_auth_alternatives,
+    flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
     operation_prose, quoted_string_literal, reject_duplicate_command_files, reject_sse_operations,
     request_body_models_of, success_responses_of, OperationAuthScheme, RequestBodyModel, ALL_HELP,
     BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, LIMIT_HELP,
@@ -1846,7 +1846,7 @@ fn emit_help_tables(
             writeln!(
                 out,
                 "summary: {},",
-                quoted_string_literal(group_summary(graph, group))
+                quoted_string_literal(group_summary(graph, ops))
             )
             .map_err(sink)?;
             writeln!(out, "commands: []cliCommand{{").map_err(sink)?;
@@ -1876,14 +1876,19 @@ fn emit_command_entry(out: &mut String, op: &Operation) -> Result<(), CoreError>
 
 /// The one line a group states about itself, or nothing.
 ///
-/// `GroupDocsPolicy` is the single source. A group with no entry renders its name alone — the name
-/// is not re-used as a stand-in sentence, because a derived sentence would be a second way to state
-/// the fact (CLAUDE.md rule 3).
-fn group_summary<'a>(graph: &'a ApiGraph, group: &str) -> &'a str {
+/// `GroupDocsPolicy` is the single source, keyed by the group name exactly as the operation carries
+/// it — the same spelling `GroupOperations::describe` validates against, so one spelling is right
+/// everywhere rather than one at generation time and another at render time. A group with no entry
+/// renders its name alone: a sentence derived from the name would be a second way to state the fact
+/// (CLAUDE.md rule 3).
+fn group_summary<'a>(graph: &'a ApiGraph, ops: &[&Operation]) -> &'a str {
+    let Some(name) = ops.first().and_then(|op| op.group.as_deref()) else {
+        return "";
+    };
     graph
         .group_docs
         .iter()
-        .find(|doc| kebab(&doc.name) == group)
+        .find(|doc| doc.name == name)
         .map_or("", |doc| doc.summary.as_str())
 }
 
