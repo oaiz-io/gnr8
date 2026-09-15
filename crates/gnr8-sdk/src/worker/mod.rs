@@ -104,7 +104,7 @@ pub(crate) fn serve<R: Read, W: Write>(
                 return Ok(());
             }
             HostMessage::FreezeGraph { graph } => {
-                match graph.resolve(&session.graph) {
+                match graph.resolve_taking(std::mem::take(&mut session.graph)) {
                     Ok(graph) => {
                         // The frozen graph ends the transform phase: the host sends no further
                         // graph, so both sides drop what they held rather than keep a copy alive for
@@ -226,7 +226,11 @@ fn dispatch(
             Ok(WorkerMessage::Graph { graph: patch })
         }
         HostMessage::ApplyTransforms { indices, graph } => {
-            let mut graph = graph.resolve(&session.graph)?;
+            // The graph this side held is what the request is measured against, and the request
+            // replaces it — so it is handed over rather than lent, and every unchanged element
+            // moves into the rebuilt graph instead of being copied out of a graph about to be
+            // dropped.
+            let mut graph = graph.resolve_taking(std::mem::take(&mut session.graph))?;
             // What the host holds is what it just described, which is this graph before the run
             // touches it. Recording it here is what lets the reply be the difference.
             session.graph = HeldGraph::of(&graph);
@@ -246,7 +250,9 @@ fn dispatch(
                     "the host asked for a custom target before handing over the frozen graph",
                 )
             })?;
-            let mut out = Artifacts::from_files(artifacts.resolve(&session.artifacts)?);
+            let mut out = Artifacts::from_files(
+                artifacts.resolve_taking(std::mem::take(&mut session.artifacts))?,
+            );
             for index in indices {
                 let target = pipeline
                     .custom_target(index)
@@ -257,7 +263,9 @@ fn dispatch(
             Ok(answer_with_changes(session, out))
         }
         HostMessage::RunPosts { indices, artifacts } => {
-            let mut out = Artifacts::from_files(artifacts.resolve(&session.artifacts)?);
+            let mut out = Artifacts::from_files(
+                artifacts.resolve_taking(std::mem::take(&mut session.artifacts))?,
+            );
             for index in indices {
                 let post = pipeline
                     .custom_post(index)
