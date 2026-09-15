@@ -24,65 +24,106 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::sdk::bundle::{safe_frame_name, SdkFile};
 use crate::CoreError;
 
-/// Format generated Go files, answering from `memo_dir`'s record where this run already knows.
+/// The canonical formatter, held open across every `gofmt` run one target performs.
 ///
-/// Split SDK layouts can produce hundreds of small Go files. Running `gofmt` once per file pays
-/// process startup latency hundreds of times, so multi-file generation writes a short-lived temp
-/// tree, runs one batched `gofmt -w`, then reads the files back in the same deterministic order as
-/// the input vector.
+/// A target does not format its Go once. `GoSdk` formats the SDK bundle, then the generated CLI,
+/// then the contract test — three separate runs that all belong to ONE generation. The record is
+/// rewritten with exactly the entries the generation needed, which is what keeps it the size of one
+/// SDK rather than a log of every graph the project ever had; so the generation, not one run inside
+/// it, has to be what decides "needed". Three runs each rewriting the file in turn leave only the
+/// last one's answers behind, and the next generation re-formats everything the other two asked
+/// for — the memo is then paid for on every run and collected on none.
 ///
-/// `memo_dir` is where the caller keeps its [`Memo`] — the project's `.gnr8/cache` for a pipeline
-/// run, `None` for a caller with no project to keep one in. It changes nothing about the answers,
-/// only how many of them this run has to ask `gofmt` for.
-pub(crate) fn gofmt_files(
-    files: Vec<SdkFile>,
-    memo_dir: Option<&Path>,
-) -> Result<Vec<SdkFile>, CoreError> {
-    let formatter = FormatterIdentity::resolve("gofmt")?;
-    let memo = memo_dir.map(|dir| Memo::load(dir, &formatter));
+/// Holding it open also resolves and hashes the `gofmt` binary once per target instead of once per
+/// run, and reads and writes the record once instead of three times.
+///
+/// A memo may only make a run faster: this changes nothing about the bytes any of those runs
+/// produce. What it changes is how many of them have to be asked for twice.
+pub(crate) struct Formatter {
+    identity: FormatterIdentity,
+    /// Where the record lives, or `None` for a caller with no project to keep one in.
+    dir: Option<PathBuf>,
+    /// The answers the record already held when this target started.
+    known: BTreeMap<[u8; 32], String>,
+    /// Every answer this target used, from the record or from `gofmt` — what gets written back.
+    used: BTreeMap<[u8; 32], String>,
+}
 
-    let digests: Vec<[u8; 32]> = files
-        .iter()
-        .map(|file| *blake3::hash(file.contents.as_bytes()).as_bytes())
-        .collect();
-    let mut pending: Vec<SdkFile> = Vec::new();
-    let mut pending_positions: Vec<usize> = Vec::new();
-    let mut answers: Vec<Option<String>> = Vec::with_capacity(files.len());
-    for (position, file) in files.iter().enumerate() {
-        if let Some(known) = memo.as_ref().and_then(|memo| memo.get(&digests[position])) {
-            answers.push(Some(known.to_string()));
-        } else {
-            answers.push(None);
-            pending_positions.push(position);
-            pending.push(file.clone());
+impl Formatter {
+    /// Resolve `gofmt` and read `dir`'s record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GoToolchainMissing`] when `gofmt` cannot be found or read.
+    pub(crate) fn open(dir: Option<&Path>) -> Result<Self, CoreError> {
+        let identity = FormatterIdentity::resolve("gofmt")?;
+        let known = dir.map(|dir| Memo::load(dir, &identity).entries);
+        Ok(Self {
+            identity,
+            dir: dir.map(Path::to_path_buf),
+            known: known.unwrap_or_default(),
+            used: BTreeMap::new(),
+        })
+    }
+
+    /// Format `files`, answering from the record where this target already knows.
+    ///
+    /// Split SDK layouts can produce hundreds of small Go files. Running `gofmt` once per file pays
+    /// process startup latency hundreds of times, so multi-file generation writes a short-lived temp
+    /// tree, runs one batched `gofmt -w`, then reads the files back in the same deterministic order
+    /// as the input vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GoFmt`] when `gofmt` rejects the emitted Go.
+    pub(crate) fn format(&mut self, files: Vec<SdkFile>) -> Result<Vec<SdkFile>, CoreError> {
+        let digests: Vec<[u8; 32]> = files
+            .iter()
+            .map(|file| *blake3::hash(file.contents.as_bytes()).as_bytes())
+            .collect();
+        let mut pending: Vec<SdkFile> = Vec::new();
+        let mut pending_positions: Vec<usize> = Vec::new();
+        let mut answers: Vec<Option<String>> = Vec::with_capacity(files.len());
+        for (position, file) in files.iter().enumerate() {
+            if let Some(known) = self.known.get(&digests[position]) {
+                answers.push(Some(known.clone()));
+            } else {
+                answers.push(None);
+                pending_positions.push(position);
+                pending.push(file.clone());
+            }
+        }
+
+        for (file, position) in format_uncached(&self.identity, pending)?
+            .into_iter()
+            .zip(&pending_positions)
+        {
+            answers[*position] = Some(file.contents);
+        }
+
+        let mut out = Vec::with_capacity(files.len());
+        for ((file, contents), digest) in files.into_iter().zip(answers).zip(digests) {
+            let Some(contents) = contents else {
+                return Err(CoreError::GoFmt {
+                    code: None,
+                    stderr: format!("gofmt returned no output for {}", file.name),
+                });
+            };
+            self.used.insert(digest, contents.clone());
+            out.push(SdkFile {
+                name: file.name,
+                contents,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Write back exactly the answers this target used.
+    pub(crate) fn finish(self) {
+        if let Some(dir) = &self.dir {
+            Memo::save(dir, &self.identity, &self.used);
         }
     }
-
-    for (file, position) in format_uncached(&formatter, pending)?
-        .into_iter()
-        .zip(&pending_positions)
-    {
-        answers[*position] = Some(file.contents);
-    }
-
-    let mut out = Vec::with_capacity(files.len());
-    for (file, contents) in files.into_iter().zip(answers) {
-        let Some(contents) = contents else {
-            return Err(CoreError::GoFmt {
-                code: None,
-                stderr: format!("gofmt returned no output for {}", file.name),
-            });
-        };
-        out.push(SdkFile {
-            name: file.name,
-            contents,
-        });
-    }
-
-    if let Some(dir) = memo_dir {
-        Memo::save(dir, &formatter, &digests, &out);
-    }
-    Ok(out)
 }
 
 /// Format every file by actually running `gofmt`.
@@ -185,10 +226,6 @@ pub(crate) struct Memo {
 }
 
 impl Memo {
-    fn get(&self, digest: &[u8; 32]) -> Option<&str> {
-        self.entries.get(digest).map(String::as_str)
-    }
-
     fn load(dir: &Path, formatter: &FormatterIdentity) -> Self {
         Self {
             entries: fs::read(dir.join(MEMO_FILE))
@@ -198,13 +235,9 @@ impl Memo {
         }
     }
 
-    /// Publish the answers this run used. Failure is silent by design: a memo that cannot be written
-    /// costs the next run some time and nothing else.
-    fn save(dir: &Path, formatter: &FormatterIdentity, digests: &[[u8; 32]], files: &[SdkFile]) {
-        let mut entries: BTreeMap<&[u8; 32], &str> = BTreeMap::new();
-        for (digest, file) in digests.iter().zip(files) {
-            entries.insert(digest, file.contents.as_str());
-        }
+    /// Publish the answers this generation used. Failure is silent by design: a memo that cannot be
+    /// written costs the next run some time and nothing else.
+    fn save(dir: &Path, formatter: &FormatterIdentity, entries: &BTreeMap<[u8; 32], String>) {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MEMO_MAGIC);
         bytes.extend_from_slice(&formatter.digest);
@@ -431,9 +464,24 @@ mod tests {
     // the workspace-wide RUST-04 deny stays intact for production code.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{decode_memo, gofmt_files, gofmt_with, FormatterIdentity, Memo};
+    use super::{decode_memo, gofmt_with, Formatter, FormatterIdentity, Memo};
     use crate::sdk::bundle::SdkFile;
     use crate::CoreError;
+    use std::path::Path;
+
+    /// Open a formatter, format once, write the record back.
+    ///
+    /// Production holds one formatter open across a target's several runs; a test that makes only
+    /// one asks for the same three steps in a row.
+    fn gofmt_files(
+        files: Vec<SdkFile>,
+        memo_dir: Option<&Path>,
+    ) -> Result<Vec<SdkFile>, CoreError> {
+        let mut formatter = Formatter::open(memo_dir)?;
+        let out = formatter.format(files)?;
+        formatter.finish();
+        Ok(out)
+    }
 
     /// Whether the `gofmt` binary is available, so toolchain-dependent tests skip gracefully (mirrors
     /// `tests/determinism.rs`) rather than failing for a missing dependency.

@@ -2897,24 +2897,25 @@ impl TargetExec for GoSdk {
         // existing deterministic SDK generator — never a re-implementation (CLAUDE.md rules 2 & 3).
         let package = sdk_package(&self.module)?;
         let model = SdkModel::build(ir, &package, &ir.base_path, &self.layout)?;
+        // The SDK bundle, the contract test and the generated CLI are three `gofmt` runs of ONE
+        // generation. They share one formatter so the record this target writes back is everything
+        // the target used, not whichever of the three happened to finish last.
+        let mut formatter = crate::gosdk::Formatter::open(Some(&cache_dir(cx)))?;
         let files = crate::gosdk::generate_files_with_layout(
             ir,
             &model.package,
             &model.base_path,
             &self.layout,
-            Some(&cache_dir(cx)),
+            &mut formatter,
         )?;
         write_sdk_files(out, &self.dir, files)?;
         if self.contract_tests {
             // The suite is planned from the SAME projected graph the SDK was emitted from, so the
             // assertions and the client can never describe two different contracts.
             let plan = crate::verify::plan_contract_tests(ir)?;
-            if let Some(file) = crate::gosdk::generate_contract_test(
-                ir,
-                &model.package,
-                &plan,
-                Some(&cache_dir(cx)),
-            )? {
+            if let Some(file) =
+                crate::gosdk::generate_contract_test(ir, &model.package, &plan, &mut formatter)?
+            {
                 out.create(
                     format!("{}/{}", self.dir.trim_end_matches('/'), file.name),
                     file.contents,
@@ -2923,13 +2924,8 @@ impl TargetExec for GoSdk {
         }
         write_sdk_docs(out, &self.dir, "Go", &model.package, ir, &model, &self.docs)?;
         if let Some(cli) = &self.cli {
-            let cli_files = crate::gosdk::generate_cli(
-                ir,
-                &self.module,
-                &model.package,
-                cli,
-                Some(&cache_dir(cx)),
-            )?;
+            let cli_files =
+                crate::gosdk::generate_cli(ir, &self.module, &model.package, cli, &mut formatter)?;
             for file in cli_files {
                 out.create(
                     format!("{}/{}", self.dir.trim_end_matches('/'), file.name),
@@ -2937,6 +2933,7 @@ impl TargetExec for GoSdk {
                 )?;
             }
         }
+        formatter.finish();
         if self.package_metadata {
             out.create(
                 format!("{}/go.mod", self.dir.trim_end_matches('/')),

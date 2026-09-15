@@ -17,6 +17,8 @@ mod contract;
 mod emit;
 mod gofmt;
 
+pub(crate) use gofmt::Formatter;
+
 use std::collections::BTreeMap;
 
 use crate::graph::direction::{directions_of, schema_directions};
@@ -60,7 +62,8 @@ pub fn generate(
 ///
 /// `memo_dir` is where the canonical formatter keeps its record of already-formatted sources — the
 /// project's `.gnr8/cache` for a pipeline run, `None` for a caller with no project to keep one in.
-/// It changes nothing about the emitted bytes.
+/// It changes nothing about the emitted bytes. A caller that formats several times in one generation
+/// opens a [`gofmt::Formatter`] itself instead, so all of those runs share one record.
 ///
 /// # Errors
 ///
@@ -73,7 +76,9 @@ pub fn generate_with_layout(
     memo_dir: Option<&std::path::Path>,
 ) -> Result<String, crate::CoreError> {
     let projected = crate::graph::projection::for_generation(graph)?;
-    let files = generate_files_with_layout(&projected, package, base_path, layout, memo_dir)?;
+    let mut formatter = gofmt::Formatter::open(memo_dir)?;
+    let files = generate_files_with_layout(&projected, package, base_path, layout, &mut formatter)?;
+    formatter.finish();
     let bundle = SdkBundle { files };
     Ok(bundle.to_string())
 }
@@ -88,7 +93,7 @@ pub(crate) fn generate_files_with_layout(
     package: &str,
     base_path: &str,
     layout: &SdkFileLayout,
-    memo_dir: Option<&std::path::Path>,
+    formatter: &mut gofmt::Formatter,
 ) -> Result<Vec<SdkFile>, crate::CoreError> {
     validate_sdk_base_path(base_path)?;
     UniqueSchemaNames::check(graph, "Go SDK")?;
@@ -188,7 +193,7 @@ pub(crate) fn generate_files_with_layout(
     }
 
     check_unique_file_names(&files, "Go SDK")?;
-    let mut files = gofmt::gofmt_files(files, memo_dir)?;
+    let mut files = formatter.format(files)?;
     check_unique_file_names(&files, "Go SDK")?;
     files.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(files)
@@ -220,16 +225,13 @@ pub(crate) fn generate_contract_test(
     graph: &ApiGraph,
     package: &str,
     plan: &crate::verify::ContractTestPlan,
-    memo_dir: Option<&std::path::Path>,
+    formatter: &mut gofmt::Formatter,
 ) -> Result<Option<SdkFile>, crate::CoreError> {
     let Some(raw) = contract::emit_contract_test(graph, package, plan)? else {
         return Ok(None);
     };
-    let mut formatted = gofmt::gofmt_files(
-        vec![raw_go_file(contract::CONTRACT_TEST_FILE, raw)],
-        memo_dir,
-    )?;
-    Ok(formatted.pop())
+    let mut files = formatter.format(vec![raw_go_file(contract::CONTRACT_TEST_FILE, raw)])?;
+    Ok(files.pop())
 }
 
 /// The file name the Go SDK's contract test is written at, relative to the target's output dir.
@@ -251,10 +253,10 @@ pub(crate) fn generate_cli(
     module: &str,
     package: &str,
     cli: &gnr8::sdk::SdkCli,
-    memo_dir: Option<&std::path::Path>,
+    formatter: &mut gofmt::Formatter,
 ) -> Result<Vec<SdkFile>, crate::CoreError> {
     let raw = cli::emit_cli(graph, module, package, cli)?;
-    gofmt::gofmt_files(raw, memo_dir)
+    formatter.format(raw)
 }
 
 fn raw_go_file(name: impl Into<String>, raw: impl Into<String>) -> SdkFile {
