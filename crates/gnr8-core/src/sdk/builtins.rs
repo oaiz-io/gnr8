@@ -371,39 +371,83 @@ fn is_go_module_input(name: &str) -> bool {
 /// part of the module's own source set; `.git`, `.gnr8`, and `node_modules` hold no Go sources the
 /// module compiles.
 fn go_gin_cache_scope_files(scope: &Path) -> Option<Vec<PathBuf>> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
-        for entry in std::fs::read_dir(dir).ok()? {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            let name = path.file_name().and_then(|name| name.to_str())?;
-            let kind = entry.file_type().ok()?;
-            if kind.is_symlink() {
-                // A symlinked file is read like any other file; a symlinked directory is outside the
-                // module's own source set (`go` does not walk into one).
-                if path.is_file() && is_go_module_input(name) {
-                    out.push(path);
-                }
+    /// How many directories the frontier has to hold before the rest of the walk is handed out.
+    ///
+    /// Descending costs one `read_dir` per directory, so a narrow frontier is cheaper to widen here
+    /// than to spread; a Go module's top level is a handful of directories and its second is dozens.
+    const SPREAD_AT: usize = 32;
+
+    // Reading one directory says nothing about any other, and a module is hundreds of them holding
+    // thousands of files. So the walk descends a level at a time, in one place, only until the
+    // frontier is wide enough to be worth handing out — and then walks what is left of the tree at
+    // once. What comes back is a SET, sorted before it is returned, so how the walk was spread
+    // cannot reach the digest taken over it.
+    let mut files = Vec::new();
+    let mut frontier = vec![scope.to_path_buf()];
+    while !frontier.is_empty() && frontier.len() < SPREAD_AT {
+        let mut deeper = Vec::new();
+        for dir in &frontier {
+            read_go_module_dir(dir, &mut files, &mut deeper)?;
+        }
+        frontier = deeper;
+    }
+    let subtrees =
+        crate::parallel::map_ordered_blocks(&frontier, |dir| Ok(walk_go_module_subtree(dir)))
+            .ok()?;
+    for subtree in subtrees {
+        let mut subtree = subtree?;
+        files.append(&mut subtree);
+    }
+    files.sort();
+    Some(files)
+}
+
+/// Sort one directory's entries into this module's build inputs and the directories below it.
+///
+/// `None` for anything the walk cannot account for — an unreadable directory, a name that is not
+/// UTF-8, an entry that is neither file, directory, nor symlink. A tree gnr8 cannot bound is a tree
+/// it will not key on.
+fn read_go_module_dir(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    deeper: &mut Vec<PathBuf>,
+) -> Option<()> {
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        let name = path.file_name().and_then(|name| name.to_str())?;
+        let kind = entry.file_type().ok()?;
+        if kind.is_symlink() {
+            // A symlinked file is read like any other file; a symlinked directory is outside the
+            // module's own source set (`go` does not walk into one).
+            if path.is_file() && is_go_module_input(name) {
+                files.push(path);
+            }
+            continue;
+        }
+        if kind.is_dir() {
+            if matches!(name, ".git" | ".gnr8" | "node_modules") {
                 continue;
             }
-            if kind.is_dir() {
-                if matches!(name, ".git" | ".gnr8" | "node_modules") {
-                    continue;
-                }
-                walk(&path, out)?;
-            } else if kind.is_file() {
-                if is_go_module_input(name) {
-                    out.push(path);
-                }
-            } else {
-                return None;
+            deeper.push(path);
+        } else if kind.is_file() {
+            if is_go_module_input(name) {
+                files.push(path);
             }
+        } else {
+            return None;
         }
-        Some(())
     }
+    Some(())
+}
 
+/// Every build input under one subtree, walked in one thread.
+fn walk_go_module_subtree(root: &Path) -> Option<Vec<PathBuf>> {
     let mut files = Vec::new();
-    walk(scope, &mut files)?;
-    files.sort();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        read_go_module_dir(&dir, &mut files, &mut pending)?;
+    }
     Some(files)
 }
 
