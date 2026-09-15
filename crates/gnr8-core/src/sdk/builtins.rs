@@ -77,7 +77,18 @@ pub trait TargetExec {
     /// # Errors
     ///
     /// Returns the target's own typed failure (a fact it cannot represent, a formatter failure, …).
-    fn generate(&self, ir: &ApiGraph, out: &mut Artifacts, cx: &Cx) -> Result<(), CoreError>;
+    ///
+    /// `store` is the machine-global store, for a target that keeps a derived record a fresh
+    /// checkout would otherwise have to recompute. It is handed to every target for the same reason
+    /// [`load_source`] hands it to every source: which of them keep one is their own business, and
+    /// a target that keeps none simply ignores it. `None` means sharing is off for this run.
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        cx: &Cx,
+        store: Option<&Store>,
+    ) -> Result<(), CoreError>;
 
     /// The project-relative output path(s) this target writes — its loop-safety anchors.
     fn output_anchors(&self) -> Vec<String> {
@@ -2788,7 +2799,13 @@ fn apply_openapi_field_patch(
 }
 
 impl TargetExec for OpenApi31 {
-    fn generate(&self, ir: &ApiGraph, out: &mut Artifacts, _cx: &Cx) -> Result<(), CoreError> {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
         if self.path.is_empty() {
             return Err(CoreError::Config {
                 message: "OpenApi31 target has no output path — call .to(\"openapi.yaml\")"
@@ -2826,7 +2843,13 @@ impl TargetExec for OpenApi31 {
 }
 
 impl TargetExec for OpenApi31Json {
-    fn generate(&self, ir: &ApiGraph, out: &mut Artifacts, _cx: &Cx) -> Result<(), CoreError> {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
         if self.path.is_empty() {
             return Err(CoreError::Config {
                 message: "OpenApi31Json target has no output path — call .to(\"openapi.json\")"
@@ -2860,7 +2883,13 @@ impl TargetExec for OpenApi31Json {
 }
 
 impl TargetExec for StaticFiles {
-    fn generate(&self, _ir: &ApiGraph, out: &mut Artifacts, cx: &Cx) -> Result<(), CoreError> {
+    fn generate(
+        &self,
+        _ir: &ApiGraph,
+        out: &mut Artifacts,
+        cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
         let (source_root, files) = self.static_source_files(cx)?;
         let to_dir = validate_static_dir("output dir", &self.to_dir)?;
         for rel in files {
@@ -2914,7 +2943,13 @@ impl StaticFilesSources for StaticFiles {
 }
 
 impl TargetExec for GoSdk {
-    fn generate(&self, ir: &ApiGraph, out: &mut Artifacts, cx: &Cx) -> Result<(), CoreError> {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        cx: &Cx,
+        store: Option<&Store>,
+    ) -> Result<(), CoreError> {
         if self.module.is_empty() {
             return Err(CoreError::Config {
                 message: "GoSdk target has no module — call .module(\"example.com/acme/sdk\")"
@@ -2944,7 +2979,7 @@ impl TargetExec for GoSdk {
         // The SDK bundle, the contract test and the generated CLI are three `gofmt` runs of ONE
         // generation. They share one formatter so the record this target writes back is everything
         // the target used, not whichever of the three happened to finish last.
-        let mut formatter = crate::gosdk::Formatter::open(Some(&cache_dir(cx)))?;
+        let mut formatter = crate::gosdk::Formatter::open(Some(&cache_dir(cx)), store)?;
         let files = crate::gosdk::generate_files_with_layout(
             ir,
             &model.package,
@@ -3035,7 +3070,13 @@ impl TargetExec for GoSdk {
 }
 
 impl TargetExec for PySdk {
-    fn generate(&self, ir: &ApiGraph, out: &mut Artifacts, _cx: &Cx) -> Result<(), CoreError> {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
         if self.module.is_empty() {
             return Err(CoreError::Config {
                 message: "PySdk target has no module — call .module(\"example.com/acme/sdk\")"
@@ -3291,7 +3332,13 @@ fn is_python_identifier(value: &str) -> bool {
 }
 
 impl TargetExec for TsSdk {
-    fn generate(&self, ir: &ApiGraph, out: &mut Artifacts, _cx: &Cx) -> Result<(), CoreError> {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
         if self.module.is_empty() {
             return Err(CoreError::Config {
                 message: "TsSdk target has no module — call .module(\"example.com/acme/sdk\")"
@@ -4181,14 +4228,15 @@ pub fn generate_target(
     ir: &ApiGraph,
     out: &mut Artifacts,
     cx: &Cx,
+    store: Option<&Store>,
 ) -> Result<(), CoreError> {
     match spec {
-        BuiltinTarget::OpenApi31(t) => t.generate(ir, out, cx),
-        BuiltinTarget::OpenApi31Json(t) => t.generate(ir, out, cx),
-        BuiltinTarget::StaticFiles(t) => t.generate(ir, out, cx),
-        BuiltinTarget::GoSdk(t) => t.generate(ir, out, cx),
-        BuiltinTarget::PySdk(t) => t.generate(ir, out, cx),
-        BuiltinTarget::TsSdk(t) => t.generate(ir, out, cx),
+        BuiltinTarget::OpenApi31(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::OpenApi31Json(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::StaticFiles(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::GoSdk(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::PySdk(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::TsSdk(t) => t.generate(ir, out, cx, store),
     }
 }
 
@@ -5080,7 +5128,7 @@ mod tests {
         let mut out = Artifacts::new();
         OpenApi31::new()
             .to("openapi.yaml")
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap();
         let yaml = out.files()[0].text.as_str();
         assert!(!yaml.starts_with("security:"), "{yaml}");
@@ -5338,7 +5386,7 @@ mod tests {
         let mut out = Artifacts::new();
         OpenApi31::new()
             .to("openapi.yaml")
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap();
         let yaml = out.files()[0].text.as_str();
         assert!(yaml.contains("required: false"), "{yaml}");
@@ -5879,7 +5927,7 @@ mod tests {
         let mut out = Artifacts::new();
         OpenApi31::new()
             .to("openapi.yaml")
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap();
         let yaml = out.files()[0].text.as_str();
         assert!(yaml.contains("name: startDate"), "{yaml}");
@@ -6078,7 +6126,7 @@ mod tests {
         GoSdk::new()
             .module("example.com/bookclient")
             .to("sdk")
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap();
         let operations = out
             .files()
@@ -6684,7 +6732,7 @@ mod tests {
             .module("example.com/tool/sdk")
             .to("generated/ts")
             .package_metadata(false)
-            .generate(&ir, &mut artifacts, &cx())
+            .generate(&ir, &mut artifacts, &cx(), None)
             .unwrap();
         let reference = artifacts
             .files()
@@ -6991,7 +7039,7 @@ mod tests {
         OpenApi31::new()
             .to("openapi.yaml")
             .schema_patch(patch.clone())
-            .generate(&ir, &mut yaml_out, &cx())
+            .generate(&ir, &mut yaml_out, &cx(), None)
             .unwrap();
         let yaml = yaml_out
             .files()
@@ -7015,7 +7063,7 @@ mod tests {
         OpenApi31Json::new()
             .to("openapi.json")
             .schema_patch(patch)
-            .generate(&ir, &mut json_out, &cx())
+            .generate(&ir, &mut json_out, &cx(), None)
             .unwrap();
         let json = json_out
             .files()
@@ -7156,7 +7204,7 @@ mod tests {
                 OpenApiSchemaPatch::new("Shared")
                     .field(OpenApiFieldPatch::new("value").description("Some prose")),
             )
-            .generate(&ir, &mut Artifacts::new(), &cx())
+            .generate(&ir, &mut Artifacts::new(), &cx(), None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -7172,7 +7220,7 @@ mod tests {
                 OpenApiSchemaPatch::new("SharedInput")
                     .field(OpenApiFieldPatch::new("value").description("Some prose")),
             )
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap();
         let yaml = out
             .files()
@@ -7187,7 +7235,7 @@ mod tests {
         let typo = OpenApi31::new()
             .to("openapi.yaml")
             .schema_patch(OpenApiSchemaPatch::new("Nonexistent"))
-            .generate(&ir, &mut Artifacts::new(), &cx())
+            .generate(&ir, &mut Artifacts::new(), &cx(), None)
             .unwrap_err()
             .to_string();
         assert!(typo.ends_with("unknown schema \"Nonexistent\""), "{typo}");
@@ -7232,7 +7280,7 @@ mod tests {
                     .field(OpenApiFieldPatch::new("enabled").example_bool(false))
                     .field(OpenApiFieldPatch::new("empty").example_null()),
             )
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap();
 
         let json = out
@@ -7263,41 +7311,41 @@ mod tests {
         let ir = ApiGraph::default();
         let mut out = Artifacts::new();
         assert!(matches!(
-            OpenApi31::new().generate(&ir, &mut out, &cx()),
+            OpenApi31::new().generate(&ir, &mut out, &cx(), None),
             Err(crate::CoreError::Config { .. })
         ));
         assert!(matches!(
-            OpenApi31Json::new().generate(&ir, &mut out, &cx()),
+            OpenApi31Json::new().generate(&ir, &mut out, &cx(), None),
             Err(crate::CoreError::Config { .. })
         ));
         assert!(matches!(
-            GoSdk::new().generate(&ir, &mut out, &cx()),
+            GoSdk::new().generate(&ir, &mut out, &cx(), None),
             Err(crate::CoreError::Config { .. })
         ));
         assert!(matches!(
             GoSdk::new()
                 .module("x.com/sdk")
-                .generate(&ir, &mut out, &cx()),
+                .generate(&ir, &mut out, &cx(), None),
             Err(crate::CoreError::Config { .. })
         ));
         assert!(matches!(
-            PySdk::new().generate(&ir, &mut out, &cx()),
+            PySdk::new().generate(&ir, &mut out, &cx(), None),
             Err(crate::CoreError::Config { .. })
         ));
         assert!(matches!(
             PySdk::new()
                 .module("x.com/sdk")
-                .generate(&ir, &mut out, &cx()),
+                .generate(&ir, &mut out, &cx(), None),
             Err(crate::CoreError::Config { .. })
         ));
         assert!(matches!(
-            StaticFiles::new().generate(&ir, &mut out, &cx()),
+            StaticFiles::new().generate(&ir, &mut out, &cx(), None),
             Err(crate::CoreError::Config { .. })
         ));
         assert!(matches!(
             StaticFiles::new()
                 .from("static")
-                .generate(&ir, &mut out, &cx()),
+                .generate(&ir, &mut out, &cx(), None),
             Err(crate::CoreError::Config { .. })
         ));
     }
@@ -7360,7 +7408,7 @@ mod tests {
             .from("static")
             .to("pkg")
             .include(["runtime/**", "README.md"])
-            .generate(&ApiGraph::default(), &mut out, &Cx::new(&root))
+            .generate(&ApiGraph::default(), &mut out, &Cx::new(&root), None)
             .unwrap();
 
         let files: Vec<_> = out
@@ -7421,7 +7469,7 @@ mod tests {
             .from("static")
             .to("pkg")
             .include(["../secret.py"])
-            .generate(&ApiGraph::default(), &mut out, &cx())
+            .generate(&ApiGraph::default(), &mut out, &cx(), None)
             .unwrap_err();
         assert!(err.to_string().contains("invalid StaticFiles include"));
     }
@@ -7433,7 +7481,7 @@ mod tests {
             .from("../static")
             .to("pkg")
             .include(["README.md"])
-            .generate(&ApiGraph::default(), &mut out, &cx())
+            .generate(&ApiGraph::default(), &mut out, &cx(), None)
             .unwrap_err();
         assert!(
             err.to_string().contains("invalid StaticFiles source dir"),
@@ -7444,7 +7492,7 @@ mod tests {
             .from("static")
             .to("/pkg")
             .include(["README.md"])
-            .generate(&ApiGraph::default(), &mut out, &cx())
+            .generate(&ApiGraph::default(), &mut out, &cx(), None)
             .unwrap_err();
         assert!(
             err.to_string().contains("invalid StaticFiles output dir"),
@@ -7462,7 +7510,7 @@ mod tests {
             .to("generated/sdk-go");
 
         let mut out = Artifacts::new();
-        target.generate(&ir, &mut out, &cx()).unwrap();
+        target.generate(&ir, &mut out, &cx(), None).unwrap();
 
         let go_mod = out
             .files()
@@ -7494,7 +7542,7 @@ mod tests {
             .source_only();
 
         let mut out = Artifacts::new();
-        target.generate(&ir, &mut out, &cx()).unwrap();
+        target.generate(&ir, &mut out, &cx(), None).unwrap();
 
         for path in [
             "generated/sdk-go/go.mod",
@@ -7519,7 +7567,7 @@ mod tests {
         // A configured run writes one Artifact per generated Python file, all anchored under the
         // (slash-trimmed) output dir.
         let mut out = Artifacts::new();
-        target.generate(&ir, &mut out, &cx()).unwrap();
+        target.generate(&ir, &mut out, &cx(), None).unwrap();
         assert!(
             !out.files().is_empty(),
             "a configured PySdk run must emit at least one Artifact"
@@ -7542,7 +7590,7 @@ mod tests {
 
         // Two fresh runs over the same IR yield byte-identical Artifacts (T-03-02-05).
         let mut out2 = Artifacts::new();
-        target.generate(&ir, &mut out2, &cx()).unwrap();
+        target.generate(&ir, &mut out2, &cx(), None).unwrap();
         let first: Vec<(&str, &str)> = out
             .files()
             .iter()
@@ -7566,7 +7614,7 @@ mod tests {
             .to("generated/sdk-py");
 
         let mut out = Artifacts::new();
-        target.generate(&ir, &mut out, &cx()).unwrap();
+        target.generate(&ir, &mut out, &cx(), None).unwrap();
         let init = out
             .files()
             .iter()
@@ -7594,7 +7642,7 @@ mod tests {
             .module("example.com/bookstore/sdk")
             .root_export("exceptions-user", "fail")
             .to("generated/sdk-py")
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap_err();
         assert!(error.to_string().contains("invalid module"), "{error}");
     }
@@ -7618,7 +7666,7 @@ mod tests {
             .to("generated/sdk-py");
 
         let mut out = Artifacts::new();
-        target.generate(&ir, &mut out, &cx()).unwrap();
+        target.generate(&ir, &mut out, &cx(), None).unwrap();
 
         let pyproject = out
             .files()
@@ -7700,7 +7748,7 @@ mod tests {
             .to("generated/sdk-py")
             .cli("bookstore");
         let mut cli_out = Artifacts::new();
-        with_cli.generate(&ir, &mut cli_out, &cx()).unwrap();
+        with_cli.generate(&ir, &mut cli_out, &cx(), None).unwrap();
         let cli_pyproject = cli_out
             .files()
             .iter()
@@ -7735,7 +7783,7 @@ mod tests {
             .module("example.com/bookstore/sdk")
             .to("generated/sdk-py")
             .cli("")
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap_err();
         assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
         assert!(
@@ -7760,7 +7808,7 @@ mod tests {
                 .module("example.com/bookstore/sdk")
                 .to("generated/sdk-py")
                 .cli(program)
-                .generate(&ir, &mut out, &cx())
+                .generate(&ir, &mut out, &cx(), None)
                 .unwrap_err();
             assert!(
                 matches!(error, crate::CoreError::Config { .. }),
@@ -7777,7 +7825,7 @@ mod tests {
             .module("example.com/bookstore/sdk")
             .to("generated/sdk-py")
             .cli("book_store.v2")
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .expect("a conventional console-script name stays accepted");
     }
 
@@ -7790,7 +7838,7 @@ mod tests {
             .to("generated/sdk-py")
             .cli("bookstore")
             .source_only()
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap_err();
         assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
         let message = error.to_string();
@@ -7809,7 +7857,7 @@ mod tests {
             .module("example.com/bookstore/sdk")
             .to("generated/sdk-go")
             .cli("")
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap_err();
         assert!(matches!(error, crate::CoreError::Config { .. }), "{error}");
         assert!(
@@ -7831,7 +7879,7 @@ mod tests {
                 .module("example.com/bookstore/sdk")
                 .to("generated/sdk-go")
                 .cli(program)
-                .generate(&ir, &mut out, &cx())
+                .generate(&ir, &mut out, &cx(), None)
                 .unwrap_err();
             assert!(
                 matches!(error, crate::CoreError::Config { .. }),
@@ -7855,7 +7903,7 @@ mod tests {
             .to("generated/sdk-go")
             .cli("bookstore")
             .source_only()
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .expect("GoSdk::cli does not require package metadata");
     }
 
@@ -7868,7 +7916,7 @@ mod tests {
             .source_only();
 
         let mut out = Artifacts::new();
-        target.generate(&ir, &mut out, &cx()).unwrap();
+        target.generate(&ir, &mut out, &cx(), None).unwrap();
 
         for path in [
             "generated/sdk-py/README.md",
@@ -7891,7 +7939,7 @@ mod tests {
         let mut out = Artifacts::new();
         assert!(
             matches!(
-                TsSdk::new().generate(&ir, &mut out, &cx()),
+                TsSdk::new().generate(&ir, &mut out, &cx(), None),
                 Err(crate::CoreError::Config { .. })
             ),
             "TsSdk with no module must be a Config error"
@@ -7900,7 +7948,7 @@ mod tests {
             matches!(
                 TsSdk::new()
                     .module("x.com/sdk")
-                    .generate(&ir, &mut out, &cx()),
+                    .generate(&ir, &mut out, &cx(), None),
                 Err(crate::CoreError::Config { .. })
             ),
             "TsSdk with a module but no output dir must be a Config error"
@@ -7917,7 +7965,7 @@ mod tests {
         // A configured run writes one Artifact per generated TypeScript file, all anchored under the
         // (slash-trimmed) output dir.
         let mut out = Artifacts::new();
-        target.generate(&ir, &mut out, &cx()).unwrap();
+        target.generate(&ir, &mut out, &cx(), None).unwrap();
         assert!(
             !out.files().is_empty(),
             "a configured TsSdk run must emit at least one Artifact"
@@ -7940,7 +7988,7 @@ mod tests {
 
         // Two fresh runs over the same IR yield byte-identical Artifacts (T-05-02-03 determinism).
         let mut out2 = Artifacts::new();
-        target.generate(&ir, &mut out2, &cx()).unwrap();
+        target.generate(&ir, &mut out2, &cx(), None).unwrap();
         let first: Vec<(&str, &str)> = out
             .files()
             .iter()
@@ -7962,7 +8010,7 @@ mod tests {
             .module("@example/bookstore-sdk")
             .to("generated/sdk-ts")
             .package(SdkPackageMetadata::new().version("2.0.0"))
-            .generate(&ir, &mut out, &cx())
+            .generate(&ir, &mut out, &cx(), None)
             .unwrap();
 
         for path in [

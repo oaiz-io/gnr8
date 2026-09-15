@@ -1517,7 +1517,7 @@ fn materialize_go_cli_with(
         .to("sdk")
         .without_contract_tests()
         .cli(cli)
-        .generate(graph, &mut out, &Cx::new(&dir))
+        .generate(graph, &mut out, &Cx::new(&dir), None)
         .expect("GoSdk with .cli() must generate");
     for file in out.files() {
         let path = dir.join(&file.path);

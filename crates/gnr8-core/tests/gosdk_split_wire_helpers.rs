@@ -276,7 +276,7 @@ fn split_per_tag_go_sdk_emits_wire_helpers_once_and_compiles() {
         .module("example.com/generated/sdk")
         .to("go-sdk")
         .layout(SdkFileLayout::split().operations_per_tag())
-        .generate(&ir, &mut out, &Cx::new(&root))
+        .generate(&ir, &mut out, &Cx::new(&root), None)
         .expect("generate Go SDK");
     write_artifacts(&out, &root);
 
@@ -442,7 +442,7 @@ fn split_layouts_compile_for_every_request_body_encoding() {
                     .module("example.com/generated/sdk")
                     .to("go-sdk")
                     .layout(layout)
-                    .generate(&ir, &mut out, &Cx::new(&root))
+                    .generate(&ir, &mut out, &Cx::new(&root), None)
                     .expect("generate Go SDK");
                 write_artifacts(&out, &root);
 

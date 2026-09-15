@@ -79,6 +79,8 @@ pub enum Namespace {
     Worker,
     /// Go source-analysis graphs, keyed by the source cache key.
     GoGinSource,
+    /// `gofmt` answers for one emitted source set, keyed by the formatter and that set.
+    GofmtMemo,
 }
 
 impl Namespace {
@@ -87,6 +89,7 @@ impl Namespace {
         match self {
             Self::Worker => root.join("worker"),
             Self::GoGinSource => root.join("sources").join("go-gin"),
+            Self::GofmtMemo => root.join("gofmt"),
         }
     }
 }

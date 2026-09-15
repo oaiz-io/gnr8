@@ -97,7 +97,7 @@ fn generated_sdks_support_configurable_surface_and_compile() {
                 .operation_file_template("api_{service_snake}_{operation_snake}.go")
                 .model_file_template("model_{schema_snake}.go"),
         )
-        .generate(&ir, &mut out, &Cx::new(&root))
+        .generate(&ir, &mut out, &Cx::new(&root), None)
         .expect("generate Go SDK");
 
     PySdk::new()
@@ -109,7 +109,7 @@ fn generated_sdks_support_configurable_surface_and_compile() {
                 .model_file_template("models/{schema_snake}.py"),
         )
         .pydantic()
-        .generate(&ir, &mut out, &Cx::new(&root))
+        .generate(&ir, &mut out, &Cx::new(&root), None)
         .expect("generate Python SDK");
 
     TsSdk::new()
@@ -120,7 +120,7 @@ fn generated_sdks_support_configurable_surface_and_compile() {
                 .model_dir("models")
                 .model_file_template("models/{schema_snake}.ts"),
         )
-        .generate(&ir, &mut out, &Cx::new(&root))
+        .generate(&ir, &mut out, &Cx::new(&root), None)
         .expect("generate TypeScript SDK");
 
     write_artifacts(&out, &root);

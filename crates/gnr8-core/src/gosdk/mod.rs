@@ -76,7 +76,9 @@ pub fn generate_with_layout(
     memo_dir: Option<&std::path::Path>,
 ) -> Result<String, crate::CoreError> {
     let projected = crate::graph::projection::for_generation(graph)?;
-    let mut formatter = gofmt::Formatter::open(memo_dir)?;
+    // A caller outside a pipeline has no machine store to reach; the project's own record is the
+    // whole memo for it.
+    let mut formatter = gofmt::Formatter::open(memo_dir, None)?;
     let files = generate_files_with_layout(&projected, package, base_path, layout, &mut formatter)?;
     formatter.finish();
     let bundle = SdkBundle { files };

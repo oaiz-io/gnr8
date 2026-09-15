@@ -402,7 +402,7 @@ pub fn run(
                             move || {
                                 let mut out = Artifacts::new();
                                 out.begin_stage(builtin_target_producer(position, spec));
-                                builtins::generate_target(spec, graph, &mut out, cx)?;
+                                builtins::generate_target(spec, graph, &mut out, cx, store)?;
                                 Ok(out.into_files())
                             }
                         })
