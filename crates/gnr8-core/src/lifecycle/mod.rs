@@ -281,15 +281,18 @@ fn reconcile_manifest_path_aliases<'a>(
 }
 
 fn validate_manifest_paths(manifest: &Manifest) -> Result<(), crate::CoreError> {
+    // One fold per entry, each independent of every other, and a manifest tracks one entry per
+    // generated file; the walk that reports a duplicate stays in order so it names the first pair.
+    let identities = crate::parallel::map_ordered(&manifest.files, |entry| {
+        portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
+            message: format!(
+                "ownership manifest contains non-portable path {:?}: {reason}",
+                entry.path
+            ),
+        })
+    })?;
     let mut seen = BTreeMap::new();
-    for entry in &manifest.files {
-        let identity =
-            portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
-                message: format!(
-                    "ownership manifest contains non-portable path {:?}: {reason}",
-                    entry.path
-                ),
-            })?;
+    for (entry, identity) in manifest.files.iter().zip(identities) {
         if let Some(previous) = seen.insert(identity, entry.path.as_str()) {
             return Err(crate::CoreError::Manifest {
                 message: format!(
@@ -306,21 +309,36 @@ fn generation_recovery_files<'a>(
     manifest: &Manifest,
     current: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<Vec<(String, String)>, crate::CoreError> {
+    let current: Vec<(&str, &str)> = current.into_iter().collect();
+    // Two folds per generated file — one for the manifest's spelling of it and one for this run's —
+    // and each depends on nothing but its own path. The inserts below stay in order, because a
+    // current path has to overwrite the manifest entry it renames rather than race it.
+    let (recorded, planned) = crate::parallel::join(
+        || {
+            crate::parallel::map_ordered(&manifest.files, |entry| {
+                portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
+                    message: format!(
+                        "ownership manifest contains non-portable path {:?}: {reason}",
+                        entry.path
+                    ),
+                })
+            })
+        },
+        || {
+            crate::parallel::map_ordered(&current, |(path, _)| {
+                portable_path_identity(path).map_err(|reason| crate::CoreError::Io {
+                    message: format!(
+                        "refusing to journal non-portable output path {path:?}: {reason}"
+                    ),
+                })
+            })
+        },
+    )?;
     let mut files = BTreeMap::new();
-    for entry in &manifest.files {
-        let identity =
-            portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
-                message: format!(
-                    "ownership manifest contains non-portable path {:?}: {reason}",
-                    entry.path
-                ),
-            })?;
+    for (entry, identity) in manifest.files.iter().zip(recorded) {
         files.insert(identity, (entry.path.clone(), entry.hash.clone()));
     }
-    for (path, hash) in current {
-        let identity = portable_path_identity(path).map_err(|reason| crate::CoreError::Io {
-            message: format!("refusing to journal non-portable output path {path:?}: {reason}"),
-        })?;
+    for ((path, hash), identity) in current.into_iter().zip(planned) {
         files.insert(identity, (path.to_string(), hash.to_string()));
     }
     Ok(files.into_values().collect())
@@ -437,15 +455,14 @@ pub fn apply_writes_with_anchors(
         )?;
     }
 
-    let current_paths = plan
-        .files
-        .iter()
-        .filter_map(|file| {
-            portable_path_identity(&file.path)
-                .ok()
-                .map(|identity| (identity, file.path.clone()))
-        })
-        .collect();
+    // One fold per planned file, none of which says anything about any other.
+    let current_paths = crate::parallel::map_ordered(&plan.files, |file| {
+        Ok(portable_path_identity(&file.path).ok())
+    })?
+    .into_iter()
+    .zip(&plan.files)
+    .filter_map(|(identity, file)| identity.map(|identity| (identity, file.path.clone())))
+    .collect();
     prune_stale_manifest_files(
         project_root,
         &mut dirs,
@@ -631,14 +648,17 @@ fn prune_stale_manifest_files(
     out: &mut GenerateOutcome,
 ) -> Result<(), crate::CoreError> {
     let project_dir = dirs.project_dir.try_clone().map_err(recovery_io_error)?;
-    for entry in &manifest.files {
-        let identity =
-            portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
-                message: format!(
-                    "ownership manifest contains non-portable path {:?}: {reason}",
-                    entry.path
-                ),
-            })?;
+    // One fold per manifest entry, independent of every other; the walk below stays in order
+    // because pruning is a mutation and the first stale entry is the one that reports.
+    let identities = crate::parallel::map_ordered(&manifest.files, |entry| {
+        portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
+            message: format!(
+                "ownership manifest contains non-portable path {:?}: {reason}",
+                entry.path
+            ),
+        })
+    })?;
+    for (entry, identity) in manifest.files.iter().zip(identities) {
         if let Some(current_path) = current_paths.get(&identity) {
             if entry.path == *current_path {
                 continue;
