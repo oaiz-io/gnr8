@@ -356,7 +356,8 @@ pub fn run(
     // for a pipeline with no configured targets, so it follows the same one deterministic path.
     let mut generation_ir = crate::graph::projection::into_generation(ir)?;
     let mut files: Vec<Artifact> = Vec::new();
-    if !plan.targets.is_empty() {
+    let rendered_graph: Result<String, CoreError>;
+    {
         // Every target, including a user-defined one, receives the same canonical directional
         // graph. `build_ir` and `inspect` intentionally retain the unsplit source facts; the
         // projection belongs at the artifact boundary.
@@ -377,40 +378,55 @@ pub fn run(
         // during that wait instead of after it, and a plan with no worker stage at all is bounded by
         // its slowest target rather than by the sum of them.
         let graph = &generation_ir;
-        std::thread::scope(|scope| -> Result<(), CoreError> {
-            let mut produced = crate::parallel::run_ahead(
-                scope,
-                spans
-                    .iter()
-                    .filter_map(|span| match span {
-                        StageSpan::Builtin(position, spec) => Some((*position, *spec)),
-                        StageSpan::Custom(_) => None,
-                    })
-                    .map(|(position, spec)| {
-                        move || {
-                            let mut out = Artifacts::new();
-                            out.begin_stage(builtin_target_producer(position, spec));
-                            builtins::generate_target(spec, graph, &mut out, cx)?;
-                            Ok(out.into_files())
+        // The graph artifact is a pure function of the frozen graph, exactly like a built-in
+        // target: only WHERE it lands in the finished set is observable, and that is still after
+        // the post-processors, which must not see it. So it is rendered here, beside the targets
+        // it shares a graph with, rather than in the gap after the last post-processor returns.
+        //
+        // Its failure is carried out of the scope rather than raised inside it. The artifact is
+        // still created after the post-processors, so raising it early would change which failure a
+        // run reports when a post-processor would also fail.
+        rendered_graph =
+            std::thread::scope(|scope| -> Result<Result<String, CoreError>, CoreError> {
+                let rendering_graph =
+                    scope.spawn(move || crate::graph_artifact::GraphArtifact::json_for(graph));
+                let mut produced = crate::parallel::run_ahead(
+                    scope,
+                    spans
+                        .iter()
+                        .filter_map(|span| match span {
+                            StageSpan::Builtin(position, spec) => Some((*position, *spec)),
+                            StageSpan::Custom(_) => None,
+                        })
+                        .map(|(position, spec)| {
+                            move || {
+                                let mut out = Artifacts::new();
+                                out.begin_stage(builtin_target_producer(position, spec));
+                                builtins::generate_target(spec, graph, &mut out, cx)?;
+                                Ok(out.into_files())
+                            }
+                        })
+                        .collect(),
+                );
+                for span in spans {
+                    match span {
+                        StageSpan::Builtin(_, _) => adopt_produced(&mut files, produced.next()?)?,
+                        StageSpan::Custom(indices) => {
+                            let paths = artifact_paths(&files);
+                            let produced =
+                                runner.generate_targets(&indices, std::mem::take(&mut files))?;
+                            require_no_dropped_artifacts("target", &indices, &paths, &produced)?;
+                            files = produced;
+                            files.sort_by(|left, right| left.path.cmp(&right.path));
                         }
-                    })
-                    .collect(),
-            );
-            for span in spans {
-                match span {
-                    StageSpan::Builtin(_, _) => adopt_produced(&mut files, produced.next()?)?,
-                    StageSpan::Custom(indices) => {
-                        let paths = artifact_paths(&files);
-                        let produced =
-                            runner.generate_targets(&indices, std::mem::take(&mut files))?;
-                        require_no_dropped_artifacts("target", &indices, &paths, &produced)?;
-                        files = produced;
-                        files.sort_by(|left, right| left.path.cmp(&right.path));
                     }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(rendering_graph.join().unwrap_or_else(|_| {
+                    Err(CoreError::SdkGen {
+                        message: "a generation worker thread stopped unexpectedly".to_string(),
+                    })
+                }))
+            })?;
     }
     let mut artifacts = Artifacts::from_files(files);
 
@@ -441,8 +457,7 @@ pub fn run(
     let contract_test_suites = contract_test_suites(plan, &generation_ir)?;
 
     artifacts.begin_stage("gnr8:GraphArtifact");
-    let graph_json = crate::graph_artifact::GraphArtifact::new(generation_ir).to_json()?;
-    artifacts.create(crate::graph_artifact::GRAPH_ARTIFACT_PATH, graph_json)?;
+    artifacts.create(crate::graph_artifact::GRAPH_ARTIFACT_PATH, rendered_graph?)?;
 
     let artifacts = artifacts.into_files();
     validate_artifact_paths(&artifacts)?;

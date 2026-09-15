@@ -43,18 +43,43 @@ impl GraphArtifact {
     /// Returns a typed graph-artifact error if comparison identities are ambiguous or the graph
     /// cannot be serialized.
     pub fn to_json(&self) -> Result<String, crate::CoreError> {
-        validate_comparison_identities(&self.graph).map_err(|message| {
+        Self::json_for(&self.graph)
+    }
+
+    /// The same bytes [`Self::to_json`] writes, for a caller that only BORROWS the graph.
+    ///
+    /// The pipeline renders this artifact beside the built-in targets, which all hold the frozen
+    /// graph by reference, so wrapping a copy of it first would copy megabytes to serialize them.
+    /// [`GraphArtifactRef`] carries the same fields in the same order, so this is one serialization
+    /// rather than a second one that has to be kept in step.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed graph-artifact error if comparison identities are ambiguous or the graph
+    /// cannot be serialized.
+    pub fn json_for(graph: &ApiGraph) -> Result<String, crate::CoreError> {
+        validate_comparison_identities(graph).map_err(|message| {
             crate::CoreError::GraphArtifact {
                 message: format!("{GRAPH_ARTIFACT_PATH} contains an invalid graph: {message}"),
             }
         })?;
-        let mut text =
-            serde_json::to_string_pretty(self).map_err(|err| crate::CoreError::GraphArtifact {
-                message: format!("failed to serialize {GRAPH_ARTIFACT_PATH}: {err}"),
-            })?;
+        let mut text = serde_json::to_string_pretty(&GraphArtifactRef {
+            schema_version: GRAPH_ARTIFACT_SCHEMA_VERSION,
+            graph,
+        })
+        .map_err(|err| crate::CoreError::GraphArtifact {
+            message: format!("failed to serialize {GRAPH_ARTIFACT_PATH}: {err}"),
+        })?;
         text.push('\n');
         Ok(text)
     }
+}
+
+/// The write side of [`GraphArtifact`], borrowing the graph it serializes.
+#[derive(Debug, serde::Serialize)]
+struct GraphArtifactRef<'graph> {
+    schema_version: u32,
+    graph: &'graph ApiGraph,
 }
 
 /// Reject graph identities that would otherwise collapse when a committed artifact is compared.
