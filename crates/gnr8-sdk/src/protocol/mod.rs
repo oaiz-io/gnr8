@@ -235,7 +235,8 @@ impl<T: Clone + PartialEq> Patched<T> {
 /// The failure a slot naming a position outside the held vector reports.
 fn reused_beyond_held(position: usize, held: usize) -> Error {
     Error::protocol(format!(
-        "a frame reused element {position} of a vector this side holds {held}                              element(s) of; the host and worker disagree about the previous one"
+        "a frame reused element {position} of a vector this side holds {held} element(s) of; the \
+         host and worker disagree about the previous one"
     ))
 }
 
