@@ -487,19 +487,39 @@ fn hash_paths(root: &Path, paths: &[PathBuf], skip: &str) -> Result<(String, Str
     ))
 }
 
-/// The content hash of the running `gnr8` executable.
+/// The content hash of the running `gnr8` executable, read once per process.
 ///
-/// This is what makes the build stamp safe when `.gnr8/Cargo.toml` uses a path dependency on an
-/// in-repo SDK: changing the SDK forces a host rebuild, which changes this hash, which invalidates
-/// every worker stamp.
+/// Two keys name it, and for one reason: what this executable produces is a property of its BYTES.
+/// The build stamp names it so that a `.gnr8/Cargo.toml` path dependency on an in-repo SDK is safe —
+/// changing the SDK forces a host rebuild, which changes this hash, which invalidates every worker
+/// stamp. The emission memo names it so that a change to gnr8's own emitters is never invisible to a
+/// record of what they emitted.
+///
+/// Read once because the running image cannot change under it, and reading a whole executable twice
+/// to answer one question is waste on a path that is measured in milliseconds.
+fn host_hash() -> &'static Result<String, String> {
+    static HASH: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        let exe = std::env::current_exe()
+            .map_err(|err| format!("failed to resolve the gnr8 executable: {err}"))?;
+        let (_, hash) =
+            blake3_file(&exe).map_err(|err| format!("failed to read {}: {err}", exe.display()))?;
+        Ok(hash)
+    })
+}
+
 fn host_executable_hash() -> Result<String, CoreError> {
-    let exe = std::env::current_exe().map_err(|err| CoreError::WorkerBuild {
-        message: format!("failed to resolve the gnr8 executable: {err}"),
-    })?;
-    let (_, hash) = blake3_file(&exe).map_err(|err| CoreError::WorkerBuild {
-        message: format!("failed to read {}: {err}", exe.display()),
-    })?;
-    Ok(hash)
+    host_hash()
+        .clone()
+        .map_err(|message| CoreError::WorkerBuild { message })
+}
+
+/// Which gnr8 this is, for a key that has to name the gnr8 a derived fact came out of.
+///
+/// `None` when the executable cannot be read. A caller that has no way to report that does not take
+/// a key it cannot complete — it derives the fact instead, which is slower and never wrong.
+pub(crate) fn host_identity() -> Option<&'static str> {
+    host_hash().as_deref().ok()
 }
 
 /// The two fingerprints of a `.gnr8/` workspace.

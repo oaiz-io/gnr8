@@ -142,10 +142,13 @@ an explicit script/program that performs discovery.
 `emission.memo` is one file the size of one generation — every built-in target's output plus the
 graph artifact — and each generation overwrites it, so it does not grow with the project's history.
 It is the answer to one question, and it is offered only to that question: its key names the frozen
-graph, every built-in target declaration in plan order, the gnr8 version, and, when Go is emitted,
-the content digest of the `gofmt` binary that formatted it. A pipeline whose targets include
-`StaticFiles`, which copies files out of the project, gets **no** key at all — the whole block emits
-rather than take a key that cannot name what it read.
+graph, every built-in target declaration in plan order, the content hash of the `gnr8` executable
+whose own code those targets are, and, when Go is emitted, the content digest of the `gofmt` binary
+that formatted it. The executable rather than its version, for the reason the worker build stamp
+already names the same thing: two builds of one version emit differently the moment a line of an
+emitter changes. A pipeline whose targets include `StaticFiles`, which copies files out of the
+project, gets **no** key at all — the whole block emits rather than take a key that cannot name what
+it read.
 
 This is narrower than the disabled `artifacts/` reuse below it, and the difference is the one that
 matters: that cache tried to predict what a project's own code-as-config would produce, from stamps

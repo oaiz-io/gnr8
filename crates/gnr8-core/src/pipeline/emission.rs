@@ -11,9 +11,10 @@
 //! Exactly the discipline [`crate::store`] states: a record may only be offered as the answer to
 //! the question it answered. A built-in target is a pure function of the frozen graph and its own
 //! declaration — it creates files and reads none — so [`key`] names the graph, every built-in
-//! target declaration in plan order, this gnr8's own version, and, when Go is emitted, the content
-//! digest of the `gofmt` binary that would have formatted it. A key that cannot be completed is
-//! [`None`], and a generation with no key simply emits, which is slower and never wrong.
+//! target declaration in plan order, the content hash of the gnr8 executable whose own code those
+//! targets ARE, and, when Go is emitted, the content digest of the `gofmt` binary that would have
+//! formatted it. A key that cannot be completed is [`None`], and a generation with no key simply
+//! emits, which is slower and never wrong.
 //!
 //! The one target that is NOT such a function is `StaticFiles`, which copies files out of the
 //! project. A plan that declares one gets no key at all rather than a key that ignores what it
@@ -51,12 +52,45 @@ pub(crate) struct Emission {
 
 /// The key naming everything the built-in targets and the graph artifact read, or `None`.
 ///
-/// `None` whenever some input cannot be named: a target that reads the project tree, or a `gofmt`
-/// that cannot be resolved. The caller then emits, exactly as it always did.
+/// `None` whenever some input cannot be named: a target that reads the project tree, a `gofmt` that
+/// cannot be resolved, or a gnr8 that cannot read its own executable. The caller then emits, exactly
+/// as it always did.
 pub(crate) fn key(graph: &mut ApiGraph, targets: &[(usize, &BuiltinTarget)]) -> Option<String> {
+    // WHICH gnr8 emitted a record is as much an input to it as the graph it emitted from: the
+    // built-in targets are this executable's own code. A version string cannot say that — two builds
+    // of one version emit differently the moment a line of an emitter changes, and every gnr8 built
+    // between two releases carries the same one — so the key names the executable's own content,
+    // exactly as the worker build stamp already does for the same reason.
+    let host = crate::worker::build::host_identity()?;
+    // Emitted Go IS `gofmt`'s output, so the binary that would have produced it is as much an input
+    // as the graph. Skipping emission must never skip noticing that it changed.
+    let gofmt = if targets
+        .iter()
+        .any(|(_, spec)| matches!(spec, BuiltinTarget::GoSdk(_)))
+    {
+        Some(
+            *crate::gosdk::FormatterIdentity::resolve_canonical()
+                .ok()?
+                .digest(),
+        )
+    } else {
+        None
+    };
+    key_over(graph, targets, host, gofmt.as_ref())
+}
+
+/// The key over inputs this module has already been handed, so each one's contribution is its own
+/// statement rather than a side effect of resolving it.
+fn key_over(
+    graph: &mut ApiGraph,
+    targets: &[(usize, &BuiltinTarget)],
+    host: &str,
+    gofmt: Option<&[u8; 32]>,
+) -> Option<String> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"gnr8-emission-memo-v1\n");
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(b"gnr8-emission-memo-v2\n");
+    hasher.update(b"host\n");
+    hasher.update(host.as_bytes());
     hasher.update(b"\n");
     hasher.update(b"targets\n");
     for (position, spec) in targets {
@@ -70,18 +104,9 @@ pub(crate) fn key(graph: &mut ApiGraph, targets: &[(usize, &BuiltinTarget)]) -> 
         hasher.update(&serde_json::to_vec(spec).ok()?);
         hasher.update(b"\0");
     }
-    if targets
-        .iter()
-        .any(|(_, spec)| matches!(spec, BuiltinTarget::GoSdk(_)))
-    {
-        // Emitted Go IS `gofmt`'s output, so the binary that would have produced it is as much an
-        // input as the graph. Skipping emission must never skip noticing that it changed.
+    if let Some(gofmt) = gofmt {
         hasher.update(b"gofmt\n");
-        hasher.update(
-            crate::gosdk::FormatterIdentity::resolve_canonical()
-                .ok()?
-                .digest(),
-        );
+        hasher.update(gofmt);
         hasher.update(b"\0");
     }
     hasher.update(b"graph\n");
@@ -331,7 +356,7 @@ fn split_len(rest: &[u8]) -> Option<(usize, &[u8])> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{decode, key, Recorder};
+    use super::{decode, key, key_over, Recorder};
     use crate::graph::ApiGraph;
     use crate::sdk::{builtins as decl, Artifact, BuiltinTarget};
 
@@ -423,6 +448,37 @@ mod tests {
 
         graph.schemas.clear();
         assert_ne!(with_schema, key(&mut graph, &[(0, &target)]).unwrap());
+    }
+
+    /// WHICH gnr8 emitted a record is part of the question it answers. The built-in targets are the
+    /// host executable's own code, so a host whose emitters changed must never be handed the
+    /// emission of one whose had not — and a version string cannot tell two such hosts apart.
+    #[test]
+    fn the_key_moves_with_the_gnr8_that_emitted_it() {
+        let mut graph = ApiGraph::default();
+        let target = openapi_target();
+        let one = key_over(&mut graph, &[(0, &target)], "host-a", None).expect("a keyable plan");
+        let other = key_over(&mut graph, &[(0, &target)], "host-b", None).expect("a keyable plan");
+        assert_ne!(one, other, "a different gnr8 is a different question");
+        assert_eq!(
+            one,
+            key_over(&mut graph, &[(0, &target)], "host-a", None).unwrap(),
+            "and the same gnr8 is the same one"
+        );
+    }
+
+    /// Emitted Go IS `gofmt`'s output, so an upgraded formatter is an emission no earlier record
+    /// answers for — including the record of a run that emitted no Go at all.
+    #[test]
+    fn the_key_moves_with_the_formatter_the_go_would_have_been_formatted_by() {
+        let mut graph = ApiGraph::default();
+        let target = openapi_target();
+        let unformatted = key_over(&mut graph, &[(0, &target)], "host", None);
+        let one = key_over(&mut graph, &[(0, &target)], "host", Some(&[7; 32]));
+        let other = key_over(&mut graph, &[(0, &target)], "host", Some(&[8; 32]));
+        assert!(one.is_some() && other.is_some());
+        assert_ne!(one, other, "a different gofmt is a different question");
+        assert_ne!(one, unformatted, "and naming one at all is a third");
     }
 
     /// A target that reads the project tree cannot be named by the graph and its declaration, so
