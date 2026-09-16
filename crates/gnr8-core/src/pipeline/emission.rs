@@ -276,8 +276,13 @@ struct Header {
 }
 
 /// The emission recorded for `key`, or `None` when this project has no record of it.
-pub(crate) fn load(cx: &Cx, key: &str) -> Option<Emission> {
-    decode(&std::fs::read(record_path(cx)).ok()?, key)
+///
+/// `groups` is how many built-in targets the plan declares. A record holding a different number is
+/// not an answer this plan can be handed, whatever its key says — and a record this run cannot use
+/// is a MISS, which is the one thing every unreadable record here is. Raising instead would make a
+/// damaged cache file fail a generation that is perfectly able to emit.
+pub(crate) fn load(cx: &Cx, key: &str, groups: usize) -> Option<Emission> {
+    decode(&std::fs::read(record_path(cx)).ok()?, key, groups)
 }
 
 /// Record `recorder`'s groups as the answer to `key`, replacing whatever this project held before.
@@ -319,12 +324,12 @@ fn write_atomically(path: &Path, bytes: &[u8]) {
 }
 
 /// The emission a record holds, if it proves it answers `key` under a schema this gnr8 reads.
-fn decode(bytes: &[u8], key: &str) -> Option<Emission> {
+fn decode(bytes: &[u8], key: &str, groups: usize) -> Option<Emission> {
     let rest = bytes.strip_prefix(MAGIC)?;
     let (len, rest) = split_len(rest)?;
     let (header, mut rest) = rest.split_at_checked(len)?;
     let header: Header = serde_json::from_slice(header).ok()?;
-    if header.key != key {
+    if header.key != key || header.groups.len() != groups {
         return None;
     }
     let mut groups = header.groups;
@@ -375,7 +380,7 @@ mod tests {
     #[test]
     fn a_record_round_trips_every_group_in_order() {
         let bytes = recorded("k");
-        let restored = decode(&bytes, "k").expect("a record answers its own key");
+        let restored = decode(&bytes, "k", 2).expect("a record answers its own key");
         assert_eq!(restored.groups.len(), 2);
         assert_eq!(restored.groups[0][0].path, "a/one.go");
         assert_eq!(restored.groups[0][0].text, "package one\n");
@@ -387,15 +392,26 @@ mod tests {
     #[test]
     fn a_record_is_never_offered_as_the_answer_to_another_key() {
         let bytes = recorded("k");
-        assert!(decode(&bytes, "other").is_none());
+        assert!(decode(&bytes, "other", 2).is_none());
     }
 
     #[test]
     fn a_truncated_or_foreign_record_is_a_miss_not_an_error() {
         let bytes = recorded("k");
-        assert!(decode(&bytes[..bytes.len() - 4], "k").is_none());
-        assert!(decode(b"not a gnr8 record", "k").is_none());
-        assert!(decode(&[], "k").is_none());
+        assert!(decode(&bytes[..bytes.len() - 4], "k", 2).is_none());
+        assert!(decode(b"not a gnr8 record", "k", 2).is_none());
+        assert!(decode(&[], "k", 2).is_none());
+    }
+
+    /// A record holds one group per built-in target the plan declared, so one that holds a
+    /// different number cannot be this plan's answer — and, like every record this run cannot use,
+    /// it is a miss rather than a failure.
+    #[test]
+    fn a_record_for_a_different_number_of_targets_is_a_miss() {
+        let bytes = recorded("k");
+        assert!(decode(&bytes, "k", 2).is_some());
+        assert!(decode(&bytes, "k", 1).is_none());
+        assert!(decode(&bytes, "k", 3).is_none());
     }
 
     fn openapi_target() -> BuiltinTarget {

@@ -454,7 +454,7 @@ fn emit(
     let emission_key = emission::key(generation_ir, &builtin_targets);
     let restored = emission_key
         .as_deref()
-        .and_then(|key| emission::load(cx, key));
+        .and_then(|key| emission::load(cx, key, builtin_targets.len()));
     let graph = &*generation_ir;
     std::thread::scope(|scope| -> Result<Result<String, CoreError>, CoreError> {
         let mut emitted = match restored {
