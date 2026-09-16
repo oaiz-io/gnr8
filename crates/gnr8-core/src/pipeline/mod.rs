@@ -1207,6 +1207,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A hit is SERVED from the record — it is not re-emitted and then compared to one. The only
+    /// way to tell those two apart from outside is to make the record say something emitting could
+    /// not: the artifact text travels beside the JSON as raw bytes, so a same-length substitution
+    /// leaves every length in the record true and changes only what one artifact says. A run that
+    /// read it back reports the substitution; a run that emitted could not.
+    #[test]
+    fn a_recorded_emission_is_what_the_next_run_hands_on() {
+        let root = unique_temp_dir("emission-memo-served");
+        std::fs::create_dir_all(root.join(crate::lifecycle::WORKSPACE_DIR).join("cache")).unwrap();
+        let cx = Cx::new(root.clone());
+        let plan = Pipeline::new()
+            .source(Custom(CustomSource))
+            .target(decl::OpenApi31::new().to("generated/openapi.yaml"))
+            .plan();
+
+        let emitted = run(&plan, &cx, &mut RecordingRunner::default(), None).unwrap();
+        assert!(
+            document_of(&emitted).starts_with("openapi: 3.1.0"),
+            "the run that emitted wrote the document this gnr8 emits"
+        );
+
+        let record = root
+            .join(crate::lifecycle::WORKSPACE_DIR)
+            .join("cache")
+            .join("emission.memo");
+        let mut bytes = std::fs::read(&record).unwrap();
+        let (from, to) = (b"openapi: 3.1.0", b"openapi: 9.9.9");
+        assert_eq!(
+            bytes.windows(from.len()).filter(|w| *w == from).count(),
+            1,
+            "the emitted document appears in the record exactly once"
+        );
+        let at = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .unwrap();
+        bytes[at..at + to.len()].copy_from_slice(to);
+        std::fs::write(&record, &bytes).unwrap();
+
+        let restored = run(&plan, &cx, &mut RecordingRunner::default(), None).unwrap();
+        assert!(
+            document_of(&restored).starts_with("openapi: 9.9.9"),
+            "the second run served the record, it did not emit again: {}",
+            &document_of(&restored)[..32]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn document_of(outcome: &crate::pipeline::PipelineOutcome) -> &str {
+        outcome
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == "generated/openapi.yaml")
+            .map(|artifact| artifact.text.as_str())
+            .expect("the plan emits one OpenAPI document")
+    }
+
     /// A record answers one question. A plan that declares a different target is a different
     /// question, so the run emits rather than reading the previous plan's answer back.
     #[test]
