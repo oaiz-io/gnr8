@@ -158,9 +158,10 @@ produced. The write plan still compares real bytes against the real files on dis
 
 ### The machine-global store
 
-Everything above is per checkout, so every worktree of one repository recompiles the same worker and
-re-extracts the same tree. The two answers that do not depend on *where* the checkout is are shared
-through one machine-global, content-addressed store, on by default:
+Everything above is per checkout, so every worktree of one repository recompiles the same worker,
+re-extracts the same tree and re-formats the same generated Go. The answers that do not depend on
+*where* the checkout is are shared through one machine-global, content-addressed store, on by
+default:
 
 | Platform | Default location |
 |---|---|
@@ -181,6 +182,7 @@ What is shared, and nothing else:
 |---|---|---|
 | the built `.gnr8/` worker binary | the build fingerprint above | the fingerprint covers every build input and no path |
 | a Go source analysis | the source cache key above | the key covers the module's build inputs, the extractor binary, the toolchain and the gnr8 version; the stored graph holds only project-relative paths |
+| one `gofmt` call's answers | the resolved `gofmt`'s content hash and the SET of source digests it was asked about | `gofmt` is a pure function of (binary, input bytes) and the key names both; the record is a sorted map of exactly those digests, so it reproduces its own key — which is checked before it is trusted |
 
 Each is shared only while its key provably names the same bytes read from any checkout, and a
 derivation that reaches outside the tree its key hashes is simply never shared. A `.gnr8/Cargo.toml`
@@ -202,9 +204,17 @@ read, cannot parse, or that `include`s another file counts as a redirect too. A 
 local build; a false no would share the wrong binary.
 
 The ownership manifest is deliberately **not** shared: it records what *this* checkout's outputs are,
-which is checkout state rather than an answer. Neither is the `gofmt` memo, which is rewritten with
-exactly the entries one run needed and would otherwise thrash between projects. The compiled
-`goextract` sidecar and the cargo and Go build caches were already machine-global and are untouched.
+which is checkout state rather than an answer. Neither is `.gnr8/cache/gofmt.memo` itself — it is
+rewritten with exactly the entries one run needed, so it is this checkout's working set rather than
+an answer, and sharing it would make projects thrash it. What IS shared is one `gofmt` CALL's
+answers, all of them or none, under a key naming the whole source set that call asked about; a
+checkout emitting one different Go file simply misses and runs `gofmt`, which is what it would have
+done anyway. A store hit is folded into the project's own memo on the way through, so the checkout
+ends the run in the state a local `gofmt` would have left it in. `.gnr8/cache/emission.memo` is not
+shared either, for the manifest's reason: it is the record of what THIS checkout last emitted.
+
+The compiled `goextract` sidecar and the cargo and Go build caches were already machine-global and
+are untouched.
 
 A store hit is an entry proving it answers the same key, so it is equal to recomputing by the same
 determinism rule that makes gnr8's output byte-identical for identical input: a differing gnr8

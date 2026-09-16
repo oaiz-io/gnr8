@@ -163,8 +163,11 @@ sorted set. Use `create`, `overlay`, or `rewrite` so ownership intent is explici
 ## Determinism and caches
 
 The graph, artifact paths, and built-in output are sorted and deterministic. gnr8 caches source
-analysis, file hashes, and the worker build stamp under `.gnr8/cache`; Rust build output is under
-`.gnr8/target`. Cache hits change work performed, not output semantics.
+analysis, `gofmt` answers, the built-in targets' last emission, file hashes, and the worker build
+stamp under `.gnr8/cache`; Rust build output is under `.gnr8/target`. Cache hits change work
+performed, not output semantics — every one of those records is keyed on everything the work it
+stands in for read, and a record that cannot prove it answers the question being asked is a miss.
+[Generated artifacts and CI](../operations/artifacts-and-ci.md) lists each file and its key.
 
 ## Next pages
 
