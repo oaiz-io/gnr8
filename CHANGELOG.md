@@ -9,6 +9,48 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **`.gnr8/cache/emission.memo` — a record of what the built-in targets last emitted.** A warm
+  no-op run re-emitted every file the project has and then discovered, one file at a time, that each
+  already held exactly those bytes. The built-in target block — every built-in target plus the graph
+  artifact — is a pure function of the frozen graph and the declarations, so a generation records
+  its whole product under a key naming that graph, every built-in declaration in plan order, the
+  content hash of the `gnr8` executable whose own code those targets are, and, when Go is emitted,
+  the `gofmt` binary that would have formatted it. A run with the same key reads the record back
+  instead of emitting again. It is one file per checkout, the size of one generation, overwritten
+  every generation and covered by the `/cache/` rule `gnr8 init` writes into `.gnr8/.gitignore`; a
+  plan whose targets include `StaticFiles`, which copies files out of the project, takes no key at
+  all and emits. Nothing downstream can tell: the post-processors still run over the restored set,
+  and the write plan still reads the real files on disk and compares real bytes.
+- **One `gofmt` call's answers are shared through the machine store.** A fresh checkout has no
+  `.gnr8/cache`, so it had no record of what `gofmt` already answered for a split Go SDK it emits
+  byte for byte identically. The store gains a third namespace, keyed by the resolved `gofmt`'s
+  content hash and the SET of source digests one call asked about; a record proves that it
+  reproduces that key and names this formatter before anything is read out of it, and a store hit is
+  folded into the project's own memo, so the checkout ends the run where a local `gofmt` would
+  have left it.
+- **`Patched::resolve_taking` and `GraphPatch::resolve_taking`.** A receiver always replaces what it
+  holds with what a patch rebuilds, so the vector a patch is measured against is dead the moment it
+  resolves; taking it by value moves every reused element into the rebuilt vector instead of copying
+  it out of one about to be dropped. The wire is unchanged and `capability_digest` does not move, so
+  a worker built against an earlier `gnr8` talks to this host exactly as before.
+
+### Changed
+
+- **Warm `gnr8 check` and `gnr8 generate` are ~1.6x faster on large consumers, and repo-cold runs
+  1.3–1.4x.** Measured on a 5,165-artifact / 16.4 MB repository, block-interleaved against 0.16.1,
+  medians of 9 (warm) and 3 (cold): warm `check` 1066 ms → 655 ms, warm `generate` 1186 ms → 746 ms,
+  cold `check` 1060 ms → 827 ms, cold `generate` 1161 ms → 813 ms. An ice-cold run — no project
+  cache and no store — is unchanged (25.7 s → 24.4 s), because it is dominated by `cargo`,
+  `go build` and `go/types`. Output is byte-identical: the same tree digest across 0.16.1, a forced
+  re-emission and a record hit.
+- **A generated Go SDK's three `gofmt` runs share one record.** `GoSdk` formats the SDK bundle, the
+  contract test and the generated CLI, and each call used to rewrite `.gnr8/cache/gofmt.memo` with
+  only its own entries, so the last writer won and the other two's answers were dropped. Every warm
+  run then re-formatted the whole split SDK. The memo now belongs to the target, so it records
+  everything one generation used.
+
 ## 0.16.1 — 2026-09-14
 
 ### Breaking
