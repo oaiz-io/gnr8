@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.16.2 — 2026-09-16
+
 ### Added
 
 - **`.gnr8/cache/emission.memo` — a record of what the built-in targets last emitted.** A warm
