@@ -135,8 +135,23 @@ an explicit script/program that performs discovery.
 | `.gnr8/cache/manifest.json` | generated ownership hashes | no |
 | `.gnr8/cache/sources/` | source analysis cache | no |
 | `.gnr8/cache/gofmt.memo` | `gofmt` answers this checkout has already asked for | no |
+| `.gnr8/cache/emission.memo` | what this checkout's built-in targets last emitted | no |
 | `.gnr8/cache/artifacts/` | reserved; cross-run artifact reuse is disabled | no |
 | `.gnr8/cache/verified-noop.json` | reserved; ignored while pre-child skipping is disabled | no |
+
+`emission.memo` is one file the size of one generation — every built-in target's output plus the
+graph artifact — and each generation overwrites it, so it does not grow with the project's history.
+It is the answer to one question, and it is offered only to that question: its key names the frozen
+graph, every built-in target declaration in plan order, the gnr8 version, and, when Go is emitted,
+the content digest of the `gofmt` binary that formatted it. A pipeline whose targets include
+`StaticFiles`, which copies files out of the project, gets **no** key at all — the whole block emits
+rather than take a key that cannot name what it read.
+
+This is narrower than the disabled `artifacts/` reuse below it, and the difference is the one that
+matters: that cache tried to predict what a project's own code-as-config would produce, from stamps
+over `.gnr8/src`. This one predicts nothing about it. Every stage a project wrote still runs, on
+every run, and what is reused is only the host's own emission from the graph those stages just
+produced. The write plan still compares real bytes against the real files on disk.
 
 ### The machine-global store
 
