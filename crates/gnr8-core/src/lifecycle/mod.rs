@@ -2863,20 +2863,47 @@ pub fn with_generation_state_lock<T>(
     Ok(result)
 }
 
+/// The failure reading one generated output reports, naming the file it was reading.
+fn output_read_error(project_root: &Path, rel: &str, err: &std::io::Error) -> crate::CoreError {
+    crate::CoreError::Io {
+        message: format!(
+            "failed to inspect generated output {}: {err}",
+            project_root.join(rel).display()
+        ),
+    }
+}
+
 fn read_artifacts_from_disk(
     project_root: &Path,
     artifacts: &[Artifact],
 ) -> Result<HashMap<String, Option<Vec<u8>>>, crate::CoreError> {
     let project_dir = open_project_dir(project_root)?;
+    // Reaching a leaf's parent costs one `openat` per path component, and that walk is a property
+    // of the DIRECTORY, not of any one file in it. A split SDK puts thousands of files in a dozen
+    // directories seven components deep, so walking per file made the overwhelming majority of this
+    // pass's system calls repeats of a walk it had already done. Each directory is therefore reached
+    // once here — the same thing the write pass does with `OutputDirs` — and every file in it is
+    // then read from the handle that walk produced.
+    let mut parents: BTreeMap<&str, Option<Dir>> = BTreeMap::new();
+    for artifact in artifacts {
+        let (parent_rel, _) = split_output_path(&artifact.path)
+            .map_err(|err| output_read_error(project_root, &artifact.path, &err))?;
+        if !parents.contains_key(parent_rel) {
+            let opened = open_output_dir(&project_dir, parent_rel, false)
+                .map_err(|err| output_read_error(project_root, &artifact.path, &err))?;
+            parents.insert(parent_rel, opened);
+        }
+    }
     // Reading a few thousand generated files is I/O the machine can overlap; the map this builds is
     // keyed by path, so the order the reads finish in cannot reach the write decision.
     let bytes = crate::parallel::map_ordered(artifacts, |artifact| {
-        read_output_file(&project_dir, &artifact.path).map_err(|err| crate::CoreError::Io {
-            message: format!(
-                "failed to inspect generated output {}: {err}",
-                project_root.join(&artifact.path).display()
-            ),
-        })
+        let (parent_rel, leaf) = split_output_path(&artifact.path)
+            .map_err(|err| output_read_error(project_root, &artifact.path, &err))?;
+        let Some(parent) = parents.get(parent_rel).and_then(Option::as_ref) else {
+            return Ok(None);
+        };
+        read_file_optional(parent, leaf)
+            .map_err(|err| output_read_error(project_root, &artifact.path, &err))
     })?;
     let mut disk = HashMap::with_capacity(artifacts.len());
     for (artifact, bytes) in artifacts.iter().zip(bytes) {
