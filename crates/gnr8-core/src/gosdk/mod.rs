@@ -17,7 +17,7 @@ mod contract;
 mod emit;
 mod gofmt;
 
-pub(crate) use gofmt::Formatter;
+pub(crate) use gofmt::{Formatter, FormatterIdentity};
 
 use std::collections::BTreeMap;
 

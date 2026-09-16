@@ -19,6 +19,8 @@ use crate::store::Store;
 use crate::verify::ContractTestSuite;
 use crate::CoreError;
 
+mod emission;
+
 /// The worker-side half of a pipeline run: whatever executes the user's own stages.
 pub trait StageRunner {
     /// Run the custom source at `index`.
@@ -356,78 +358,7 @@ pub fn run(
     // for a pipeline with no configured targets, so it follows the same one deterministic path.
     let mut generation_ir = crate::graph::projection::into_generation(ir)?;
     let mut files: Vec<Artifact> = Vec::new();
-    let rendered_graph: Result<String, CoreError>;
-    {
-        // Every target, including a user-defined one, receives the same canonical directional
-        // graph. `build_ir` and `inspect` intentionally retain the unsplit source facts; the
-        // projection belongs at the artifact boundary.
-        let spans = stage_spans(&plan.targets);
-        // The frozen graph is the same for every target, so it crosses to the worker once rather
-        // than riding along with each run.
-        if spans
-            .iter()
-            .any(|span| matches!(span, StageSpan::Custom(_)))
-        {
-            runner.freeze_graph(&mut generation_ir)?;
-        }
-        // A BUILT-IN target is a pure function of the frozen graph: every one of them only creates
-        // files, and not one reads the set it writes into. WHEN it runs is therefore not observable
-        // — only WHERE its files land in the accumulated set is. So they ALL run ahead of the loop
-        // that places them, and the loop takes each one's files back at the position the plan gives
-        // it. A run that spends a tenth of a second inside one worker stage emits its whole Go SDK
-        // during that wait instead of after it, and a plan with no worker stage at all is bounded by
-        // its slowest target rather than by the sum of them.
-        let graph = &generation_ir;
-        // The graph artifact is a pure function of the frozen graph, exactly like a built-in
-        // target: only WHERE it lands in the finished set is observable, and that is still after
-        // the post-processors, which must not see it. So it is rendered here, beside the targets
-        // it shares a graph with, rather than in the gap after the last post-processor returns.
-        //
-        // Its failure is carried out of the scope rather than raised inside it. The artifact is
-        // still created after the post-processors, so raising it early would change which failure a
-        // run reports when a post-processor would also fail.
-        rendered_graph =
-            std::thread::scope(|scope| -> Result<Result<String, CoreError>, CoreError> {
-                let rendering_graph =
-                    scope.spawn(move || crate::graph_artifact::GraphArtifact::json_for(graph));
-                let mut produced = crate::parallel::run_ahead(
-                    scope,
-                    spans
-                        .iter()
-                        .filter_map(|span| match span {
-                            StageSpan::Builtin(position, spec) => Some((*position, *spec)),
-                            StageSpan::Custom(_) => None,
-                        })
-                        .map(|(position, spec)| {
-                            move || {
-                                let mut out = Artifacts::new();
-                                out.begin_stage(builtin_target_producer(position, spec));
-                                builtins::generate_target(spec, graph, &mut out, cx, store)?;
-                                Ok(out.into_files())
-                            }
-                        })
-                        .collect(),
-                );
-                for span in spans {
-                    match span {
-                        StageSpan::Builtin(_, _) => adopt_produced(&mut files, produced.next()?)?,
-                        StageSpan::Custom(indices) => {
-                            let paths = artifact_paths(&files);
-                            let produced =
-                                runner.generate_targets(&indices, std::mem::take(&mut files))?;
-                            require_no_dropped_artifacts("target", &indices, &paths, &produced)?;
-                            files = produced;
-                            files.sort_by(|left, right| left.path.cmp(&right.path));
-                        }
-                    }
-                }
-                Ok(rendering_graph.join().unwrap_or_else(|_| {
-                    Err(CoreError::SdkGen {
-                        message: "a generation worker thread stopped unexpectedly".to_string(),
-                    })
-                }))
-            })?;
-    }
+    let rendered_graph = emit(plan, &mut generation_ir, &mut files, cx, runner, store)?;
     let mut artifacts = Artifacts::from_files(files);
 
     for span in stage_spans(&plan.posts) {
@@ -478,6 +409,170 @@ pub fn run(
 /// path an earlier stage already owns. Both sides are sorted, so one merge walk answers it — and the
 /// artifacts are carried across whole, so a file records the same producer and ownership it would
 /// have had if the built-in had written straight into the set.
+/// Run the target phase: every target in plan order, plus the graph artifact beside them.
+///
+/// Returns the rendered graph artifact, whose FAILURE is carried out rather than raised here. The
+/// artifact is created after the post-processors, so raising it early would change which failure a
+/// run reports when a post-processor would also fail.
+///
+/// # Errors
+///
+/// Returns a target's own failure, or an ownership failure when two of them claim one path.
+fn emit(
+    plan: &StagePlan,
+    generation_ir: &mut ApiGraph,
+    files: &mut Vec<Artifact>,
+    cx: &Cx,
+    runner: &mut dyn StageRunner,
+    store: Option<&Store>,
+) -> Result<Result<String, CoreError>, CoreError> {
+    // Every target, including a user-defined one, receives the same canonical directional graph.
+    // `build_ir` and `inspect` intentionally retain the unsplit source facts; the projection
+    // belongs at the artifact boundary.
+    let spans = stage_spans(&plan.targets);
+    // The frozen graph is the same for every target, so it crosses to the worker once rather than
+    // riding along with each run.
+    if spans
+        .iter()
+        .any(|span| matches!(span, StageSpan::Custom(_)))
+    {
+        runner.freeze_graph(generation_ir)?;
+    }
+    // A BUILT-IN target is a pure function of the frozen graph: every one of them only creates
+    // files, and not one reads the set it writes into. WHEN it runs is therefore not observable —
+    // only WHERE its files land in the accumulated set is. So they ALL run ahead of the loop that
+    // places them, and the loop takes each one's files back at the position the plan gives it. A run
+    // that spends a tenth of a second inside one worker stage emits its whole Go SDK during that
+    // wait instead of after it, and a plan with no worker stage at all is bounded by its slowest
+    // target rather than by the sum of them.
+    //
+    // Those built-ins and the graph artifact are, for the same reason, ONE answer — so a generation
+    // that already computed it need not compute it again. `emission` records the block under a key
+    // naming this graph, the declarations, this gnr8, and the `gofmt` any Go would be formatted by.
+    // A key it cannot complete is `None`, and the block then runs exactly as it always did.
+    let builtin_targets = emission::builtin_targets(&plan.targets);
+    let emission_key = emission::key(generation_ir, &builtin_targets);
+    let restored = emission_key
+        .as_deref()
+        .and_then(|key| emission::load(cx, key));
+    let graph = &*generation_ir;
+    std::thread::scope(|scope| -> Result<Result<String, CoreError>, CoreError> {
+        let mut emitted = match restored {
+            Some(emission::Emission {
+                groups,
+                graph_artifact,
+            }) => Emitted::Recorded {
+                groups: groups.into_iter(),
+                graph_artifact,
+            },
+            None => Emitted::Running {
+                rendering_graph: scope
+                    .spawn(move || crate::graph_artifact::GraphArtifact::json_for(graph)),
+                started: crate::parallel::run_ahead(
+                    scope,
+                    builtin_targets
+                        .iter()
+                        .map(|(position, spec)| {
+                            let (position, spec) = (*position, *spec);
+                            move || {
+                                let mut out = Artifacts::new();
+                                out.begin_stage(builtin_target_producer(position, spec));
+                                builtins::generate_target(spec, graph, &mut out, cx, store)?;
+                                Ok(out.into_files())
+                            }
+                        })
+                        .collect(),
+                ),
+                recorder: emission::Recorder::default(),
+            },
+        };
+        for span in spans {
+            match span {
+                StageSpan::Builtin(_, _) => adopt_produced(files, emitted.next_group()?)?,
+                StageSpan::Custom(indices) => {
+                    let paths = artifact_paths(files);
+                    let produced = runner.generate_targets(&indices, std::mem::take(files))?;
+                    require_no_dropped_artifacts("target", &indices, &paths, &produced)?;
+                    *files = produced;
+                    files.sort_by(|left, right| left.path.cmp(&right.path));
+                }
+            }
+        }
+        let (rendered, unrecorded) = emitted.finish();
+        // Recorded only once every group came back and the graph rendered, so a run that failed
+        // part way through never leaves a record claiming a whole emission.
+        if let (Some(key), Some(recorder), Ok(graph_artifact)) =
+            (emission_key.as_deref(), unrecorded, rendered.as_ref())
+        {
+            emission::save(cx, key, recorder, graph_artifact);
+        }
+        Ok(rendered)
+    })
+}
+
+/// Where the built-in targets' output for this run is coming from.
+///
+/// One or the other, decided once before the block starts: either this generation is running the
+/// targets, or it is reading back the record of a generation that already ran them under the same
+/// key. The placement loop asks for groups in plan order and cannot tell which, which is what keeps
+/// the memo a memo rather than a second way to decide what a target emits.
+enum Emitted<'scope> {
+    /// Running now: each group is taken back as its thread finishes, so a custom target's worker
+    /// time overlaps the built-in renders that have not been placed yet.
+    Running {
+        rendering_graph: std::thread::ScopedJoinHandle<'scope, Result<String, CoreError>>,
+        started: crate::parallel::Started<'scope, Vec<Artifact>>,
+        recorder: emission::Recorder,
+    },
+    /// Read back: the groups are already here, handed out in the same order.
+    Recorded {
+        groups: std::vec::IntoIter<Vec<Artifact>>,
+        graph_artifact: String,
+    },
+}
+
+impl Emitted<'_> {
+    /// The next built-in target's files, in plan order.
+    fn next_group(&mut self) -> Result<Vec<Artifact>, CoreError> {
+        match self {
+            Self::Running {
+                started, recorder, ..
+            } => {
+                let group = started.next()?;
+                recorder.add_group(&group);
+                Ok(group)
+            }
+            Self::Recorded { groups, .. } => groups.next().ok_or_else(|| CoreError::SdkGen {
+                message: "the recorded emission holds fewer built-in targets than the plan \
+                          declares"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// The rendered graph artifact, and the record to keep when this run is the one that emitted.
+    ///
+    /// A run that read the groups back has nothing to record: re-writing the record it just read
+    /// would spend a whole emission's worth of I/O restating it.
+    fn finish(self) -> (Result<String, CoreError>, Option<emission::Recorder>) {
+        match self {
+            Self::Running {
+                rendering_graph,
+                recorder,
+                ..
+            } => {
+                let rendered = rendering_graph.join().unwrap_or_else(|_| {
+                    Err(CoreError::SdkGen {
+                        message: "a generation worker thread stopped unexpectedly".to_string(),
+                    })
+                });
+                (rendered, Some(recorder))
+            }
+            Self::Recorded { graph_artifact, .. } => (Ok(graph_artifact), None),
+        }
+    }
+}
+
 fn adopt_produced(into: &mut Vec<Artifact>, produced: Vec<Artifact>) -> Result<(), CoreError> {
     if into.is_empty() {
         *into = produced;
@@ -1081,6 +1176,89 @@ mod tests {
         assert_eq!(producers[0], "target[0]:OpenApi31");
         assert_eq!(producers[2], "gnr8:GraphArtifact");
         assert_eq!(producers[3], "target[2]:OpenApi31Json");
+    }
+
+    /// A record may only make a run faster. The second run reads every built-in target's output
+    /// back instead of emitting it, and what it hands on has to be what emitting produced —
+    /// artifact for artifact, producer included, graph artifact included.
+    #[test]
+    fn a_recorded_emission_reproduces_what_emitting_produced() {
+        let root = unique_temp_dir("emission-memo");
+        std::fs::create_dir_all(root.join(crate::lifecycle::WORKSPACE_DIR).join("cache")).unwrap();
+        let cx = Cx::new(root.clone());
+        let plan = Pipeline::new()
+            .source(Custom(CustomSource))
+            .target(decl::OpenApi31::new().to("generated/a-openapi.yaml"))
+            .target(decl::OpenApi31Json::new().to("generated/z-openapi.json"))
+            .plan();
+
+        let emitted = run(&plan, &cx, &mut RecordingRunner::default(), None).unwrap();
+        assert!(
+            root.join(crate::lifecycle::WORKSPACE_DIR)
+                .join("cache")
+                .join("emission.memo")
+                .is_file(),
+            "the run that emitted records what it emitted"
+        );
+        let restored = run(&plan, &cx, &mut RecordingRunner::default(), None).unwrap();
+
+        assert_eq!(restored.artifacts, emitted.artifacts);
+        assert_eq!(restored.diagnostics, emitted.diagnostics);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A record answers one question. A plan that declares a different target is a different
+    /// question, so the run emits rather than reading the previous plan's answer back.
+    #[test]
+    fn a_record_is_not_offered_to_a_plan_it_does_not_answer() {
+        let root = unique_temp_dir("emission-memo-replan");
+        std::fs::create_dir_all(root.join(crate::lifecycle::WORKSPACE_DIR).join("cache")).unwrap();
+        let cx = Cx::new(root.clone());
+        let first = Pipeline::new()
+            .source(Custom(CustomSource))
+            .target(decl::OpenApi31::new().to("generated/one.yaml"))
+            .plan();
+        let second = Pipeline::new()
+            .source(Custom(CustomSource))
+            .target(decl::OpenApi31::new().to("generated/two.yaml"))
+            .plan();
+
+        run(&first, &cx, &mut RecordingRunner::default(), None).unwrap();
+        let outcome = run(&second, &cx, &mut RecordingRunner::default(), None).unwrap();
+
+        let paths: Vec<&str> = outcome
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.path.as_str())
+            .collect();
+        assert_eq!(paths, vec![GRAPH_ARTIFACT_PATH, "generated/two.yaml"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The key names the graph, so a graph the record was not taken from never reaches it.
+    #[test]
+    fn a_record_is_not_offered_to_a_graph_it_does_not_answer() {
+        let root = unique_temp_dir("emission-memo-regraph");
+        std::fs::create_dir_all(root.join(crate::lifecycle::WORKSPACE_DIR).join("cache")).unwrap();
+        let cx = Cx::new(root.clone());
+        let plan = Pipeline::new()
+            .source(Custom(CustomSource))
+            .transform(Custom(CustomTransform))
+            .target(decl::OpenApi31::new().to("generated/one.yaml"))
+            .plan();
+
+        let untransformed = Pipeline::new()
+            .source(Custom(CustomSource))
+            .target(decl::OpenApi31::new().to("generated/one.yaml"))
+            .plan();
+        let before = run(&untransformed, &cx, &mut RecordingRunner::default(), None).unwrap();
+        let after = run(&plan, &cx, &mut RecordingRunner::default(), None).unwrap();
+
+        assert_ne!(
+            after.artifacts, before.artifacts,
+            "a transformed graph emits a different document, never the record of the untransformed one"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

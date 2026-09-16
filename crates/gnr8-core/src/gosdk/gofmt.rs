@@ -224,6 +224,24 @@ pub(crate) struct FormatterIdentity {
 }
 
 impl FormatterIdentity {
+    /// The canonical `gofmt` this machine will run, or the typed toolchain failure.
+    ///
+    /// Public to the crate because the formatter is an input to more than the formatting itself: a
+    /// memo that lets a generation skip emitting Go has to name the binary that Go would have been
+    /// formatted by, or a `gofmt` upgrade would be invisible to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GoToolchainMissing`] when `gofmt` is not on `PATH` or cannot be read.
+    pub(crate) fn resolve_canonical() -> Result<Self, CoreError> {
+        Self::resolve("gofmt")
+    }
+
+    /// The content digest of the resolved binary, for a caller keying work on it.
+    pub(crate) fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
     fn resolve(name: &str) -> Result<Self, CoreError> {
         let binary = resolve_program(name)?;
         let bytes = fs::read(&binary).map_err(|source| CoreError::GoToolchainMissing { source })?;
