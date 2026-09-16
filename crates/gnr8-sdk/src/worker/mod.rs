@@ -46,7 +46,16 @@ pub fn run(pipeline: Pipeline) -> ExitCode {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     match serve(&pipeline, &mut stdin.lock(), &mut stdout.lock()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(finished) => {
+            // The session's own graph and artifact set are plain gnr8 data with no destructor that
+            // does anything but free memory, and this process is about to hand its whole address
+            // space back to the kernel. Leaving them for the kernel is what stops the host waiting
+            // on a free() walk of tens of megabytes AFTER it has the last frame. The user's own
+            // stages are NOT included: `pipeline` is dropped normally, so a stage that does
+            // something on drop still does it.
+            std::mem::forget(finished);
+            ExitCode::SUCCESS
+        }
         Err(Session::Handshake(err)) => {
             eprintln!("gnr8 worker: {err}");
             eprintln!(
@@ -60,6 +69,21 @@ pub fn run(pipeline: Pipeline) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// What a finished session was still holding when its last frame went out.
+///
+/// Handed back rather than dropped inside [`serve`] so the caller decides what happens to it. The
+/// host is blocked on this process's exit from the moment that frame lands, and on a large project
+/// these are tens of megabytes of graph and artifact text — walking them one allocation at a time
+/// is time the host spends waiting for an answer it already has.
+#[expect(
+    dead_code,
+    reason = "held so the caller can decide not to walk it; nothing reads it again"
+)]
+pub(crate) struct Finished {
+    session: Held,
+    frozen: Option<crate::graph::ApiGraph>,
 }
 
 /// How a session ended, so [`run`] can pick the right exit code.
@@ -82,7 +106,7 @@ pub(crate) fn serve<R: Read, W: Write>(
     pipeline: &Pipeline,
     input: &mut R,
     output: &mut W,
-) -> Result<(), Session> {
+) -> Result<Finished, Session> {
     let cx = handshake(pipeline, input, output)?;
     // The frozen graph the target phase runs against, once the host has handed it over.
     let mut frozen: Option<crate::graph::ApiGraph> = None;
@@ -101,7 +125,7 @@ pub(crate) fn serve<R: Read, W: Write>(
             }
             HostMessage::Shutdown => {
                 write_frame(output, &WorkerMessage::Done.into_frame()).map_err(Session::Run)?;
-                return Ok(());
+                return Ok(Finished { session, frozen });
             }
             HostMessage::FreezeGraph { graph } => {
                 match graph.resolve_taking(std::mem::take(&mut session.graph)) {
@@ -386,7 +410,9 @@ mod tests {
             write_frame(&mut input, &request.clone().into_frame()).unwrap();
         }
         let mut output = Vec::new();
-        let result = serve(pipeline, &mut input.as_slice(), &mut output);
+        // A test runs many sessions in one process, so what a finished one held is dropped here
+        // rather than forgotten; only the worker binary, which is about to exit, keeps it.
+        let result = serve(pipeline, &mut input.as_slice(), &mut output).map(|_| ());
         (result, output)
     }
 
