@@ -161,6 +161,52 @@ impl WritePlan {
             .iter()
             .any(|f| matches!(f.action, WriteAction::Write | WriteAction::UserEdited))
     }
+
+    /// The files a generation will apply, carrying no classification of them.
+    ///
+    /// A generation classifies every output ONCE, under the generation lock, against the bytes
+    /// [`apply_writes_with_anchors`] reads there — the only reading that can still be true when the
+    /// write happens, which is why [`apply_planned_file`] documents a plan's own `action` as
+    /// advisory and recomputes it. Reading every generated file a second time BEFORE the lock, to
+    /// decide something nothing then acts on, cost a full pass over the whole output tree.
+    ///
+    /// So a generation's plan carries bytes and hashes and no decision: `action` is
+    /// [`WriteAction::Write`] for every file until the write pass — the reader with the
+    /// authoritative view — says otherwise. [`plan_writes`] remains the one classifier, and
+    /// `gnr8 check`, which never writes and so has no lock to classify under, remains its caller.
+    #[must_use]
+    pub fn unclassified(artifacts: &[Artifact]) -> Self {
+        let files = artifacts
+            .iter()
+            .zip(artifact_hashes(artifacts))
+            .map(|(artifact, new_hash)| PlannedFile {
+                path: artifact.path.clone(),
+                action: WriteAction::Write,
+                new_bytes: artifact.text.as_bytes().to_vec(),
+                new_hash,
+                source: SOURCE_GENERATED.to_string(),
+            })
+            .collect();
+        Self { files }
+    }
+}
+
+/// The blake3 hash of every artifact's bytes, in order.
+///
+/// Each one depends on nothing but its own artifact, and on a large SDK this is megabytes of them,
+/// so the machine computes them at once. A worker that stopped falls back to nothing: the same
+/// hashes are computed here instead, because this answer has one definition and losing a thread is
+/// not a reason to return a different one.
+fn artifact_hashes(artifacts: &[Artifact]) -> Vec<String> {
+    crate::parallel::map_ordered(artifacts, |artifact| {
+        Ok(blake3_hex(artifact.text.as_bytes()))
+    })
+    .unwrap_or_else(|_| {
+        artifacts
+            .iter()
+            .map(|artifact| blake3_hex(artifact.text.as_bytes()))
+            .collect()
+    })
 }
 
 /// Counts of what a generation did, returned by [`apply_writes`]/[`regenerate`].
@@ -200,18 +246,7 @@ pub fn plan_writes<'disk>(
     manifest: &Manifest,
     on_disk: &dyn Fn(&str) -> Option<&'disk [u8]>,
 ) -> WritePlan {
-    // Every artifact's own digest depends on nothing but that artifact, and on a large SDK this is
-    // megabytes of it, so the machine computes them at once. The decision below still walks the
-    // artifacts in order.
-    let new_hashes = crate::parallel::map_ordered(artifacts, |artifact| {
-        Ok(blake3_hex(artifact.text.as_bytes()))
-    })
-    .unwrap_or_else(|_| {
-        artifacts
-            .iter()
-            .map(|artifact| blake3_hex(artifact.text.as_bytes()))
-            .collect()
-    });
+    let new_hashes = artifact_hashes(artifacts);
     let mut files = Vec::with_capacity(artifacts.len());
     for (artifact, new_hash) in artifacts.iter().zip(new_hashes) {
         let path = &artifact.path;
@@ -2817,9 +2852,7 @@ pub fn regenerate_with_anchors(
     )
     .map_err(recovery_io_error)?;
 
-    let disk = read_artifacts_from_disk(project_root, artifacts)?;
-    let on_disk = |path: &str| -> Option<&[u8]> { disk.get(path)?.as_deref() };
-    let plan = plan_writes(artifacts, &manifest, &on_disk);
+    let plan = WritePlan::unclassified(artifacts);
 
     let recovery_files = generation_recovery_files(
         &manifest,
