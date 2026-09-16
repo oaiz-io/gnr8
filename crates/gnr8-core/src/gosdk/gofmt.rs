@@ -22,67 +22,176 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::sdk::bundle::{safe_frame_name, SdkFile};
+use crate::store::{Namespace, Store};
 use crate::CoreError;
 
-/// Format generated Go files, answering from `memo_dir`'s record where this run already knows.
+/// The canonical formatter, held open across every `gofmt` run one target performs.
 ///
-/// Split SDK layouts can produce hundreds of small Go files. Running `gofmt` once per file pays
-/// process startup latency hundreds of times, so multi-file generation writes a short-lived temp
-/// tree, runs one batched `gofmt -w`, then reads the files back in the same deterministic order as
-/// the input vector.
+/// A target does not format its Go once. `GoSdk` formats the SDK bundle, then the generated CLI,
+/// then the contract test — three separate runs that all belong to ONE generation. The record is
+/// rewritten with exactly the entries the generation needed, which is what keeps it the size of one
+/// SDK rather than a log of every graph the project ever had; so the generation, not one run inside
+/// it, has to be what decides "needed". Three runs each rewriting the file in turn leave only the
+/// last one's answers behind, and the next generation re-formats everything the other two asked
+/// for — the memo is then paid for on every run and collected on none.
 ///
-/// `memo_dir` is where the caller keeps its [`Memo`] — the project's `.gnr8/cache` for a pipeline
-/// run, `None` for a caller with no project to keep one in. It changes nothing about the answers,
-/// only how many of them this run has to ask `gofmt` for.
-pub(crate) fn gofmt_files(
-    files: Vec<SdkFile>,
-    memo_dir: Option<&Path>,
-) -> Result<Vec<SdkFile>, CoreError> {
-    let formatter = FormatterIdentity::resolve("gofmt")?;
-    let memo = memo_dir.map(|dir| Memo::load(dir, &formatter));
+/// Holding it open also resolves and hashes the `gofmt` binary once per target instead of once per
+/// run, and reads and writes the record once instead of three times.
+///
+/// A memo may only make a run faster: this changes nothing about the bytes any of those runs
+/// produce. What it changes is how many of them have to be asked for twice.
+pub(crate) struct Formatter {
+    identity: FormatterIdentity,
+    /// Where the record lives, or `None` for a caller with no project to keep one in.
+    dir: Option<PathBuf>,
+    /// The machine-global store, for the record a checkout that never had a `.gnr8/cache` needs.
+    store: Option<Store>,
+    /// The answers the record already held when this target started, plus any the store restored.
+    known: BTreeMap<[u8; 32], String>,
+    /// Every answer this target used, from the record or from `gofmt` — what gets written back.
+    used: BTreeMap<[u8; 32], String>,
+}
 
-    let digests: Vec<[u8; 32]> = files
-        .iter()
-        .map(|file| *blake3::hash(file.contents.as_bytes()).as_bytes())
-        .collect();
-    let mut pending: Vec<SdkFile> = Vec::new();
-    let mut pending_positions: Vec<usize> = Vec::new();
-    let mut answers: Vec<Option<String>> = Vec::with_capacity(files.len());
-    for (position, file) in files.iter().enumerate() {
-        if let Some(known) = memo.as_ref().and_then(|memo| memo.get(&digests[position])) {
-            answers.push(Some(known.to_string()));
-        } else {
-            answers.push(None);
-            pending_positions.push(position);
-            pending.push(file.clone());
+impl Formatter {
+    /// Resolve `gofmt` and read `dir`'s record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GoToolchainMissing`] when `gofmt` cannot be found or read.
+    pub(crate) fn open(dir: Option<&Path>, store: Option<&Store>) -> Result<Self, CoreError> {
+        let identity = FormatterIdentity::resolve("gofmt")?;
+        let known = dir.map(|dir| Memo::load(dir, &identity).entries);
+        Ok(Self {
+            identity,
+            dir: dir.map(Path::to_path_buf),
+            store: store.cloned(),
+            known: known.unwrap_or_default(),
+            used: BTreeMap::new(),
+        })
+    }
+
+    /// Format `files`, answering from the record where this target already knows.
+    ///
+    /// Split SDK layouts can produce hundreds of small Go files. Running `gofmt` once per file pays
+    /// process startup latency hundreds of times, so multi-file generation writes a short-lived temp
+    /// tree, runs one batched `gofmt -w`, then reads the files back in the same deterministic order
+    /// as the input vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GoFmt`] when `gofmt` rejects the emitted Go.
+    pub(crate) fn format(&mut self, files: Vec<SdkFile>) -> Result<Vec<SdkFile>, CoreError> {
+        let digests: Vec<[u8; 32]> = files
+            .iter()
+            .map(|file| *blake3::hash(file.contents.as_bytes()).as_bytes())
+            .collect();
+        // The project's own record answers per file. When it cannot answer all of them — which is
+        // exactly what a fresh checkout with no `.gnr8/cache` looks like — the machine store is
+        // asked for this call's record before `gofmt` is. That is one memo kept in two places, not
+        // two ways to format Go: both are read under the SAME rule, that a record names the
+        // formatter that produced it and the sources it answers for, and anything else is absent.
+        // A store hit is folded into what this target knows, so `finish` writes it into the
+        // project's own record on the way through and the checkout ends the run in the state a
+        // local `gofmt` would have left it in.
+        if digests
+            .iter()
+            .any(|digest| !self.known.contains_key(digest))
+        {
+            if let Some(restored) = self.restore(&digests) {
+                self.known.extend(restored);
+            }
+        }
+        let mut pending: Vec<SdkFile> = Vec::new();
+        let mut pending_positions: Vec<usize> = Vec::new();
+        let mut answers: Vec<Option<String>> = Vec::with_capacity(files.len());
+        for (position, file) in files.iter().enumerate() {
+            if let Some(known) = self.known.get(&digests[position]) {
+                answers.push(Some(known.clone()));
+            } else {
+                answers.push(None);
+                pending_positions.push(position);
+                pending.push(file.clone());
+            }
+        }
+
+        for (file, position) in format_uncached(&self.identity, pending)?
+            .into_iter()
+            .zip(&pending_positions)
+        {
+            answers[*position] = Some(file.contents);
+        }
+
+        let mut out = Vec::with_capacity(files.len());
+        for ((file, contents), digest) in files.into_iter().zip(answers).zip(&digests) {
+            let Some(contents) = contents else {
+                return Err(CoreError::GoFmt {
+                    code: None,
+                    stderr: format!("gofmt returned no output for {}", file.name),
+                });
+            };
+            self.used.insert(*digest, contents.clone());
+            out.push(SdkFile {
+                name: file.name,
+                contents,
+            });
+        }
+        // Published only when this run actually had to ask `gofmt`, and the record is built only
+        // then: a warm run that answered every file from the project's own memo has nothing to add,
+        // and collecting one to decide that would copy the whole SDK to throw it away.
+        if !pending_positions.is_empty() {
+            let answered: BTreeMap<[u8; 32], String> = digests
+                .iter()
+                .copied()
+                .zip(out.iter().map(|file| file.contents.clone()))
+                .collect();
+            self.record(&answered);
+        }
+        Ok(out)
+    }
+
+    /// The store's record for this exact call, or `None` when it has none it can prove.
+    ///
+    /// A record is untrusted input until it proves two things about itself: that it names THIS
+    /// formatter, and that the set of sources it answers for is the set the key asked about.
+    /// Anything else is deleted and the answers are recomputed, never reported.
+    fn restore(&self, digests: &[[u8; 32]]) -> Option<BTreeMap<[u8; 32], String>> {
+        let store = self.store.as_ref()?;
+        let key = record_key(&self.identity, digests.iter().copied());
+        let bytes = store.read(Namespace::GofmtMemo, &key)?;
+        let refuse = || {
+            store.discard(Namespace::GofmtMemo, &key);
+            None
+        };
+        let Some(entries) = decode_memo(&bytes, &self.identity) else {
+            return refuse();
+        };
+        if record_key(&self.identity, entries.keys().copied()) != key {
+            return refuse();
+        }
+        Some(entries)
+    }
+
+    /// Publish this call's answers for the next checkout that emits the same sources.
+    fn record(&self, entries: &BTreeMap<[u8; 32], String>) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let Some(bytes) = encode_memo(&self.identity, entries) else {
+            return;
+        };
+        store.publish(
+            Namespace::GofmtMemo,
+            &record_key(&self.identity, entries.keys().copied()),
+            &bytes,
+        );
+    }
+
+    /// Write back exactly the answers this target used.
+    pub(crate) fn finish(self) {
+        if let Some(dir) = &self.dir {
+            Memo::save(dir, &self.identity, &self.used);
         }
     }
-
-    for (file, position) in format_uncached(&formatter, pending)?
-        .into_iter()
-        .zip(&pending_positions)
-    {
-        answers[*position] = Some(file.contents);
-    }
-
-    let mut out = Vec::with_capacity(files.len());
-    for (file, contents) in files.into_iter().zip(answers) {
-        let Some(contents) = contents else {
-            return Err(CoreError::GoFmt {
-                code: None,
-                stderr: format!("gofmt returned no output for {}", file.name),
-            });
-        };
-        out.push(SdkFile {
-            name: file.name,
-            contents,
-        });
-    }
-
-    if let Some(dir) = memo_dir {
-        Memo::save(dir, &formatter, &digests, &out);
-    }
-    Ok(out)
 }
 
 /// Format every file by actually running `gofmt`.
@@ -115,6 +224,24 @@ pub(crate) struct FormatterIdentity {
 }
 
 impl FormatterIdentity {
+    /// The canonical `gofmt` this machine will run, or the typed toolchain failure.
+    ///
+    /// Public to the crate because the formatter is an input to more than the formatting itself: a
+    /// memo that lets a generation skip emitting Go has to name the binary that Go would have been
+    /// formatted by, or a `gofmt` upgrade would be invisible to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::GoToolchainMissing`] when `gofmt` is not on `PATH` or cannot be read.
+    pub(crate) fn resolve_canonical() -> Result<Self, CoreError> {
+        Self::resolve("gofmt")
+    }
+
+    /// The content digest of the resolved binary, for a caller keying work on it.
+    pub(crate) fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
     fn resolve(name: &str) -> Result<Self, CoreError> {
         let binary = resolve_program(name)?;
         let bytes = fs::read(&binary).map_err(|source| CoreError::GoToolchainMissing { source })?;
@@ -185,10 +312,6 @@ pub(crate) struct Memo {
 }
 
 impl Memo {
-    fn get(&self, digest: &[u8; 32]) -> Option<&str> {
-        self.entries.get(digest).map(String::as_str)
-    }
-
     fn load(dir: &Path, formatter: &FormatterIdentity) -> Self {
         Self {
             entries: fs::read(dir.join(MEMO_FILE))
@@ -198,28 +321,12 @@ impl Memo {
         }
     }
 
-    /// Publish the answers this run used. Failure is silent by design: a memo that cannot be written
-    /// costs the next run some time and nothing else.
-    fn save(dir: &Path, formatter: &FormatterIdentity, digests: &[[u8; 32]], files: &[SdkFile]) {
-        let mut entries: BTreeMap<&[u8; 32], &str> = BTreeMap::new();
-        for (digest, file) in digests.iter().zip(files) {
-            entries.insert(digest, file.contents.as_str());
-        }
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MEMO_MAGIC);
-        bytes.extend_from_slice(&formatter.digest);
-        let Ok(count) = u32::try_from(entries.len()) else {
+    /// Publish the answers this generation used. Failure is silent by design: a memo that cannot be
+    /// written costs the next run some time and nothing else.
+    fn save(dir: &Path, formatter: &FormatterIdentity, entries: &BTreeMap<[u8; 32], String>) {
+        let Some(bytes) = encode_memo(formatter, entries) else {
             return;
         };
-        bytes.extend_from_slice(&count.to_be_bytes());
-        for (digest, contents) in entries {
-            let Ok(len) = u32::try_from(contents.len()) else {
-                return;
-            };
-            bytes.extend_from_slice(digest);
-            bytes.extend_from_slice(&len.to_be_bytes());
-            bytes.extend_from_slice(contents.as_bytes());
-        }
         if fs::create_dir_all(dir).is_err() {
             return;
         }
@@ -228,6 +335,54 @@ impl Memo {
             let _ = fs::remove_file(&temp);
         }
     }
+}
+
+/// Serialize a set of answers, naming the formatter that produced them.
+///
+/// One encoding for both places a record is kept — the project's `.gnr8/cache` file and the machine
+/// store — so a record written in either can be read from the other.
+fn encode_memo(
+    formatter: &FormatterIdentity,
+    entries: &BTreeMap<[u8; 32], String>,
+) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(MEMO_MAGIC);
+    bytes.extend_from_slice(&formatter.digest);
+    bytes.extend_from_slice(&u32::try_from(entries.len()).ok()?.to_be_bytes());
+    for (digest, contents) in entries {
+        bytes.extend_from_slice(digest);
+        bytes.extend_from_slice(&u32::try_from(contents.len()).ok()?.to_be_bytes());
+        bytes.extend_from_slice(contents.as_bytes());
+    }
+    Some(bytes)
+}
+
+/// The store key one `gofmt` call's answers are filed under.
+///
+/// A record answers for ONE call's input SET, all of it or none of it, and the key names that set
+/// and the formatter that produced the answers — the complete input surface of the derivation, which
+/// is what the store asks of every entry. A checkout that emits one different Go file simply misses
+/// and runs `gofmt`, which is what it would have done anyway; the project's own memo stays the
+/// finer-grained record, and this is the tier that survives a `.gnr8/cache` a fresh checkout never
+/// had.
+///
+/// Keyed on the set rather than the order it was asked in, so a record — whose entries are a sorted
+/// map of exactly those digests — reproduces its own key. [`Formatter::restore`] checks that it
+/// does, which is how an entry proves it is the answer to the question being asked.
+fn record_key(
+    formatter: &FormatterIdentity,
+    digests: impl IntoIterator<Item = [u8; 32]>,
+) -> String {
+    let mut sources: Vec<[u8; 32]> = digests.into_iter().collect();
+    sources.sort_unstable();
+    sources.dedup();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"gnr8-gofmt-record-v1\n");
+    hasher.update(&formatter.digest);
+    for digest in &sources {
+        hasher.update(digest);
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 /// Parse a memo written by [`Memo::save`], or `None` for anything this run must not trust.
@@ -431,9 +586,28 @@ mod tests {
     // the workspace-wide RUST-04 deny stays intact for production code.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{decode_memo, gofmt_files, gofmt_with, FormatterIdentity, Memo};
+    use super::{
+        decode_memo, encode_memo, gofmt_with, record_key, Formatter, FormatterIdentity, Memo,
+    };
     use crate::sdk::bundle::SdkFile;
+    use crate::store::{Namespace, Store};
     use crate::CoreError;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    /// Open a formatter, format once, write the record back.
+    ///
+    /// Production holds one formatter open across a target's several runs; a test that makes only
+    /// one asks for the same three steps in a row.
+    fn gofmt_files(
+        files: Vec<SdkFile>,
+        memo_dir: Option<&Path>,
+    ) -> Result<Vec<SdkFile>, CoreError> {
+        let mut formatter = Formatter::open(memo_dir, None)?;
+        let out = formatter.format(files)?;
+        formatter.finish();
+        Ok(out)
+    }
 
     /// Whether the `gofmt` binary is available, so toolchain-dependent tests skip gracefully (mirrors
     /// `tests/determinism.rs`) rather than failing for a missing dependency.
@@ -531,6 +705,101 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn store_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "gnr8-gofmt-store-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A checkout with no project cache must get the SAME bytes from the store that `gofmt` gave the
+    /// checkout that published them — that is the whole contract of the second tier.
+    #[test]
+    fn a_store_record_answers_a_checkout_that_has_no_project_cache() {
+        if !gofmt_available() {
+            eprintln!("skipping gofmt store test: gofmt unavailable");
+            return;
+        }
+        let root = store_dir("answers");
+        let store = Store::at(&root);
+
+        let mut first = Formatter::open(None, Some(&store)).unwrap();
+        let published: Vec<(String, String)> = first
+            .format(messy_files())
+            .unwrap()
+            .into_iter()
+            .map(|file| (file.name, file.contents))
+            .collect();
+        first.finish();
+
+        // The record is filed under the set of sources it answers for, so exactly one call wrote
+        // exactly one entry.
+        let entries: Vec<_> = std::fs::read_dir(root.join("gofmt"))
+            .unwrap()
+            .filter_map(|shard| std::fs::read_dir(shard.ok()?.path()).ok())
+            .flat_map(|files| files.filter_map(Result::ok))
+            .collect();
+        assert_eq!(entries.len(), 1, "one call publishes one record");
+
+        let mut second = Formatter::open(None, Some(&store)).unwrap();
+        let from_store: Vec<(String, String)> = second
+            .format(messy_files())
+            .unwrap()
+            .into_iter()
+            .map(|file| (file.name, file.contents))
+            .collect();
+        assert_eq!(
+            from_store, published,
+            "a store hit must equal what gofmt produced"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An entry that does not answer for the sources its key names is untrusted input: it is
+    /// deleted, and the answers are recomputed rather than reported.
+    #[test]
+    fn a_record_that_does_not_answer_its_own_key_is_refused_and_deleted() {
+        if !gofmt_available() {
+            eprintln!("skipping gofmt store test: gofmt unavailable");
+            return;
+        }
+        let root = store_dir("refused");
+        let store = Store::at(&root);
+        let formatter = Formatter::open(None, Some(&store)).unwrap();
+
+        let asked: Vec<[u8; 32]> = messy_files()
+            .iter()
+            .map(|file| *blake3::hash(file.contents.as_bytes()).as_bytes())
+            .collect();
+        // A well-formed record from the same formatter — but for a different source.
+        let mut other: BTreeMap<[u8; 32], String> = BTreeMap::new();
+        other.insert(
+            *blake3::hash(b"package other\n").as_bytes(),
+            "package other\n".to_string(),
+        );
+        let key = record_key(&formatter.identity, asked.iter().copied());
+        store.publish(
+            Namespace::GofmtMemo,
+            &key,
+            &encode_memo(&formatter.identity, &other).unwrap(),
+        );
+
+        assert!(
+            formatter.restore(&asked).is_none(),
+            "a record must prove it answers the key it is filed under"
+        );
+        assert!(
+            store.read(Namespace::GofmtMemo, &key).is_none(),
+            "the refused record must be deleted, not left to be re-read"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn messy_files() -> Vec<SdkFile> {

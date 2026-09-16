@@ -164,23 +164,85 @@ impl<T: Clone + PartialEq> Patched<T> {
             let element = match slot {
                 Some(position) => held
                     .get(position)
-                    .ok_or_else(|| {
-                        Error::protocol(format!(
-                            "a frame reused element {position} of a vector this side holds {}                              element(s) of; the host and worker disagree about the previous one",
-                            held.len()
-                        ))
-                    })?
+                    .ok_or_else(|| reused_beyond_held(position, held.len()))?
                     .clone(),
-                None => fresh.next().ok_or_else(|| {
-                    Error::protocol(
-                        "a frame described more new elements than it carried".to_string(),
-                    )
-                })?,
+                None => fresh.next().ok_or_else(ran_out_of_fresh)?,
             };
             resolved.push(element);
         }
         Ok(resolved)
     }
+
+    /// Rebuild the described vector, consuming the `held` vector it is measured against.
+    ///
+    /// A receiver always replaces what it holds with what it just rebuilt, so the vector this patch
+    /// is measured against is dead the moment the patch is resolved. Taking it by value is what lets
+    /// a reused element be MOVED into the rebuilt vector instead of copied out of a vector that is
+    /// then dropped — and the graph is the megabytes of a pipeline, so on a large project that
+    /// second copy was the single largest cost of a crossing.
+    ///
+    /// Two slots may name one position (a vector whose identity is not unique — a rule that fired
+    /// twice with the same message and place), so the uses of each position are counted first and
+    /// only the last use of a position moves; an earlier one still copies. The result is identical
+    /// to [`resolve`](Self::resolve)'s, element for element.
+    ///
+    /// # Errors
+    ///
+    /// The same failures [`resolve`](Self::resolve) reports, for the same reasons.
+    pub fn resolve_taking(self, held: Vec<T>) -> Result<Vec<T>, Error> {
+        let Self { slots, fresh } = self;
+        let mut remaining = vec![0usize; held.len()];
+        for position in slots.iter().flatten() {
+            let count = remaining
+                .get_mut(*position)
+                .ok_or_else(|| reused_beyond_held(*position, held.len()))?;
+            *count += 1;
+        }
+        let mut held: Vec<Option<T>> = held.into_iter().map(Some).collect();
+        let mut fresh = fresh.into_iter();
+        let mut resolved = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let element = match slot {
+                Some(position) => {
+                    let held_len = held.len();
+                    let uses = remaining
+                        .get_mut(position)
+                        .ok_or_else(|| reused_beyond_held(position, held_len))?;
+                    *uses -= 1;
+                    let last_use = *uses == 0;
+                    let element = held
+                        .get_mut(position)
+                        .ok_or_else(|| reused_beyond_held(position, held_len))?;
+                    if last_use {
+                        element
+                            .take()
+                            .ok_or_else(|| reused_beyond_held(position, held_len))?
+                    } else {
+                        element
+                            .as_ref()
+                            .ok_or_else(|| reused_beyond_held(position, held_len))?
+                            .clone()
+                    }
+                }
+                None => fresh.next().ok_or_else(ran_out_of_fresh)?,
+            };
+            resolved.push(element);
+        }
+        Ok(resolved)
+    }
+}
+
+/// The failure a slot naming a position outside the held vector reports.
+fn reused_beyond_held(position: usize, held: usize) -> Error {
+    Error::protocol(format!(
+        "a frame reused element {position} of a vector this side holds {held} element(s) of; the \
+         host and worker disagree about the previous one"
+    ))
+}
+
+/// The failure a patch whose slots outrun its carried elements reports.
+fn ran_out_of_fresh() -> Error {
+    Error::protocol("a frame described more new elements than it carried".to_string())
 }
 
 /// The graph vectors one side of the boundary holds — what a [`GraphPatch`] is measured against.
@@ -284,6 +346,29 @@ impl GraphPatch {
         metadata.operations = operations.resolve(&held.operations)?;
         metadata.schemas = schemas.resolve(&held.schemas)?;
         metadata.diagnostics = diagnostics.resolve(&held.diagnostics)?;
+        Ok(metadata)
+    }
+
+    /// Rebuild the graph this patch describes, consuming the one this side holds.
+    ///
+    /// The receiver of a graph frame always replaces what it holds with what it just rebuilt, so the
+    /// graph this patch is measured against is dead the moment it is resolved. Handing it over
+    /// rather than lending it is what lets every unchanged operation, schema and diagnostic move
+    /// into the rebuilt graph instead of being copied out of one about to be dropped.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Patched::resolve_taking`]'s protocol error.
+    pub fn resolve_taking(self, held: HeldGraph) -> Result<ApiGraph, Error> {
+        let Self {
+            mut metadata,
+            operations,
+            schemas,
+            diagnostics,
+        } = self;
+        metadata.operations = operations.resolve_taking(held.operations)?;
+        metadata.schemas = schemas.resolve_taking(held.schemas)?;
+        metadata.diagnostics = diagnostics.resolve_taking(held.diagnostics)?;
         Ok(metadata)
     }
 }
@@ -750,6 +835,90 @@ mod tests {
         };
         let err = described.resolve(&[]).unwrap_err();
         assert!(err.to_string().contains("more new elements"), "{err}");
+    }
+
+    /// Taking the held vector is an allocation decision, never a different answer: the two
+    /// resolutions are compared element for element over an insert, a removal and a reorder.
+    #[test]
+    fn taking_the_held_vector_rebuilds_exactly_what_borrowing_it_does() {
+        let held = vec![
+            artifact("a.txt", "a"),
+            artifact("b.txt", "b"),
+            artifact("c.txt", "c"),
+        ];
+        let next = vec![
+            artifact("c.txt", "c"),
+            artifact("a.txt", "a"),
+            artifact("d.txt", "d"),
+        ];
+        let described = patch(&next, &held);
+        let borrowed = described.clone().resolve(&held).unwrap();
+        let taken = described.resolve_taking(held).unwrap();
+        assert_eq!(taken, next);
+        assert_eq!(taken, borrowed);
+    }
+
+    /// Two slots may name one position, so only the LAST use of a position may move out of it.
+    /// An earlier use that moved would leave the later one with nothing to rebuild from.
+    #[test]
+    fn two_slots_naming_one_held_position_both_rebuild() {
+        let held = vec![artifact("a.txt", "a"), artifact("b.txt", "b")];
+        let described: Patched<Artifact> = Patched {
+            slots: vec![Some(0), Some(1), Some(0)],
+            fresh: Vec::new(),
+        };
+        let borrowed = described.clone().resolve(&held).unwrap();
+        let taken = described.resolve_taking(held).unwrap();
+        assert_eq!(
+            taken,
+            vec![
+                artifact("a.txt", "a"),
+                artifact("b.txt", "b"),
+                artifact("a.txt", "a"),
+            ]
+        );
+        assert_eq!(taken, borrowed);
+    }
+
+    #[test]
+    fn taking_reports_the_same_protocol_errors_as_borrowing() {
+        let out_of_range: Patched<Artifact> = Patched {
+            slots: vec![Some(7)],
+            fresh: Vec::new(),
+        };
+        let err = out_of_range
+            .resolve_taking(vec![artifact("a.txt", "a")])
+            .unwrap_err();
+        assert!(err.to_string().contains("disagree"), "{err}");
+
+        let too_few: Patched<Artifact> = Patched {
+            slots: vec![None, None],
+            fresh: vec![artifact("a.txt", "a")],
+        };
+        let err = too_few.resolve_taking(Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("more new elements"), "{err}");
+    }
+
+    /// The graph-level pair has the same obligation as the element-level one.
+    #[test]
+    fn taking_the_held_graph_rebuilds_exactly_what_borrowing_it_does() {
+        let mut before = ApiGraph {
+            title: "Bookstore".to_string(),
+            schemas: vec![schema("Book"), schema("Author")],
+            ..ApiGraph::default()
+        };
+        let held = HeldGraph::of(&before);
+        let mut after = ApiGraph {
+            title: "Bookstore".to_string(),
+            schemas: vec![schema("Author"), schema("Shelf")],
+            ..ApiGraph::default()
+        };
+        let described = GraphPatch::of(&mut after, &held);
+        let borrowed = described.clone().resolve(&held).unwrap();
+        let taken = described.resolve_taking(held).unwrap();
+        assert_eq!(taken.schemas, after.schemas);
+        assert_eq!(taken.schemas, borrowed.schemas);
+        let _ = &mut before;
     }
 
     fn schema(id: &str) -> Schema {

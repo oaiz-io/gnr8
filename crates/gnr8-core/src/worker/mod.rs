@@ -436,8 +436,11 @@ impl WorkerSession {
         self.send(request)?;
         match self.receive()? {
             WorkerMessage::Graph { graph } => {
+                // What this side held is what the reply is measured against, and it is replaced by
+                // what the reply rebuilds — so it is handed over rather than lent, and every
+                // unchanged element moves across instead of being copied out of it.
                 let graph = graph
-                    .resolve(&self.held_graph)
+                    .resolve_taking(std::mem::take(&mut self.held_graph))
                     .map_err(|err| Self::protocol_error(err.to_string()))?;
                 self.held_graph = HeldGraph::of(&graph);
                 Ok(graph)

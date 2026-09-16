@@ -1959,7 +1959,7 @@ fn materialize_sdk_target_with_cli(
         .module(format!("example.com/{PACKAGE}"))
         .to(PACKAGE)
         .cli(program)
-        .generate(graph, &mut out, &Cx::new(&dir))
+        .generate(graph, &mut out, &Cx::new(&dir), None)
         .expect("PySdk with .cli() must generate");
     for file in out.files() {
         let path = dir.join(&file.path);

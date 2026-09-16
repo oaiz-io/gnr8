@@ -223,16 +223,19 @@ pub(crate) fn hash_files(files: &[PathBuf], root: &Path) -> Result<String, CoreE
 ///
 /// Returns [`CoreError::ArtifactOwnership`] naming the offending path and its producer.
 pub fn validate_artifact_paths(artifacts: &[Artifact]) -> Result<(), CoreError> {
+    // Folding a path to its portable identity is Unicode work that depends on nothing but that
+    // path, and a split SDK brings thousands of them; the walk that reports a collision stays in
+    // order, because the pair it names has to be the first one.
+    let identities = crate::parallel::map_ordered(artifacts, |artifact| {
+        portable_path_identity(&artifact.path).map_err(|reason| CoreError::ArtifactOwnership {
+            code: "artifact.path_invalid".to_string(),
+            path: artifact.path.clone(),
+            producer: artifact.producer.clone(),
+            message: format!("artifact path is not portable: {reason}"),
+        })
+    })?;
     let mut seen: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
-    for artifact in artifacts {
-        let identity = portable_path_identity(&artifact.path).map_err(|reason| {
-            CoreError::ArtifactOwnership {
-                code: "artifact.path_invalid".to_string(),
-                path: artifact.path.clone(),
-                producer: artifact.producer.clone(),
-                message: format!("artifact path is not portable: {reason}"),
-            }
-        })?;
+    for (artifact, identity) in artifacts.iter().zip(identities) {
         if let Some(owner) = seen.insert(identity, artifact.producer.as_str()) {
             return Err(CoreError::ArtifactOwnership {
                 code: "artifact.path_collision".to_string(),

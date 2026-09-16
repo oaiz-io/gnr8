@@ -43,18 +43,50 @@ impl GraphArtifact {
     /// Returns a typed graph-artifact error if comparison identities are ambiguous or the graph
     /// cannot be serialized.
     pub fn to_json(&self) -> Result<String, crate::CoreError> {
-        validate_comparison_identities(&self.graph).map_err(|message| {
-            crate::CoreError::GraphArtifact {
-                message: format!("{GRAPH_ARTIFACT_PATH} contains an invalid graph: {message}"),
-            }
-        })?;
-        let mut text =
-            serde_json::to_string_pretty(self).map_err(|err| crate::CoreError::GraphArtifact {
-                message: format!("failed to serialize {GRAPH_ARTIFACT_PATH}: {err}"),
-            })?;
-        text.push('\n');
-        Ok(text)
+        json_of(self.schema_version, &self.graph)
     }
+
+    /// The same bytes [`Self::to_json`] writes, for a caller that only BORROWS the graph.
+    ///
+    /// The pipeline renders this artifact beside the built-in targets, which all hold the frozen
+    /// graph by reference, so wrapping a copy of it first would copy megabytes to serialize them.
+    /// [`GraphArtifactRef`] carries the same fields in the same order, so this is one serialization
+    /// rather than a second one that has to be kept in step.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed graph-artifact error if comparison identities are ambiguous or the graph
+    /// cannot be serialized.
+    pub fn json_for(graph: &ApiGraph) -> Result<String, crate::CoreError> {
+        json_of(GRAPH_ARTIFACT_SCHEMA_VERSION, graph)
+    }
+}
+
+/// The one serialization both entry points above go through.
+///
+/// `schema_version` is passed rather than assumed, so [`GraphArtifact::to_json`] still writes the
+/// envelope version the artifact it was called on actually carries — a serializer that substituted
+/// the current constant would quietly relabel an artifact read at another one.
+fn json_of(schema_version: u32, graph: &ApiGraph) -> Result<String, crate::CoreError> {
+    validate_comparison_identities(graph).map_err(|message| crate::CoreError::GraphArtifact {
+        message: format!("{GRAPH_ARTIFACT_PATH} contains an invalid graph: {message}"),
+    })?;
+    let mut text = serde_json::to_string_pretty(&GraphArtifactRef {
+        schema_version,
+        graph,
+    })
+    .map_err(|err| crate::CoreError::GraphArtifact {
+        message: format!("failed to serialize {GRAPH_ARTIFACT_PATH}: {err}"),
+    })?;
+    text.push('\n');
+    Ok(text)
+}
+
+/// The write side of [`GraphArtifact`], borrowing the graph it serializes.
+#[derive(Debug, serde::Serialize)]
+struct GraphArtifactRef<'graph> {
+    schema_version: u32,
+    graph: &'graph ApiGraph,
 }
 
 /// Reject graph identities that would otherwise collapse when a committed artifact is compared.
@@ -211,6 +243,36 @@ mod tests {
             serde_json::from_str(&first).expect("deserialize graph artifact");
         assert_eq!(decoded.schema_version, GRAPH_ARTIFACT_SCHEMA_VERSION);
         assert_eq!(decoded.graph, graph);
+    }
+
+    /// The envelope version an artifact was READ at is the one it writes back. `json_for` renders a
+    /// graph this gnr8 just produced and stamps the current schema on it; `to_json` renders one that
+    /// already carries a version, and substituting the constant there would relabel it.
+    #[test]
+    fn to_json_writes_the_envelope_version_the_artifact_carries() {
+        let graph = ApiGraph {
+            title: "Versioned API".to_string(),
+            ..ApiGraph::default()
+        };
+        let foreign = GraphArtifact {
+            schema_version: GRAPH_ARTIFACT_SCHEMA_VERSION + 1,
+            graph: graph.clone(),
+        };
+        let decoded: GraphArtifact = serde_json::from_str(
+            &foreign
+                .to_json()
+                .expect("serialize a foreign-schema artifact"),
+        )
+        .expect("deserialize it again");
+        assert_eq!(decoded.schema_version, GRAPH_ARTIFACT_SCHEMA_VERSION + 1);
+
+        assert_eq!(
+            GraphArtifact::json_for(&graph).expect("render a borrowed graph"),
+            GraphArtifact::new(graph)
+                .to_json()
+                .expect("render an owned one"),
+            "a graph this gnr8 produced renders the same either way"
+        );
     }
 
     #[test]

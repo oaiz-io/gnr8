@@ -445,6 +445,50 @@ fn noop_second_run_writes_nothing() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A generation's plan carries bytes and hashes, never a decision about them.
+///
+/// Every file in it is `Write`, including one already on disk byte for byte, because the write pass
+/// under the generation lock is the only reader whose view of the tree is still true when the write
+/// happens — and it still reports that file unchanged. `plan_writes`, which `gnr8 check` calls, is
+/// unaffected: it is the classifier, and it still classifies.
+#[test]
+fn a_generations_plan_carries_no_classification_and_the_write_pass_still_decides() {
+    let root = init_root("unclassified-plan");
+    let artifacts = vec![artifact("sdk/client.go", "package sdk\n")];
+    lifecycle::regenerate(&root, &artifacts, false).expect("cold regenerate");
+
+    let plan = lifecycle::WritePlan::unclassified(&artifacts);
+    assert_eq!(plan.files.len(), 1);
+    assert!(
+        matches!(plan.files[0].action, WriteAction::Write),
+        "an unclassified plan decides nothing, so every file is Write"
+    );
+    assert_eq!(
+        plan.files[0].new_bytes, b"package sdk\n",
+        "it still carries the bytes the write pass will apply"
+    );
+    assert_eq!(
+        plan.files[0].new_hash,
+        gnr8_engine::manifest::blake3_hex(b"package sdk\n"),
+        "and the hash the manifest and the journal are recorded from"
+    );
+
+    let warm = lifecycle::regenerate(&root, &artifacts, false).expect("warm regenerate");
+    assert!(
+        warm.written.is_empty(),
+        "the write pass classifies, so an identical output is still not rewritten: {warm:?}"
+    );
+    assert_eq!(warm.unchanged.len(), 1, "{warm:?}");
+    assert!(
+        !lifecycle::plan_only(&root, &artifacts)
+            .expect("plan_only")
+            .has_drift(),
+        "the classifier `check` calls is unchanged"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn case_only_output_rename_removes_distinct_old_spelling_without_deleting_an_alias() {
     let root = init_root("case-only-output-rename");

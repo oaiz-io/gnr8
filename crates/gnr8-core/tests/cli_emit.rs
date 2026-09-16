@@ -20,7 +20,7 @@ fn generate_cli(graph: &ApiGraph, program: &str) -> String {
         .module("example.com/bookstore/sdk")
         .to("generated/sdk")
         .cli(program)
-        .generate(graph, &mut out, &cx())
+        .generate(graph, &mut out, &cx(), None)
         .expect("PySdk with .cli() must generate");
     python_cli_source(&out, "generated/sdk")
 }
@@ -31,7 +31,7 @@ fn generate_cli_with(graph: &ApiGraph, cli: SdkCli) -> String {
         .module("example.com/bookstore/sdk")
         .to("generated/sdk")
         .cli(cli)
-        .generate(graph, &mut out, &cx())
+        .generate(graph, &mut out, &cx(), None)
         .expect("PySdk with .cli() must generate");
     python_cli_source(&out, "generated/sdk")
 }
@@ -42,7 +42,7 @@ fn generate_cli_result(graph: &ApiGraph, cli: SdkCli) -> Result<Artifacts, gnr8_
         .module("example.com/bookstore/sdk")
         .to("generated/sdk")
         .cli(cli)
-        .generate(graph, &mut out, &cx())?;
+        .generate(graph, &mut out, &cx(), None)?;
     Ok(out)
 }
 
@@ -124,7 +124,7 @@ fn generate_go_cli(graph: &ApiGraph, program: &str) -> String {
         .to("generated/sdk-go")
         .without_contract_tests()
         .cli(program)
-        .generate(graph, &mut out, &cx())
+        .generate(graph, &mut out, &cx(), None)
         .expect("GoSdk with .cli() must generate");
     go_cli_source(&out, "generated/sdk-go", program)
 }
@@ -139,7 +139,7 @@ fn generate_go_cli_result(
         .to("generated/sdk-go")
         .without_contract_tests()
         .cli(program)
-        .generate(graph, &mut out, &cx())?;
+        .generate(graph, &mut out, &cx(), None)?;
     Ok(out)
 }
 
@@ -388,7 +388,7 @@ fn absent_cli_emits_no_cli_file() {
     PySdk::new()
         .module("example.com/bookstore/sdk")
         .to("generated/sdk")
-        .generate(&graph, &mut out, &cx())
+        .generate(&graph, &mut out, &cx(), None)
         .expect("PySdk without .cli() must generate");
     assert!(
         !out.files().iter().any(|file| file.path.contains("/cli/")),
@@ -408,7 +408,7 @@ fn cli_artifact_is_under_the_output_dir_and_covered_by_anchors() {
         .to("generated/sdk-py/")
         .cli("bookstore");
     let mut out = Artifacts::new();
-    target.generate(&graph, &mut out, &cx()).unwrap();
+    target.generate(&graph, &mut out, &cx(), None).unwrap();
     assert!(
         out.files()
             .iter()
@@ -475,7 +475,7 @@ fn sse_success_response_is_sdk_gen() {
         .module("example.com/bookstore/sdk")
         .to("generated/sdk")
         .cli("bookstore")
-        .generate(&graph, &mut out, &cx())
+        .generate(&graph, &mut out, &cx(), None)
         .unwrap_err();
     assert!(
         matches!(error, gnr8_engine::CoreError::SdkGen { .. }),
@@ -815,7 +815,7 @@ fn go_absent_cli_emits_no_cli_file() {
         .module("example.com/bookstore/sdk")
         .to("generated/sdk-go")
         .without_contract_tests()
-        .generate(&graph, &mut out, &cx())
+        .generate(&graph, &mut out, &cx(), None)
         .expect("GoSdk without .cli() must generate");
     assert!(
         !out.files()
@@ -841,7 +841,7 @@ fn go_cli_artifact_is_under_the_output_dir_and_covered_by_anchors() {
         .without_contract_tests()
         .cli("bookstore");
     let mut out = Artifacts::new();
-    target.generate(&graph, &mut out, &cx()).unwrap();
+    target.generate(&graph, &mut out, &cx(), None).unwrap();
     assert!(
         out.files()
             .iter()
@@ -1272,7 +1272,7 @@ fn scoping_the_cli_leaves_every_other_artifact_byte_identical() {
             .module("example.com/bookstore/sdk")
             .to("generated/sdk")
             .cli(cli)
-            .generate(&bookstore_graph(), &mut out, &cx())
+            .generate(&bookstore_graph(), &mut out, &cx(), None)
             .expect("PySdk with .cli() must generate");
         out.files()
             .iter()
@@ -1401,7 +1401,7 @@ fn go_commands_selector_emits_only_the_selected_operations() {
         .cli(SdkCli::new("bookstore").commands(OperationSelector::not(
             OperationSelector::operation("getBook"),
         )))
-        .generate(&bookstore_graph(), &mut out, &cx())
+        .generate(&bookstore_graph(), &mut out, &cx(), None)
         .expect("scoped Go CLI must generate");
     let text = go_cli_source(&out, "generated/sdk-go", "bookstore");
     assert!(!text.contains("\"get-book\""), "{text}");
@@ -1492,7 +1492,7 @@ fn go_sse_operation_out_of_scope_no_longer_blocks_the_whole_cli() {
         .cli(SdkCli::new("bookstore").commands(OperationSelector::not(
             OperationSelector::operation("streamEvents"),
         )))
-        .generate(&graph, &mut out, &cx())
+        .generate(&graph, &mut out, &cx(), None)
         .expect("a scoped Go CLI over an SSE-carrying graph must generate");
     let text = go_cli_source(&out, "generated/sdk-go", "bookstore");
     assert!(text.contains("\"get-book\""), "{text}");
@@ -1775,7 +1775,7 @@ fn go_base_url_is_the_programs_default_and_servers_is_not_consulted() {
         .to("generated/sdk-go")
         .without_contract_tests()
         .cli(SdkCli::new("bookstore").base_url("https://api.example.com"))
-        .generate(&bookstore_graph(), &mut out, &cx())
+        .generate(&bookstore_graph(), &mut out, &cx(), None)
         .expect("a Go CLI with a declared base URL must generate");
     let text = go_cli_source(&out, "generated/sdk-go", "bookstore");
     assert!(
@@ -1916,7 +1916,7 @@ fn go_a_declared_server_is_never_the_clis_default_host() {
         .to("generated/sdk-go")
         .without_contract_tests()
         .cli(SdkCli::new("bookstore").base_url("https://api.example.com"))
-        .generate(&graph, &mut out, &cx())
+        .generate(&graph, &mut out, &cx(), None)
         .expect("a declared base URL must win over an advertised server");
     let declared = go_cli_source(&out, "generated/sdk-go", "bookstore");
     assert!(
@@ -2027,7 +2027,7 @@ fn the_command_module_list_is_sorted() {
         .module("example.com/bookstore/sdk")
         .to("generated/sdk")
         .cli("bookstore")
-        .generate(&mixed_group_graph(), &mut out, &cx())
+        .generate(&mixed_group_graph(), &mut out, &cx(), None)
         .expect("a mixed-group graph must generate");
 
     let commands_init = artifact(&out, "generated/sdk/cli/commands/__init__.py");
@@ -2260,14 +2260,14 @@ fn a_python_cli_and_a_go_cli_can_be_emitted_side_by_side() {
         .module("example.com/bookstore/sdk")
         .to("generated/py")
         .cli("bookstore")
-        .generate(&graph, &mut out, &cx())
+        .generate(&graph, &mut out, &cx(), None)
         .expect("PySdk with .cli() must generate");
     GoSdk::new()
         .module("example.com/bookstore/sdk")
         .to("generated/go")
         .without_contract_tests()
         .cli("bookstore")
-        .generate(&graph, &mut out, &cx())
+        .generate(&graph, &mut out, &cx(), None)
         .expect("GoSdk with .cli() must generate beside a Python CLI");
 
     let mut paths: Vec<&str> = out.files().iter().map(|file| file.path.as_str()).collect();
@@ -2419,7 +2419,7 @@ fn the_reserved_flags_document_themselves() {
         .to("generated/sdk-go")
         .without_contract_tests()
         .cli(SdkCli::new("bookstore").base_url("https://api.test"))
-        .generate(&graph, &mut out, &cx())
+        .generate(&graph, &mut out, &cx(), None)
         .expect("GoSdk with .cli() must generate");
     let go = go_cli_source(&out, "generated/sdk-go", "bookstore");
     for expected in [

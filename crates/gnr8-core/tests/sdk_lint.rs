@@ -265,6 +265,7 @@ fn python_sdk_target_with_cli_is_ruff_clean() {
         &graph,
         &mut out,
         &gnr8_engine::sdk::Cx::new(std::env::temp_dir()),
+        None,
     )
     .expect("PySdk with .cli() must generate");
     let dir = unique_temp_dir("py-cli");
@@ -357,6 +358,7 @@ fn secured_python_cli_package_is_ruff_clean() {
         &graph,
         &mut out,
         &gnr8_engine::sdk::Cx::new(std::env::temp_dir()),
+        None,
     )
     .expect("PySdk with .cli() must generate");
     let dir = unique_temp_dir("py-cli-secured");
@@ -483,7 +485,7 @@ fn go_sdk_with_cli_is_gofmt_and_go_vet_clean() {
         .to("sdk")
         .without_contract_tests()
         .cli("goalservice")
-        .generate(&graph, &mut out, &Cx::new(&dir))
+        .generate(&graph, &mut out, &Cx::new(&dir), None)
         .expect("GoSdk with .cli() must generate");
     for file in out.files() {
         let path = dir.join(&file.path);

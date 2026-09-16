@@ -161,6 +161,52 @@ impl WritePlan {
             .iter()
             .any(|f| matches!(f.action, WriteAction::Write | WriteAction::UserEdited))
     }
+
+    /// The files a generation will apply, carrying no classification of them.
+    ///
+    /// A generation classifies every output ONCE, under the generation lock, against the bytes
+    /// [`apply_writes_with_anchors`] reads there — the only reading that can still be true when the
+    /// write happens, which is why [`apply_planned_file`] documents a plan's own `action` as
+    /// advisory and recomputes it. Reading every generated file a second time BEFORE the lock, to
+    /// decide something nothing then acts on, cost a full pass over the whole output tree.
+    ///
+    /// So a generation's plan carries bytes and hashes and no decision: `action` is
+    /// [`WriteAction::Write`] for every file until the write pass — the reader with the
+    /// authoritative view — says otherwise. [`plan_writes`] remains the one classifier, and
+    /// `gnr8 check`, which never writes and so has no lock to classify under, remains its caller.
+    #[must_use]
+    pub fn unclassified(artifacts: &[Artifact]) -> Self {
+        let files = artifacts
+            .iter()
+            .zip(artifact_hashes(artifacts))
+            .map(|(artifact, new_hash)| PlannedFile {
+                path: artifact.path.clone(),
+                action: WriteAction::Write,
+                new_bytes: artifact.text.as_bytes().to_vec(),
+                new_hash,
+                source: SOURCE_GENERATED.to_string(),
+            })
+            .collect();
+        Self { files }
+    }
+}
+
+/// The blake3 hash of every artifact's bytes, in order.
+///
+/// Each one depends on nothing but its own artifact, and on a large SDK this is megabytes of them,
+/// so the machine computes them at once. A worker that stopped falls back to nothing: the same
+/// hashes are computed here instead, because this answer has one definition and losing a thread is
+/// not a reason to return a different one.
+fn artifact_hashes(artifacts: &[Artifact]) -> Vec<String> {
+    crate::parallel::map_ordered(artifacts, |artifact| {
+        Ok(blake3_hex(artifact.text.as_bytes()))
+    })
+    .unwrap_or_else(|_| {
+        artifacts
+            .iter()
+            .map(|artifact| blake3_hex(artifact.text.as_bytes()))
+            .collect()
+    })
 }
 
 /// Counts of what a generation did, returned by [`apply_writes`]/[`regenerate`].
@@ -200,18 +246,7 @@ pub fn plan_writes<'disk>(
     manifest: &Manifest,
     on_disk: &dyn Fn(&str) -> Option<&'disk [u8]>,
 ) -> WritePlan {
-    // Every artifact's own digest depends on nothing but that artifact, and on a large SDK this is
-    // megabytes of it, so the machine computes them at once. The decision below still walks the
-    // artifacts in order.
-    let new_hashes = crate::parallel::map_ordered(artifacts, |artifact| {
-        Ok(blake3_hex(artifact.text.as_bytes()))
-    })
-    .unwrap_or_else(|_| {
-        artifacts
-            .iter()
-            .map(|artifact| blake3_hex(artifact.text.as_bytes()))
-            .collect()
-    });
+    let new_hashes = artifact_hashes(artifacts);
     let mut files = Vec::with_capacity(artifacts.len());
     for (artifact, new_hash) in artifacts.iter().zip(new_hashes) {
         let path = &artifact.path;
@@ -281,15 +316,18 @@ fn reconcile_manifest_path_aliases<'a>(
 }
 
 fn validate_manifest_paths(manifest: &Manifest) -> Result<(), crate::CoreError> {
+    // One fold per entry, each independent of every other, and a manifest tracks one entry per
+    // generated file; the walk that reports a duplicate stays in order so it names the first pair.
+    let identities = crate::parallel::map_ordered(&manifest.files, |entry| {
+        portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
+            message: format!(
+                "ownership manifest contains non-portable path {:?}: {reason}",
+                entry.path
+            ),
+        })
+    })?;
     let mut seen = BTreeMap::new();
-    for entry in &manifest.files {
-        let identity =
-            portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
-                message: format!(
-                    "ownership manifest contains non-portable path {:?}: {reason}",
-                    entry.path
-                ),
-            })?;
+    for (entry, identity) in manifest.files.iter().zip(identities) {
         if let Some(previous) = seen.insert(identity, entry.path.as_str()) {
             return Err(crate::CoreError::Manifest {
                 message: format!(
@@ -306,21 +344,36 @@ fn generation_recovery_files<'a>(
     manifest: &Manifest,
     current: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<Vec<(String, String)>, crate::CoreError> {
+    let current: Vec<(&str, &str)> = current.into_iter().collect();
+    // Two folds per generated file — one for the manifest's spelling of it and one for this run's —
+    // and each depends on nothing but its own path. The inserts below stay in order, because a
+    // current path has to overwrite the manifest entry it renames rather than race it.
+    let (recorded, planned) = crate::parallel::join(
+        || {
+            crate::parallel::map_ordered(&manifest.files, |entry| {
+                portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
+                    message: format!(
+                        "ownership manifest contains non-portable path {:?}: {reason}",
+                        entry.path
+                    ),
+                })
+            })
+        },
+        || {
+            crate::parallel::map_ordered(&current, |(path, _)| {
+                portable_path_identity(path).map_err(|reason| crate::CoreError::Io {
+                    message: format!(
+                        "refusing to journal non-portable output path {path:?}: {reason}"
+                    ),
+                })
+            })
+        },
+    )?;
     let mut files = BTreeMap::new();
-    for entry in &manifest.files {
-        let identity =
-            portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
-                message: format!(
-                    "ownership manifest contains non-portable path {:?}: {reason}",
-                    entry.path
-                ),
-            })?;
+    for (entry, identity) in manifest.files.iter().zip(recorded) {
         files.insert(identity, (entry.path.clone(), entry.hash.clone()));
     }
-    for (path, hash) in current {
-        let identity = portable_path_identity(path).map_err(|reason| crate::CoreError::Io {
-            message: format!("refusing to journal non-portable output path {path:?}: {reason}"),
-        })?;
+    for ((path, hash), identity) in current.into_iter().zip(planned) {
         files.insert(identity, (path.to_string(), hash.to_string()));
     }
     Ok(files.into_values().collect())
@@ -437,15 +490,14 @@ pub fn apply_writes_with_anchors(
         )?;
     }
 
-    let current_paths = plan
-        .files
-        .iter()
-        .filter_map(|file| {
-            portable_path_identity(&file.path)
-                .ok()
-                .map(|identity| (identity, file.path.clone()))
-        })
-        .collect();
+    // One fold per planned file, none of which says anything about any other.
+    let current_paths = crate::parallel::map_ordered(&plan.files, |file| {
+        Ok(portable_path_identity(&file.path).ok())
+    })?
+    .into_iter()
+    .zip(&plan.files)
+    .filter_map(|(identity, file)| identity.map(|identity| (identity, file.path.clone())))
+    .collect();
     prune_stale_manifest_files(
         project_root,
         &mut dirs,
@@ -631,14 +683,17 @@ fn prune_stale_manifest_files(
     out: &mut GenerateOutcome,
 ) -> Result<(), crate::CoreError> {
     let project_dir = dirs.project_dir.try_clone().map_err(recovery_io_error)?;
-    for entry in &manifest.files {
-        let identity =
-            portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
-                message: format!(
-                    "ownership manifest contains non-portable path {:?}: {reason}",
-                    entry.path
-                ),
-            })?;
+    // One fold per manifest entry, independent of every other; the walk below stays in order
+    // because pruning is a mutation and the first stale entry is the one that reports.
+    let identities = crate::parallel::map_ordered(&manifest.files, |entry| {
+        portable_path_identity(&entry.path).map_err(|reason| crate::CoreError::Manifest {
+            message: format!(
+                "ownership manifest contains non-portable path {:?}: {reason}",
+                entry.path
+            ),
+        })
+    })?;
+    for (entry, identity) in manifest.files.iter().zip(identities) {
         if let Some(current_path) = current_paths.get(&identity) {
             if entry.path == *current_path {
                 continue;
@@ -2797,9 +2852,7 @@ pub fn regenerate_with_anchors(
     )
     .map_err(recovery_io_error)?;
 
-    let disk = read_artifacts_from_disk(project_root, artifacts)?;
-    let on_disk = |path: &str| -> Option<&[u8]> { disk.get(path)?.as_deref() };
-    let plan = plan_writes(artifacts, &manifest, &on_disk);
+    let plan = WritePlan::unclassified(artifacts);
 
     let recovery_files = generation_recovery_files(
         &manifest,
@@ -2843,20 +2896,47 @@ pub fn with_generation_state_lock<T>(
     Ok(result)
 }
 
+/// The failure reading one generated output reports, naming the file it was reading.
+fn output_read_error(project_root: &Path, rel: &str, err: &std::io::Error) -> crate::CoreError {
+    crate::CoreError::Io {
+        message: format!(
+            "failed to inspect generated output {}: {err}",
+            project_root.join(rel).display()
+        ),
+    }
+}
+
 fn read_artifacts_from_disk(
     project_root: &Path,
     artifacts: &[Artifact],
 ) -> Result<HashMap<String, Option<Vec<u8>>>, crate::CoreError> {
     let project_dir = open_project_dir(project_root)?;
+    // Reaching a leaf's parent costs one `openat` per path component, and that walk is a property
+    // of the DIRECTORY, not of any one file in it. A split SDK puts thousands of files in a dozen
+    // directories seven components deep, so walking per file made the overwhelming majority of this
+    // pass's system calls repeats of a walk it had already done. Each directory is therefore reached
+    // once here — the same thing the write pass does with `OutputDirs` — and every file in it is
+    // then read from the handle that walk produced.
+    let mut parents: BTreeMap<&str, Option<Dir>> = BTreeMap::new();
+    for artifact in artifacts {
+        let (parent_rel, _) = split_output_path(&artifact.path)
+            .map_err(|err| output_read_error(project_root, &artifact.path, &err))?;
+        if !parents.contains_key(parent_rel) {
+            let opened = open_output_dir(&project_dir, parent_rel, false)
+                .map_err(|err| output_read_error(project_root, &artifact.path, &err))?;
+            parents.insert(parent_rel, opened);
+        }
+    }
     // Reading a few thousand generated files is I/O the machine can overlap; the map this builds is
     // keyed by path, so the order the reads finish in cannot reach the write decision.
     let bytes = crate::parallel::map_ordered(artifacts, |artifact| {
-        read_output_file(&project_dir, &artifact.path).map_err(|err| crate::CoreError::Io {
-            message: format!(
-                "failed to inspect generated output {}: {err}",
-                project_root.join(&artifact.path).display()
-            ),
-        })
+        let (parent_rel, leaf) = split_output_path(&artifact.path)
+            .map_err(|err| output_read_error(project_root, &artifact.path, &err))?;
+        let Some(parent) = parents.get(parent_rel).and_then(Option::as_ref) else {
+            return Ok(None);
+        };
+        read_file_optional(parent, leaf)
+            .map_err(|err| output_read_error(project_root, &artifact.path, &err))
     })?;
     let mut disk = HashMap::with_capacity(artifacts.len());
     for (artifact, bytes) in artifacts.iter().zip(bytes) {
