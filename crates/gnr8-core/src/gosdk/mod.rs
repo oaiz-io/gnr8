@@ -3,7 +3,7 @@
 //! [`generate`] turns the Phase-2 [`crate::graph::ApiGraph`] into a single deterministic, `gofmt`-clean
 //! Go SDK bundle String (D-06): one functional-options `client.go`, one typed `errors.go`, one generic
 //! `operations.go` resource surface, and one `models.go`. Tags were an annotation fact and have been
-//! removed (CLAUDE.md rules 1 & 3), so the SDK is a single operations surface rather than per-tag files.
+//! removed (AGENTS.md rules 1 & 3), so the SDK is a single operations surface rather than per-tag files.
 //! The package name is supplied by the caller (derived from the `GoSdk` target's module path, the single
 //! source of truth — see [`crate::sdk::builtins::GoSdk`]). Each file is emitted by `emit`
 //! (`format!`-based, no template engine — D-05), normalized through the real `gofmt` (the `gofmt`
@@ -42,7 +42,7 @@ use crate::sdk::layout::{OperationFileSplit, SdkFileLayout};
 /// source of truth) via [`crate::sdk::builtins::GoSdk`]; it appears in every file's `package` clause.
 /// `base_path` is the API base/mount path joined to each operation's group-relative path in the emitted
 /// request URLs — the SAME single source of truth (the graph's `base_path`, set by a `SetBasePath`
-/// transform) the `OpenAPI` lowering takes it from (CLAUDE.md rules 3 & 4), so the SDK and the spec
+/// transform) the `OpenAPI` lowering takes it from (AGENTS.md rules 3 & 4), so the SDK and the spec
 /// agree on the prefix.
 ///
 /// # Errors
@@ -185,7 +185,7 @@ pub(crate) fn generate_files_with_layout(
         })?);
     } else {
         // All operations go into a single generic `operations.go` resource surface. Tags were an
-        // annotation fact and have been removed (CLAUDE.md rules 1 & 3), so there is no per-tag grouping;
+        // annotation fact and have been removed (AGENTS.md rules 1 & 3), so there is no per-tag grouping;
         // the file name is generic (not the package/fixture name) so it never overfits to one service.
         let raw = emit::emit_operations(graph, package, base_path, &ops)?;
         files.push(raw_go_file("operations.go", raw));

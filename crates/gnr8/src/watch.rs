@@ -102,7 +102,7 @@ impl LatencyReport {
 /// `*.rs` file under `gnr8_src` (the pipeline crate's source — the user edited the config). `source_ext`
 /// is threaded in by the caller from the SINGLE `gnr8_engine::analyze::source_toolchain` decision over the
 /// source dir (XLANG-04) — this pure function never re-derives it, so there is no second source of truth
-/// and no per-extension fallback (CLAUDE.md rule 3). `output_set` holds gnr8's own outputs + the
+/// and no per-extension fallback (AGENTS.md rule 3). `output_set` holds gnr8's own outputs + the
 /// `.gnr8/target`/`.gnr8/cache` dirs; anything under one of those is gnr8's own write and returns `false`
 /// — the loop-safety core of WATCH-02. `gnr8_root` is the canonicalized `.gnr8/` crate root: a
 /// source-language file ANYWHERE under it (e.g. `.gnr8/src/helper.ts`) is the pipeline crate's own, NOT
@@ -270,7 +270,7 @@ pub(crate) fn run(
 
     // Derive the watched source extension from the SINGLE `source_toolchain` decision over the project
     // root (the `.gnr8/` crate is excluded from that scan in core — Open Q2). One decision, no
-    // per-extension fallback (CLAUDE.md rule 3); an undetectable/ambiguous source fails startup loudly
+    // per-extension fallback (AGENTS.md rule 3); an undetectable/ambiguous source fails startup loudly
     // via the anyhow boundary rather than watching the wrong (or every) extension.
     let source_ext = gnr8_engine::analyze::source_toolchain(&project_root.to_string_lossy())
         .map(|tc| tc.source_extension().to_string())

@@ -17,7 +17,7 @@ use gnr8_engine::graph::{ApiGraph, Operation, Schema, Type};
 /// Render `inspect routes`: a METHOD/PATH/OPERATION/REQUEST/RESPONSES table (or JSON).
 ///
 /// There is no SECURED column: security is not a graph fact — it comes from the user's gnr8 config
-/// (CLAUDE.md rule 4), so the code-derived route table never claims a per-operation security state.
+/// (AGENTS.md rule 4), so the code-derived route table never claims a per-operation security state.
 ///
 /// # Errors
 /// Returns the underlying [`serde_json::Error`] if `--json` serialization fails.

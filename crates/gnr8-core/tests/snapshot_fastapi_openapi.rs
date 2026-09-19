@@ -19,7 +19,7 @@ const FIXTURE_DIR: &str = concat!(
     "/../../fixtures/fastapi-bookstore"
 );
 
-/// The fixture's security schemes — the single source of truth for security (CLAUDE.md rule 4):
+/// The fixture's security schemes — the single source of truth for security (AGENTS.md rule 4):
 /// security is SUPPLIED by code-as-config, never scraped from the source. One `ApiKeyAuth` /
 /// `X-API-Key` scheme, mirroring the goalservice OpenAPI contract test.
 fn fixture_security() -> Vec<gnr8_engine::graph::SecurityScheme> {

@@ -172,7 +172,7 @@ func (a *Accumulator) RequestBodyUnresolved(subject, method, route, reason, file
 // DynamicResponse records the dynamic/unresolvable-response warning (D-05 / GO-06):
 // a c.JSON(...) whose status or body could not be resolved to a constant/named
 // type. The response is diagnosed rather than guessed or silently dropped; there
-// is no secondary source to recover it from (CLAUDE.md rule 3).
+// is no secondary source to recover it from (AGENTS.md rule 3).
 func (a *Accumulator) DynamicResponse(method, route, handler, reason, file string, line uint32) {
 	a.items = append(a.items, facts.DiagnosticFact{
 		Code:     "response.schema.unresolved",
@@ -297,7 +297,7 @@ func (a *Accumulator) SourceHandlerAmbiguous(subject, message, file string, line
 // UnsupportedType records that a struct field's declared type has no faithful
 // neutral primitive (e.g. complex64/128, uintptr, an untyped constant kind), so
 // the extractor lowers it to free-form `any` rather than guessing a concrete
-// type (GO-06 / CLAUDE.md rule 3: diagnose, never fabricate). goType is the
+// type (GO-06 / AGENTS.md rule 3: diagnose, never fabricate). goType is the
 // rendered Go type. method/route identity here is the struct.field + declared
 // type, mirroring Floatf/FreeFormMap.
 func (a *Accumulator) UnsupportedType(structName, fieldName, goType, file string, line uint32) {

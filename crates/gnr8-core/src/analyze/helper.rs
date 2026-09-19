@@ -89,7 +89,7 @@ pub(crate) fn resolve_target(target_dir: &str) -> Result<String, CoreError> {
 ///   it. Hashing the binary names the artifact instead of predicting it.
 ///
 /// One value, resolved once, used for both the cache key and the extraction — so the key can
-/// never describe a different helper than the one that produced the facts (CLAUDE.md rule 3).
+/// never describe a different helper than the one that produced the facts (AGENTS.md rule 3).
 pub(crate) struct ExtractorIdentity {
     /// The analyzed module's `go env GOVERSION GOOS GOARCH GOFLAGS CGO_ENABLED GOTOOLCHAIN` reading.
     toolchain: GoToolchain,
@@ -651,7 +651,7 @@ fn run_tsextract_with(node_bin: &str, target_dir: &str) -> Result<facts::GoFacts
 /// Health-probe whether the TypeScript toolchain is ACTUALLY ready for `target_dir` (WR-02): both
 /// `node` runs AND the user's `typescript` is resolvable, using the EXACT resolution `run_tsextract`
 /// uses at generate time (`tsextract/probe.js` calls the SAME `ts.resolveTypescript`, so there is one
-/// source of truth — no second detector, no fallback; CLAUDE.md rule 3). Returns `true` iff the probe
+/// source of truth — no second detector, no fallback; AGENTS.md rule 3). Returns `true` iff the probe
 /// exits 0.
 ///
 /// `gnr8 doctor` calls this so a TS project with `node` but no `typescript` reports UNHEALTHY up front,

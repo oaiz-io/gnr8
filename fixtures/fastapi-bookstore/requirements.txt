@@ -5,5 +5,5 @@
 # snapshots; no extractor runs against this fixture yet (pyextract lands in Phase 2).
 # gnr8 will later derive API facts from Python's OWN type system (annotations,
 # Pydantic/@dataclass field types) — NEVER from FastAPI's runtime /openapi.json
-# or any third-party schema tool (CLAUDE.md rule 1).
+# or any third-party schema tool (AGENTS.md rule 1).
 fastapi

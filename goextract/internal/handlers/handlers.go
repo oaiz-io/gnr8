@@ -49,7 +49,7 @@ const maxContextHelperDepth = 32
 
 // CodeFacts is the code-inferred contract for one handler: the request body, the
 // responses keyed by status, and the params. This is the ONLY source of these
-// facts — there is no annotation/fallback path (CLAUDE.md rules 1 & 3).
+// facts — there is no annotation/fallback path (AGENTS.md rules 1 & 3).
 //
 // Summary/Description are the handler's own doc comment read as PLAIN PROSE (rule 0.1
 // category 2) — never a directive, never structural. They are carried here rather than
@@ -2696,7 +2696,7 @@ func requestFormFileInFrame(frame helperFrame, call *ast.CallExpr) (string, bool
 // ERROR diagnostic, not a panic or a false-complete contract (GO-06). The module prefix used to qualify schema refs is read
 // from the Analyzer's per-invocation context (WR-03), not a package global.
 // handlerProse reads the handler declaration's own doc comment as plain prose and
-// splits it into a summary sentence and the remaining description (CLAUDE.md rule 0.1
+// splits it into a summary sentence and the remaining description (AGENTS.md rule 0.1
 // category 2). Only a ROUTED handler ever reaches here, so an internal helper's doc
 // comment can never leak into the API surface.
 //
@@ -7387,7 +7387,7 @@ func pathParam(name string, fset *token.FileSet, pos token.Pos) facts.ParamFact 
 
 // queryParam builds a query parameter from a c.Query("name") read. Type defaults
 // to string and required starts false; queryRequiredness may replace that initial
-// value only when native control flow proves it (CLAUDE.md rules 1 & 3).
+// value only when native control flow proves it (AGENTS.md rules 1 & 3).
 func queryParam(name string, fset *token.FileSet, pos token.Pos) facts.ParamFact {
 	return facts.ParamFact{
 		Name:     name,

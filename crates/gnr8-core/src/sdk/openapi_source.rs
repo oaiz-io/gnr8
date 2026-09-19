@@ -667,7 +667,7 @@ impl Importer {
     /// An imported operation's group is its first tag, so the tag object that names the group is
     /// where the document already says what the group is for. Reading it here is the imported half
     /// of the rule operation prose follows — the spec for imported APIs, config for source-extracted
-    /// ones (CLAUDE.md rule 3). A `GroupOperations::describe` that targets a group already described
+    /// ones (AGENTS.md rule 3). A `GroupOperations::describe` that targets a group already described
     /// by the spec is a hard error, not an override.
     ///
     /// Only tags an operation actually groups under are carried: a document may declare tags it
@@ -890,7 +890,7 @@ impl Importer {
                 // Prose is a first-class `Operation` field, not a docs policy: an operation has
                 // exactly ONE prose source (the spec here, a handler doc comment for extracted
                 // sources), and `DocumentOperation` must be able to detect a collision with it
-                // (CLAUDE.md rule 3). Keeping it in the policy bucket would make that undetectable.
+                // (AGENTS.md rule 3). Keeping it in the policy bucket would make that undetectable.
                 let summary = operation_object
                     .get("summary")
                     .and_then(Value::as_str)
@@ -3231,7 +3231,7 @@ paths:
 
         // Prose is a first-class `Operation` field, not a docs policy entry: one source
         // per operation (the spec here), so a `DocumentOperation` collision is
-        // detectable rather than a silent override (CLAUDE.md rule 3).
+        // detectable rather than a silent override (AGENTS.md rule 3).
         let operation = &graph.operations[0];
         assert_eq!(operation.summary.as_deref(), Some("Create a report"));
         assert_eq!(

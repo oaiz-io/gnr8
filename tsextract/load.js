@@ -4,7 +4,7 @@
 // `ts.Program` + `TypeChecker` over them — the TypeScript twin of
 // `pyextract/load.py`.
 //
-// CRITICAL static-only boundary (CLAUDE.md rule 3 / threat T-04-05): the loader
+// CRITICAL static-only boundary (AGENTS.md rule 3 / threat T-04-05): the loader
 // reads each file as TEXT (via the Compiler API's own file system) and builds a
 // Program with `ts.createProgram`. It NEVER `require`s, `import`s, `eval`s, runs
 // `vm`, transpiles-and-runs, or otherwise EXECUTES the target by any means.

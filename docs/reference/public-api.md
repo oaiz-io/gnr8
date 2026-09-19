@@ -166,7 +166,7 @@ that is why the published crate's whole dependency list is `serde`, `serde_json`
 | normalize already-declared files | custom `PostProcess` or `FormatCommand` |
 | rename a public operation or type | `RenameOperation` or `RenameType` transform |
 | ingest an existing OpenAPI document as input | `OpenApi` source |
-| reproduce another generator's SDK surface | nothing — a non-goal (CLAUDE.md rule 0) |
+| reproduce another generator's SDK surface | nothing — a non-goal (AGENTS.md rule 0) |
 
 Keep custom stages deterministic, return `gnr8::Error` instead of panicking, and use explicit artifact
 ownership transitions. Your stages run in the worker process; built-in declarations run in the host.

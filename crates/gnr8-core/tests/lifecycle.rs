@@ -894,7 +894,7 @@ fn go_available() -> bool {
         .is_ok()
 }
 
-/// The fixture's security schemes — the single source of truth for security (CLAUDE.md rule 4): one
+/// The fixture's security schemes — the single source of truth for security (AGENTS.md rule 4): one
 /// `ApiKeyAuth` / `X-API-Key` scheme (graph-owned, as `ApplySecurity` would set them).
 fn fixture_security() -> Vec<gnr8_engine::graph::SecurityScheme> {
     vec![gnr8_engine::graph::SecurityScheme {

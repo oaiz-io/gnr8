@@ -4,7 +4,7 @@
 // `pyextract/routes.py`'s recognizer).
 //
 // Recognition is STATIC and derived ENTIRELY from the SOURCE's own constructs
-// (CLAUDE.md rule 1): a class carrying an `@Controller(...)` decorator, whose
+// (AGENTS.md rule 1): a class carrying an `@Controller(...)` decorator, whose
 // methods carry an HTTP-verb decorator (`@Get`/`@Post`/`@Put`/`@Patch`/`@Delete`),
 // and whose parameters carry `@Param`/`@Query`/`@Body`. The ONLY decorators read
 // are @nestjs/common's framework-native ROUTING decorators; nothing here ever
@@ -28,7 +28,7 @@ const types = require("./types");
 
 // Return the `{summary, description}` keys for a routed method's JSDoc block.
 //
-// CLAUDE.md rule 0.1 category 2: the method's own JSDoc read as PLAIN PROSE, split by
+// AGENTS.md rule 0.1 category 2: the method's own JSDoc read as PLAIN PROSE, split by
 // the shared positional rule in `./docs`. `getDocumentationComment` returns the LEADING
 // DESCRIPTION ONLY — JSDoc tags are excluded by the compiler itself, so this file NEVER
 // reads a tag of any kind and needs no list of tags to avoid.

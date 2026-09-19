@@ -24,7 +24,7 @@ const FIXTURE_DIR: &str = concat!(
     "/../../fixtures/nestjs-bookstore"
 );
 
-/// The fixture's security schemes — code-as-config (CLAUDE.md rule 4); security is supplied, never
+/// The fixture's security schemes — code-as-config (AGENTS.md rule 4); security is supplied, never
 /// scraped. One `ApiKeyAuth` / `X-API-Key` scheme.
 fn fixture_security() -> Vec<gnr8_engine::graph::SecurityScheme> {
     vec![gnr8_engine::graph::SecurityScheme {

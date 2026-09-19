@@ -1,5 +1,5 @@
 {
-  "//": "Fixture-local documentation ONLY (Phase 1). Never npm-installed, never linked into gnr8-core. This phase ships STATIC source + red-by-design snapshots; no extractor runs against this fixture yet (tsextract lands in Phase 4). gnr8 will later derive API facts from the source's OWN TS property types via the language's reference compiler — never from a third-party schema-annotation decorator, a validation-schema dialect, or a runtime schema export (CLAUDE.md rule 1).",
+  "//": "Fixture-local documentation ONLY (Phase 1). Never npm-installed, never linked into gnr8-core. This phase ships STATIC source + red-by-design snapshots; no extractor runs against this fixture yet (tsextract lands in Phase 4). gnr8 will later derive API facts from the source's OWN TS property types via the language's reference compiler — never from a third-party schema-annotation decorator, a validation-schema dialect, or a runtime schema export (AGENTS.md rule 1).",
   "name": "nestjs-bookstore-fixture",
   "private": true,
   "version": "0.1.0",

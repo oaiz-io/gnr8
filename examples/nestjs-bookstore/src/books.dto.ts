@@ -1,6 +1,6 @@
 // Typed DTO classes for the NestJS bookstore fixture.
 //
-// BRIGHT LINE (CLAUDE.md rule 1, the whole product premise): every API fact gnr8
+// BRIGHT LINE (AGENTS.md rule 1, the whole product premise): every API fact gnr8
 // extracts from these DTOs is carried by ORDINARY TypeScript property types —
 // string-literal-union enums, `A | B` unions, `field?: T` optional vs
 // `field: T | null` nullable. There is deliberately NO third-party
@@ -23,7 +23,7 @@
 // alias used solely inline (`SortOrder`, below) never becomes a standalone schema.
 //
 // (The remaining lines in this block are spacing only — no API fact is encoded in
-// any comment, per CLAUDE.md rule 1. They exist so the declaration lines anchor to
+// any comment, per AGENTS.md rule 1. They exist so the declaration lines anchor to
 // the committed snapshot's asserted spans.)
 //
 //

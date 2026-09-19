@@ -5,7 +5,7 @@ JSON facts document the gnr8 host deserializes (the same contract `goextract`
 emits). It is the Python twin of `goextract/`: load -> symbol table -> types ->
 schemas -> diagnostics -> facts marshal.
 
-Hard invariants (CLAUDE.md):
+Hard invariants (AGENTS.md):
   * stdlib ONLY — `ast`, `json`, `sys`, `os`, `pathlib`, `enum`, `dataclasses`,
     `typing`. No third-party module, ever. The target's pydantic/fastapi/flask are
     NEVER imported.

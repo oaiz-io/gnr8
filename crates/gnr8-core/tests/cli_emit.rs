@@ -2681,7 +2681,7 @@ fn go_a_group_without_prose_renders_its_name_alone() {
     let text = generate_go_cli(&graph, "bookstore");
 
     // `authors` is described nowhere, so it carries no sentence — and nothing invents one from
-    // the name (CLAUDE.md rule 3).
+    // the name (AGENTS.md rule 3).
     let table = text
         .split("var cliGroups")
         .nth(1)

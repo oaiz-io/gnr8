@@ -227,7 +227,7 @@ fn append_reference_diagnostics(text: &mut String, ir: &ApiGraph) {
 /// Render the "Operation Documentation" section.
 ///
 /// Iteration is over OPERATIONS, not over `operation_docs`: prose lives on the operation
-/// (CLAUDE.md rule 3), and effective tags can come from the operation's group without a policy
+/// (AGENTS.md rule 3), and effective tags can come from the operation's group without a policy
 /// entry. The policy is joined in for the facts that genuinely are policy — deprecation and
 /// examples.
 fn append_reference_operation_docs(text: &mut String, ir: &ApiGraph) {

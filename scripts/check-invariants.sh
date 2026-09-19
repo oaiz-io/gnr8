@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Enforce CLAUDE.md rule 0: gnr8 has exactly one native contract.
+# Enforce AGENTS.md rule 0: gnr8 has exactly one native contract.
 #
 # No annotation dialects from other tools, no brownfield/compatibility product surface, no
 # vocabulary that reads as "we support their thing". This is a hard gate, not a warning.
@@ -40,12 +40,12 @@ scope=(
 # Files exempt from every rule below, with the reason they exist.
 #
 #   scripts/check-invariants.sh  — this file necessarily names what it forbids.
-#   CLAUDE.md / AGENTS.md        — the invariant text itself (AGENTS.md is a symlink to CLAUDE.md).
+#   AGENTS.md                    — the invariant text itself.
 #   CHANGELOG.md                 — a record of what was REMOVED must name the removed symbols; it
 #                                  is evidence of the deletion, the same category as `.planning/`.
 is_exempt_file() {
   case "$1" in
-    scripts/check-invariants.sh | CLAUDE.md | AGENTS.md | CHANGELOG.md) return 0 ;;
+    scripts/check-invariants.sh | AGENTS.md | CHANGELOG.md) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -75,7 +75,7 @@ check_rule() {
   done <<<"$hits"
 
   if [[ -n "${surviving//[$'\n']/}" ]]; then
-    echo "INVARIANT VIOLATION — $name (CLAUDE.md rule 0):" >&2
+    echo "INVARIANT VIOLATION — $name (AGENTS.md rule 0):" >&2
     printf '%s' "$surviving" >&2
     echo >&2
     status=1
@@ -85,7 +85,7 @@ check_rule() {
 # 0.1 — another tool's annotations, config files, or emitted packages.
 #
 # Naming a forbidden tool in order to state that we do NOT read it is the documented bright line
-# (CLAUDE.md 0.1), so disclaimer lines are subtracted. Anything that names one of these tools
+# (AGENTS.md 0.1), so disclaimer lines are subtracted. Anything that names one of these tools
 # WITHOUT disclaiming it is a coupling risk and fails.
 check_rule "foreign annotation/generator coupling" \
   '(openapi[-_. ]?generator|openapitools|swagger[-_]?codegen|oapi[-_]codegen|typescript[-_]axios|typescript[-_]fetch|antihax|swaggertype|swaggerignore|swaggo|drf[-_]yasg|drf[-_]spectacular|apispec|flasgger|springdoc|@nestjs/swagger|class-validator|class-transformer)' \
@@ -124,7 +124,7 @@ for pattern in '*brownfield*' '*openapi-generator*' '*openapitools*' '*swagger-c
   fi
 done
 if [[ -n "${forbidden_paths//[$'\n']/}" ]]; then
-  echo "INVARIANT VIOLATION — forbidden path name (CLAUDE.md rule 0.3):" >&2
+  echo "INVARIANT VIOLATION — forbidden path name (AGENTS.md rule 0.3):" >&2
   printf '%s\n' "$forbidden_paths" >&2
   status=1
 fi

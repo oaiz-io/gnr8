@@ -128,7 +128,7 @@ red:
 # then for each of the three end-to-end examples (Go / Python / TypeScript) `cd` in, run `gnr8
 # generate`, then `gnr8 check` — which DRY-RUNS the same write plan and exits NON-ZERO on any drift
 # (crates/gnr8/src/main.rs run_check). `gnr8 check` IS the regen-and-diff, so no bespoke compare
-# script is written (CLAUDE.md rule 2 / Don't-Hand-Roll). The committed `examples/*/generated/` bytes
+# script is written (AGENTS.md rule 2 / Don't-Hand-Roll). The committed `examples/*/generated/` bytes
 # are thereby asserted to equal a fresh `gnr8 generate` (T-06-04: hand-edited bytes fail the gate).
 #
 # `gnr8 generate` builds the `.gnr8/` worker with `cargo build` on its first run and runs the
@@ -154,7 +154,7 @@ examples-check: tsextract-deps
 	PATH="$$PATH:$(GO_BIN)" sh -c 'cd examples/nestjs-bookstore  && "$(CURDIR)/$(GNR8_BIN)" generate --force && "$(CURDIR)/$(GNR8_BIN)" check'; \
 	for dir in examples/*/generated; do diff -ru "$$tmp/$$dir" "$$dir"; done
 
-# Enforce CLAUDE.md rule 0: one native contract, no foreign annotation/compatibility coupling.
+# Enforce AGENTS.md rule 0: one native contract, no foreign annotation/compatibility coupling.
 invariants:
 	scripts/check-invariants.sh
 	python3 scripts/check-ci-budget.py

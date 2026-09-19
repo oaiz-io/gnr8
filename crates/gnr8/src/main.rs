@@ -759,7 +759,7 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
 ///
 /// One `gnr8_engine::analyze::source_toolchain` decision over the project root picks the language (the
 /// `.gnr8/` crate is excluded from that scan in core, so it does not spoof detection — Open Q2). That
-/// SINGLE decision then routes to exactly one readiness check (no try-go-then-python fallback — CLAUDE.md
+/// SINGLE decision then routes to exactly one readiness check (no try-go-then-python fallback — AGENTS.md
 /// rule 3):
 /// - Go/Python: spawn the discrete probe binary (`go version` / `python3 --version`) and require it to
 ///   EXIT SUCCESSFULLY (WR-05). `.output().map(|o| o.status.success())` — a spawn `io::Error` (binary not

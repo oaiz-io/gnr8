@@ -49,7 +49,7 @@ const FLASK_FIXTURE_DIR: &str = concat!(
     "/../../fixtures/flask-bookstore"
 );
 
-/// The fixture's security schemes — the single source of truth for security (CLAUDE.md rule 4): one
+/// The fixture's security schemes — the single source of truth for security (AGENTS.md rule 4): one
 /// `ApiKeyAuth` / `X-API-Key` scheme. Security is no longer scraped from the source, so the contract
 /// tests supply it here to drive lowering (graph-owned `SecurityScheme`s).
 fn fixture_security() -> Vec<gnr8_engine::graph::SecurityScheme> {

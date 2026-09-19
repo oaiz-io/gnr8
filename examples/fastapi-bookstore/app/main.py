@@ -3,7 +3,7 @@
 Routes are declared with FastAPI's own `@app`/`@router` decorators, and every
 request/response/param fact is derived from the handler SIGNATURE + the typed
 models in `app.models`. Nothing here reads FastAPI's runtime `/openapi.json` and
-nothing depends on a third-party schema tool (CLAUDE.md rule 1). No app runs this
+nothing depends on a third-party schema tool (AGENTS.md rule 1). No app runs this
 phase (no `pip install`); this is the static source `pyextract` reads.
 
 The routes mount under an `APIRouter(prefix="/books")`; that static framework

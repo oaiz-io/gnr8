@@ -9,6 +9,12 @@ must move the minor version.
 
 ## Unreleased
 
+### Changed
+
+- **Engineering invariants live in `AGENTS.md` only.** The Claude-named copy is gone, and
+  `AGENTS.md` is the real file rather than a symlink. Claude Code now reads `AGENTS.md`
+  natively, so the repository keeps one invariants document.
+
 ## 0.16.2 — 2026-09-16
 
 ### Added
@@ -1293,7 +1299,7 @@ replacement flag is needed: byte-identical output adoption is normal generation 
 
 The generated-SDK surface and the code-as-config API are now purely native. Everything whose
 purpose was to make gnr8's output resemble another generator's is gone, permanently — see rule 0
-in [`CLAUDE.md`](CLAUDE.md), enforced by `make invariants`.
+in [`AGENTS.md`](AGENTS.md), enforced by `make invariants`.
 
 `DocumentOperation::summary()` / `::description()` now **error** when they target an operation that
 already has prose from its source (its handler's doc comment, or an imported spec). An operation's

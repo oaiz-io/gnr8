@@ -11,7 +11,7 @@
 //! - **F** `DocumentOperation` colliding with source-derived prose is a hard error.
 //!
 //! (**C** — "an unknown `gnr8:` directive is an error" — does not exist: gnr8 reads plain
-//! prose and has no directive syntax to be unknown about. See CLAUDE.md rule 0.1.)
+//! prose and has no directive syntax to be unknown about. See AGENTS.md rule 0.1.)
 //!
 //! The Go-source tests require the Go toolchain (they invoke the `goextract` helper).
 
@@ -214,7 +214,7 @@ fn require_operation_docs_passes_when_every_operation_is_documented() {
 }
 
 /// **F.** `DocumentOperation` colliding with source-derived prose is a HARD ERROR, never a
-/// silent override and never a precedence rule (CLAUDE.md rule 3). Two ways to state one
+/// silent override and never a precedence rule (AGENTS.md rule 3). Two ways to state one
 /// fact is the defect; picking a winner between them is the same defect with extra steps.
 #[test]
 fn document_operation_colliding_with_source_prose_is_an_error() {

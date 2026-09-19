@@ -10,7 +10,7 @@
 // two-file edit (this file + facts.rs). The drift guard in facts_test.go asserts the
 // emitted key set against a hardcoded canonical list so a mismatch fails here.
 //
-// Standard library only (CLAUDE.md rule 2 for the sidecar): encoding/json, io, sort.
+// Standard library only (AGENTS.md rule 2 for the sidecar): encoding/json, io, sort.
 package facts
 
 import (
@@ -39,7 +39,7 @@ type GoFacts struct {
 
 // RouteFact describes one HTTP route, derived PURELY from source code. There is
 // exactly one code-derived source per fact and no annotation/fallback path anywhere
-// (CLAUDE.md rules 1 & 3):
+// (AGENTS.md rules 1 & 3):
 //
 //   - OperationID is the handler function/method symbol (e.g. `createGoal`).
 //   - Path is the code-derived, group-relative, normalized template (`/`, `/list`,
@@ -48,12 +48,12 @@ type GoFacts struct {
 //
 // Security, router-path overrides, and param enum/required-from-annotation are
 // DELIBERATELY ABSENT: those were doc-comment-annotation facts. Security now lives in
-// the user's gnr8 config (CLAUDE.md rule 4). Group is a source-derived route-group/tag
+// the user's gnr8 config (AGENTS.md rule 4). Group is a source-derived route-group/tag
 // name from static Gin groups, not an annotation.
 //
 // Summary/Description ARE present, and are still a single code-derived source: the
 // routed handler's own doc comment read as PLAIN PROSE via the language's native
-// synopsis convention (CLAUDE.md rule 0.1 category 2). They carry no grammar — there is
+// synopsis convention (AGENTS.md rule 0.1 category 2). They carry no grammar — there is
 // no marker, prefix, or key/value syntax inside the comment — and they can state
 // nothing structural. Every field above them stays code-inferred and a doc comment can
 // neither set nor override any of them.

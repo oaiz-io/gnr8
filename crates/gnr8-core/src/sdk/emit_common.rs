@@ -6,7 +6,7 @@
 //! [`request_body_models_of`]).
 //! They contain NO per-language formatting — the casers (`exported`/`snake`/`camel`/…) and the type
 //! mappers (`go_type`/`py_type`/`ts_type`) stay in each emitter, where they genuinely diverge. One
-//! definition per fact (CLAUDE.md rule 3).
+//! definition per fact (AGENTS.md rule 3).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -71,7 +71,7 @@ pub(crate) fn split_words(name: &str) -> Vec<String> {
 /// `userUUIDsList` → the `s` closes `UUIDs` (`L` starts the next word).
 /// `IDsomething` → the `s` opens `Dsomething` (`o` continues a lowercase word).
 ///
-/// One rule, no fallback (CLAUDE.md rule 3): the decision reads only the two characters after `idx`.
+/// One rule, no fallback (AGENTS.md rule 3): the decision reads only the two characters after `idx`.
 fn plural_acronym_s(chars: &[char], idx: usize) -> bool {
     chars.get(idx + 1).is_some_and(|next| *next == 's')
         && chars
@@ -205,7 +205,7 @@ fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<Strin
 ///
 /// `SdkCli::commands` selects which facts become commands; it never renames one. An operation left
 /// out is still in the OpenAPI document and still a method on the generated client, so this filter
-/// is a property of the program rather than of the API (CLAUDE.md rule 4).
+/// is a property of the program rather than of the API (AGENTS.md rule 4).
 ///
 /// # Errors
 ///
@@ -988,7 +988,7 @@ pub(crate) fn model_file_name(
 
 /// Join the `base_path` prefix with a group-relative operation path (slash-collapsed). `base_path` is
 /// the user's `gnr8` config value — the single source of truth for the service prefix shared with the
-/// `OpenAPI` lowering (CLAUDE.md rules 3 & 4) — so the SDK URLs and the spec paths agree.
+/// `OpenAPI` lowering (AGENTS.md rules 3 & 4) — so the SDK URLs and the spec paths agree.
 pub(crate) fn join_path(base_path: &str, path: &str) -> String {
     let base = base_path.trim_end_matches('/');
     let trimmed = path.trim_start_matches('/');
@@ -1320,7 +1320,7 @@ fn join_statuses(statuses: &[u16]) -> String {
 /// Reject a response that declares a body on a status that cannot carry one.
 ///
 /// Silently dropping the body here while the `OpenAPI` lowering kept it would make one graph
-/// describe two different contracts, so the contradiction is surfaced instead (CLAUDE.md rule 3).
+/// describe two different contracts, so the contradiction is surfaced instead (AGENTS.md rule 3).
 fn reject_impossible_body(op: &Operation, resp: &crate::graph::Response) -> Result<(), CoreError> {
     if !resp.declares_impossible_body() {
         return Ok(());
@@ -1585,7 +1585,7 @@ fn validate_request_body_schema(
 ///
 /// The source is the operation's own `summary`/`description` — the routed handler's doc
 /// comment, the imported spec, or `DocumentOperation` for operations with neither. There
-/// is exactly one source per operation (CLAUDE.md rule 3), so this helper reads the
+/// is exactly one source per operation (AGENTS.md rule 3), so this helper reads the
 /// operation directly and never consults a policy.
 pub(crate) struct OperationProse {
     /// The single-line summary sentence, if the operation has one.

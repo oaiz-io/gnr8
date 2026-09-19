@@ -1,6 +1,6 @@
 // Derive operation prose from a declaration's own JSDoc block.
 //
-// This is CLAUDE.md rule 0.1 category 2: the source language's own documentation
+// This is AGENTS.md rule 0.1 category 2: the source language's own documentation
 // facility, read as PLAIN PROSE. There is no directive syntax, no marker prefix, and no
 // key/value grammar — not `@Summary`, not `gnr8:summary`, not anything. A comment with
 // grammar is a dialect regardless of who owns it, and dialects grow until they are

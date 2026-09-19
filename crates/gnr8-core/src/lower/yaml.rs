@@ -190,7 +190,7 @@ fn write_operation(out: &mut String, op: &Operation, depth: usize) {
 }
 
 /// Emit one parameter list entry (`- name: .. / in: .. / required: .. / schema: ..`). There is no
-/// `description` — it was an annotation fact and has been removed (CLAUDE.md rules 1 & 3).
+/// `description` — it was an annotation fact and has been removed (AGENTS.md rules 1 & 3).
 fn write_parameter(out: &mut String, param: &Parameter, depth: usize) {
     let pad = INDENT.repeat(depth);
     let _ = writeln!(out, "{pad}- name: {}", scalar(&param.name));

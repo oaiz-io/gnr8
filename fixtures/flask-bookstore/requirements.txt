@@ -5,5 +5,5 @@
 # extractor runs against this fixture yet (pyextract lands in Phase 2). gnr8 will
 # later derive API facts from Python's OWN type system (annotations, @dataclass
 # field types) — NEVER from a runtime schema export or a third-party schema tool
-# (CLAUDE.md rule 1).
+# (AGENTS.md rule 1).
 flask

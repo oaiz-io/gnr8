@@ -37,7 +37,7 @@ _BODYLESS_METHODS = frozenset({"GET", "HEAD", "DELETE"})
 def _prose(stmt):
     """Return ``{"summary": ..., "description": ...}`` keys for a routed handler's docstring.
 
-    CLAUDE.md rule 0.1 category 2: the handler's own docstring read as PLAIN PROSE, split
+    AGENTS.md rule 0.1 category 2: the handler's own docstring read as PLAIN PROSE, split
     by the shared positional rule in :mod:`pyextract.docs`. Nothing here matches on
     docstring CONTENT — that is what keeps this a documentation convention rather than a
     dialect. Only ROUTED handlers reach here, so an internal helper's docstring can never

@@ -1,7 +1,7 @@
 # gnr8 — Reference (agent-oriented)
 
 Dense reference for operating and editing gnr8. Terse by design. Source of truth for behavior is the
-code; this matches the current build. Product invariants: [`../CLAUDE.md`](../CLAUDE.md) (one source per
+code; this matches the current build. Product invariants: [`../AGENTS.md`](../AGENTS.md) (one source per
 fact, an end-to-end owned generation chain, no fallback chains, config supplies what typed source can't).
 
 ## What it is / isn't
@@ -27,7 +27,7 @@ make gates                           # the contract suite (4 snapshots, sdk_comp
 Requires the **source language's toolchain** (Go/Python/TypeScript) on PATH — gnr8 shells a
 per-language helper to load the target (Go module, Python `ast`, TS Compiler API). The toolchain that
 matters is the one the analyzed project is written in: a Go service needs `go`, a FastAPI/Flask service
-needs `python3`, a NestJS service needs `node` + the project's own `typescript` (see CLAUDE.md
+needs `python3`, a NestJS service needs `node` + the project's own `typescript` (see AGENTS.md
 "TypeScript toolchain (required, not shipped)").
 
 ## Install
@@ -312,7 +312,7 @@ contract (the committed graph/OpenAPI snapshots are the spec).
 Generated SDKs keep HTTP dependency-free: GoSdk uses `net/http`, PySdk uses `urllib`, and TsSdk uses
 the built-in `fetch`. PySdk emits Pydantic v2 `BaseModel` models by default, with
 `.dataclasses()` available for stdlib-only model consumers. The `tsextract` sidecar resolves the
-**project's own `typescript`** toolchain (required, not shipped — see CLAUDE.md); every other sidecar is
+**project's own `typescript`** toolchain (required, not shipped — see AGENTS.md); every other sidecar is
 stdlib-only (Go `go/types`, Python `ast`), and `gnr8-core` itself keeps a small Rust dependency set.
 The CLI's focused open-source dependencies support bounded commodity concerns; the source-to-SDK
 pipeline remains gnr8-owned end to end.
@@ -669,7 +669,7 @@ Runnable end-to-end example with committed input + generated output: [`../exampl
 | `crates/gnr8/src/{main,cli,doctor,watch,render}` | CLI dispatch, trust flags, exit codes, doctor, watch, rendering |
 | `crates/gnr8-core/tests` | contract snapshots (`snapshot_{graph,openapi,sdk,diagnostics}`), `sdk_compile`, `determinism`, `lifecycle` |
 
-When editing: obey `../CLAUDE.md`. Changing emitted output requires regenerating snapshots
+When editing: obey `../AGENTS.md`. Changing emitted output requires regenerating snapshots
 (`fixtures/goalservice/expected/*` + `crates/gnr8-core/tests/snapshots/*.snap`) and the examples
 (`examples/bookstore/generated/*`, `examples/taskflow/generated/*`); keep `make check` + `make gates`
 green.
