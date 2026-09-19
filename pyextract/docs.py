@@ -1,6 +1,6 @@
 """Derive operation prose from a declaration's own docstring.
 
-This is CLAUDE.md rule 0.1 category 2: the source language's own documentation
+This is AGENTS.md rule 0.1 category 2: the source language's own documentation
 facility, read as PLAIN PROSE. There is no directive syntax, no marker prefix, and no
 key/value grammar — not ``@Summary``, not ``gnr8:summary``, not anything. A comment with
 grammar is a dialect regardless of who owns it, and dialects grow until they are
@@ -26,7 +26,7 @@ which is what keeps it a split rather than a parse.
 Unlike the Go sidecar there is no symbol-name strip: PEP 257 docstrings do not begin
 with the function's own name, so there is nothing to remove.
 
-Standard library only (CLAUDE.md rule 2 for the sidecar).
+Standard library only (AGENTS.md rule 2 for the sidecar).
 """
 
 _TERMINATORS = (".", "!", "?")

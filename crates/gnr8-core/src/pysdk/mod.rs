@@ -43,7 +43,7 @@ use crate::sdk::model_style::PyModelStyle;
 /// `package` is the SDK's Python package name (derived from the `PySdk` target's module path, the single
 /// source of truth — wired in plan 03-02). `base_path` is the API base/mount path joined to each
 /// operation's group-relative path in the emitted request URLs — the SAME single source of truth (the
-/// graph's `base_path`) the `OpenAPI` lowering and the Go SDK take it from (CLAUDE.md rules 3 & 4).
+/// graph's `base_path`) the `OpenAPI` lowering and the Go SDK take it from (AGENTS.md rules 3 & 4).
 ///
 /// # Errors
 ///

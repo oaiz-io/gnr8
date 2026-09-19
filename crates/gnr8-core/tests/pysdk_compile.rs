@@ -16,7 +16,7 @@
 //!       Pitfall 5), serves in a daemon thread, injects an `OpenerDirector` into the generated `Client`,
 //!       and asserts a 2xx Pydantic-model round-trip AND a 4xx → typed `ApiError(is_not_found())`.
 //!
-//! Hermeticity (CLAUDE.md rule 2 + ASVS): the fake backend + driver use ONLY the Python stdlib
+//! Hermeticity (AGENTS.md rule 2 + ASVS): the fake backend + driver use ONLY the Python stdlib
 //! (`http.server`, `threading`, `json`, `urllib.request`) — NO fastapi/uvicorn/requests/httpx/pytest, no
 //! `pip install`. The harness also greps every written `.py` and asserts the generated SDK carries no
 //! third-party HTTP import (PYSDK-01).
@@ -253,7 +253,7 @@ fn materialize_sdk() -> PathBuf {
     let graph = gnr8_engine::analyze::build_graph(FIXTURE_DIR)
         .expect("Phase 2 build_graph must succeed (requires python3 for the pyextract sidecar)");
     // `base_path` is the graph's single source of truth (the FastAPI fixture's is "/"); pass it through
-    // exactly as a Pipeline would (CLAUDE.md rules 3 & 4).
+    // exactly as a Pipeline would (AGENTS.md rules 3 & 4).
     materialize_sdk_from_graph("ok", &graph, &graph.base_path)
 }
 
@@ -943,7 +943,7 @@ fn invalid_python_compile_maps_to_captured_error_not_panic() {
 /// a 4xx → fallback `ApiError` path. Written to a FILE and run by path (NEVER `-c "<interpolated
 /// data>"`, threat
 /// T-03-03-01 / V13). It uses ONLY the Python stdlib (`http.server`/`threading`/`json`/`urllib`) — no
-/// fastapi/uvicorn/requests/httpx/pytest, no `pip install` (CLAUDE.md rule 2, threat T-03-03-04).
+/// fastapi/uvicorn/requests/httpx/pytest, no `pip install` (AGENTS.md rule 2, threat T-03-03-04).
 ///
 /// Backend shape (matches the `FastAPI` fixture's committed graph):
 /// - `do_POST` is the `create_book` path (`/`): replies `201` with a `CreatedMessage` body.

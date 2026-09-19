@@ -246,7 +246,7 @@ there is no crates.io fallback and no ancestor-directory search.
   its generated output stays committed. The fixture/contract tests drive the framework API directly
   (the host↔child path gets its own integration test that compiles + runs a scaffolded crate, like
   polint's example crates in CI).
-- **Update** `CLAUDE.md`: rule 4 ("config") now means *code*; "no dynamic plugin runtime" stays true —
+- **Update** `AGENTS.md`: rule 4 ("config") now means *code*; "no dynamic plugin runtime" stays true —
   this is **compile-time** extension (cargo build + run a child process), not runtime plugin loading.
   Add an invariant: there is no declarative config format; the only config is the `.gnr8/` Rust crate.
 

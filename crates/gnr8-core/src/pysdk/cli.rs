@@ -1176,7 +1176,7 @@ fn emit_group_register(
 ///
 /// `GroupDocsPolicy` is the single source, keyed by the group name exactly as the operation carries
 /// it. A group with no entry renders its name alone: a sentence derived from the name would be a
-/// second way to state the fact (CLAUDE.md rule 3).
+/// second way to state the fact (AGENTS.md rule 3).
 fn group_summary<'a>(graph: &'a ApiGraph, ops: &[&Operation]) -> &'a str {
     let Some(name) = ops.first().and_then(|op| op.group.as_deref()) else {
         return "";

@@ -5204,7 +5204,7 @@ func sortedCopy(in []string) []string {
 }
 
 // TestHandlerDocCommentsBecomeOperationProse proves the four properties that keep doc
-// comments a documentation convention rather than an annotation dialect (CLAUDE.md
+// comments a documentation convention rather than an annotation dialect (AGENTS.md
 // rule 0.1 category 2):
 //
 //  1. a ROUTED handler's doc comment yields summary + description;

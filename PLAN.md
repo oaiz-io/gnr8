@@ -1,14 +1,14 @@
 # gnr8 release-readiness plan
 
 This plan implements every P0 finding in `RELEASE-GAP-ANALYSIS.md` under the clarified invariants in
-`CLAUDE.md`. Commodity dependencies are allowed; generated SDKs remain standard-library-only. The
+`AGENTS.md`. Commodity dependencies are allowed; generated SDKs remain standard-library-only. The
 native gnr8 contract is singular: there is one generated surface, and no preset reshapes it to match
 another generator. Missing facts and resources fail explicitly instead of entering recovery chains.
 
 ## Working rules
 
 - Work on `release-readiness` from `main`.
-- Preserve the pre-existing user changes in `CLAUDE.md`, `NEXT-STEPS-RESEARCH.md`, and
+- Preserve the pre-existing user changes in `AGENTS.md`, `NEXT-STEPS-RESEARCH.md`, and
   `RELEASE-GAP-ANALYSIS.md`; do not stage them implicitly.
 - Process P0.1 through P0.10 in order. For behavioral fixes, add or change the narrow regression test,
   run it to record the expected failure, implement the smallest complete fix, rerun the focused suite,
@@ -45,7 +45,7 @@ serialization back-compat shims went with them.
 
 What remains is the generic, user-owned primitive set: `SdkFileLayout`, `OperationFileSplit`,
 `SdkPackageMetadata`, `SdkDocs`, and the `RenameOperation`/`RenameType` transforms. Rule 0 in
-`CLAUDE.md` states the permanent prohibition, and `make invariants`
+`AGENTS.md` states the permanent prohibition, and `make invariants`
 (`scripts/check-invariants.sh`, wired into `make check` and CI) is the standing gate that keeps it
 from creeping back through code, docs, or path names.
 
@@ -56,7 +56,7 @@ Verification performed:
 2. Removed them along with the dependent emitters, options, tests, fixtures, and snapshots.
 3. Ran the Rust CLI/core/SDK tests, the generated-SDK compile gates, and example regeneration.
 4. Repeated the inventory, now automated by `make invariants`. Governance/audit source documents
-   (`CLAUDE.md`, the supplied audit, and the supplied research note) are evidence rather than product
+   (`AGENTS.md`, the supplied audit, and the supplied research note) are evidence rather than product
    coupling and remain unstaged unless the
    user explicitly changes their scope; all product code, generated artifacts, tests, and active docs
    must be clean.

@@ -17,7 +17,7 @@
 /// The Go Gin fixture authored in Plan 01-02, resolved relative to this crate's manifest dir.
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/goalservice");
 
-/// The fixture's security schemes — the single source of truth for security (CLAUDE.md rule 4): one
+/// The fixture's security schemes — the single source of truth for security (AGENTS.md rule 4): one
 /// `ApiKeyAuth` / `X-API-Key` scheme. Security is no longer scraped from the source, so this contract
 /// test supplies it to drive lowering (graph-owned `SecurityScheme`s, as an `ApplySecurity` transform
 /// would set them), and the snapshot still carries `ApiKeyAuth` from code-as-config.

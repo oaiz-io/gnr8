@@ -9,7 +9,7 @@
 //! `(path, method)`, schemas by id, params by name, responses by status, object fields by name, enum
 //! members lexically). The graph never serializes an unordered hash map — only sorted vectors — so two
 //! `build_graph` runs over unchanged source produce byte-identical output. Operation ids are the handler
-//! function symbol (e.g. `createGoal`) — purely code-derived, with no annotation override (CLAUDE.md
+//! function symbol (e.g. `createGoal`) — purely code-derived, with no annotation override (AGENTS.md
 //! rules 1 & 3). Schema ids are the package-qualified type name the sidecar already emits.
 //!
 //! Provenance (D-07): every operation, param, schema, and source-established request-body reference
@@ -52,7 +52,7 @@ pub fn split_local_component_ref(reference: &str) -> Option<(String, Option<&str
 /// `base_path`, `title`, `security`, runtime policy, pagination policy, and documentation policy are
 /// **not** extracted from the source — they are facts the typed source cannot express (the mount prefix
 /// is often a runtime value; the title is author metadata; auth lives in middleware; retry,
-/// pagination, and public docs are product decisions, CLAUDE.md rule 4). They live on the graph as
+/// pagination, and public docs are product decisions, AGENTS.md rule 4). They live on the graph as
 /// plain metadata that a [`crate::sdk::Transform`] sets and a [`crate::sdk::Target`] reads, then passes
 /// to the existing lowering and SDK emitters. They default to a root-mounted, untitled, unsecured API
 /// with no runtime helpers, so a bare `build_graph` graph still lowers.
@@ -77,7 +77,7 @@ pub struct ApiGraph {
     pub openapi_metadata: OpenApiMetadataPolicy,
     /// The API security schemes — set by a transform (`ApplySecurity`), read by targets. The single
     /// source of truth for the generated `security` requirement + `components.securitySchemes`
-    /// (CLAUDE.md rule 4). Defaults to empty (no security).
+    /// (AGENTS.md rule 4). Defaults to empty (no security).
     pub security: Vec<SecurityScheme>,
     /// Exact top-level `OpenAPI` security alternatives. Empty preserves the legacy derived policy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -399,11 +399,11 @@ pub enum PaginationTermination {
 /// A group is a name that source routing states or [`crate::sdk::builtins::GroupOperations`]
 /// assigns. Nothing in typed source states what a group is *for* — the grouping construct carries
 /// members, not a sentence about them — so the one line that describes a group is a cross-cutting
-/// fact from config (CLAUDE.md rule 4), the way security schemes and the document title are.
+/// fact from config (AGENTS.md rule 4), the way security schemes and the document title are.
 ///
 /// A group with no entry here has no prose. Targets render the name alone; they never derive a
 /// stand-in sentence from the name, because that would be a second way to state the same fact
-/// (CLAUDE.md rule 3).
+/// (AGENTS.md rule 3).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GroupDocsPolicy {
     /// The group name this prose applies to, exactly as [`Operation::group`] carries it.
@@ -423,7 +423,7 @@ pub struct OperationDocsPolicy {
     // NOTE: `summary`/`description` are deliberately NOT here. Prose lives on
     // [`Operation`] itself, so an operation has exactly one place its words are written
     // down and a second source is structurally impossible rather than merely discouraged
-    // (CLAUDE.md rule 3). `DocumentOperation` writes through to the operation and errors
+    // (AGENTS.md rule 3). `DocumentOperation` writes through to the operation and errors
     // on collision.
     /// Whether the operation is deprecated.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -480,7 +480,7 @@ fn is_zero_u8(value: &u8) -> bool {
     *value == 0
 }
 
-/// One declared security scheme — graph-owned generation metadata (CLAUDE.md rule 4).
+/// One declared security scheme — graph-owned generation metadata (AGENTS.md rule 4).
 ///
 /// Security cannot be derived from typed source (auth lives in middleware), so it is supplied by the
 /// user configuring our engine — an `ApplySecurity` transform pushes one of these onto
@@ -505,14 +505,14 @@ pub struct SecurityScheme {
 /// One HTTP operation: a method + path template plus its inferred params/body/responses (D-07).
 ///
 /// Language-neutral — there is deliberately no framework handle here; only the recognized HTTP facts.
-/// Every structural field is derived PURELY from source code (CLAUDE.md rules 1 & 3); there is no
+/// Every structural field is derived PURELY from source code (AGENTS.md rules 1 & 3); there is no
 /// annotation carry-through (no router-path override or security here — security comes from the
 /// user's gnr8 config at lowering time, rule 4). `group` is optional static router grouping
 /// metadata derived from source and used as an `OpenAPI` tag / SDK grouping hint.
 ///
 /// `summary`/`description` are the ONE non-structural pair, and they are still a source fact: they are
 /// the routed handler's own doc comment read as plain prose via the language's native synopsis
-/// convention (CLAUDE.md rule 0.1 category 2). They carry no grammar and can state nothing structural.
+/// convention (AGENTS.md rule 0.1 category 2). They carry no grammar and can state nothing structural.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Operation {
     /// Stable operation id, derived deterministically from the handler symbol (D-08).
@@ -530,7 +530,7 @@ pub struct Operation {
     ///
     /// One source per operation — the handler's doc comment for source-extracted operations, the spec
     /// for `OpenApi`-imported ones. A `DocumentOperation` that targets an operation already carrying
-    /// this is a hard error, never an override (CLAUDE.md rule 3).
+    /// this is a hard error, never an override (AGENTS.md rule 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     /// Longer human prose: everything after the summary sentence, trimmed.
@@ -661,7 +661,7 @@ impl Response {
     /// that declares one is ambiguous, and gnr8 rejects ambiguity rather than silently recovering:
     /// dropping the body in the SDK while the lowered `OpenAPI` kept it would make one graph produce
     /// two artifacts that describe different contracts. This is the single definition both the SDK
-    /// emitters and the `OpenAPI` lowering consult (CLAUDE.md rule 3).
+    /// emitters and the `OpenAPI` lowering consult (AGENTS.md rule 3).
     #[must_use]
     pub fn declares_impossible_body(&self) -> bool {
         self.status == 204 && self.body.is_some()
@@ -963,7 +963,7 @@ impl Operation {
     /// Lower one [`RouteFact`] into an [`Operation`], carrying the code-derived id and sorting children.
     fn from_fact(route: RouteFact, root: &str) -> Self {
         // Stable operation id (D-08): the handler-symbol-derived id the sidecar already emits — purely
-        // code-derived, deterministic, with no annotation override path (CLAUDE.md rules 1 & 3).
+        // code-derived, deterministic, with no annotation override path (AGENTS.md rules 1 & 3).
         let id = route.operation_id;
 
         let mut params: Vec<Param> = route

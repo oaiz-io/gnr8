@@ -1880,7 +1880,7 @@ fn emit_command_entry(out: &mut String, op: &Operation) -> Result<(), CoreError>
 /// it — the same spelling `GroupOperations::describe` validates against, so one spelling is right
 /// everywhere rather than one at generation time and another at render time. A group with no entry
 /// renders its name alone: a sentence derived from the name would be a second way to state the fact
-/// (CLAUDE.md rule 3).
+/// (AGENTS.md rule 3).
 fn group_summary<'a>(graph: &'a ApiGraph, ops: &[&Operation]) -> &'a str {
     let Some(name) = ops.first().and_then(|op| op.group.as_deref()) else {
         return "";

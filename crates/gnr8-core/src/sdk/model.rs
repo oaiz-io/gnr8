@@ -389,7 +389,7 @@ impl SdkModel {
             operation_docs.push(SdkOperationDocs {
                 operation_id: op.id.clone(),
                 service: service.clone(),
-                // Prose comes from the operation — its one source (CLAUDE.md rule 3).
+                // Prose comes from the operation — its one source (AGENTS.md rule 3).
                 summary: op.summary.clone(),
                 description: op.description.clone(),
                 deprecated: docs_policy.is_some_and(|policy| policy.deprecated),

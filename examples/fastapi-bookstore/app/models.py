@@ -4,7 +4,7 @@ Every API fact gnr8 will later extract from this service is expressible from
 Python's OWN type system alone: function signatures + Pydantic/`@dataclass`
 field annotations. There is deliberately NO third-party schema-annotation tool
 and NO separate validation-schema dialect here, and nothing assumes FastAPI's
-runtime `/openapi.json`. Facts come from the language's own types. (CLAUDE.md rule 1.)
+runtime `/openapi.json`. Facts come from the language's own types. (AGENTS.md rule 1.)
 
 This module encodes the v2.0 acceptance vocabulary:
   - objects            -> Pydantic `BaseModel` + a `@dataclass` DTO

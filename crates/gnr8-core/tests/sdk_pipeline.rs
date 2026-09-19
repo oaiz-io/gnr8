@@ -88,7 +88,7 @@ fn pipeline_emits_openapi_and_sdk_artifacts_with_key_facts() {
         "expected the createGoal operationId:\n{}",
         openapi.text
     );
-    // The security scheme came from ApplySecurity (the single source of truth — CLAUDE.md rule 4).
+    // The security scheme came from ApplySecurity (the single source of truth — AGENTS.md rule 4).
     assert!(
         openapi.text.contains("ApiKeyAuth")
             && openapi.text.contains("type: apiKey")

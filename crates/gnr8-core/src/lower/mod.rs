@@ -11,7 +11,7 @@
 //! NO explicit service base path; 02-03 deferred joining the dynamic `"/" + basePath` prefix to
 //! Phase-3 lowering (see `graph::Operation::path`). That prefix is the Gin group argument — often a
 //! *runtime* value the analyzer cannot constant-fold — so it is NOT scraped: it is the graph's
-//! `base_path` (the single source of truth; CLAUDE.md rules 3 & 4), set by a `SetBasePath` transform in
+//! `base_path` (the single source of truth; AGENTS.md rules 3 & 4), set by a `SetBasePath` transform in
 //! the user's `.gnr8/` pipeline and threaded into [`to_openapi`], joined to each operation's
 //! group-relative path with slash-collapse. With `base_path = "/goal"` this yields `/goal/`,
 //! `/goal/list`, `/goal/{uuid}` (never `/goal//list` and never a dropped prefix). A multi-group
@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// `info.version` in the `OpenAPI` document and `--version` in the generated CLI are the same
 /// fact read twice, so they read one default: two artifacts of one pipeline may not disagree
-/// about the version of the API they describe (CLAUDE.md rule 3).
+/// about the version of the API they describe (AGENTS.md rule 3).
 pub(crate) const DEFAULT_API_VERSION: &str = "0.1.0";
 
 /// Supported `apiKey` locations.
@@ -67,11 +67,11 @@ const SUPPORTED_HTTP_SCHEMES: &[&str] = &["bearer", "basic"];
 ///
 /// A pure graph→typed-doc transform (D-02): builds a `model::OpenApiDoc` and serializes it via the
 /// deterministic `yaml::write` writer. Operation paths are joined with the `base_path` prefix (Open Q
-/// A3 — the single source of truth for the service prefix, set by a `SetBasePath` transform, CLAUDE.md
+/// A3 — the single source of truth for the service prefix, set by a `SetBasePath` transform, AGENTS.md
 /// rules 3 & 4); every schema `$ref` is resolved against `graph.schemas` to its bare
 /// component name. The `security` requirement and `components.securitySchemes` are built ENTIRELY from
 /// `security` (the [`crate::graph::SecurityScheme`]s an `ApplySecurity` transform set on the graph) —
-/// the single source of truth for security (`CLAUDE.md` rule 4); the graph carries no security facts
+/// the single source of truth for security (`AGENTS.md` rule 4); the graph carries no security facts
 /// otherwise. The `PoC` policy applies every scheme to all operations (top-level `security`).
 ///
 /// # Errors
@@ -249,7 +249,7 @@ struct LoweredSecurity {
 }
 
 /// Build the top-level `security` requirements + `components.securitySchemes` from the graph's
-/// [`crate::graph::SecurityScheme`]s (the single source of truth for security — CLAUDE.md rule 4, set
+/// [`crate::graph::SecurityScheme`]s (the single source of truth for security — AGENTS.md rule 4, set
 /// by an `ApplySecurity` transform). The `PoC` `apply_to_all` policy adds every scheme to the top-level
 /// requirement, sorted by scheme id for determinism.
 ///
@@ -412,7 +412,7 @@ fn place_operation(
 /// Lower one graph [`GraphOp`] into a typed [`Operation`] (operationId, params, body, responses).
 ///
 /// Query params lower to a bare `string` schema, never required, with no enum (those were annotation
-/// facts and are gone — CLAUDE.md rules 1 & 3). There is no summary/tags. Response descriptions use a
+/// facts and are gone — AGENTS.md rules 1 & 3). There is no summary/tags. Response descriptions use a
 /// stable default since the graph carries none.
 fn lower_operation(
     op: &GraphOp,
@@ -485,7 +485,7 @@ fn lower_operation(
         // spec for `OpenApi`-imported ones, or `DocumentOperation` for operations that
         // have neither. `DocumentOperation` writes straight to these fields and errors
         // on collision, so there is no precedence to apply here and no policy fallback
-        // to consult (CLAUDE.md rule 3).
+        // to consult (AGENTS.md rule 3).
         summary: op.summary.clone(),
         description: op.description.clone(),
         deprecated: docs.is_some_and(|policy| policy.deprecated),
@@ -1219,7 +1219,7 @@ mod tests {
     use crate::analyze::facts::{Constraints, Extension, FieldMeta, LiteralValue};
     use crate::graph::{ApiGraph, Prim, SecurityScheme, Type};
 
-    /// The fixture's security schemes (the SINGLE source of truth for security — CLAUDE.md rule 4):
+    /// The fixture's security schemes (the SINGLE source of truth for security — AGENTS.md rule 4):
     /// one `ApiKeyAuth` / `X-API-Key` scheme applied to all operations. Graph-owned `SecurityScheme`s,
     /// as an `ApplySecurity` transform would set them.
     fn security_config() -> Vec<SecurityScheme> {
@@ -2274,7 +2274,7 @@ mod tests {
     #[test]
     fn no_security_config_emits_no_security() {
         // With an empty security config the document carries no security — proving security is
-        // ENTIRELY config-driven, never derived from the graph (CLAUDE.md rule 4).
+        // ENTIRELY config-driven, never derived from the graph (AGENTS.md rule 4).
         let yaml = to_openapi(&sample_graph(), "goalservice", "/goal", &[]).unwrap();
         assert!(
             !yaml.contains("ApiKeyAuth"),
@@ -2578,7 +2578,7 @@ mod tests {
     #[test]
     fn code_defined_enum_is_preserved() {
         // A code-defined Go enum (TargetDirection, from go/types) must still render as a string enum —
-        // it comes from CODE, not annotations (CLAUDE.md rule on keeping code-defined enums).
+        // it comes from CODE, not annotations (AGENTS.md rule on keeping code-defined enums).
         let yaml = to_openapi(&sample_graph(), "goalservice", "/goal", &security_config()).unwrap();
         let td = yaml
             .split("TargetDirection:")

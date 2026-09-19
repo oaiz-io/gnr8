@@ -5,7 +5,7 @@ request/response bodies are ordinary `dict`/`request.json` unless the author
 OPTS IN to typed DTOs. This fixture encodes the opt-in typed envelope (PYSRC-02):
 `@dataclass` request/response DTOs whose field types ARE the API facts, derived
 from Python's own type system — never from a third-party schema-annotation tool
-and never from a runtime schema export (CLAUDE.md rule 1).
+and never from a runtime schema export (AGENTS.md rule 1).
 
 Where Flask is genuinely untyped (a raw `request.json` read, a stringly-typed
 query arg with no annotation), the Phase-2 extractor must emit a DIAGNOSTIC, not

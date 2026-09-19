@@ -16,7 +16,7 @@
 //! `lib.dom.d.ts`; omit `,dom` and TypeScript fails with `error TS2304: Cannot find name 'fetch'`
 //! (RESEARCH Pitfall 3) — so the SDK can stay dependency-free (no `@types/node`).
 //!
-//! Hermeticity (CLAUDE.md rule 2 + ASVS): `current_dir` is the unique temp dir with NO nearby
+//! Hermeticity (AGENTS.md rule 2 + ASVS): `current_dir` is the unique temp dir with NO nearby
 //! `node_modules`/`tsconfig.json`, so no ambient `@types` or config leaks in; the typecheck reuses ONLY
 //! the already-vendored `typescript` (Phase 4, committed lockfile) — no `npm install`. The harness also
 //! greps every written `.ts` and asserts the generated SDK carries no third-party runtime import
@@ -140,7 +140,7 @@ fn materialize_sdk() -> PathBuf {
     let graph = gnr8_engine::analyze::build_graph(FIXTURE_DIR)
         .expect("Phase 4 build_graph must succeed (requires node for the tsextract sidecar)");
     // `base_path` is the graph's single source of truth; pass it through exactly as a Pipeline would
-    // (CLAUDE.md rules 3 & 4) — the same way pysdk_compile/the SDK targets take it.
+    // (AGENTS.md rules 3 & 4) — the same way pysdk_compile/the SDK targets take it.
     let bundle = gnr8_engine::tssdk::generate(&graph, PACKAGE, &graph.base_path)
         .expect("tssdk::generate must succeed");
     let dir = unique_temp_dir("ok");
@@ -464,7 +464,7 @@ fn split_generated_sdk_with_group_facades_typechecks_with_vendored_tsc() {
 }
 
 /// TSSDK-03: the materialized SDK is byte-identical across two independent generate->write runs
-/// (deterministic output — identical input ⇒ byte-identical files, CLAUDE.md standing constraint).
+/// (deterministic output — identical input ⇒ byte-identical files, AGENTS.md standing constraint).
 #[test]
 fn generated_sdk_is_byte_identical_across_two_runs() {
     if !toolchain_available() {

@@ -40,7 +40,7 @@ use std::collections::BTreeMap;
 /// `package` is the SDK's package name (derived from the `TsSdk` target's module path, the single source
 /// of truth — wired in plan 02). `base_path` is the API base/mount path joined to each operation's
 /// group-relative path in the emitted request URLs — the SAME single source of truth (the graph's
-/// `base_path`) the `OpenAPI` lowering and the Go/Python SDKs take it from (CLAUDE.md rules 3 & 4).
+/// `base_path`) the `OpenAPI` lowering and the Go/Python SDKs take it from (AGENTS.md rules 3 & 4).
 ///
 /// # Errors
 ///

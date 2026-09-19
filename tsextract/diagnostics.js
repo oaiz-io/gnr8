@@ -3,7 +3,7 @@
 // The diagnostics accumulator — the TypeScript twin of `pyextract/diagnostics.py`
 // / `goextract/internal/diag`.
 //
-// A diagnostic is emitted (CLAUDE.md rule 3) whenever a fact cannot be derived
+// A diagnostic is emitted (AGENTS.md rule 3) whenever a fact cannot be derived
 // from a single deterministic code source: an unresolvable/foreign type name, an
 // untyped surface, etc. The fact is then OMITTED — never guessed.
 //

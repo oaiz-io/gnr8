@@ -5,7 +5,7 @@
 //! declaration becomes work: it holds the four execution traits, one implementation per built-in,
 //! and the `match` that dispatches a serialized declaration to the right one.
 //!
-//! CRITICAL (CLAUDE.md rules 2 & 3): these NEVER re-implement extraction, lowering, or SDK emission,
+//! CRITICAL (AGENTS.md rules 2 & 3): these NEVER re-implement extraction, lowering, or SDK emission,
 //! and they NEVER add a second source for a fact or a fallback path. A source calls
 //! [`crate::analyze::build_graph`]; a target reads the graph metadata a transform set and calls the
 //! existing [`crate::lower::to_openapi`] / [`crate::gosdk::generate`]; a transform mutates the one
@@ -1439,7 +1439,7 @@ fn request_parameter_matches(existing: &crate::graph::Param, requested: &Request
 ///
 /// Every field-level override asks the same four questions — does the schema exist, is a bare name
 /// unambiguous, is the body an object, does the field exist — so they are asked once here rather than
-/// once per override kind (CLAUDE.md rule 3). `label` names the override in each message, so a
+/// once per override kind (AGENTS.md rule 3). `label` names the override in each message, so a
 /// correction that has gone stale still says which one it was.
 fn override_target_field<'a>(
     ir: &'a mut ApiGraph,
@@ -2361,7 +2361,7 @@ fn apply_documented_error_responses(
 /// An operation's `summary`/`description` have EXACTLY ONE source: the routed handler's
 /// doc comment for source-extracted operations, the spec for `OpenApi`-imported ones, or
 /// this transform for operations that have neither. Two ways to state one fact is the
-/// defect CLAUDE.md rule 3 exists to prevent, and picking a winner between them is the
+/// defect AGENTS.md rule 3 exists to prevent, and picking a winner between them is the
 /// same defect with extra steps — so a collision is a hard error, never a silent
 /// override and never a fallback.
 ///
@@ -2813,7 +2813,7 @@ impl TargetExec for OpenApi31 {
             });
         }
         // Pass the graph's security schemes straight to the existing lowering (the single source of
-        // truth — an `ApplySecurity` transform set them); never a re-implementation (CLAUDE.md rule 3).
+        // truth — an `ApplySecurity` transform set them); never a re-implementation (AGENTS.md rule 3).
         let mut doc = crate::lower::build_openapi_doc(ir, &ir.title, &ir.base_path, &ir.security)?;
         apply_openapi_customizations(&mut doc, &self.schema_patches)?;
         out.create(self.path.clone(), crate::lower::write_openapi_yaml(&doc))?;
@@ -2973,7 +2973,7 @@ impl TargetExec for GoSdk {
         let projected = crate::graph::projection::for_generation(ir)?;
         let ir = &*projected;
         // Derive the package from the module path (the single source of truth) and generate via the
-        // existing deterministic SDK generator — never a re-implementation (CLAUDE.md rules 2 & 3).
+        // existing deterministic SDK generator — never a re-implementation (AGENTS.md rules 2 & 3).
         let package = sdk_package(&self.module)?;
         let model = SdkModel::build(ir, &package, &ir.base_path, &self.layout)?;
         // The SDK bundle, the contract test and the generated CLI are three `gofmt` runs of ONE
@@ -3095,7 +3095,7 @@ impl TargetExec for PySdk {
         let ir = &*projected;
         // Derive the package from the module path via the SAME single source of truth GoSdk uses, and
         // generate via the existing deterministic Python SDK generator — never a re-derivation, never
-        // a fallback (CLAUDE.md rules 2 & 3). `ir.base_path` is the same single source of truth the
+        // a fallback (AGENTS.md rules 2 & 3). `ir.base_path` is the same single source of truth the
         // OpenAPI lowering reads (rule 3/4 — never re-derived).
         let package = sdk_package(&self.module)?;
         let model = SdkModel::build(ir, &package, &ir.base_path, &self.layout)?;
@@ -3354,7 +3354,7 @@ impl TargetExec for TsSdk {
         let ir = &*projected;
         // Derive the package from the module path via the SAME single source of truth GoSdk/PySdk use,
         // and generate via the existing deterministic TypeScript SDK generator — never a re-derivation,
-        // never a fallback (CLAUDE.md rules 2 & 3). `ir.base_path` is the same single source of truth
+        // never a fallback (AGENTS.md rules 2 & 3). `ir.base_path` is the same single source of truth
         // the OpenAPI lowering reads (rule 3/4 — never re-derived).
         let package = sdk_package(&self.module)?;
         let model = SdkModel::build(ir, &package, &ir.base_path, &self.layout)?;

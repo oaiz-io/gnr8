@@ -1,6 +1,6 @@
 //! Generated-code quality gate: the DEFAULT SDK gnr8 emits for each language is already clean under
 //! that language's most common formatter/linter — with NO post-processing step in the release/generation
-//! path (CLAUDE.md rule 2: gnr8 ships no formatter; every emitter produces already-correct source). This
+//! path (AGENTS.md rule 2: gnr8 ships no formatter; every emitter produces already-correct source). This
 //! is a test-suite-only validation, exactly like `sdk_compile`/`pysdk_compile`/`tssdk_compile`:
 //!
 //!   - Go: `gofmt -l` (format) MUST list nothing, and `go vet ./...` (vet) MUST pass.
@@ -48,7 +48,7 @@ const VENDORED_PRETTIER: &str = concat!(
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A UNIQUE temp subdir under `std::env::temp_dir()` (PID + seq + nanos — no user-supplied path
-/// component). No `tempfile` crate (CLAUDE.md rule 2).
+/// component). No `tempfile` crate (AGENTS.md rule 2).
 fn unique_temp_dir(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

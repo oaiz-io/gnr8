@@ -70,7 +70,7 @@ impl Target for ApiMarkdown {
         for schema in &ir.schemas {
             // The neutral `Type` variant IS the schema's kind (the old string `kind` field was removed
             // when the IR became language-neutral in v2.0). Match exhaustively — a new variant is a
-            // compile error here, never a silently-mislabeled schema (CLAUDE.md rule 3).
+            // compile error here, never a silently-mislabeled schema (AGENTS.md rule 3).
             let kind = match &schema.body {
                 Type::Primitive(_) => "primitive",
                 Type::WellKnown(_) => "well-known",

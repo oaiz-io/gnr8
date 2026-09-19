@@ -19,7 +19,7 @@
 // The group prefix is a non-constant `"/" + basePath`, so routes are recorded
 // group-relative with Gin `:param` normalized to OpenAPI `{param}`; the concrete
 // `/goal` prefix is supplied later by the Rust lowering layer (it is not scraped
-// from any annotation — CLAUDE.md rule 1). No Gin terms leak into the emitted
+// from any annotation — AGENTS.md rule 1). No Gin terms leak into the emitted
 // facts — only router-agnostic HTTP routes.
 package routes
 
@@ -62,7 +62,7 @@ var openAPIOperationMethods = map[string]bool{
 // so the handler analyzer can match a handler FuncDecl by symbol. Middleware/Secured
 // record source middleware placement for later explicit config matching — pure code
 // recognition, NOT an inferred security requirement: generated API security still
-// comes from the user's gnr8 config (CLAUDE.md rule 4).
+// comes from the user's gnr8 config (AGENTS.md rule 4).
 type Route struct {
 	Method          string           // "POST"
 	Path            string           // group-relative, normalized: "/", "/list", "/{uuid}"

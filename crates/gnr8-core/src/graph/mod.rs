@@ -8,7 +8,7 @@
 //! becomes two public models.
 //!
 //! Re-exporting rather than redefining keeps `crate::graph::ApiGraph` valid throughout the engine
-//! and guarantees there is exactly one definition of every node type (CLAUDE.md rule 3).
+//! and guarantees there is exactly one definition of every node type (AGENTS.md rule 3).
 
 pub(crate) mod direction;
 pub(crate) mod projection;

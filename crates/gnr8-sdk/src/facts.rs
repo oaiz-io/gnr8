@@ -64,7 +64,7 @@ pub struct RouteFact {
     /// Operation id, derived deterministically from the handler symbol in code.
     pub operation_id: String,
     /// First sentence of the routed handler's own doc comment, read as plain prose via the source
-    /// language's native synopsis convention (CLAUDE.md rule 0.1 category 2). `#[serde(default)]`
+    /// language's native synopsis convention (AGENTS.md rule 0.1 category 2). `#[serde(default)]`
     /// keeps a sidecar that does not yet emit it parseable under `deny_unknown_fields`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -907,7 +907,7 @@ mod tests {
     /// handler-derived `operation_id`, a path param, and responses by numeric
     /// status. There is no `router_path`/`summary`/`tags`/`secured`/
     /// `security_schemes` and no param `description`/`enum_values` — those were
-    /// annotation facts and have been removed (CLAUDE.md rules 1, 3 & 4).
+    /// annotation facts and have been removed (AGENTS.md rules 1, 3 & 4).
     mod route_facts {
         use crate::facts::GoFacts;
 

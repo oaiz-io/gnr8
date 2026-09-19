@@ -4,7 +4,7 @@
 // @Post, @Put, @Param, @Query, @Body) — the direct Gin analog. Every
 // request/response/param fact is derived from the method SIGNATURE + the typed
 // DTO classes in `books.dto.ts`; nothing reads a third-party schema-annotation
-// decorator or a runtime schema export (CLAUDE.md rule 1).
+// decorator or a runtime schema export (AGENTS.md rule 1).
 //
 // The static @Controller('books') prefix is composed into the neutral graph
 // operation paths (`/books/`, `/books/{bookId}`). No app

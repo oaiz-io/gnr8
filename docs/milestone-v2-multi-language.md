@@ -115,7 +115,7 @@ No language terms leak into the IR (no Gin terms do today; no FastAPI/Nest terms
 | 8 | **Python target — `PySdk`** | Dependency-free `urllib` + `@dataclass` SDK; hermetic generate-and-run test against the FastAPI fixture. `PySdk` Target built-in. |
 | 9 | **TS source — `tsextract`** *(gated on the rule-2 decision)* | NestJS recognizer on the `typescript` Compiler API (or hand-rolled per (B)); `@nestjs/common` decorators + DTO classes → neutral facts; bright-line exclusions enforced. `NestJs` Source built-in. |
 | 10 | **TS target — `TsSdk`** | `fetch`-based typed client; hermetic `tsc --noEmit` typecheck of the generated SDK. `TsSdk` Target built-in. |
-| 11 | **Cross-language hardening + examples + docs** | FastAPI + NestJS `.gnr8/` example lifecycles with real committed output; per-language supported-envelope tables in `docs/USAGE.md`; cross-language determinism; doctor/watch parity; CLAUDE.md + PROJECT.md decision record. |
+| 11 | **Cross-language hardening + examples + docs** | FastAPI + NestJS `.gnr8/` example lifecycles with real committed output; per-language supported-envelope tables in `docs/USAGE.md`; cross-language determinism; doctor/watch parity; AGENTS.md + PROJECT.md decision record. |
 
 If TS is deferred (option C), v2.0 = phases 6–8 + a trimmed hardening phase; TS becomes v2.1.
 

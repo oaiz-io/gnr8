@@ -988,7 +988,7 @@ func mapBasic(u *gotypes.Basic, ctx mapCtx) facts.Type {
 		// An unsupported basic kind (complex64/128, uintptr, untyped constants,
 		// ...) has no faithful neutral primitive. Emit a diagnostic and fall back
 		// to the HONEST free-form `any` rather than fabricating a `string` fact
-		// with no evidence (GO-06 / CLAUDE.md rule 3: diagnose, never guess).
+		// with no evidence (GO-06 / AGENTS.md rule 3: diagnose, never guess).
 		ctx.diags.UnsupportedType(ctx.structName, ctx.fieldName, ctx.declaredType, ctx.file, ctx.line)
 		return facts.AnyType()
 	}
@@ -1125,7 +1125,7 @@ const (
 
 // The `json` tag's two omission options. They differ in WHICH values they drop:
 // `omitempty` drops encoding/json's "empty" set, `omitzero` drops a type's zero
-// value. Both are first-class `encoding/json` options (CLAUDE.md rule 0.1
+// value. Both are first-class `encoding/json` options (AGENTS.md rule 0.1
 // category 1) — neither is a marker any generator invented.
 const (
 	optOmitEmpty = "omitempty"
@@ -1170,7 +1170,7 @@ func parseWireTag(raw string, goName string, wire payloadWire) (name string, omi
 }
 
 // presenceAndNullability derives serializer omission and deserializer null acceptance.
-// Each wire has exactly one rule per fact (CLAUDE.md rule 3).
+// Each wire has exactly one rule per fact (AGENTS.md rule 3).
 //
 // `encoding/json` accepts a JSON null for every ordinary Go destination. Nilable values become nil;
 // non-nilable values are left unchanged. A custom unmarshaler may reject null, but its method body is

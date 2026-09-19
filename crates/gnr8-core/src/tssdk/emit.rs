@@ -3,7 +3,7 @@
 //! Each emitter turns the router-agnostic [`crate::graph::ApiGraph`] into one idiomatic, dependency-free
 //! TypeScript source file. Like [`crate::pysdk::emit`] (and unlike [`crate::gosdk::emit`]) there is NO
 //! `gofmt`-style normalization step (the only stdlib TS formatter would be `tsc` itself, which does not
-//! reformat; `prettier` is third-party — CLAUDE.md rule 2): every emitter produces already-correct
+//! reformat; `prettier` is third-party — AGENTS.md rule 2): every emitter produces already-correct
 //! TypeScript directly.
 //!
 //! - [`emit_models`]   — one `export interface X` per object [`Schema`], one runtime value object plus
@@ -1329,7 +1329,7 @@ pub(crate) fn emit_operation_module(
 ///
 /// Prettier ALWAYS collapses a specifier list that fits, so emitting the broken form unconditionally
 /// would leave `index.ts` unformatted for a small API. One width rule for every specifier list gnr8
-/// writes (CLAUDE.md rule 2: the emitted TypeScript is already formatter-clean, with no formatter
+/// writes (AGENTS.md rule 2: the emitted TypeScript is already formatter-clean, with no formatter
 /// dependency).
 fn ts_module_specifier_list(prefix: &str, names: &[String], module: &str) -> String {
     let one_line = format!("{prefix} {{ {} }} from \"{module}\";", names.join(", "));
@@ -1813,7 +1813,7 @@ fn emit_operation_jsdoc(
 
 /// Render a class method's `async` signature at 2-space indent, wrapping the parameter list one per line
 /// when the single-line form would exceed Prettier's default 80-column `printWidth` — so the emitted TS
-/// is already prettier-clean (CLAUDE.md rule 2: no formatter dependency). When wrapped, each parameter
+/// is already prettier-clean (AGENTS.md rule 2: no formatter dependency). When wrapped, each parameter
 /// sits at 4-space indent with a trailing comma (the trailing comma Prettier keeps), and the return type
 /// closes at 2-space indent. An empty parameter list is never wrapped (nothing to break).
 fn ts_method_signature(name: &str, args: &[String], ret_promise: &str) -> String {

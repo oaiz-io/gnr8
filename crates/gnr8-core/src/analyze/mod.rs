@@ -19,7 +19,7 @@ pub(crate) mod helper;
 ///
 /// Picked by a SINGLE deterministic classification ([`detect_language`]) of the target's files —
 /// NOT by which `Source` built-in was used, and NOT by a try-one-then-fall-back-to-the-other chain
-/// (CLAUDE.md rule 3). The selected variant routes to exactly one sidecar driver.
+/// (AGENTS.md rule 3). The selected variant routes to exactly one sidecar driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Lang {
     /// A Go module — routes to [`helper::run_goextract`].
@@ -32,7 +32,7 @@ pub(crate) enum Lang {
 
 /// Classify the language of a resolved target directory by ONE deterministic file scan.
 ///
-/// This is a single classification, never a fallback chain (CLAUDE.md rule 3 / RESEARCH Pitfall 1):
+/// This is a single classification, never a fallback chain (AGENTS.md rule 3 / RESEARCH Pitfall 1):
 /// we walk the tree once, recording whether any Go marker (`go.mod` or `*.go`), Python marker
 /// (`*.py`), and/or TypeScript marker (`tsconfig.json` or `*.ts`) is present, then make ONE decision
 /// by counting how many languages are present. We do NOT "try goextract, and on failure try
@@ -98,7 +98,7 @@ pub(crate) fn detect_language(target_dir: &str) -> Result<Lang, crate::CoreError
 /// This is the SINGLE public face of the language detector for the CLI (`doctor`/`watch`): it carries
 /// the discrete probe-binary name and the watch trigger extension per language WITHOUT exposing the
 /// internal `Lang`/`detect_language` surface or letting a caller re-derive the language a second way
-/// (CLAUDE.md rule 3 — one source of truth). It is produced ONLY by [`source_toolchain`], which maps the
+/// (AGENTS.md rule 3 — one source of truth). It is produced ONLY by [`source_toolchain`], which maps the
 /// one `detect_language` decision onto these arms — never a try-one-then-fall-back chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceToolchain {
@@ -151,7 +151,7 @@ impl SourceToolchain {
 ///
 /// This is a PURE MAPPING over the single classifier — it delegates to `detect_language` and maps each
 /// `Lang` arm to the matching [`SourceToolchain`] arm. It is NOT a second detector and NOT a
-/// try-go-then-python fallback (CLAUDE.md rule 3): there is exactly one file scan, exactly one decision.
+/// try-go-then-python fallback (AGENTS.md rule 3): there is exactly one file scan, exactly one decision.
 /// `detect_language`'s typed ambiguity/none [`crate::CoreError::Config`] propagates unchanged so an
 /// undetectable/mixed tree is surfaced, never guessed (the caller reports it as a finding, not a panic).
 ///
@@ -210,7 +210,7 @@ fn scan_markers(
             // build trees that may vendor other-language deps, which would otherwise spoof the language
             // detector into a false ambiguity over an otherwise single-language project root (WR-03 /
             // Open Q2 / Pitfall 2). None of these is ever the user's API source, so this is the SAME
-            // one deterministic skip set the runtime watch filter uses (CLAUDE.md rule 3 — one
+            // one deterministic skip set the runtime watch filter uses (AGENTS.md rule 3 — one
             // consistent rule, never a fallback). Mirrors `tsextract/load.js:49`'s `node_modules` skip.
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if matches!(name, ".gnr8" | ".git" | "node_modules" | "target") {
@@ -243,7 +243,7 @@ fn scan_markers(
 /// Build the router-agnostic [`crate::graph::ApiGraph`] from a Go OR Python fixture/source directory.
 ///
 /// Resolves `fixture_dir` to an absolute target, classifies its language ONCE via `detect_language`
-/// (one deterministic detector, never a try-Go-then-try-Python fallback — CLAUDE.md rule 3), runs the
+/// (one deterministic detector, never a try-Go-then-try-Python fallback — AGENTS.md rule 3), runs the
 /// matching sidecar driver (`helper::run_goextract` / `helper::run_pyextract`), and maps the SAME
 /// neutral facts into the graph ([`crate::graph::ApiGraph::from_facts`], reused unchanged — the v2.0
 /// bet). Operation ids are stable, schema ids are qualified, and every collection is sorted so two
@@ -285,7 +285,7 @@ pub(crate) fn build_graph_for_lang(
 /// Build a Go graph from an already-resolved `target`, with separate route and schema scopes.
 ///
 /// The caller supplies the [`helper::ExtractorIdentity`] it keyed its cache entry on, so the
-/// binary that produced these facts is provably the binary the key names (CLAUDE.md rule 3).
+/// binary that produced these facts is provably the binary the key names (AGENTS.md rule 3).
 pub(crate) fn build_go_graph_with_package_scopes(
     target: &str,
     identity: &helper::ExtractorIdentity,

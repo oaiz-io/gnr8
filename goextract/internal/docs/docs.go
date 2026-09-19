@@ -1,6 +1,6 @@
 // Package docs derives operation prose from a declaration's own doc comment.
 //
-// This is CLAUDE.md rule 0.1 category 2: the source language's own documentation
+// This is AGENTS.md rule 0.1 category 2: the source language's own documentation
 // facility, read as PLAIN PROSE. There is no directive syntax, no marker prefix, and
 // no key/value grammar — not `@Summary`, not `gnr8:summary`, not anything. A comment
 // with grammar is a dialect regardless of who owns it, and dialects grow until they
@@ -27,9 +27,9 @@
 // WHOLE text rather than just the summary, and it returns "" for text beginning
 // "Deprecated:" / "Copyright" / "All rights reserved" — which would make Go behave
 // differently from Python and TypeScript on ordinary input. We steal the idea, not the
-// implementation (CLAUDE.md rule 0: steal freely; never be compliant).
+// implementation (AGENTS.md rule 0: steal freely; never be compliant).
 //
-// Standard library only (CLAUDE.md rule 2 for the sidecar).
+// Standard library only (AGENTS.md rule 2 for the sidecar).
 package docs
 
 import (

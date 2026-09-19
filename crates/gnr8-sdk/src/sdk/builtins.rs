@@ -8,7 +8,7 @@
 //!
 //! The builder methods are the supported API. The fields are `pub` because the host reads the
 //! declaration directly rather than through a second, mirrored definition of every stage — one
-//! definition, no drift (CLAUDE.md rule 3). Construct stages through the builders.
+//! definition, no drift (AGENTS.md rule 3). Construct stages through the builders.
 //!
 //! Your own stages implement [`crate::sdk::Source`] / [`Transform`](crate::sdk::Transform) /
 //! [`Target`](crate::sdk::Target) / [`PostProcess`](crate::sdk::PostProcess) and compose with
@@ -135,7 +135,7 @@ impl OpenApi {
 /// `inputs` are project-relative source directories; for now exactly ONE is supported, and a
 /// different count is a clear typed error rather than a silent first-wins. The single input is
 /// resolved against [`Cx::project_root`]. This Source does NOT pick the language — it calls the SAME
-/// `gnr8_engine::analyze::build_graph`, which detects Python by scanning the target (CLAUDE.md rule 3):
+/// `gnr8_engine::analyze::build_graph`, which detects Python by scanning the target (AGENTS.md rule 3):
 /// one deterministic path per fact, never a per-Source extraction fork.
 ///
 /// [`Cx::project_root`]: crate::sdk::Cx::project_root
@@ -168,7 +168,7 @@ impl FastApi {
 ///
 /// `inputs` are project-relative source directories; exactly ONE is supported for now. Like every
 /// other source it calls the SAME `gnr8_engine::analyze::build_graph` — language is detected from the
-/// target, never from which Source was used (CLAUDE.md rule 3).
+/// target, never from which Source was used (AGENTS.md rule 3).
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Flask {
     pub inputs: Vec<String>,
@@ -199,7 +199,7 @@ impl Flask {
 ///
 /// `inputs` are project-relative source directories; exactly ONE is supported for now. Like every
 /// other source it calls the SAME `gnr8_engine::analyze::build_graph` — language is detected from the
-/// TARGET (the `*.ts` tree), never from which Source was used (CLAUDE.md rule 3/4): there is no
+/// TARGET (the `*.ts` tree), never from which Source was used (AGENTS.md rule 3/4): there is no
 /// per-Source extraction fork.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NestJs {
@@ -1135,7 +1135,7 @@ impl SetEnumOrder {
 
 /// Push a security scheme onto [`ApiGraph::security`] — the single source of truth for the generated
 /// `security` requirement + `components.securitySchemes` (replaces the `[[security.schemes]]` knob,
-/// CLAUDE.md rule 4).
+/// AGENTS.md rule 4).
 ///
 /// [`ApiGraph::security`]: crate::graph::ApiGraph::security
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1873,7 +1873,7 @@ impl GroupOperations {
     ///
     /// `group` must name a group that exists once every rule has run, whether this transform
     /// assigned it or the source did. Describing a group that no operation belongs to is a typo,
-    /// and describing one twice is two sources for one fact; both fail generation (CLAUDE.md rule 3).
+    /// and describing one twice is two sources for one fact; both fail generation (AGENTS.md rule 3).
     #[must_use]
     pub fn describe(mut self, group: impl Into<String>, summary: impl Into<String>) -> Self {
         self.docs.push(crate::graph::GroupDocsPolicy {
@@ -2284,7 +2284,7 @@ impl GoSdk {
     }
 
     /// Set the Go module path for the generated SDK (e.g. `"example.com/bookstore/sdk"`). The package
-    /// name is derived from this — the single source of truth (CLAUDE.md rule 3).
+    /// name is derived from this — the single source of truth (AGENTS.md rule 3).
     #[must_use]
     pub fn module(mut self, module: impl Into<String>) -> Self {
         self.module = module.into();
@@ -2401,7 +2401,7 @@ impl Default for GoSdk {
 ///
 /// The structural twin of [`GoSdk`] (minus the `gofmt` step Python has no analog for). Derives the
 /// SDK's Python package name from [`PySdk::module`] via the SAME `sdk_package` single-source-of-truth
-/// derivation `GoSdk` uses (CLAUDE.md rule 3 — no second derivation), takes the URL prefix from
+/// derivation `GoSdk` uses (AGENTS.md rule 3 — no second derivation), takes the URL prefix from
 /// `ir.base_path` (the value `SetBasePath` set and the OpenAPI lowering reads — never re-derived),
 /// calls the existing `gnr8_engine::pysdk::generate` to produce the bundle, splits it into files on
 /// the shared bundle framing, and writes each at `<dir>/<name>`.
@@ -2440,7 +2440,7 @@ impl PySdk {
     }
 
     /// Set the module path for the generated SDK (e.g. `"example.com/bookstore/sdk"`). The Python
-    /// package name is derived from this — the single source of truth (CLAUDE.md rule 3), the same
+    /// package name is derived from this — the single source of truth (AGENTS.md rule 3), the same
     /// derivation `GoSdk` uses.
     #[must_use]
     pub fn module(mut self, module: impl Into<String>) -> Self {
@@ -2565,7 +2565,7 @@ impl Default for PySdk {
 /// under [`TsSdk::to`].
 ///
 /// The structural twin of [`PySdk`]/[`GoSdk`]. Derives the SDK's package name from [`TsSdk::module`]
-/// via the SAME `sdk_package` single-source-of-truth derivation `PySdk`/`GoSdk` use (CLAUDE.md
+/// via the SAME `sdk_package` single-source-of-truth derivation `PySdk`/`GoSdk` use (AGENTS.md
 /// rule 3 — no second derivation, no TS-specific sanitizer), takes the URL prefix from `ir.base_path`
 /// (the value `SetBasePath` set and the OpenAPI lowering reads — never re-derived), calls the existing
 /// `gnr8_engine::tssdk::generate` to produce the bundle, splits it into files on the shared bundle
@@ -2598,7 +2598,7 @@ impl TsSdk {
     }
 
     /// Set the module path for the generated SDK (e.g. `"example.com/bookstore/sdk"`). The package
-    /// name is derived from this — the single source of truth (CLAUDE.md rule 3), the same derivation
+    /// name is derived from this — the single source of truth (AGENTS.md rule 3), the same derivation
     /// `PySdk`/`GoSdk` use.
     #[must_use]
     pub fn module(mut self, module: impl Into<String>) -> Self {
@@ -2854,7 +2854,7 @@ impl Header {
 /// Build one media example from its parts.
 ///
 /// Shared by the declaration builders here and by the host that executes them, so an example is
-/// constructed exactly one way (CLAUDE.md rule 3).
+/// constructed exactly one way (AGENTS.md rule 3).
 #[must_use]
 pub fn media_example(
     name: impl Into<String>,

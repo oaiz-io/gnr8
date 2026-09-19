@@ -105,7 +105,7 @@ func run(targetDir string, scopes packageScopes, w *os.File) error {
 	// request/response/param facts. buildRoutes owns the wiring + the per-route
 	// diagnostics (untyped query params, dynamic responses). Every fact is derived
 	// PURELY from Go code — there is no annotation source and no fallback path
-	// (CLAUDE.md rules 1 & 3).
+	// (AGENTS.md rules 1 & 3).
 	//
 	// The Analyzer carries the module prefix as per-invocation context (WR-03), so
 	// the analysis is reentrant rather than depending on process-global setup
@@ -160,7 +160,7 @@ func sameStrings(a, b []string) bool {
 
 // buildRoutes maps each recognized Gin route to a router-agnostic RouteFact.
 //
-// Every fact has exactly ONE code-derived source (CLAUDE.md rules 1 & 3): the
+// Every fact has exactly ONE code-derived source (AGENTS.md rules 1 & 3): the
 // method/path/handler come from the route recognizer, the operationId is the
 // handler symbol, and the request body / responses / params come from analyzing
 // the handler body. There is no annotation source and no fallback anywhere.

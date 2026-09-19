@@ -7,7 +7,7 @@
 // `node` but no `typescript` reports unhealthy here, instead of passing doctor and failing at generate.
 //
 // There is ONE resolution decision shared with the extractor (`ts.resolveTypescript`) — no second
-// source of truth, no fallback (CLAUDE.md rule 3). This file resolves NOTHING else and runs NO target
+// source of truth, no fallback (AGENTS.md rule 3). This file resolves NOTHING else and runs NO target
 // code: it only asks `require.resolve` whether `typescript` is present.
 //
 // Contract: `node probe.js <target-dir>` -> exit 0 (typescript resolvable) | exit 1 (absent / no arg).

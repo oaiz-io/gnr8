@@ -2,7 +2,7 @@
 //!
 //! Each emitter turns the router-agnostic [`crate::graph::ApiGraph`] into one idiomatic Python source
 //! file. Unlike [`crate::gosdk::emit`], there is NO `gofmt` normalization step (Python has no stdlib
-//! formatter; `black`/`autopep8` are third-party — CLAUDE.md rule 2): every emitter produces
+//! formatter; `black`/`autopep8` are third-party — AGENTS.md rule 2): every emitter produces
 //! already-correct, significant-whitespace Python directly.
 //!
 //! - [`emit_models`]   — one Pydantic v2 `BaseModel` per object [`Schema`] by default (or one
@@ -256,7 +256,7 @@ pub(crate) use crate::sdk::emit_common::screaming_snake;
 /// The fixed set of Python reserved words that may NOT be used as bare identifiers.
 ///
 /// Sourced from Python's `keyword.kwlist` (a FIXED set baked into the emitter — never shelled out,
-/// CLAUDE.md rule 2). A field/param/local whose name lands on this list emits invalid Python, so
+/// AGENTS.md rule 2). A field/param/local whose name lands on this list emits invalid Python, so
 /// [`safe_ident`] suffixes a trailing `_` to produce a valid, deterministic identifier.
 const PY_KEYWORDS: &[&str] = &[
     "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
@@ -2658,7 +2658,7 @@ fn emit_operation_docstring(
 
 /// Render a method `def` header at 4-space (Client-method) indent, wrapping to one-argument-per-line
 /// when the single-line form would exceed the 88-column limit — matching `ruff format` so the emitted
-/// source is already format-stable (CLAUDE.md rule 2: no formatter dependency). When exploded, each
+/// source is already format-stable (AGENTS.md rule 2: no formatter dependency). When exploded, each
 /// argument sits at 8-space indent with a trailing comma (the "magic trailing comma" that keeps the
 /// formatter from re-collapsing it).
 fn method_def(name: &str, args: &[String], ret: &str) -> String {

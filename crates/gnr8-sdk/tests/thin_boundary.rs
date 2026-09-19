@@ -19,7 +19,7 @@ fn crate_root() -> PathBuf {
 /// The complete, intentional dependency set of the published `gnr8` crate.
 ///
 /// Adding to this list is a product decision, not a refactor: state the bounded commodity concern
-/// the crate serves (CLAUDE.md rule 2) and measure the build cost it adds before changing it.
+/// the crate serves (AGENTS.md rule 2) and measure the build cost it adds before changing it.
 const ALLOWED_DEPENDENCIES: [&str; 4] = ["blake3", "serde", "serde_json", "thiserror"];
 
 /// Module names that belong to the host engine and must never appear in SDK source.

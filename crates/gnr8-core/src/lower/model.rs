@@ -23,7 +23,7 @@ pub(crate) struct OpenApiDoc {
     /// Public server URLs.
     pub servers: Vec<Server>,
     /// Top-level security requirements (e.g. `[{ApiKeyAuth: []}]`), built from the user's `gnr8` config;
-    /// empty when the config declares no schemes (`CLAUDE.md` rule 4 — security is config, not scraped).
+    /// empty when the config declares no schemes (`AGENTS.md` rule 4 — security is config, not scraped).
     pub security: Vec<SecurityRequirement>,
     /// Path templates keyed absolutely (`/goal/`, `/goal/list`, `/goal/{uuid}`), in sorted order.
     pub paths: Vec<(String, PathItem)>,
@@ -230,7 +230,7 @@ pub(crate) struct Components {
 }
 
 /// A security scheme, built from the user's `gnr8` config (the single source of truth for security —
-/// `CLAUDE.md` rule 4).
+/// `AGENTS.md` rule 4).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct SecurityScheme {
     /// The scheme kind (e.g. `"apiKey"` or `"http"`), from config.

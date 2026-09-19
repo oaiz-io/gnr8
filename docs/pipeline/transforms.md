@@ -370,7 +370,7 @@ outside the handler:
 `.summary()` and `.description()` remain available for operations that have **no** source prose —
 notably those imported from an OpenAPI document, or handlers whose words genuinely live elsewhere.
 Using them on an operation that already has source prose is a **hard error**, not an override: one
-fact has one source (CLAUDE.md rule 3). Fix the doc comment, or narrow the selector.
+fact has one source (AGENTS.md rule 3). Fix the doc comment, or narrow the selector.
 
 A selector that matches nothing is an error.
 
