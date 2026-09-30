@@ -7,7 +7,7 @@
 //!
 //! `OpenAPI` 3.1 specifics enforced here: `openapi: 3.1.0`; nullability is the `JSON Schema 2020-12`
 //! **type array form** `type: ["T", "null"]` (3.1 dropped the 3.0-era `nullable` keyword), or, for a
-//! bare `$ref` node, the `oneOf: [ {$ref}, {type: "null"} ]` form; optionality is independent and is
+//! `$ref` node, the `oneOf: [ {$ref}, {type: "null"} ]` form; optionality is independent and is
 //! expressed by omission from the owning object's `required` list. `$ref` is JSON-pointer form
 //! `'#/components/schemas/Name'` and QUOTED; `additionalProperties: true` for free-form maps; `format`
 //! is emitted alongside `type`. Indentation is two-space block style.
@@ -411,21 +411,23 @@ fn write_security_scheme(out: &mut String, name: &str, scheme: &SecurityScheme) 
     }
 }
 
-/// Emit a [`SchemaObject`] body with keys in fixed order: `type`, `format`, `description`, `enum`,
-/// `required`, `properties`, `items`, `additionalProperties`, `oneOf`, `$ref`.
+/// Emit a [`SchemaObject`] body with keys in fixed order: `$ref`, `oneOf`, `type`, `format`,
+/// `description`, `enum`, constraints, `default`, `example`, extensions, `required`, `properties`,
+/// `items`, `additionalProperties`.
 ///
 /// Nullability is rendered as the 3.1 type array form `type: ["<type>", "null"]` when
 /// [`SchemaObject::nullable`] is set; a `oneOf` composition (a union, or the nullable-`$ref` form) is
 /// emitted as a block sequence of variant schemas.
 fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
     let pad = INDENT.repeat(depth);
-    // A bare `$ref` schema emits ONLY the `$ref` key (a `$ref` sibling-keys-are-ignored rule). A
-    // nullable `$ref` is carried as a `oneOf` (handled below), never as a sibling key beside `$ref`.
+    // `$ref` leads; any field-owned keywords follow as siblings (3.1 / JSON Schema 2020-12 applies
+    // them alongside the reference). A nullable `$ref` is carried as a `oneOf` (handled below), never
+    // as a sibling `type` beside `$ref`.
     if let Some(schema_ref) = &schema.schema_ref {
         let _ = writeln!(out, "{pad}$ref: {}", ref_pointer(schema_ref));
-        return;
     }
-    // A `oneOf` composition (union / nullable-$ref) emits the variant sequence and nothing else.
+    // A `oneOf` composition (union / nullable-$ref) emits the variant sequence; field-owned keywords
+    // follow it as siblings.
     if !schema.one_of.is_empty() {
         let _ = writeln!(out, "{pad}oneOf:");
         for variant in &schema.one_of {
@@ -539,9 +541,9 @@ fn write_schema_constraints(out: &mut String, schema: &SchemaObject, pad: &str) 
     }
 }
 
-/// Emit one block-sequence item (`- ...`) for a `oneOf` variant. A bare-`$ref` or type-only variant is
-/// compact (`- $ref: ...` / `- type: null`); a richer variant places its body on indented lines under
-/// the dash.
+/// Emit one block-sequence item (`- ...`) for a `oneOf` variant. The variant's first key goes on the
+/// dash line (`- $ref: ...` / `- type: null`) and any further keys — a `$ref`'s siblings included —
+/// on indented lines under it.
 fn write_schema_seq_item(out: &mut String, schema: &SchemaObject, depth: usize) {
     let pad = INDENT.repeat(depth);
     // Render the variant body into its own buffer (indented one level deeper), then re-flow the first
@@ -815,6 +817,44 @@ mod tests {
         assert!(
             openapi < info && info < security && security < paths && paths < components,
             "top-level key order wrong:\n{yaml}"
+        );
+    }
+
+    /// A `$ref` carries its sibling keywords (3.1 / JSON Schema 2020-12), both as a property and as a
+    /// `oneOf` member, where the siblings must land under the `- $ref:` dash rather than beside it.
+    #[test]
+    fn ref_siblings_render_as_property_and_as_one_of_member() {
+        let with_prose = SchemaObject {
+            description: Some("Pointer with prose".to_string()),
+            min_items: Some(1),
+            ..SchemaObject::reference("Bar")
+        };
+        let mut doc = sample_doc();
+        doc.components.schemas[0].1.properties.push((
+            "choice".to_string(),
+            SchemaObject {
+                one_of: vec![with_prose.clone(), SchemaObject::reference("Baz")],
+                ..SchemaObject::default()
+            },
+        ));
+        doc.components.schemas[0]
+            .1
+            .properties
+            .push(("pointer".to_string(), with_prose));
+        let yaml = write(&doc);
+        let parsed = crate::sdk::openapi_source::parse_json_or_yaml(&yaml, Path::new("o.yaml"))
+            .unwrap_or_else(|err| panic!("{err}\n{yaml}"));
+        let expected = serde_json::json!({
+            "$ref": "#/components/schemas/Bar",
+            "description": "Pointer with prose",
+            "minItems": 1,
+        });
+        let properties = &parsed["components"]["schemas"]["Foo"]["properties"];
+        assert_eq!(properties["pointer"], expected, "{yaml}");
+        assert_eq!(
+            properties["choice"]["oneOf"],
+            serde_json::json!([expected, { "$ref": "#/components/schemas/Baz" }]),
+            "{yaml}"
         );
     }
 
