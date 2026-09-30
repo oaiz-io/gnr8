@@ -15,6 +15,22 @@ must move the minor version.
   `AGENTS.md` is the real file rather than a symlink. Claude Code now reads `AGENTS.md`
   natively, so the repository keeps one invariants document.
 
+### Fixed
+
+- **An OpenAPI document now round-trips field metadata beside a `$ref`.** A property whose type is
+  a named schema lost everything it said about itself — `description`, `example`, `default`,
+  `format`, constraints such as `minItems`, and vendor extensions — because lowering attached
+  field-owned keywords only to properties that were not a bare `$ref`, and both writers emitted the
+  `$ref` key alone. The importer already read those keywords beside a `$ref`, so importing a document
+  and writing it straight back out dropped facts nobody edited. gnr8 emits OpenAPI 3.1, whose schemas
+  are JSON Schema 2020-12: `$ref` is an ordinary keyword and its siblings apply alongside it (the
+  rule that ignored them was OpenAPI 3.0's). The keywords are now emitted as `$ref` siblings in both
+  YAML and JSON. A nullable reference is unchanged: it stays `oneOf: [{$ref}, {type: null}]`, with
+  the field's metadata on the `oneOf` once and its members bare. The OpenAPI document changes for
+  every named-type property that carries field metadata, from any source language, including its
+  `description` and `default`, so anything that reads that document sees them. gnr8's own SDKs are
+  generated from the graph rather than from the document and do not change.
+
 ## 0.16.2 — 2026-09-16
 
 ### Added

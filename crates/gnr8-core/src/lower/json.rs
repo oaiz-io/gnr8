@@ -384,10 +384,12 @@ fn write_security_scheme(scheme: &SecurityScheme) -> Value {
 
 #[allow(clippy::too_many_lines)]
 fn write_schema(schema: &SchemaObject) -> Value {
-    if let Some(schema_ref) = &schema.schema_ref {
-        return ref_schema(schema_ref);
-    }
     let mut out = Map::new();
+    // Field-owned keywords below are siblings of `$ref` (3.1 / JSON Schema 2020-12 applies them
+    // alongside the reference); a nullable `$ref` is a `oneOf`, never a sibling `type`.
+    if let Some(schema_ref) = &schema.schema_ref {
+        out.insert("$ref".to_string(), ref_pointer(schema_ref));
+    }
     if !schema.one_of.is_empty() {
         out.insert(
             "oneOf".to_string(),
@@ -511,11 +513,12 @@ fn write_schema(schema: &SchemaObject) -> Value {
 
 fn ref_schema(name: &str) -> Value {
     let mut out = Map::new();
-    out.insert(
-        "$ref".to_string(),
-        Value::String(format!("#/components/schemas/{name}")),
-    );
+    out.insert("$ref".to_string(), ref_pointer(name));
     Value::Object(out)
+}
+
+fn ref_pointer(name: &str) -> Value {
+    Value::String(format!("#/components/schemas/{name}"))
 }
 
 fn literal(value: &LiteralValue) -> Value {

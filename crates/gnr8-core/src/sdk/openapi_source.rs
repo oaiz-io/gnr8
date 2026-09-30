@@ -3563,6 +3563,78 @@ components:
     }
 
     #[test]
+    fn re_emits_field_metadata_beside_a_ref_unchanged() {
+        // The importer reads a property's own keywords whether or not its type is a `$ref`, so
+        // writing the document back out must keep them beside the `$ref`. Under 3.1 / JSON Schema
+        // 2020-12 a `$ref`'s siblings apply alongside it; dropping them loses facts nobody edited.
+        let text = r"
+openapi: 3.1.0
+info: { title: Books API, version: 1.0.0 }
+paths:
+  /books:
+    post:
+      operationId: createBook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookInput' }
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookInput' }
+components:
+  schemas:
+    BookInput:
+      type: object
+      required: [tags]
+      properties:
+        tags: { $ref: '#/components/schemas/Tags', description: Shelf labels, minItems: 1, maxItems: 5 }
+        owner:
+          oneOf: [{ $ref: '#/components/schemas/Owner' }, { type: 'null' }]
+          description: Who holds the book
+    Owner:
+      type: object
+      properties: { name: { type: string } }
+    Tags:
+      type: array
+      items: { type: string }
+";
+        let graph = import_openapi_document(
+            std::path::Path::new("."),
+            std::path::PathBuf::from("openapi.yaml"),
+            text,
+        )
+        .unwrap();
+        let yaml = to_openapi(&graph, "Books API", "/", &graph.security).unwrap();
+        validate_openapi_artifact(&yaml, std::path::Path::new("generated.yaml")).unwrap();
+        let emitted = parse_json_or_yaml(&yaml, std::path::Path::new("generated.yaml")).unwrap();
+        let properties = &emitted["components"]["schemas"]["BookInput"]["properties"];
+        assert_eq!(
+            properties["tags"],
+            serde_json::json!({
+                "$ref": "#/components/schemas/Tags",
+                "description": "Shelf labels",
+                "minItems": 1,
+                "maxItems": 5,
+            }),
+            "{yaml}"
+        );
+        // The nullable reference keeps its prose on the `oneOf` wrapper, once, and the referenced
+        // member stays a bare `$ref`.
+        let owner = &properties["owner"];
+        assert_eq!(owner["description"], "Who holds the book", "{yaml}");
+        assert_eq!(
+            owner["oneOf"][0],
+            serde_json::json!({ "$ref": "#/components/schemas/Owner" }),
+            "{yaml}"
+        );
+        assert_eq!(owner["oneOf"].as_array().map(Vec::len), Some(2), "{yaml}");
+    }
+
+    #[test]
     fn preserves_request_media_types_that_share_a_schema() {
         let text = r"
 openapi: 3.1.0

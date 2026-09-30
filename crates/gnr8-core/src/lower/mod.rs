@@ -934,18 +934,17 @@ fn lower_object(
                 ref_to_name,
                 directions,
             )?;
-            // Attach field-owned keywords when the schema is not a bare `$ref`. A composed schema
-            // (`oneOf`, including nullable references) may carry sibling JSON Schema keywords such
-            // as `description`, `default`, and vendor extensions, so do not drop metadata there.
-            if prop.schema_ref.is_none() {
-                if let Some(desc) = &field.description {
-                    prop.description = Some(desc.clone());
-                }
-                if let Some(example) = &field.example {
-                    prop.example = Some(LiteralValue::String(example.clone()));
-                }
-                apply_field_meta(field, &mut prop);
+            // Attach field-owned keywords to the property schema whatever its shape. OpenAPI 3.1
+            // schemas are JSON Schema 2020-12, where `$ref` is an ordinary keyword whose siblings
+            // apply alongside it, so a named-type field keeps its metadata beside the `$ref`. A
+            // nullable reference carries it once, on the `oneOf` wrapper, never on its members.
+            if let Some(desc) = &field.description {
+                prop.description = Some(desc.clone());
             }
+            if let Some(example) = &field.example {
+                prop.example = Some(LiteralValue::String(example.clone()));
+            }
+            apply_field_meta(field, &mut prop);
             Ok((field.json_name.clone(), prop))
         })
         .collect::<Result<Vec<_>, crate::CoreError>>()?;
@@ -992,8 +991,8 @@ fn apply_constraints(constraints: &Constraints, prop: &mut SchemaObject) {
 
 /// Lower a field's neutral [`Type`] applying the field's `nullable` axis: a nullable scalar/array/map
 /// renders as the 3.1 `type: ["<type>", "null"]` array form; a nullable `$ref` renders as the
-/// `oneOf: [ {$ref}, {type: "null"} ]` form (a `$ref` cannot carry a sibling `type`). A non-nullable
-/// field is the plain lowered schema.
+/// `oneOf: [ {$ref}, {type: "null"} ]` form (a sibling `type` beside a `$ref` would intersect with the
+/// referenced schema rather than widen it). A non-nullable field is the plain lowered schema.
 fn lower_field_schema(
     ty: &Type,
     nullable: bool,
@@ -1004,8 +1003,9 @@ fn lower_field_schema(
     if !nullable {
         return Ok(lowered);
     }
-    // A bare `$ref` (or an already-composed `oneOf`) cannot carry a sibling `type` key — wrap it in a
-    // `oneOf` with an explicit null schema (the 3.1 / JSON-Schema-2020-12 nullable-reference form).
+    // A `$ref` (or an already-composed `oneOf`) cannot widen to null with a sibling `type` key — its
+    // siblings intersect with it — so wrap it in a `oneOf` with an explicit null schema (the 3.1 /
+    // JSON-Schema-2020-12 nullable-reference form).
     if lowered.schema_ref.is_some() || !lowered.one_of.is_empty() {
         return Ok(SchemaObject {
             one_of: vec![lowered, null_schema()],
@@ -2505,6 +2505,80 @@ mod tests {
         assert_eq!(prop["description"], "Preferred target direction");
         assert_eq!(prop["default"], "gte");
         assert_eq!(prop["x-gnr8-render"], "select");
+        // Field metadata is applied once, on the wrapper: the referenced member stays a bare `$ref`
+        // and the null member stays a bare null schema, in both writers.
+        let expected_members = serde_json::json!([
+            { "$ref": "#/components/schemas/TargetDirection" },
+            { "type": "null" },
+        ]);
+        assert_eq!(prop["oneOf"], expected_members, "{json_text}");
+        let parsed =
+            crate::sdk::openapi_source::parse_json_or_yaml(&yaml, std::path::Path::new("o.yaml"))
+                .unwrap();
+        let yaml_prop =
+            &parsed["components"]["schemas"]["CreateGoalInput"]["properties"]["direction"];
+        assert_eq!(yaml_prop["oneOf"][0], expected_members[0], "{yaml}");
+        assert_eq!(
+            yaml_prop["oneOf"].as_array().map(Vec::len),
+            Some(2),
+            "{yaml}"
+        );
+        for key in ["description", "default", "x-gnr8-render"] {
+            assert_eq!(yaml_prop[key], prop[key], "{key}:\n{yaml}");
+        }
+    }
+
+    #[test]
+    fn metadata_on_bare_ref_lowers_as_ref_siblings() {
+        use crate::graph::{Field, Type};
+        // OpenAPI 3.1 schemas are JSON Schema 2020-12, where `$ref` is an ordinary keyword whose
+        // siblings apply alongside it. A field whose type is a named schema keeps its own metadata.
+        let mut graph = sample_graph();
+        graph.schemas[1].body = Type::Object(vec![Field {
+            json_name: "direction".to_string(),
+            serializer_may_omit: false,
+            deserializer_accepts_absent: false,
+            deserializer_accepts_null: false,
+            serializer_may_emit_null: false,
+            validator_requires_presence: true,
+            validator_rejects_null: false,
+            schema: Type::Named("internal/dto.TargetDirection".to_string()),
+            description: Some("Preferred target direction".to_string()),
+            example: Some("gte".to_string()),
+            meta: FieldMeta {
+                constraints: Constraints {
+                    min_items: Some(1),
+                    ..Constraints::default()
+                },
+                default: Some(LiteralValue::String("gte".to_string())),
+                format: None,
+                extensions: vec![Extension {
+                    name: "x-gnr8-render".to_string(),
+                    value: LiteralValue::String("select".to_string()),
+                }],
+            },
+        }]);
+        let expected = serde_json::json!({
+            "$ref": "#/components/schemas/TargetDirection",
+            "description": "Preferred target direction",
+            "minItems": 1,
+            "default": "gte",
+            "example": "gte",
+            "x-gnr8-render": "select",
+        });
+
+        let json_text =
+            to_openapi_json(&graph, "goalservice", "/goal", &security_config()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+        let prop = &json["components"]["schemas"]["CreateGoalInput"]["properties"]["direction"];
+        assert_eq!(prop, &expected, "{json_text}");
+
+        let yaml = to_openapi(&graph, "goalservice", "/goal", &security_config()).unwrap();
+        let parsed =
+            crate::sdk::openapi_source::parse_json_or_yaml(&yaml, std::path::Path::new("o.yaml"))
+                .unwrap();
+        let prop = &parsed["components"]["schemas"]["CreateGoalInput"]["properties"]["direction"];
+        assert_eq!(prop, &expected, "{yaml}");
     }
 
     #[test]
