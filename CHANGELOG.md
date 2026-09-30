@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.16.3 — 2026-09-30
+
 ### Changed
 
 - **Engineering invariants live in `AGENTS.md` only.** The Claude-named copy is gone, and
