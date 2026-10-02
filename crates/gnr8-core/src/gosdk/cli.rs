@@ -21,11 +21,12 @@ use crate::sdk::emit_common::{
     command_verb, command_view, credential_env_var, debug_env_var, file_stem, flag_name,
     format_env_var, help_spec_json, helper_env_var, http_auth_features_for, is_positional_param,
     no_input_env_var, operation_auth_alternatives, operation_prose, output_dir_env_var,
-    parameter_flag_help, positional_names, positional_usage, quoted_string_literal,
+    pager_env_var, parameter_flag_help, positional_names, positional_usage, quoted_string_literal,
     reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
     response_field_names, success_responses_of, OperationAuthScheme, RequestBodyModel, ALL_HELP,
-    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP,
-    JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
+    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP,
+    FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP, QUIET_HELP,
+    YES_HELP,
 };
 use crate::CoreError;
 
@@ -72,6 +73,7 @@ const RESERVED_CLI_FILES: &[&str] = &[
     "errors",
     "flags",
     "output",
+    "complete",
 ];
 
 /// One emitted `internal/cli/*.go` file: the commands under one group, or the ungrouped ones.
@@ -247,6 +249,9 @@ pub(crate) fn emit_cli(
     files.push(part("output", &|body, imports| {
         emit_print_helpers(body, package, imports);
         Ok(())
+    })?);
+    files.push(part("complete", &|body, imports| {
+        emit_complete_helpers(body, &ops, cli, imports)
     })?);
     if !ops.is_empty() || !cli.owned_commands.is_empty() {
         files.push(part("errors", &|body, imports| {
@@ -599,6 +604,12 @@ fn emit_constants(
         out,
         "const outputDirEnv = {}",
         quoted_string_literal(&output_dir_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const pagerEnv = {}",
+        quoted_string_literal(&pager_env_var(&cli.program))
     )
     .map_err(sink)?;
     writeln!(
@@ -1143,6 +1154,7 @@ fn emit_print_helpers(out: &mut String, package: &str, imports: &mut ImportSet) 
     imports.add("io");
     imports.add("net/http");
     imports.add("os");
+    imports.add("os/exec");
     imports.add("path/filepath");
     imports.add("sort");
     imports.add("strconv");
@@ -1224,6 +1236,86 @@ func fileIsTTY(file *os.File) bool {{
 func stdoutIsTTY() bool {{ return fileIsTTY(os.Stdout) }}
 func stderrIsTTY() bool {{ return fileIsTTY(os.Stderr) }}
 func stdinIsTTY() bool  {{ return fileIsTTY(os.Stdin) }}
+
+func useColor() bool {{
+	if outputFormat != "" && outputFormat != "human" {{
+		return false
+	}}
+	switch colorMode {{
+	case "always":
+		return true
+	case "never":
+		return false
+	default:
+		if os.Getenv("NO_COLOR") != "" {{
+			return false
+		}}
+		if os.Getenv("TERM") == "dumb" {{
+			return false
+		}}
+		return stdoutIsTTY()
+	}}
+}}
+
+func colorize(code, text string) string {{
+	if !useColor() {{
+		return text
+	}}
+	return "\x1b[" + code + "m" + text + "\x1b[0m"
+}}
+
+func termWidth() int {{
+	if v := os.Getenv("COLUMNS"); v != "" {{
+		if n, err := strconv.Atoi(v); err == nil && n >= 20 {{
+			return n
+		}}
+	}}
+	return 80
+}}
+
+func fitWidth(text string) string {{
+	width := termWidth()
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(text, "\n") {{
+		line = strings.TrimRight(line, "\n")
+		runes := []rune(line)
+		if len(runes) > width {{
+			if width > 1 {{
+				line = string(runes[:width-1]) + "…"
+			}} else {{
+				line = "…"
+			}}
+		}}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}}
+	return b.String()
+}}
+
+func writeHuman(text string) int {{
+	text = fitWidth(strings.TrimRight(text, "\n") + "\n")
+	if !noPager && stdoutIsTTY() && strings.Count(text, "\n") >= 24 {{
+		pager := os.Getenv(pagerEnv)
+		if pager == "" {{
+			pager = os.Getenv("PAGER")
+		}}
+		if pager == "" {{
+			pager = "less -FIRX"
+		}}
+		cmd := exec.Command("sh", "-c", pager)
+		cmd.Stdin = strings.NewReader(text)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {{
+			return 0
+		}}
+	}}
+	if _, err := os.Stdout.WriteString(text); err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	return 0
+}}
 
 func printResult(result any) int {{
 	if outputPath != "" && outputPath != "-" {{
@@ -1317,22 +1409,14 @@ func printHuman(result any) int {{
 		var buf bytes.Buffer
 		if err := json.Indent(&buf, projected, "", "  "); err == nil {{
 			buf.WriteByte('\n')
-			_, err = os.Stdout.Write(buf.Bytes())
-			if err != nil {{
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return 1
-			}}
-			return 0
+			return writeHuman(buf.String())
 		}}
 	}}
-	if _, err := os.Stdout.Write(raw); err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
+	text := string(raw)
+	if !strings.HasSuffix(text, "\n") {{
+		text += "\n"
 	}}
-	if raw[len(raw)-1] != '\n' {{
-		_, _ = os.Stdout.Write([]byte("\n"))
-	}}
-	return 0
+	return writeHuman(text)
 }}
 
 func printAIFriendly(result any) int {{
@@ -2391,6 +2475,18 @@ fn emit_handler(
         quoted_string_literal(NO_INPUT_HELP)
     )
     .map_err(sink)?;
+    writeln!(
+        out,
+        "colorFlag := fs.String(\"color\", \"\", {})",
+        quoted_string_literal(COLOR_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "noPagerFlag := fs.Bool(\"no-pager\", false, {})",
+        quoted_string_literal(NO_PAGER_HELP)
+    )
+    .map_err(sink)?;
 
     if paged {
         writeln!(out, "for _, arg := range args {{").map_err(sink)?;
@@ -2436,6 +2532,14 @@ fn emit_handler(
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if *noInputFlag {{").map_err(sink)?;
     writeln!(out, "noInput = true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *colorFlag != \"\" {{").map_err(sink)?;
+    writeln!(out, "if code := setColor(*colorFlag); code != 0 {{").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *noPagerFlag {{").map_err(sink)?;
+    writeln!(out, "noPager = true").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "commandPath = {}", quoted_string_literal(&invocation)).map_err(sink)?;
     if let Some(view) = command_view(cli, graph, op) {
@@ -2731,6 +2835,13 @@ fn emit_handler(
         )
         .map_err(sink)?;
         writeln!(out, "lastAnswer.body = nil").map_err(sink)?;
+        writeln!(out, "if stderrIsTTY() {{").map_err(sink)?;
+        writeln!(
+            out,
+            "fmt.Fprintf(os.Stderr, \"fetched %d items…\\n\", len(items))"
+        )
+        .map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
         let items_key =
             pagination_policy(graph, op).map_or("items", |policy| policy.items_field.as_str());
         writeln!(
@@ -3360,6 +3471,8 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "var commandPath string").map_err(sink)?;
     writeln!(out, "var flagArgs []string").map_err(sink)?;
     writeln!(out, "var previewFields []string").map_err(sink)?;
+    writeln!(out, "var colorMode = \"auto\"").map_err(sink)?;
+    writeln!(out, "var noPager bool").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "func versionLine() string {{").map_err(sink)?;
     writeln!(out, "version := active.Version").map_err(sink)?;
@@ -3401,6 +3514,21 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(
         out,
         "fmt.Fprintf(os.Stderr, \"error: --format must be one of human, ai-friendly, json, jsonl (got %q)\\n\", value)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "func setColor(value string) int {{").map_err(sink)?;
+    writeln!(out, "switch value {{").map_err(sink)?;
+    writeln!(out, "case \"auto\", \"always\", \"never\":").map_err(sink)?;
+    writeln!(out, "colorMode = value").map_err(sink)?;
+    writeln!(out, "return 0").map_err(sink)?;
+    writeln!(out, "default:").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: --color must be one of auto, always, never (got %q)\\n\", value)"
     )
     .map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -3484,6 +3612,9 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "case peelBool(arg, \"no-input\"):").map_err(sink)?;
     writeln!(out, "noInput = true").map_err(sink)?;
     writeln!(out, "rest = rest[1:]").map_err(sink)?;
+    writeln!(out, "case peelBool(arg, \"no-pager\"):").map_err(sink)?;
+    writeln!(out, "noPager = true").map_err(sink)?;
+    writeln!(out, "rest = rest[1:]").map_err(sink)?;
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
@@ -3523,6 +3654,20 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "rest = next").map_err(sink)?;
     writeln!(out, "continue").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if value, next, code := peelValue(rest, \"color\"); code != -1 {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "if code != 0 {{").map_err(sink)?;
+    writeln!(out, "return nil, code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if code := setColor(value); code != 0 {{").map_err(sink)?;
+    writeln!(out, "return nil, code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "rest = next").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "return rest, -1").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
@@ -3541,6 +3686,10 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "peel, dispatch, help, completion, and owned commands share one Run"
+)]
 fn emit_main(
     out: &mut String,
     command_files: &[CommandFile<'_>],
@@ -3613,6 +3762,10 @@ fn emit_main(
     writeln!(out, "return 0").map_err(sink)?;
     writeln!(out, "case \"help\":").map_err(sink)?;
     writeln!(out, "return printHelp(args[1:])").map_err(sink)?;
+    writeln!(out, "case \"completion\":").map_err(sink)?;
+    writeln!(out, "return printCompletion(args[1:])").map_err(sink)?;
+    writeln!(out, "case \"__complete\":").map_err(sink)?;
+    writeln!(out, "return complete(args[1:])").map_err(sink)?;
     for command in &cli.owned_commands {
         writeln!(out, "case {}:", quoted_string_literal(&command.name)).map_err(sink)?;
         writeln!(out, "return {}(args[1:], active)", owned_function(command)).map_err(sink)?;
@@ -4364,7 +4517,11 @@ fn emit_handle_err(
     writeln!(out, "fmt.Fprintf(os.Stderr, \"%s\\n\", line)").map_err(sink)?;
     writeln!(out, "return code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %s\\n\", message)").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"%s %s\\n\", colorize(\"31\", \"error:\"), message)"
+    )
+    .map_err(sink)?;
     writeln!(out, "n := 1").map_err(sink)?;
     writeln!(out, "for _, hint := range hints {{").map_err(sink)?;
     writeln!(out, "if n >= 6 {{").map_err(sink)?;
@@ -4576,6 +4733,8 @@ fn flag_ident(param: &Param) -> String {
         || ident == "debugFlag"
         || ident == "yesBind"
         || ident == "noInputFlag"
+        || ident == "colorFlag"
+        || ident == "noPagerFlag"
         || ident == "fields"
         || ident == "output"
         || ident == "quiet"
@@ -4656,6 +4815,353 @@ fn pagination_item_type(graph: &ApiGraph, op: &Operation) -> Result<String, Core
         });
     };
     go_type(item_schema, false, graph)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "completion scripts and __complete share one generated table"
+)]
+fn emit_complete_helpers(
+    out: &mut String,
+    ops: &[&Operation],
+    cli: &SdkCli,
+    imports: &mut ImportSet,
+) -> Result<(), CoreError> {
+    imports.add("context");
+    imports.add("encoding/json");
+    imports.add("fmt");
+    imports.add("os");
+    imports.add("os/exec");
+    imports.add("strings");
+    imports.add("time");
+    writeln!(out, "type liveComplete struct {{").map_err(sink)?;
+    writeln!(out, "path []string").map_err(sink)?;
+    writeln!(out, "list []string").map_err(sink)?;
+    writeln!(out, "idField string").map_err(sink)?;
+    writeln!(out, "nameField string").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "type specFlag struct {{").map_err(sink)?;
+    writeln!(out, "Name string   `json:\"name\"`").map_err(sink)?;
+    writeln!(out, "Enum []string `json:\"enum\"`").map_err(sink)?;
+    writeln!(out, "Help string   `json:\"help\"`").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "type specCommand struct {{").map_err(sink)?;
+    writeln!(out, "Invocation string     `json:\"invocation\"`").map_err(sink)?;
+    writeln!(out, "Arguments  []string   `json:\"arguments\"`").map_err(sink)?;
+    writeln!(out, "Flags      []specFlag `json:\"flags\"`").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "type specRoot struct {{").map_err(sink)?;
+    writeln!(out, "Commands []specCommand `json:\"commands\"`").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "var liveCompletes = []liveComplete{{").map_err(sink)?;
+    for op in ops {
+        let Some(command) = cli.spec_command(&op.id) else {
+            continue;
+        };
+        if command.positionals.is_empty() {
+            continue;
+        }
+        let list_id = command
+            .selector
+            .as_ref()
+            .map(|sel| sel.list_operation.as_str());
+        let list_id = list_id.or_else(|| {
+            cli.spec_topic(&op.id).and_then(|topic| {
+                topic
+                    .commands
+                    .iter()
+                    .find(|candidate| candidate.verb == "list")
+                    .map(|candidate| candidate.operation.as_str())
+            })
+        });
+        let Some(list_id) = list_id else {
+            continue;
+        };
+        let Some(list_op) = ops
+            .iter()
+            .copied()
+            .find(|candidate| candidate.id == list_id)
+        else {
+            continue;
+        };
+        let path = command_invocation(cli, op);
+        let list = command_invocation(cli, list_op);
+        let id_field = command
+            .selector
+            .as_ref()
+            .map_or("id", |sel| sel.id_field.as_str());
+        writeln!(out, "{{").map_err(sink)?;
+        writeln!(
+            out,
+            "path: []string{{{}}},",
+            path.split_whitespace()
+                .map(quoted_string_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "list: []string{{{}}},",
+            list.split_whitespace()
+                .map(quoted_string_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .map_err(sink)?;
+        writeln!(out, "idField: {},", quoted_string_literal(id_field)).map_err(sink)?;
+        writeln!(out, "nameField: \"name\",").map_err(sink)?;
+        writeln!(out, "}},").map_err(sink)?;
+    }
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    out.push_str(
+        r#"
+func loadSpec() specRoot {
+	var spec specRoot
+	_ = json.Unmarshal([]byte(helpSpecJSON), &spec)
+	return spec
+}
+
+func emitCandidate(name, help string) {
+	if help == "" {
+		fmt.Println(name)
+		return
+	}
+	fmt.Printf("%s\t%s\n", name, help)
+}
+
+func complete(args []string) int {
+	prefix := ""
+	if len(args) > 0 {
+		prefix = args[len(args)-1]
+		args = args[:len(args)-1]
+	}
+	var path []string
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		path = append(path, arg)
+	}
+	spec := loadSpec()
+	globals := [][2]string{
+		{"--json", "print the server body"},
+		{"--format", "output format"},
+		{"--fields", "response fields"},
+		{"--output", "write the full result to a file"},
+		{"--quiet", "print less on success"},
+		{"--debug", "write a request trace"},
+		{"--yes", "do not ask before a destructive command"},
+		{"--no-input", "never prompt"},
+		{"--color", "when to color human output"},
+		{"--no-pager", "do not page human output"},
+		{"--help", "help"},
+		{"--base-url", "host to send requests to"},
+	}
+	if strings.HasPrefix(prefix, "-") {
+		if prefix == "--format" || prefix == "--format=" {
+			for _, value := range []string{"human", "ai-friendly", "json", "jsonl"} {
+				emitCandidate(value, "")
+			}
+		} else if prefix == "--color" || prefix == "--color=" {
+			for _, value := range []string{"auto", "always", "never"} {
+				emitCandidate(value, "")
+			}
+		} else {
+			for _, flag := range globals {
+				if strings.HasPrefix(flag[0], prefix) {
+					emitCandidate(flag[0], flag[1])
+				}
+			}
+			joined := strings.Join(path, " ")
+			for _, command := range spec.Commands {
+				if command.Invocation != joined {
+					continue
+				}
+				for _, flag := range command.Flags {
+					name := "--" + flag.Name
+					if strings.HasPrefix(name, prefix) {
+						emitCandidate(name, flag.Help)
+					}
+				}
+			}
+		}
+		fmt.Println(":4")
+		return 0
+	}
+	if len(path) == 0 {
+		for _, name := range []string{"help", "completion"} {
+			if strings.HasPrefix(name, prefix) {
+				emitCandidate(name, "")
+			}
+		}
+	}
+	if len(path) == 1 && path[0] == "completion" {
+		for _, name := range []string{"bash", "zsh", "fish", "powershell"} {
+			if strings.HasPrefix(name, prefix) {
+				emitCandidate(name, "")
+			}
+		}
+		fmt.Println(":4")
+		return 0
+	}
+	seen := map[string]struct{}{}
+	for _, command := range spec.Commands {
+		tokens := strings.Fields(command.Invocation)
+		if len(tokens) <= len(path) {
+			continue
+		}
+		ok := true
+		for i, token := range path {
+			if tokens[i] != token {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		next := tokens[len(path)]
+		if !strings.HasPrefix(next, prefix) {
+			continue
+		}
+		if _, exists := seen[next]; exists {
+			continue
+		}
+		seen[next] = struct{}{}
+		emitCandidate(next, "")
+	}
+	joined := strings.Join(path, " ")
+	for _, command := range spec.Commands {
+		if command.Invocation != joined || len(command.Arguments) == 0 {
+			continue
+		}
+		for _, live := range liveCompletes {
+			if strings.Join(live.path, " ") != joined {
+				continue
+			}
+			completeLive(live, prefix)
+		}
+	}
+	fmt.Println(":4")
+	return 0
+}
+
+func completeLive(live liveComplete, prefix string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	args := append(append([]string{}, live.list...), "--json", "--fields", live.idField, "--limit", "50")
+	cmd := exec.CommandContext(ctx, os.Args[0], args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+	var value any
+	if err := json.Unmarshal(out, &value); err != nil {
+		return
+	}
+	items := specItems(value)
+	for _, item := range items {
+		id, _ := item[live.idField].(string)
+		if id == "" {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		help, _ := item[live.nameField].(string)
+		emitCandidate(id, help)
+	}
+}
+
+func specItems(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []any:
+		var out []map[string]any
+		for _, item := range typed {
+			if object, ok := item.(map[string]any); ok {
+				out = append(out, object)
+			}
+		}
+		return out
+	case map[string]any:
+		for _, key := range []string{"items", "books", "data"} {
+			if nested, ok := typed[key]; ok {
+				if items := specItems(nested); len(items) > 0 {
+					return items
+				}
+			}
+		}
+	}
+	return nil
+}
+
+"#,
+    );
+    let program = &cli.program;
+    writeln!(out, "func printCompletion(args []string) int {{").map_err(sink)?;
+    writeln!(out, "shell := \"\"").map_err(sink)?;
+    writeln!(out, "if len(args) > 0 {{").map_err(sink)?;
+    writeln!(out, "shell = args[0]").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "switch shell {{").map_err(sink)?;
+    writeln!(out, "case \"bash\":").map_err(sink)?;
+    writeln!(out, "fmt.Print(bashCompletion)").map_err(sink)?;
+    writeln!(out, "case \"zsh\":").map_err(sink)?;
+    writeln!(out, "fmt.Print(zshCompletion)").map_err(sink)?;
+    writeln!(out, "case \"fish\":").map_err(sink)?;
+    writeln!(out, "fmt.Print(fishCompletion)").map_err(sink)?;
+    writeln!(out, "case \"powershell\":").map_err(sink)?;
+    writeln!(out, "fmt.Print(powershellCompletion)").map_err(sink)?;
+    writeln!(out, "default:").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"Usage: %s completion bash|zsh|fish|powershell\\n\", program)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(
+        out,
+        "const bashCompletion = {}",
+        quoted_string_literal(&format!(
+            "# bash completion for {program}\n_{program}() {{\n  local out line\n  out=\"$({program} __complete \"${{COMP_WORDS[@]:1}}\" 2>/dev/null)\" || return\n  COMPREPLY=()\n  while IFS= read -r line; do\n    [[ -z \"$line\" || \"$line\" == :* ]] && continue\n    COMPREPLY+=(\"${{line%%$'\\t'*}}\")\n  done <<< \"$out\"\n}}\ncomplete -o nospace -F _{program} {program}\n"
+        ))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const zshCompletion = {}",
+        quoted_string_literal(&format!(
+            "#compdef {program}\n_{program}() {{\n  local -a completions\n  local out line\n  out=\"$({program} __complete \"${{words[@]:1}}\" 2>/dev/null)\" || return\n  while IFS= read -r line; do\n    [[ -z \"$line\" || \"$line\" == :* ]] && continue\n    completions+=(\"${{line%%$'\\t'*}}\")\n  done <<< \"$out\"\n  _describe 'command' completions\n}}\n_{program} \"$@\"\n"
+        ))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const fishCompletion = {}",
+        quoted_string_literal(&format!(
+            "function __{program}_complete\n    {program} __complete (commandline -opc)[2..-1] (commandline -ct) 2>/dev/null\nend\ncomplete -c {program} -f -a '(__{program}_complete)'\n"
+        ))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const powershellCompletion = {}",
+        quoted_string_literal(&format!(
+            "Register-ArgumentCompleter -Native -CommandName {program} -ScriptBlock {{\n  param($wordToComplete, $commandAst, $cursorPosition)\n  $elems = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object {{ $_.ToString() }})\n  {program} __complete @elems 2>$null | ForEach-Object {{\n    if ($_ -notlike ':*') {{\n      $name = ($_ -split \"`t\")[0]\n      [System.Management.Automation.CompletionResult]::new($name, $name, 'ParameterValue', $name)\n    }}\n  }}\n}}\n"
+        ))
+    )
+    .map_err(sink)?;
+    Ok(())
 }
 
 #[derive(Clone, Debug)]

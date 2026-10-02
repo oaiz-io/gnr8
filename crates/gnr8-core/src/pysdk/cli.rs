@@ -19,11 +19,12 @@ use crate::sdk::emit_common::{
     command_invocation, command_output_note, command_see_also, command_sub_noun, command_topic,
     command_verb, credential_env_var, debug_env_var, file_stem, flag_name, format_env_var,
     help_spec_json, helper_env_var, http_auth_features_for, is_positional_param, no_input_env_var,
-    operation_auth_alternatives, operation_prose, output_dir_env_var, parameter_flag_help,
-    positional_names, reject_duplicate_command_files, reject_sse_operations,
+    operation_auth_alternatives, operation_prose, output_dir_env_var, pager_env_var,
+    parameter_flag_help, positional_names, reject_duplicate_command_files, reject_sse_operations,
     request_body_models_of, response_field_names, OperationAuthScheme, RequestBodyModel, ALL_HELP,
-    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP,
-    JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
+    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP,
+    FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP, QUIET_HELP,
+    YES_HELP,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -238,6 +239,10 @@ pub(crate) fn emit_cli(
         SdkFile {
             name: cli_file("output.py"),
             contents: emit_output_module(graph, model_style)?,
+        },
+        SdkFile {
+            name: cli_file("complete.py"),
+            contents: emit_complete_module(&ops, cli)?,
         },
     ];
     if has_request_body(&ops, graph)? {
@@ -455,8 +460,10 @@ fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<Str
         writeln!(out, "import dataclasses").map_err(sink)?;
     }
     writeln!(out, "import hashlib").map_err(sink)?;
+    writeln!(out, "import io").map_err(sink)?;
     writeln!(out, "import json").map_err(sink)?;
     writeln!(out, "import os").map_err(sink)?;
+    writeln!(out, "import subprocess").map_err(sink)?;
     writeln!(out, "import sys").map_err(sink)?;
     writeln!(out, "import tempfile").map_err(sink)?;
     writeln!(out, "from datetime import datetime, timezone").map_err(sink)?;
@@ -472,6 +479,7 @@ fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<Str
     writeln!(out, "    FORMAT_ENV,").map_err(sink)?;
     writeln!(out, "    NO_INPUT_ENV,").map_err(sink)?;
     writeln!(out, "    OUTPUT_DIR_ENV,").map_err(sink)?;
+    writeln!(out, "    PAGER_ENV,").map_err(sink)?;
     writeln!(out, "    PROGRAM,").map_err(sink)?;
     writeln!(out, "    VERSION,").map_err(sink)?;
     writeln!(out, ")").map_err(sink)?;
@@ -683,6 +691,12 @@ fn emit_constants(
         out,
         "OUTPUT_DIR_ENV = {}",
         py_string_literal(&output_dir_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "PAGER_ENV = {}",
+        py_string_literal(&pager_env_var(&cli.program))
     )
     .map_err(sink)?;
     writeln!(
@@ -953,6 +967,8 @@ fn emit_print_helpers(
     writeln!(out, "YES = False").map_err(sink)?;
     writeln!(out, "NO_INPUT = False").map_err(sink)?;
     writeln!(out, "COMMAND_PATH = \"\"").map_err(sink)?;
+    writeln!(out, "COLOR_MODE = \"auto\"").map_err(sink)?;
+    writeln!(out, "NO_PAGER = False").map_err(sink)?;
     writeln!(out, "LAST_ANSWER: dict[str, Any] = {{}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -1059,7 +1075,11 @@ fn emit_print_helpers(
     )
     .map_err(sink)?;
     writeln!(out, "        return code").map_err(sink)?;
-    writeln!(out, "    print(f\"error: {{message}}\", file=sys.stderr)").map_err(sink)?;
+    writeln!(
+        out,
+        "    print(f\"{{colorize('31', 'error:')}} {{message}}\", file=sys.stderr)"
+    )
+    .map_err(sink)?;
     writeln!(out, "    n = 1").map_err(sink)?;
     writeln!(out, "    for hint in hints:").map_err(sink)?;
     writeln!(out, "        if n >= 6:").map_err(sink)?;
@@ -1085,6 +1105,74 @@ fn emit_print_helpers(
 )]
 fn python_output_runtime() -> String {
     r#"
+def use_color() -> bool:
+    if OUTPUT_FORMAT and OUTPUT_FORMAT != "human":
+        return False
+    if COLOR_MODE == "always":
+        return True
+    if COLOR_MODE == "never":
+        return False
+    if os.getenv("NO_COLOR"):
+        return False
+    if os.getenv("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def colorize(code: str, text: str) -> str:
+    if not use_color():
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def term_width() -> int:
+    raw = os.getenv("COLUMNS", "")
+    if raw:
+        try:
+            width = int(raw)
+        except ValueError:
+            width = 0
+        if width >= 20:
+            return width
+    return 80
+
+
+def fit_width(text: str) -> str:
+    width = term_width()
+    lines = []
+    for line in text.splitlines():
+        if len(line) > width:
+            if width > 1:
+                line = line[: width - 1] + "…"
+            else:
+                line = "…"
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def write_human(text: str) -> None:
+    text = fit_width(text.rstrip("\n") + "\n")
+    if not NO_PAGER and sys.stdout.isatty() and text.count("\n") >= 24:
+        pager = os.getenv(PAGER_ENV) or os.getenv("PAGER") or "less -FIRX"
+        try:
+            subprocess.run(
+                ["sh", "-c", pager],
+                input=text.encode(),
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                check=True,
+            )
+            return
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    sys.stdout.write(text)
+
+
+def progress_fetched(count: int) -> None:
+    if sys.stderr.isatty():
+        print(f"fetched {count} items…", file=sys.stderr)
+
+
 def capture_response(ctx: Any) -> None:
     headers = getattr(ctx, "response_headers", None) or {}
     request_id = headers.get("X-Request-ID") or headers.get(
@@ -1113,7 +1201,7 @@ def capture_response(ctx: Any) -> None:
 
 def apply_globals(args: Any) -> None:
     global OUTPUT_FORMAT, FIELDS, OUTPUT_PATH, QUIET, DEBUG, YES
-    global NO_INPUT, COMMAND_PATH
+    global NO_INPUT, COMMAND_PATH, COLOR_MODE, NO_PAGER
     resolve_format(
         bool(getattr(args, "json", False)),
         getattr(args, "format", None),
@@ -1132,6 +1220,11 @@ def apply_globals(args: Any) -> None:
         YES = True
     if getattr(args, "no_input", False):
         NO_INPUT = True
+    color = getattr(args, "color", None)
+    if color:
+        COLOR_MODE = color
+    if getattr(args, "no_pager", False):
+        NO_PAGER = True
     COMMAND_PATH = getattr(args, "_command", "") or ""
     if os.getenv(DEBUG_ENV):
         DEBUG = True
@@ -1249,10 +1342,12 @@ def print_human(result: Any) -> None:
     fields = field_list()
     payload: Any = project_value(value, fields) if fields else value
     if payload is None:
-        _write_stdout(raw)
+        write_human(raw.decode())
         return
-    json.dump(payload, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    buf = io.StringIO()
+    json.dump(payload, buf, indent=2)
+    buf.write("\n")
+    write_human(buf.getvalue())
 
 
 def output_dir_path() -> Path:
@@ -1708,6 +1803,7 @@ fn emit_handler(
         .map_err(sink)?;
         writeln!(out, "                break").map_err(sink)?;
         writeln!(out, "        output.LAST_ANSWER[\"body\"] = None").map_err(sink)?;
+        writeln!(out, "        output.progress_fetched(len(items))").map_err(sink)?;
         let items_key =
             pagination_policy(graph, op).map_or("items", |policy| policy.items_field.as_str());
         writeln!(out, "        return {{").map_err(sink)?;
@@ -1883,6 +1979,13 @@ fn emit_command_module(
             .is_some()
     }) {
         writeln!(out, "import json").map_err(sink)?;
+    }
+    if module
+        .ops
+        .iter()
+        .any(|op| pagination_policy(graph, op).is_some())
+    {
+        writeln!(out, "import sys").map_err(sink)?;
     }
     writeln!(out, "from typing import Any").map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -2369,6 +2472,16 @@ fn emit_format_flags(out: &mut String, parser: &str, root: bool) -> Result<(), C
     emit_string_kwarg(out, 8, "help", &argparse_help_text(YES_HELP))?;
     writeln!(out, "    )").map_err(sink)?;
     emit_bool_global(out, parser, root, "--no-input", "no_input", NO_INPUT_HELP)?;
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"--color\",").map_err(sink)?;
+    writeln!(out, "        dest=\"color\",").map_err(sink)?;
+    writeln!(out, "        choices=(\"auto\", \"always\", \"never\"),").map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(COLOR_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
+    emit_bool_global(out, parser, root, "--no-pager", "no_pager", NO_PAGER_HELP)?;
     Ok(())
 }
 
@@ -2505,6 +2618,308 @@ fn literal_python(value: &LiteralValue) -> String {
     }
 }
 
+/// `cli/complete.py` — shell scripts and the hidden `__complete` command.
+#[expect(
+    clippy::too_many_lines,
+    reason = "completion scripts and __complete share one generated table"
+)]
+fn emit_complete_module(ops: &[&Operation], cli: &SdkCli) -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring(
+            "Shell completion.\n\n`completion <shell>` prints a script. `__complete` answers\n\
+             candidates for the current word from the spec, plus live ids."
+        )
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from __future__ import annotations").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "import json").map_err(sink)?;
+    writeln!(out, "import subprocess").map_err(sink)?;
+    writeln!(out, "import sys").map_err(sink)?;
+    writeln!(out, "from typing import Any").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from .config import HELP_SPEC, PROGRAM").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    let mut lives = Vec::new();
+    for op in ops {
+        let Some(command) = cli.spec_command(&op.id) else {
+            continue;
+        };
+        if command.positionals.is_empty() {
+            continue;
+        }
+        let list_id = command
+            .selector
+            .as_ref()
+            .map(|sel| sel.list_operation.as_str());
+        let list_id = list_id.or_else(|| {
+            cli.spec_topic(&op.id).and_then(|topic| {
+                topic
+                    .commands
+                    .iter()
+                    .find(|candidate| candidate.verb == "list")
+                    .map(|candidate| candidate.operation.as_str())
+            })
+        });
+        let Some(list_id) = list_id else {
+            continue;
+        };
+        let Some(list_op) = ops
+            .iter()
+            .copied()
+            .find(|candidate| candidate.id == list_id)
+        else {
+            continue;
+        };
+        let path = command_invocation(cli, op);
+        let list = command_invocation(cli, list_op);
+        let id_field = command
+            .selector
+            .as_ref()
+            .map_or("id", |sel| sel.id_field.as_str());
+        lives.push((path, list, id_field.to_string()));
+    }
+    if lives.is_empty() {
+        writeln!(out, "LIVE_COMPLETES: list[dict[str, Any]] = []").map_err(sink)?;
+    } else {
+        writeln!(out, "LIVE_COMPLETES: list[dict[str, Any]] = [").map_err(sink)?;
+        for (path, list, id_field) in &lives {
+            writeln!(out, "    {{").map_err(sink)?;
+            writeln!(
+                out,
+                "        \"path\": [{}],",
+                path.split_whitespace()
+                    .map(py_string_literal)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .map_err(sink)?;
+            writeln!(
+                out,
+                "        \"list\": [{}],",
+                list.split_whitespace()
+                    .map(py_string_literal)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .map_err(sink)?;
+            writeln!(out, "        \"idField\": {},", py_string_literal(id_field)).map_err(sink)?;
+            writeln!(out, "        \"nameField\": \"name\",").map_err(sink)?;
+            writeln!(out, "    }},").map_err(sink)?;
+        }
+        writeln!(out, "]").map_err(sink)?;
+    }
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    let program = &cli.program;
+    emit_string_assign(
+        &mut out,
+        "BASH_COMPLETION",
+        &format!(
+            "# bash completion for {program}\n_{program}() {{\n  local out line\n  out=\"$({program} __complete \"${{COMP_WORDS[@]:1}}\" 2>/dev/null)\" || return\n  COMPREPLY=()\n  while IFS= read -r line; do\n    [[ -z \"$line\" || \"$line\" == :* ]] && continue\n    COMPREPLY+=(\"${{line%%$'\\t'*}}\")\n  done <<< \"$out\"\n}}\ncomplete -o nospace -F _{program} {program}\n"
+        ),
+    )?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_string_assign(
+        &mut out,
+        "ZSH_COMPLETION",
+        &format!(
+            "#compdef {program}\n_{program}() {{\n  local -a completions\n  local out line\n  out=\"$({program} __complete \"${{words[@]:1}}\" 2>/dev/null)\" || return\n  while IFS= read -r line; do\n    [[ -z \"$line\" || \"$line\" == :* ]] && continue\n    completions+=(\"${{line%%$'\\t'*}}\")\n  done <<< \"$out\"\n  _describe 'command' completions\n}}\n_{program} \"$@\"\n"
+        ),
+    )?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_string_assign(
+        &mut out,
+        "FISH_COMPLETION",
+        &format!(
+            "function __{program}_complete\n    {program} __complete (commandline -opc)[2..-1] (commandline -ct) 2>/dev/null\nend\ncomplete -c {program} -f -a '(__{program}_complete)'\n"
+        ),
+    )?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_string_assign(
+        &mut out,
+        "POWERSHELL_COMPLETION",
+        &format!(
+            "Register-ArgumentCompleter -Native -CommandName {program} -ScriptBlock {{\n  param($wordToComplete, $commandAst, $cursorPosition)\n  $elems = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object {{ $_.ToString() }})\n  {program} __complete @elems 2>$null | ForEach-Object {{\n    if ($_ -notlike ':*') {{\n      $name = ($_ -split \"`t\")[0]\n      [System.Management.Automation.CompletionResult]::new($name, $name, 'ParameterValue', $name)\n    }}\n  }}\n}}\n"
+        ),
+    )?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    out.push_str(&python_complete_runtime());
+    Ok(finish(out))
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "complete() and live lookup share one generated module"
+)]
+fn python_complete_runtime() -> String {
+    r#"
+def _emit(name: str, help_text: str = "") -> None:
+    if help_text:
+        print(f"{name}\t{help_text}")
+        return
+    print(name)
+
+
+def complete(args: list[str]) -> int:
+    prefix = ""
+    if args:
+        prefix = args[-1]
+        args = args[:-1]
+    path = [arg for arg in args if not arg.startswith("-")]
+    spec = json.loads(HELP_SPEC)
+    commands = spec.get("commands") or []
+    globals_ = [
+        ("--json", "print the server body"),
+        ("--format", "output format"),
+        ("--fields", "response fields"),
+        ("--output", "write the full result to a file"),
+        ("--quiet", "print less on success"),
+        ("--debug", "write a request trace"),
+        ("--yes", "do not ask before a destructive command"),
+        ("--no-input", "never prompt"),
+        ("--color", "when to color human output"),
+        ("--no-pager", "do not page human output"),
+        ("--help", "help"),
+        ("--base-url", "host to send requests to"),
+    ]
+    if prefix.startswith("-"):
+        if prefix in ("--format", "--format="):
+            for value in ("human", "ai-friendly", "json", "jsonl"):
+                _emit(value)
+        elif prefix in ("--color", "--color="):
+            for value in ("auto", "always", "never"):
+                _emit(value)
+        else:
+            for name, help_text in globals_:
+                if name.startswith(prefix):
+                    _emit(name, help_text)
+            joined = " ".join(path)
+            for command in commands:
+                if command.get("invocation") != joined:
+                    continue
+                for flag in command.get("flags") or []:
+                    name = "--" + str(flag.get("name") or "")
+                    if name.startswith(prefix):
+                        _emit(name, str(flag.get("help") or ""))
+        print(":4")
+        return 0
+    if not path:
+        for name in ("help", "completion"):
+            if name.startswith(prefix):
+                _emit(name)
+    if path == ["completion"]:
+        for name in ("bash", "zsh", "fish", "powershell"):
+            if name.startswith(prefix):
+                _emit(name)
+        print(":4")
+        return 0
+    seen: set[str] = set()
+    for command in commands:
+        tokens = str(command.get("invocation") or "").split()
+        if len(tokens) <= len(path):
+            continue
+        if tokens[: len(path)] != path:
+            continue
+        next_name = tokens[len(path)]
+        if not next_name.startswith(prefix) or next_name in seen:
+            continue
+        seen.add(next_name)
+        _emit(next_name)
+    joined = " ".join(path)
+    for command in commands:
+        if command.get("invocation") != joined:
+            continue
+        if not command.get("arguments"):
+            continue
+        for live in LIVE_COMPLETES:
+            if " ".join(live["path"]) == joined:
+                complete_live(live, prefix)
+    print(":4")
+    return 0
+
+
+def complete_live(live: dict[str, Any], prefix: str) -> None:
+    argv = [
+        sys.argv[0],
+        *live["list"],
+        "--json",
+        "--fields",
+        live["idField"],
+        "--limit",
+        "50",
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if completed.returncode != 0 or not completed.stdout:
+        return
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return
+    ident_key = live["idField"]
+    name_key = live["nameField"]
+    for item in spec_items(value):
+        ident = item.get(ident_key)
+        if not isinstance(ident, str) or not ident:
+            continue
+        if prefix and not ident.startswith(prefix):
+            continue
+        help_text = item.get(name_key)
+        if not isinstance(help_text, str):
+            help_text = ""
+        _emit(ident, help_text)
+
+
+def spec_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        for key in ("items", "books", "data"):
+            nested = value.get(key)
+            items = spec_items(nested)
+            if items:
+                return items
+    return []
+
+
+def print_completion(args: list[str]) -> int:
+    shell = args[0] if args else ""
+    scripts = {
+        "bash": BASH_COMPLETION,
+        "zsh": ZSH_COMPLETION,
+        "fish": FISH_COMPLETION,
+        "powershell": POWERSHELL_COMPLETION,
+    }
+    text = scripts.get(shell)
+    if text is None:
+        print(
+            f"Usage: {PROGRAM} completion bash|zsh|fish|powershell",
+            file=sys.stderr,
+        )
+        return 2
+    sys.stdout.write(text)
+    return 0
+"#
+    .to_string()
+}
+
 /// `cli/main.py` — parse, dispatch, and map every failure to its exit code.
 fn emit_main_module(
     ops: &[&Operation],
@@ -2529,6 +2944,7 @@ fn emit_main_module(
     writeln!(out).map_err(sink)?;
     let mut imports = vec![
         "from . import output".to_string(),
+        "from .complete import complete, print_completion".to_string(),
         "from .parser import build_parser".to_string(),
     ];
     if has_security(graph) {
@@ -2636,6 +3052,10 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "        return code").map_err(sink)?;
     writeln!(out, "    if argv and argv[0] == \"help\":").map_err(sink)?;
     writeln!(out, "        return _print_help(argv[1:])").map_err(sink)?;
+    writeln!(out, "    if argv and argv[0] == \"completion\":").map_err(sink)?;
+    writeln!(out, "        return print_completion(argv[1:])").map_err(sink)?;
+    writeln!(out, "    if argv and argv[0] == \"__complete\":").map_err(sink)?;
+    writeln!(out, "        return complete(argv[1:])").map_err(sink)?;
     writeln!(out, "    parser = build_parser()").map_err(sink)?;
     writeln!(out, "    args = parser.parse_args(argv)").map_err(sink)?;
     writeln!(out, "    output.apply_globals(args)").map_err(sink)?;

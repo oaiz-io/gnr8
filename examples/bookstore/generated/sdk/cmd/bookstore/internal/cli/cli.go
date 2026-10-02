@@ -30,6 +30,8 @@ var noInput bool
 var commandPath string
 var flagArgs []string
 var previewFields []string
+var colorMode = "auto"
+var noPager bool
 
 func versionLine() string {
 	version := active.Version
@@ -61,6 +63,17 @@ func setFormat(value string) int {
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "error: --format must be one of human, ai-friendly, json, jsonl (got %q)\n", value)
+		return 2
+	}
+}
+
+func setColor(value string) int {
+	switch value {
+	case "auto", "always", "never":
+		colorMode = value
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "error: --color must be one of auto, always, never (got %q)\n", value)
 		return 2
 	}
 }
@@ -130,6 +143,9 @@ func peelGlobals(args []string) ([]string, int) {
 		case peelBool(arg, "no-input"):
 			noInput = true
 			rest = rest[1:]
+		case peelBool(arg, "no-pager"):
+			noPager = true
+			rest = rest[1:]
 		default:
 			if value, next, code := peelValue(rest, "format"); code != -1 {
 				if code != 0 {
@@ -154,6 +170,16 @@ func peelGlobals(args []string) ([]string, int) {
 					return nil, code
 				}
 				outputPath = value
+				rest = next
+				continue
+			}
+			if value, next, code := peelValue(rest, "color"); code != -1 {
+				if code != 0 {
+					return nil, code
+				}
+				if code := setColor(value); code != 0 {
+					return nil, code
+				}
 				rest = next
 				continue
 			}
@@ -400,6 +426,10 @@ func Run(args []string, opts Options) int {
 		return 0
 	case "help":
 		return printHelp(args[1:])
+	case "completion":
+		return printCompletion(args[1:])
+	case "__complete":
+		return complete(args[1:])
 	case "books":
 		return dispatchBooks(args[1:])
 	default:

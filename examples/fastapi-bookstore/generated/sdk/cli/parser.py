@@ -77,6 +77,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="never prompt; refuse commands that would ask",
     )
+    parser.add_argument(
+        "--color",
+        dest="color",
+        choices=("auto", "always", "never"),
+        help="when to color human output: auto, always, or never",
+    )
+    parser.add_argument(
+        "--no-pager",
+        dest="no_pager",
+        action="store_true",
+        help="do not page human output",
+    )
     subparsers = parser.add_subparsers(
         dest="_command",
         required=True,

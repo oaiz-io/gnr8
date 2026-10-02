@@ -568,13 +568,15 @@ pub(crate) fn helper_env_var(program: &str) -> String {
 /// `--help` is bound by `argparse` on every parser it builds and by the Go dispatcher's own `-h`
 /// handling; `--base-url` is declared on each command so it can follow the subcommand;
 /// `--format` and `--json` are globals every generated command binds, as are the output-contract
-/// flags (`fields`, `output`, `quiet`, `debug`) and the prompt flags (`yes`, `no-input`).
+/// flags (`fields`, `output`, `quiet`, `debug`), the prompt flags (`yes`, `--no-input`), and the
+/// polish flags (`color`, `no-pager`).
 ///
 /// Everything else is conditional and computed per command by [`reserved_flags_for`] — reserving a
 /// name no command binds costs a user a legitimate parameter for nothing, and the only remedy
 /// available to them is changing their API's wire contract.
 const ALWAYS_RESERVED_FLAGS: &[&str] = &[
     "help", "base-url", "format", "json", "fields", "output", "quiet", "debug", "yes", "no-input",
+    "color", "no-pager",
 ];
 
 /// What each reserved flag does, in the words both emitters print.
@@ -597,6 +599,8 @@ pub(crate) const QUIET_HELP: &str = "print less on success";
 pub(crate) const DEBUG_HELP: &str = "write a request trace to stderr";
 pub(crate) const YES_HELP: &str = "do not ask before a destructive command";
 pub(crate) const NO_INPUT_HELP: &str = "never prompt; refuse commands that would ask";
+pub(crate) const COLOR_HELP: &str = "when to color human output: auto, always, or never";
+pub(crate) const NO_PAGER_HELP: &str = "do not page human output";
 
 /// Environment variable selecting the output format: `{PROG}_FORMAT`.
 pub(crate) fn format_env_var(program: &str) -> String {
@@ -616,6 +620,11 @@ pub(crate) fn no_input_env_var(program: &str) -> String {
 /// Environment variable overriding the ai-friendly output directory: `{PROG}_OUTPUT_DIR`.
 pub(crate) fn output_dir_env_var(program: &str) -> String {
     format!("{}_OUTPUT_DIR", screaming_snake(program))
+}
+
+/// Environment variable selecting the human-output pager: `{PROG}_PAGER`.
+pub(crate) fn pager_env_var(program: &str) -> String {
+    format!("{}_PAGER", screaming_snake(program))
 }
 
 /// JSON object keys of an operation's success body, for `--fields help`.
@@ -1223,6 +1232,26 @@ pub(crate) fn check_cli_names(
                     op.id
                 ),
             });
+        }
+    }
+
+    for reserved in ["help", "completion", "__complete"] {
+        if groups.contains(reserved) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} group '{reserved}' collides with the reserved command '{reserved}'"
+                ),
+            });
+        }
+        for op in ops.iter().copied() {
+            if command_topic(cli, op).is_none() && command_verb(cli, op) == reserved {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} command '{reserved}' (operation '{}') collides with the reserved command '{reserved}'",
+                        op.id
+                    ),
+                });
+            }
         }
     }
 
@@ -2601,7 +2630,7 @@ mod tests {
 
     #[test]
     fn json_and_format_are_reserved_globals() {
-        for name in ["json", "format"] {
+        for name in ["json", "format", "color", "no-pager"] {
             let graph = ApiGraph {
                 operations: vec![cli_op("listBooks", None, vec![cli_param(name)])],
                 ..ApiGraph::default()

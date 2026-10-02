@@ -75,7 +75,7 @@ func printError(message string, hints []string, requestID string, status, code i
 		fmt.Fprintf(os.Stderr, "%s\n", line)
 		return code
 	}
-	fmt.Fprintf(os.Stderr, "error: %s\n", message)
+	fmt.Fprintf(os.Stderr, "%s %s\n", colorize("31", "error:"), message)
 	n := 1
 	for _, hint := range hints {
 		if n >= 6 {

@@ -40,6 +40,11 @@ must move the minor version.
 - **Help layout and `help --json`.** A declared command spec prints Arguments, Examples, Output,
   See also, and Docs on `--help`. Generation fails when a spec command has no example.
   `help --json` prints the command spec, including each flag's type and enum members.
+- **Human polish and shell completion.** `--color auto|always|never` (with `NO_COLOR` / `TERM=dumb`),
+  width truncation, `{PROG}_PAGER`/`PAGER` paging of long human TTY output, and a stderr progress
+  line on paginated walks. `completion bash|zsh|fish|powershell` prints a script; hidden
+  `__complete` answers static candidates from the spec plus live identifiers (one list call, 1s
+  timeout).
 
 ### Changed
 

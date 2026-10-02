@@ -38,6 +38,8 @@ func cmdListBooks(args []string) int {
 	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
 	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
 	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -66,6 +68,14 @@ func cmdListBooks(args []string) int {
 	}
 	if *noInputFlag {
 		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
 	}
 	commandPath = "books list"
 	previewFields = nil
@@ -130,6 +140,8 @@ func cmdCreateBook(args []string) int {
 	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
 	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
 	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -158,6 +170,14 @@ func cmdCreateBook(args []string) int {
 	}
 	if *noInputFlag {
 		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
 	}
 	commandPath = "books create"
 	previewFields = []string{"id", "title", "author"}
@@ -257,6 +277,8 @@ func cmdDeleteBook(args []string) int {
 	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
 	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
 	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -285,6 +307,14 @@ func cmdDeleteBook(args []string) int {
 	}
 	if *noInputFlag {
 		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
 	}
 	commandPath = "books delete"
 	previewFields = nil
@@ -349,6 +379,8 @@ func cmdGetBook(args []string) int {
 	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
 	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
 	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -377,6 +409,14 @@ func cmdGetBook(args []string) int {
 	}
 	if *noInputFlag {
 		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
 	}
 	commandPath = "books get"
 	previewFields = []string{"id", "title", "author"}
@@ -463,6 +503,8 @@ func cmdUpdateBook(args []string) int {
 	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
 	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
 	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -491,6 +533,14 @@ func cmdUpdateBook(args []string) int {
 	}
 	if *noInputFlag {
 		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
 	}
 	commandPath = "books update"
 	previewFields = []string{"id", "title", "author"}

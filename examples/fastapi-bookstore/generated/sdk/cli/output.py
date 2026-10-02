@@ -7,8 +7,10 @@ Errors print `error:` plus optional hints and a request id, at most six lines.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -22,6 +24,7 @@ from .config import (
     FORMAT_ENV,
     NO_INPUT_ENV,
     OUTPUT_DIR_ENV,
+    PAGER_ENV,
     PROGRAM,
     VERSION,
 )
@@ -35,6 +38,8 @@ DEBUG = False
 YES = False
 NO_INPUT = False
 COMMAND_PATH = ""
+COLOR_MODE = "auto"
+NO_PAGER = False
 LAST_ANSWER: dict[str, Any] = {}
 
 
@@ -111,7 +116,7 @@ def print_error(
             body["requestId"] = request_id
         print(json.dumps({"error": body}, separators=(",", ":")), file=sys.stderr)
         return code
-    print(f"error: {message}", file=sys.stderr)
+    print(f"{colorize('31', 'error:')} {message}", file=sys.stderr)
     n = 1
     for hint in hints:
         if n >= 6:
@@ -122,6 +127,74 @@ def print_error(
         print(f"  request id: {request_id}", file=sys.stderr)
     return code
 
+
+
+def use_color() -> bool:
+    if OUTPUT_FORMAT and OUTPUT_FORMAT != "human":
+        return False
+    if COLOR_MODE == "always":
+        return True
+    if COLOR_MODE == "never":
+        return False
+    if os.getenv("NO_COLOR"):
+        return False
+    if os.getenv("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def colorize(code: str, text: str) -> str:
+    if not use_color():
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def term_width() -> int:
+    raw = os.getenv("COLUMNS", "")
+    if raw:
+        try:
+            width = int(raw)
+        except ValueError:
+            width = 0
+        if width >= 20:
+            return width
+    return 80
+
+
+def fit_width(text: str) -> str:
+    width = term_width()
+    lines = []
+    for line in text.splitlines():
+        if len(line) > width:
+            if width > 1:
+                line = line[: width - 1] + "…"
+            else:
+                line = "…"
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def write_human(text: str) -> None:
+    text = fit_width(text.rstrip("\n") + "\n")
+    if not NO_PAGER and sys.stdout.isatty() and text.count("\n") >= 24:
+        pager = os.getenv(PAGER_ENV) or os.getenv("PAGER") or "less -FIRX"
+        try:
+            subprocess.run(
+                ["sh", "-c", pager],
+                input=text.encode(),
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                check=True,
+            )
+            return
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    sys.stdout.write(text)
+
+
+def progress_fetched(count: int) -> None:
+    if sys.stderr.isatty():
+        print(f"fetched {count} items…", file=sys.stderr)
 
 
 def capture_response(ctx: Any) -> None:
@@ -152,7 +225,7 @@ def capture_response(ctx: Any) -> None:
 
 def apply_globals(args: Any) -> None:
     global OUTPUT_FORMAT, FIELDS, OUTPUT_PATH, QUIET, DEBUG, YES
-    global NO_INPUT, COMMAND_PATH
+    global NO_INPUT, COMMAND_PATH, COLOR_MODE, NO_PAGER
     resolve_format(
         bool(getattr(args, "json", False)),
         getattr(args, "format", None),
@@ -171,6 +244,11 @@ def apply_globals(args: Any) -> None:
         YES = True
     if getattr(args, "no_input", False):
         NO_INPUT = True
+    color = getattr(args, "color", None)
+    if color:
+        COLOR_MODE = color
+    if getattr(args, "no_pager", False):
+        NO_PAGER = True
     COMMAND_PATH = getattr(args, "_command", "") or ""
     if os.getenv(DEBUG_ENV):
         DEBUG = True
@@ -288,10 +366,12 @@ def print_human(result: Any) -> None:
     fields = field_list()
     payload: Any = project_value(value, fields) if fields else value
     if payload is None:
-        _write_stdout(raw)
+        write_human(raw.decode())
         return
-    json.dump(payload, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    buf = io.StringIO()
+    json.dump(payload, buf, indent=2)
+    buf.write("\n")
+    write_human(buf.getvalue())
 
 
 def output_dir_path() -> Path:

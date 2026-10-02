@@ -130,7 +130,7 @@ the same:
 
 | Layout | Group file | Reserved group names |
 |---|---|---|
-| Go | `internal/cli/<group>.go`, beside every shared file | `body`, `cli`, `commands`, `config`, `credentials`, `errors`, `flags`, `output` |
+| Go | `internal/cli/<group>.go`, beside every shared file | `body`, `cli`, `commands`, `complete`, `config`, `credentials`, `errors`, `flags`, `output` |
 | Python | `cli/commands/<group>.py`, one directory below the shared modules | `root` |
 
 Go puts the whole program in one directory, because a Go directory is one package, so a group named
@@ -315,10 +315,11 @@ name already in use, and `argparse` raises `ArgumentError` while building the pa
 `--help` fails.
 
 Reserved flags are computed per command from what that command actually binds: `help`, `base-url`,
-`format` and `json` always; `body`/`body-file` where the operation has a request body; `limit`/`all`/
-`cursor`/`page-size` where a `PaginationPolicy` names it; and `no-<flag>` for each boolean parameter.
-`--version` is bound on the root parser, which is not a command. A parameter named `json` or `format`
-is therefore a generation error: those flags select the output format.
+`format`, `json`, `fields`, `output`, `quiet`, `debug`, `yes`, `no-input`, `color`, and `no-pager`
+always; `body`/`body-file` where the operation has a request body; `limit`/`all`/`cursor`/`page-size`
+where a `PaginationPolicy` names it; and `no-<flag>` for each boolean parameter. `--version` is bound
+on the root parser, which is not a command. A parameter named `json`, `format`, or `color` is
+therefore a generation error: those flags select the output format and color mode.
 
 ## Flag defaults in `--help`
 
@@ -479,6 +480,17 @@ the caller's next action:
 | 5 | refused (HTTP 400/409/412/422) |
 | 6 | retry later: transport failure, HTTP 408/429/5xx |
 | 130 | interrupted (SIGINT; not emitted yet) |
+
+`--color auto|always|never` colors human output (the `error:` prefix today). `NO_COLOR` and
+`TERM=dumb` turn it off in `auto`; color is never the only signal. Human lines longer than
+`COLUMNS` (or 80) are truncated with `…`. Human TTY output of 24 lines or more is sent to
+`{PROG}_PAGER`, then `PAGER`, then `less -FIRX`, unless `--no-pager` is set. Paginated `--limit` /
+`--all` walks print `fetched N items…` on stderr when stderr is a TTY.
+
+`completion bash|zsh|fish|powershell` prints a script for that shell. The hidden `__complete`
+command answers candidates at every level from the command spec, plus live identifiers via one list
+call with a one-second timeout (failure is silent). `help` and `completion` are reserved root
+command names.
 
 `--help` and `--version` go to stdout and exit 0. A wrong `--base-url`, a mistyped `--body` and a
 missing `--body-file` are the errors a human hits first, and a generated program answers them with a

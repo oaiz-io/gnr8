@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Any
 
 from ...models import (
@@ -115,6 +116,20 @@ def register(subparsers: Any) -> None:
         action="store_true",
         default=argparse.SUPPRESS,
         help="never prompt; refuse commands that would ask",
+    )
+    cmd_list_books.add_argument(
+        "--color",
+        dest="color",
+        choices=("auto", "always", "never"),
+        default=argparse.SUPPRESS,
+        help="when to color human output: auto, always, or never",
+    )
+    cmd_list_books.add_argument(
+        "--no-pager",
+        dest="no_pager",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not page human output",
     )
     cmd_list_books.add_argument(
         "--genre",
@@ -241,6 +256,20 @@ def register(subparsers: Any) -> None:
         default=argparse.SUPPRESS,
         help="never prompt; refuse commands that would ask",
     )
+    cmd_create_book.add_argument(
+        "--color",
+        dest="color",
+        choices=("auto", "always", "never"),
+        default=argparse.SUPPRESS,
+        help="when to color human output: auto, always, or never",
+    )
+    cmd_create_book.add_argument(
+        "--no-pager",
+        dest="no_pager",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not page human output",
+    )
     cmd_create_book_body = cmd_create_book.add_mutually_exclusive_group(required=True)
     cmd_create_book_body.add_argument(
         "--body",
@@ -341,6 +370,20 @@ def register(subparsers: Any) -> None:
         action="store_true",
         default=argparse.SUPPRESS,
         help="never prompt; refuse commands that would ask",
+    )
+    cmd_get_book.add_argument(
+        "--color",
+        dest="color",
+        choices=("auto", "always", "never"),
+        default=argparse.SUPPRESS,
+        help="when to color human output: auto, always, or never",
+    )
+    cmd_get_book.add_argument(
+        "--no-pager",
+        dest="no_pager",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not page human output",
     )
     cmd_get_book.add_argument(
         "book_id",
@@ -446,6 +489,20 @@ def register(subparsers: Any) -> None:
         help="never prompt; refuse commands that would ask",
     )
     cmd_update_book.add_argument(
+        "--color",
+        dest="color",
+        choices=("auto", "always", "never"),
+        default=argparse.SUPPRESS,
+        help="when to color human output: auto, always, or never",
+    )
+    cmd_update_book.add_argument(
+        "--no-pager",
+        dest="no_pager",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not page human output",
+    )
+    cmd_update_book.add_argument(
         "book_id",
         metavar="BOOK_ID",
         help="required",
@@ -502,6 +559,7 @@ def _list_books(args: argparse.Namespace) -> Any:
             if args.limit is not None and len(items) >= args.limit:
                 break
         output.LAST_ANSWER["body"] = None
+        output.progress_fetched(len(items))
         return {
             "books": items,
             "hasMore": args.limit is not None and len(items) >= args.limit,

@@ -12,6 +12,7 @@ from typing import Optional
 from ..errors import ApiError
 from . import output
 from .body import InputError
+from .complete import complete, print_completion
 from .config import HELP_SPEC, PROGRAM
 from .parser import build_parser
 
@@ -62,6 +63,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         return code
     if argv and argv[0] == "help":
         return _print_help(argv[1:])
+    if argv and argv[0] == "completion":
+        return print_completion(argv[1:])
+    if argv and argv[0] == "__complete":
+        return complete(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     output.apply_globals(args)

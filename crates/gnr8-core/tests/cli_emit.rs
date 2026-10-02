@@ -772,8 +772,9 @@ fn helper_parsing_failures_are_typed_before_anything_is_executed() {
     let split_at = text
         .find("shlex.split(helper)")
         .expect("the helper is split");
-    let exec_at = text
+    let exec_at = text[split_at..]
         .find("subprocess.run(")
+        .map(|offset| split_at + offset)
         .expect("the helper is executed");
     assert!(
         split_at < exec_at,
@@ -1746,7 +1747,8 @@ fn a_flag_no_command_binds_no_longer_blocks_generation() {
 #[test]
 fn json_and_format_are_reserved_command_flags() {
     for name in [
-        "json", "format", "fields", "output", "quiet", "debug", "yes", "no-input",
+        "json", "format", "fields", "output", "quiet", "debug", "yes", "no-input", "color",
+        "no-pager",
     ] {
         let graph = one_query_param_graph(name);
         let error = generate_cli_result(&graph, SdkCli::new("bookstore")).unwrap_err();
@@ -2620,6 +2622,7 @@ fn the_reserved_group_names_differ_by_layout() {
         "body",
         "cli",
         "commands",
+        "complete",
         "config",
         "credentials",
         "errors",
@@ -3203,6 +3206,10 @@ fn cursor_flag_seeds_the_request_and_documents_itself() {
         python.contains("kwargs[\"cursor\"] = args.cursor"),
         "Python must seed the cursor param:\n{python}"
     );
+    assert!(
+        python.contains("output.progress_fetched(len(items))"),
+        "Python must print fetch progress:\n{python}"
+    );
     if skip_go() {
         return;
     }
@@ -3221,6 +3228,10 @@ fn cursor_flag_seeds_the_request_and_documents_itself() {
     assert!(
         go.contains("Ptr(*cursorFlag)"),
         "Go must assign the cursor flag:\n{go}"
+    );
+    assert!(
+        go.contains("fetched %d items"),
+        "Go must print fetch progress:\n{go}"
     );
 }
 
@@ -3285,4 +3296,54 @@ fn spec_help_layout_and_help_json() {
     );
     assert!(go.contains("func printHelp"), "missing printHelp in Go CLI");
     assert!(go.contains("seeAlso"), "missing seeAlso in Go help spec");
+}
+
+#[test]
+fn color_pager_and_completion_are_emitted() {
+    let graph = grouped_graph("");
+    let py = generate_cli_with(&graph, spec_cli());
+    assert!(py.contains("\"--color\""), "missing --color in Python CLI");
+    assert!(
+        py.contains("\"--no-pager\""),
+        "missing --no-pager in Python CLI"
+    );
+    assert!(py.contains("def use_color"), "missing use_color");
+    assert!(py.contains("def write_human"), "missing write_human");
+    assert!(
+        py.contains("def progress_fetched"),
+        "missing progress_fetched"
+    );
+    assert!(
+        py.contains("argv[0] == \"completion\""),
+        "missing completion dispatch"
+    );
+    assert!(
+        py.contains("argv[0] == \"__complete\""),
+        "missing __complete dispatch"
+    );
+    assert!(py.contains("BASH_COMPLETION"), "missing bash script");
+    assert!(
+        py.contains("LIVE_COMPLETES"),
+        "missing live completion table"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, spec_cli());
+    assert!(go.contains("func useColor()"), "missing useColor");
+    assert!(go.contains("func writeHuman("), "missing writeHuman");
+    assert!(go.contains("noPager"), "missing noPager");
+    assert!(
+        go.contains("case \"completion\":"),
+        "missing completion dispatch"
+    );
+    assert!(
+        go.contains("case \"__complete\":"),
+        "missing __complete dispatch"
+    );
+    assert!(go.contains("func complete("), "missing complete");
+    assert!(
+        go.contains("const bashCompletion"),
+        "missing bashCompletion"
+    );
 }

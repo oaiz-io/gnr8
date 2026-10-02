@@ -7,6 +7,7 @@ FORMAT_ENV = "BOOKSTORE_FORMAT"
 DEBUG_ENV = "BOOKSTORE_DEBUG"
 NO_INPUT_ENV = "BOOKSTORE_NO_INPUT"
 OUTPUT_DIR_ENV = "BOOKSTORE_OUTPUT_DIR"
+PAGER_ENV = "BOOKSTORE_PAGER"
 DESCRIPTION = "Bookstore API"
 HELP_SPEC = (
     "{\"commands\":[{\"arguments\":[],\"docsUrl\":\"https://example.com/cli/books/list"

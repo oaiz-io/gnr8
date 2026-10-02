@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -86,6 +87,86 @@ func fileIsTTY(file *os.File) bool {
 func stdoutIsTTY() bool { return fileIsTTY(os.Stdout) }
 func stderrIsTTY() bool { return fileIsTTY(os.Stderr) }
 func stdinIsTTY() bool  { return fileIsTTY(os.Stdin) }
+
+func useColor() bool {
+	if outputFormat != "" && outputFormat != "human" {
+		return false
+	}
+	switch colorMode {
+	case "always":
+		return true
+	case "never":
+		return false
+	default:
+		if os.Getenv("NO_COLOR") != "" {
+			return false
+		}
+		if os.Getenv("TERM") == "dumb" {
+			return false
+		}
+		return stdoutIsTTY()
+	}
+}
+
+func colorize(code, text string) string {
+	if !useColor() {
+		return text
+	}
+	return "\x1b[" + code + "m" + text + "\x1b[0m"
+}
+
+func termWidth() int {
+	if v := os.Getenv("COLUMNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 20 {
+			return n
+		}
+	}
+	return 80
+}
+
+func fitWidth(text string) string {
+	width := termWidth()
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(text, "\n") {
+		line = strings.TrimRight(line, "\n")
+		runes := []rune(line)
+		if len(runes) > width {
+			if width > 1 {
+				line = string(runes[:width-1]) + "…"
+			} else {
+				line = "…"
+			}
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func writeHuman(text string) int {
+	text = fitWidth(strings.TrimRight(text, "\n") + "\n")
+	if !noPager && stdoutIsTTY() && strings.Count(text, "\n") >= 24 {
+		pager := os.Getenv(pagerEnv)
+		if pager == "" {
+			pager = os.Getenv("PAGER")
+		}
+		if pager == "" {
+			pager = "less -FIRX"
+		}
+		cmd := exec.Command("sh", "-c", pager)
+		cmd.Stdin = strings.NewReader(text)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			return 0
+		}
+	}
+	if _, err := os.Stdout.WriteString(text); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
+}
 
 func printResult(result any) int {
 	if outputPath != "" && outputPath != "-" {
@@ -179,22 +260,14 @@ func printHuman(result any) int {
 		var buf bytes.Buffer
 		if err := json.Indent(&buf, projected, "", "  "); err == nil {
 			buf.WriteByte('\n')
-			_, err = os.Stdout.Write(buf.Bytes())
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return 1
-			}
-			return 0
+			return writeHuman(buf.String())
 		}
 	}
-	if _, err := os.Stdout.Write(raw); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
+	text := string(raw)
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
 	}
-	if raw[len(raw)-1] != '\n' {
-		_, _ = os.Stdout.Write([]byte("\n"))
-	}
-	return 0
+	return writeHuman(text)
 }
 
 func printAIFriendly(result any) int {
