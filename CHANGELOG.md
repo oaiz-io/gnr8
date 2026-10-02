@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.17.0 — 2026-10-02
+
 ### Added
 
 - **Parameter descriptions are a graph fact.** A bound parameter's prose is the field's own doc
