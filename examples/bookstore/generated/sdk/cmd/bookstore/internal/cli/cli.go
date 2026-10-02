@@ -28,6 +28,8 @@ var debugEnabled bool
 var yesFlag bool
 var noInput bool
 var commandPath string
+var flagArgs []string
+var previewFields []string
 
 func versionLine() string {
 	version := active.Version
@@ -188,11 +190,11 @@ var cliGroups = []cliGroup{
 		name:    "books",
 		summary: "Browse and manage the catalogue",
 		commands: []cliCommand{
-			{name: "list-books", summary: "Returns every book in the catalogue."},
-			{name: "create-book", summary: "Adds a book to the catalogue."},
-			{name: "delete-book", summary: "Permanently removes one book from the catalogue."},
-			{name: "get-book", summary: "Returns one book by its identifier."},
-			{name: "update-book", summary: "Replaces the mutable fields of one book."},
+			{name: "list", summary: "Returns every book in the catalogue."},
+			{name: "create", summary: "Adds a book to the catalogue."},
+			{name: "delete", summary: "Permanently removes one book from the catalogue."},
+			{name: "get", summary: "Returns one book by its identifier."},
+			{name: "update", summary: "Replaces the mutable fields of one book."},
 		},
 	},
 }
@@ -325,15 +327,15 @@ func dispatchBooks(args []string) int {
 	case "-h", "-help", "--help":
 		printGroupUsage(os.Stdout, group)
 		return 0
-	case "list-books":
+	case "list":
 		return cmdListBooks(args[1:])
-	case "create-book":
+	case "create":
 		return cmdCreateBook(args[1:])
-	case "delete-book":
+	case "delete":
 		return cmdDeleteBook(args[1:])
-	case "get-book":
+	case "get":
 		return cmdGetBook(args[1:])
-	case "update-book":
+	case "update":
 		return cmdUpdateBook(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q under %s\n", args[0], group.name)
@@ -346,6 +348,32 @@ func dispatchBooks(args []string) int {
 	}
 }
 
+func checkRename(args []string) int {
+	renames := []struct {
+		from []string
+		to   string
+	}{
+		{[]string{"books", "list-books"}, "books list"},
+	}
+	for _, rename := range renames {
+		if len(args) < len(rename.from) {
+			continue
+		}
+		match := true
+		for i, token := range rename.from {
+			if args[i] != token {
+				match = false
+				break
+			}
+		}
+		if match {
+			fmt.Fprintf(os.Stderr, "error: %s is now %s %s\n", strings.Join(rename.from, " "), program, rename.to)
+			return 2
+		}
+	}
+	return 0
+}
+
 // Run executes one invocation and returns the process exit code.
 func Run(args []string, opts Options) int {
 	active = opts
@@ -356,6 +384,9 @@ func Run(args []string, opts Options) int {
 	args = rest
 	resolveFormat()
 	resolveEnv()
+	if code := checkRename(args); code != 0 {
+		return code
+	}
 	if len(args) == 0 {
 		printRootUsage(os.Stderr)
 		return 2

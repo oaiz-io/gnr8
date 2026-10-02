@@ -2,10 +2,12 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func parseFlags(fs *flag.FlagSet, args []string) (bool, int) {
@@ -17,27 +19,133 @@ func parseFlags(fs *flag.FlagSet, args []string) (bool, int) {
 		}
 	}
 	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
+	flags, rest, code := splitFlagArgs(fs, args)
+	if code != 0 {
+		return false, code
+	}
+	if err := fs.Parse(flags); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return false, 0
 		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return false, 2
 	}
-	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", fs.Arg(0))
-		return false, 2
-	}
+	flagArgs = rest
 	return true, 0
+}
+
+type boolFlag interface{ IsBoolFlag() bool }
+
+func flagTakesValue(f *flag.Flag) bool {
+	if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {
+		return false
+	}
+	return true
+}
+
+func splitFlagArgs(fs *flag.FlagSet, args []string) ([]string, []string, int) {
+	var flags, positionals []string
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			positionals = append(positionals, arg)
+			i++
+			continue
+		}
+		name := arg
+		if strings.HasPrefix(name, "--") {
+			name = strings.TrimPrefix(name, "--")
+		} else {
+			name = strings.TrimPrefix(name, "-")
+		}
+		inline := strings.Contains(name, "=")
+		if inline {
+			name = name[:strings.IndexByte(name, '=')]
+		}
+		f := fs.Lookup(name)
+		flags = append(flags, arg)
+		i++
+		if !inline && f != nil && flagTakesValue(f) && i < len(args) {
+			flags = append(flags, args[i])
+			i++
+		}
+	}
+	return flags, positionals, 0
+}
+
+func overlayBody(payload []byte, fields map[string]any) ([]byte, error) {
+	obj := map[string]any{}
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &obj); err != nil {
+			return nil, err
+		}
+	}
+	for key, value := range fields {
+		obj[key] = value
+	}
+	return json.Marshal(obj)
+}
+
+func splitSelector(token string) (string, string, bool) {
+	at := strings.LastIndex(token, "@")
+	if at <= 0 || at == len(token)-1 {
+		return "", "", false
+	}
+	return token[:at], token[at+1:], true
+}
+
+func pickSelectedID(raw []byte, selector, matchField, idField string) (string, int) {
+	items, _, _ := listItems(nil, raw)
+	if items == nil {
+		var value any
+		if json.Unmarshal(raw, &value) != nil {
+			fmt.Fprintf(os.Stderr, "error: selector list is not JSON\n")
+			return "", 1
+		}
+		items, _, _ = listItems(value, raw)
+	}
+	latest := selector == "latest"
+	var best string
+	var bestNum int
+	found := false
+	for _, item := range items {
+		var obj map[string]any
+		if json.Unmarshal(item, &obj) != nil {
+			continue
+		}
+		match := fmt.Sprint(obj[matchField])
+		id := fmt.Sprint(obj[idField])
+		if id == "<nil>" || id == "" {
+			continue
+		}
+		if latest {
+			n := 0
+			fmt.Sscanf(strings.TrimPrefix(match, "v"), "%d", &n)
+			if !found || n >= bestNum {
+				best = id
+				bestNum = n
+				found = true
+			}
+			continue
+		}
+		if match == selector || match == "v"+selector || "v"+match == selector {
+			return id, 0
+		}
+	}
+	if latest && found {
+		return best, 0
+	}
+	fmt.Fprintf(os.Stderr, "error: no match for @%s\n", selector)
+	return "", 3
 }
 
 func visited(fs *flag.FlagSet) map[string]bool {
 	seen := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
 	return seen
-}
-
-func missingFlag(name string) int {
-	fmt.Fprintf(os.Stderr, "error: missing required flag --%s\n", name)
-	return 2
 }

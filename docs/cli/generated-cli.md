@@ -40,6 +40,9 @@ is written.
 | [`commands(selector)`](#command-scope) | which operations become commands |
 | `hand_owned_main()` | skip emitting `main.go`; a hand-owned `main` calls `Run` (Go only) |
 | `owned_command(...)` | a root command whose implementation is hand-owned and never generated (Go only) |
+| `topic(...)` | a declared topic, its verbs, positionals, and compositions |
+| `rename_error(...)` | a retired invocation that names its replacement and exits 2 |
+| `view(...)` | preview and table fields for one response schema |
 
 `.cli("bookstore")` is still accepted — a program name converts into an `SdkCli` — so a program that
 needs nothing but a name says nothing but a name. `SdkCli` is unrelated to gnr8's own CLI.

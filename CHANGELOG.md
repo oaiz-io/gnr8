@@ -28,14 +28,19 @@ must move the minor version.
   `version`/`commit`/`date` as variables so `-ldflags -X` can overwrite them.
   `SdkCli::hand_owned_main()` skips that file; `SdkCli::owned_command` names a root command whose
   implementation is hand-owned and never generated. Python rejects both — they are a Go seam.
+- **Declared CLI command spec.** `SdkCli::topic` names verbs, sub-nouns, positional identifiers,
+  body-field flags, switch flags, `@vN`/`@latest` selectors, and confirmation severity.
+  `rename_error` prints the replacement and exits 2 without sending a request. `view` names the
+  preview fields for one response schema. Absent a spec, command names stay the kebab-case
+  operation ids.
 
 ### Changed
 
-- **Output is no longer unconditionally JSON.** `--json` and `--format` are reserved globals; a
+- **Output is no longer unconditionally JSON.** `--format` and `--json` are reserved globals; a
   parameter named `json` or `format` is a generation error.
 - **Per-flag prose is emitted.** A parameter's description is the one graph fact `--help` prints for
-  it. The three-field `SdkCli` (`program`, `commands`, `base_url`) gains `emit_main` and
-  `owned_commands`.
+  it. `SdkCli` is no longer a three-field type: it carries the program name, command scope, host,
+  library seam, and the declared command spec.
 
 ## 0.16.3 — 2026-09-30
 

@@ -396,15 +396,18 @@ func viewRow(raw json.RawMessage) string {
 		return string(projected)
 	}
 	if obj, ok := value.(map[string]any); ok && fieldList() == nil {
-		keys := make([]string, 0, len(obj))
-		for key, item := range obj {
-			if isScalar(item) {
-				keys = append(keys, key)
+		keys := previewFields
+		if len(keys) == 0 {
+			keys = make([]string, 0, len(obj))
+			for key, item := range obj {
+				if isScalar(item) {
+					keys = append(keys, key)
+				}
 			}
-		}
-		sort.Strings(keys)
-		if len(keys) > 6 {
-			keys = keys[:6]
+			sort.Strings(keys)
+			if len(keys) > 6 {
+				keys = keys[:6]
+			}
 		}
 		if len(keys) > 0 {
 			value = projectValue(obj, keys)

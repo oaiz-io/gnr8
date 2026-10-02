@@ -12,10 +12,30 @@ from typing import Optional
 from ..errors import ApiError
 from . import output
 from .body import InputError
+from .config import PROGRAM
 from .parser import build_parser
 
 
+def _check_rename(argv: list[str]) -> int:
+    tokens = [arg for arg in argv if not arg.startswith("-")]
+    renames = [
+        (("books", "list-books"), "books list"),
+    ]
+    for retired, replacement in renames:
+        if tokens[: len(retired)] == list(retired):
+            print(
+                f"error: {' '.join(retired)} is now {PROGRAM} {replacement}",
+                file=sys.stderr,
+            )
+            return 2
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    code = _check_rename(argv)
+    if code:
+        return code
     parser = build_parser()
     args = parser.parse_args(argv)
     output.apply_globals(args)

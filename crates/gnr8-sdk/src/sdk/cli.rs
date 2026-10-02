@@ -55,6 +55,15 @@ pub struct SdkCli {
     /// is never deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owned_commands: Vec<OwnedCommand>,
+    /// Declared topics. Empty means command names stay the kebab-case operation ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<crate::sdk::cli_spec::CliTopic>,
+    /// Retired invocations that print the replacement and exit 2.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rename_errors: Vec<crate::sdk::cli_spec::CliRenameError>,
+    /// Preview/table fields per response schema.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<crate::sdk::cli_spec::CliView>,
 }
 
 /// One hand-owned command the generated dispatcher names.
@@ -119,6 +128,9 @@ impl SdkCli {
             base_url: None,
             emit_main: true,
             owned_commands: Vec::new(),
+            topics: Vec::new(),
+            rename_errors: Vec::new(),
+            views: Vec::new(),
         }
     }
 
@@ -156,6 +168,49 @@ impl SdkCli {
         self.owned_commands.push(command.into());
         self
     }
+
+    /// Declare a topic and the commands under it.
+    #[must_use]
+    pub fn topic(mut self, topic: crate::sdk::cli_spec::CliTopic) -> Self {
+        self.topics.push(topic);
+        self
+    }
+
+    /// A retired invocation that names its replacement and exits 2.
+    #[must_use]
+    pub fn rename_error(mut self, error: crate::sdk::cli_spec::CliRenameError) -> Self {
+        self.rename_errors.push(error);
+        self
+    }
+
+    /// Preview and table fields for one response schema.
+    #[must_use]
+    pub fn view(mut self, view: crate::sdk::cli_spec::CliView) -> Self {
+        self.views.push(view);
+        self
+    }
+
+    /// The spec command wrapping `operation_id`, if one was declared.
+    #[must_use]
+    pub fn spec_command(&self, operation_id: &str) -> Option<&crate::sdk::cli_spec::CliCommand> {
+        self.topics.iter().find_map(|topic| {
+            topic
+                .commands
+                .iter()
+                .find(|command| command.operation == operation_id)
+        })
+    }
+
+    /// The topic that owns `operation_id`, if one was declared.
+    #[must_use]
+    pub fn spec_topic(&self, operation_id: &str) -> Option<&crate::sdk::cli_spec::CliTopic> {
+        self.topics.iter().find(|topic| {
+            topic
+                .commands
+                .iter()
+                .any(|command| command.operation == operation_id)
+        })
+    }
 }
 
 impl From<&str> for SdkCli {
@@ -189,12 +244,22 @@ mod tests {
     fn declaration_serde_round_trips() {
         let cli = SdkCli::new("bookstore")
             .owned_command(OwnedCommand::new("login").summary("Sign in"))
-            .hand_owned_main();
+            .hand_owned_main()
+            .topic(
+                crate::sdk::CliTopic::new("books")
+                    .command(crate::sdk::CliCommand::operation("listBooks", "list")),
+            )
+            .rename_error(crate::sdk::CliRenameError::new(
+                ["books", "list-books"],
+                "books list",
+            ));
         let json = serde_json::to_string(&cli).expect("serialize");
         let back: SdkCli = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(cli, back);
         assert!(!back.emit_main);
         assert_eq!(back.owned_commands[0].name, "login");
+        assert_eq!(back.topics[0].name, "books");
+        assert_eq!(back.rename_errors[0].to, "books list");
     }
 
     #[test]

@@ -18,11 +18,11 @@ var schemeKinds = map[string]string{
 	"ApiKeyAuth": "apiKey",
 }
 var commandByID = map[string]string{
-	"listBooks":  "list-books",
-	"createBook": "create-book",
-	"deleteBook": "delete-book",
-	"getBook":    "get-book",
-	"updateBook": "update-book",
+	"listBooks":  "books list",
+	"createBook": "books create",
+	"deleteBook": "books delete",
+	"getBook":    "books get",
+	"updateBook": "books update",
 }
 var alternativesByID = map[string][][]string{
 	"listBooks":  {{"ApiKeyAuth"}},

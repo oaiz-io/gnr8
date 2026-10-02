@@ -3014,3 +3014,102 @@ fn go_hand_owned_main_skips_main_go_and_owned_command_is_dispatched() {
     assert!(text.contains("return runLogin(args[1:], active)"), "{text}");
     assert!(text.contains("\"Sign in\""), "{text}");
 }
+
+fn spec_cli() -> SdkCli {
+    SdkCli::new("bookstore").topic(
+        CliTopic::new("books")
+            .concept("Browse and manage the catalogue")
+            .command(CliCommand::operation("listBooks", "list"))
+            .command(
+                CliCommand::operation("getBook", "get")
+                    .positional("id")
+                    .selector(CliSelector::new("listBooks", "id", "id")),
+            ),
+    )
+}
+
+#[test]
+fn spec_renames_verbs_and_takes_positional_ids() {
+    let graph = grouped_graph("");
+    let py = generate_cli_with(&graph, spec_cli());
+    assert!(py.contains("add_parser(\n        \"list\""), "{py}");
+    assert!(py.contains("add_parser(\n        \"get\""), "{py}");
+    assert!(
+        py.contains("metavar=\"ID\""),
+        "positional id must be an argument, not a flag: {py}"
+    );
+    assert!(
+        !py.contains("\"--id\""),
+        "positional id must not be a flag: {py}"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, spec_cli());
+    assert!(go.contains("case \"list\":"), "{go}");
+    assert!(go.contains("case \"get\":"), "{go}");
+    assert!(go.contains("Usage: %s books get <id> [flags]"), "{go}");
+    assert!(go.contains("splitFlagArgs"), "{go}");
+    assert!(go.contains("splitSelector"), "{go}");
+}
+
+#[test]
+fn spec_rename_error_exits_without_dispatch() {
+    let graph = grouped_graph("");
+    let cli = spec_cli().rename_error(CliRenameError::new(["books", "list-books"], "books list"));
+    let py = generate_cli_with(&graph, cli.clone());
+    assert!(py.contains("list-books"), "{py}");
+    assert!(py.contains("books list"), "{py}");
+    assert!(py.contains("_check_rename"), "{py}");
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, cli);
+    assert!(go.contains("checkRename"), "{go}");
+    assert!(go.contains("list-books"), "{go}");
+    assert!(go.contains("books list"), "{go}");
+}
+
+#[test]
+fn spec_body_fields_and_severity() {
+    let cli = SdkCli::new("bookstore").topic(
+        CliTopic::new("books")
+            .command(CliCommand::operation("createBook", "create").body_fields())
+            .command(
+                CliCommand::operation("getBook", "get")
+                    .positional("book_id")
+                    .severity(CliSeverity::Moderate),
+            ),
+    );
+    let graph = bookstore_graph();
+    let py = generate_cli_with(&graph, cli.clone());
+    assert!(py.contains("--title"), "{py}");
+    assert!(py.contains("output.confirm("), "{py}");
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, cli);
+    assert!(go.contains("fs.String(\"title\""), "{go}");
+    assert!(go.contains("overlayBody"), "{go}");
+    assert!(go.contains("Confirm(\"moderate\""), "{go}");
+}
+
+#[test]
+fn spec_sub_noun_nests_dispatch() {
+    let cli = SdkCli::new("bookstore").topic(
+        CliTopic::new("books").command(
+            CliCommand::operation("getBook", "get")
+                .sub_noun("copy")
+                .positional("id"),
+        ),
+    );
+    let graph = grouped_graph("");
+    if skip_go() {
+        let py = generate_cli_with(&graph, cli);
+        assert!(py.contains("\"copy\""), "{py}");
+        return;
+    }
+    let go = generate_go_cli_with(&graph, cli);
+    assert!(go.contains("case \"copy\":"), "{go}");
+    assert!(go.contains("dispatchBooksCopy"), "{go}");
+}

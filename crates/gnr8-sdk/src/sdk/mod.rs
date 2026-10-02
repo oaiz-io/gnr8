@@ -50,6 +50,7 @@
 
 pub mod builtins;
 pub mod cli;
+pub mod cli_spec;
 pub mod docs;
 pub mod layout;
 pub mod model_style;
@@ -62,6 +63,9 @@ use crate::graph::{ApiGraph, Diagnostic, DiagnosticCategory, SourceSpan};
 use crate::Error;
 
 pub use cli::{OwnedCommand, SdkCli};
+pub use cli_spec::{
+    CliCommand, CliRenameError, CliSelector, CliSeverity, CliSwitchFlag, CliTopic, CliView,
+};
 pub use docs::SdkDocs;
 pub use layout::{OperationFileSplit, SdkFileLayout};
 pub use model_style::PyModelStyle;
@@ -719,6 +723,9 @@ pub mod prelude {
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticFiles, TsSdk,
     };
     pub use super::cli::{OwnedCommand, SdkCli};
+    pub use super::cli_spec::{
+        CliCommand, CliRenameError, CliSelector, CliSeverity, CliSwitchFlag, CliTopic, CliView,
+    };
     pub use super::docs::SdkDocs;
     pub use super::layout::{OperationFileSplit, SdkFileLayout};
     pub use super::model_style::PyModelStyle;

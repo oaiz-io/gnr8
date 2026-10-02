@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from .commands import root
+from .commands import books
 from .config import DESCRIPTION, PROGRAM, VERSION
 
 
@@ -81,5 +81,5 @@ def build_parser() -> argparse.ArgumentParser:
         dest="_command",
         required=True,
     )
-    root.register(subparsers)
+    books.register(subparsers)
     return parser

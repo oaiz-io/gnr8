@@ -12,11 +12,11 @@ import (
 )
 
 func cmdListBooks(args []string) int {
-	fs := flag.NewFlagSet("list-books", flag.ContinueOnError)
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books list-books — Returns every book in the catalogue.\n", program)
+		fmt.Fprintf(fs.Output(), "%s books list — Returns every book in the catalogue.\n", program)
 		fmt.Fprintln(fs.Output(), "\nPass a genre to narrow the results to one genre; omit it to list everything.")
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books list-books [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books list [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
@@ -62,7 +62,8 @@ func cmdListBooks(args []string) int {
 	if *noInputFlag {
 		noInput = true
 	}
-	commandPath = "books list-books"
+	commandPath = "books list"
+	previewFields = nil
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"books"})
 	}
@@ -72,6 +73,10 @@ func cmdListBooks(args []string) int {
 		}
 	}
 	seen := visited(fs)
+	if len(flagArgs) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
+		return 2
+	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
 	if err != nil {
@@ -89,15 +94,21 @@ func cmdListBooks(args []string) int {
 }
 
 func cmdCreateBook(args []string) int {
-	fs := flag.NewFlagSet("create-book", flag.ContinueOnError)
+	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books create-book — Adds a book to the catalogue.\n", program)
+		fmt.Fprintf(fs.Output(), "%s books create — Adds a book to the catalogue.\n", program)
 		fmt.Fprintln(fs.Output(), "\nThe book is stored immediately and returned with its generated identifier.")
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books create-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books create [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
+	authorBody := fs.String("author", "", "")
+	genreBody := fs.String("genre", "", "")
+	priceBody := fs.Float64("price", 0, "")
+	subtitleBody := fs.String("subtitle", "", "")
+	tagsBody := fs.String("tags", "", "")
+	titleBody := fs.String("title", "", "")
 	body := fs.String("body", "", "request body, as an inline JSON document")
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
@@ -140,7 +151,8 @@ func cmdCreateBook(args []string) int {
 	if *noInputFlag {
 		noInput = true
 	}
-	commandPath = "books create-book"
+	commandPath = "books create"
+	previewFields = []string{"id", "title", "author"}
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
@@ -150,12 +162,12 @@ func cmdCreateBook(args []string) int {
 		}
 	}
 	seen := visited(fs)
-	if seen["body"] && seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "error: --body and --body-file are mutually exclusive\n")
+	if len(flagArgs) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
 		return 2
 	}
-	if !seen["body"] && !seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "error: --body or --body-file is required\n")
+	if seen["body"] && seen["body-file"] {
+		fmt.Fprintf(os.Stderr, "error: --body and --body-file are mutually exclusive\n")
 		return 2
 	}
 	ctx := context.Background()
@@ -171,6 +183,35 @@ func cmdCreateBook(args []string) int {
 			return handleErr(err)
 		}
 	}
+	overlay := map[string]any{}
+	if seen["author"] {
+		overlay["author"] = *authorBody
+	}
+	if seen["genre"] {
+		overlay["genre"] = *genreBody
+	}
+	if seen["price"] {
+		overlay["price"] = *priceBody
+	}
+	if seen["subtitle"] {
+		overlay["subtitle"] = *subtitleBody
+	}
+	if seen["tags"] {
+		overlay["tags"] = *tagsBody
+	}
+	if seen["title"] {
+		overlay["title"] = *titleBody
+	}
+	if len(overlay) > 0 {
+		var err error
+		payload, err = overlayBody(payload, overlay)
+		if err != nil {
+			return handleErr(err)
+		}
+	}
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
 	var in sdk.CreateBookRequest
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return handleErr(&inputError{reason: fmt.Sprintf("body is not valid JSON: %v", err)})
@@ -183,15 +224,15 @@ func cmdCreateBook(args []string) int {
 }
 
 func cmdDeleteBook(args []string) int {
-	fs := flag.NewFlagSet("delete-book", flag.ContinueOnError)
+	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books delete-book — Permanently removes one book from the catalogue.\n", program)
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books delete-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books delete — Permanently removes one book from the catalogue.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books delete <id> [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "required")
+	id := new(string)
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
 	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
 	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
@@ -232,7 +273,8 @@ func cmdDeleteBook(args []string) int {
 	if *noInputFlag {
 		noInput = true
 	}
-	commandPath = "books delete-book"
+	commandPath = "books delete"
+	previewFields = nil
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"code", "message"})
 	}
@@ -242,8 +284,18 @@ func cmdDeleteBook(args []string) int {
 		}
 	}
 	seen := visited(fs)
-	if !seen["id"] {
-		return missingFlag("id")
+	if len(flagArgs) == 0 {
+		fmt.Fprintf(os.Stderr, "error: missing argument " < id > "\n")
+		return 2
+	}
+	*id = flagArgs[0]
+	flagArgs = flagArgs[1:]
+	if len(flagArgs) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
+		return 2
+	}
+	if code := Confirm("moderate", *id); code != 0 {
+		return code
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
@@ -259,15 +311,15 @@ func cmdDeleteBook(args []string) int {
 }
 
 func cmdGetBook(args []string) int {
-	fs := flag.NewFlagSet("get-book", flag.ContinueOnError)
+	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books get-book — Returns one book by its identifier.\n", program)
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books get-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books get — Returns one book by its identifier.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books get <id> [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "required")
+	id := new(string)
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
 	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
 	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
@@ -308,7 +360,8 @@ func cmdGetBook(args []string) int {
 	if *noInputFlag {
 		noInput = true
 	}
-	commandPath = "books get-book"
+	commandPath = "books get"
+	previewFields = []string{"id", "title", "author"}
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
@@ -318,13 +371,36 @@ func cmdGetBook(args []string) int {
 		}
 	}
 	seen := visited(fs)
-	if !seen["id"] {
-		return missingFlag("id")
+	if len(flagArgs) == 0 {
+		fmt.Fprintf(os.Stderr, "error: missing argument " < id > "\n")
+		return 2
+	}
+	*id = flagArgs[0]
+	flagArgs = flagArgs[1:]
+	if len(flagArgs) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
+		return 2
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
 	if err != nil {
 		return handleErr(err)
+	}
+	if base, sel, ok := splitSelector(*id); ok {
+		listed, err := client.ListBooks(ctx, sdk.ListBooksParams{})
+		if err != nil {
+			return handleErr(err)
+		}
+		raw, err := json.Marshal(listed)
+		if err != nil {
+			return handleErr(err)
+		}
+		id, code := pickSelectedID(raw, sel, "id", "id")
+		if code != 0 {
+			return code
+		}
+		*id = id
+		_ = base
 	}
 	idValue := *id
 	result, err := client.GetBook(ctx, idValue)
@@ -335,16 +411,22 @@ func cmdGetBook(args []string) int {
 }
 
 func cmdUpdateBook(args []string) int {
-	fs := flag.NewFlagSet("update-book", flag.ContinueOnError)
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books update-book — Replaces the mutable fields of one book.\n", program)
+		fmt.Fprintf(fs.Output(), "%s books update — Replaces the mutable fields of one book.\n", program)
 		fmt.Fprintln(fs.Output(), "\nFields omitted from the payload keep their current values.")
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books update-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books update <id> [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "required")
+	id := new(string)
+	authorBody := fs.String("author", "", "")
+	genreBody := fs.String("genre", "", "")
+	priceBody := fs.Float64("price", 0, "")
+	subtitleBody := fs.String("subtitle", "", "")
+	tagsBody := fs.String("tags", "", "")
+	titleBody := fs.String("title", "", "")
 	body := fs.String("body", "", "request body, as an inline JSON document")
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
@@ -387,7 +469,8 @@ func cmdUpdateBook(args []string) int {
 	if *noInputFlag {
 		noInput = true
 	}
-	commandPath = "books update-book"
+	commandPath = "books update"
+	previewFields = []string{"id", "title", "author"}
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
@@ -397,15 +480,18 @@ func cmdUpdateBook(args []string) int {
 		}
 	}
 	seen := visited(fs)
-	if !seen["id"] {
-		return missingFlag("id")
+	if len(flagArgs) == 0 {
+		fmt.Fprintf(os.Stderr, "error: missing argument " < id > "\n")
+		return 2
+	}
+	*id = flagArgs[0]
+	flagArgs = flagArgs[1:]
+	if len(flagArgs) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
+		return 2
 	}
 	if seen["body"] && seen["body-file"] {
 		fmt.Fprintf(os.Stderr, "error: --body and --body-file are mutually exclusive\n")
-		return 2
-	}
-	if !seen["body"] && !seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "error: --body or --body-file is required\n")
 		return 2
 	}
 	ctx := context.Background()
@@ -421,6 +507,35 @@ func cmdUpdateBook(args []string) int {
 		if err != nil {
 			return handleErr(err)
 		}
+	}
+	overlay := map[string]any{}
+	if seen["author"] {
+		overlay["author"] = *authorBody
+	}
+	if seen["genre"] {
+		overlay["genre"] = *genreBody
+	}
+	if seen["price"] {
+		overlay["price"] = *priceBody
+	}
+	if seen["subtitle"] {
+		overlay["subtitle"] = *subtitleBody
+	}
+	if seen["tags"] {
+		overlay["tags"] = *tagsBody
+	}
+	if seen["title"] {
+		overlay["title"] = *titleBody
+	}
+	if len(overlay) > 0 {
+		var err error
+		payload, err = overlayBody(payload, overlay)
+		if err != nil {
+			return handleErr(err)
+		}
+	}
+	if len(payload) == 0 {
+		payload = []byte("{}")
 	}
 	var in sdk.UpdateBookRequest
 	if err := json.Unmarshal(payload, &in); err != nil {

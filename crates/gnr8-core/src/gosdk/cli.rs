@@ -16,14 +16,15 @@ use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type, Wel
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    check_cli_names, cli_operations, command_group, command_name, credential_env_var,
-    debug_env_var, file_stem, flag_name, format_env_var, helper_env_var, http_auth_features_for,
+    body_field_flags, check_cli_names, cli_operations, command_invocation, command_sub_noun,
+    command_topic, command_verb, command_view, credential_env_var, debug_env_var, file_stem,
+    flag_name, format_env_var, helper_env_var, http_auth_features_for, is_positional_param,
     no_input_env_var, operation_auth_alternatives, operation_prose, output_dir_env_var,
-    parameter_flag_help, quoted_string_literal, reject_duplicate_command_files,
-    reject_sse_operations, request_body_models_of, response_field_names, success_responses_of,
-    OperationAuthScheme, RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP,
-    DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP,
-    QUIET_HELP, YES_HELP,
+    parameter_flag_help, positional_names, positional_usage, quoted_string_literal,
+    reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
+    response_field_names, success_responses_of, OperationAuthScheme, RequestBodyModel, ALL_HELP,
+    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP,
+    LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
 };
 use crate::CoreError;
 
@@ -84,12 +85,13 @@ struct CommandFile<'a> {
 /// Partition the program's operations into one file per group, ungrouped first.
 fn command_files<'a>(
     ops: &[&'a Operation],
-    program: &str,
+    cli: &SdkCli,
 ) -> Result<Vec<CommandFile<'a>>, CoreError> {
+    let program = cli.program.as_str();
     let mut ungrouped: Vec<&Operation> = Vec::new();
     let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
     for op in ops.iter().copied() {
-        match command_group(op) {
+        match command_topic(cli, op) {
             Some(group) => grouped.entry(group).or_default().push(op),
             None => ungrouped.push(op),
         }
@@ -138,10 +140,16 @@ fn owned_function(command: &OwnedCommand) -> String {
 }
 
 fn check_owned_command_names(cli: &SdkCli, ops: &[&Operation]) -> Result<(), CoreError> {
-    let groups: BTreeSet<String> = ops.iter().copied().filter_map(command_group).collect();
+    let groups: BTreeSet<String> = ops
+        .iter()
+        .copied()
+        .filter_map(|op| command_topic(cli, op))
+        .collect();
     let mut commands: BTreeSet<String> = BTreeSet::new();
     for op in ops.iter().copied() {
-        commands.insert(command_name(op));
+        if command_topic(cli, op).is_none() {
+            commands.insert(command_verb(cli, op));
+        }
     }
     for command in &cli.owned_commands {
         if groups.contains(&command.name) {
@@ -180,11 +188,11 @@ pub(crate) fn emit_cli(
     cli: &SdkCli,
 ) -> Result<Vec<SdkFile>, CoreError> {
     let ops = cli_operations(graph, cli)?;
-    check_cli_names(&ops, graph, &cli.program)?;
+    check_cli_names(&ops, graph, cli)?;
     check_owned_command_names(cli, &ops)?;
     reject_sse_operations(&ops, &cli.program)?;
     http_auth_features_for(&ops, graph)?;
-    let command_files = command_files(&ops, &cli.program)?;
+    let command_files = command_files(&ops, cli)?;
     let program = cli.program.as_str();
     let part = |stem: &str,
                 build: &dyn Fn(&mut String, &mut ImportSet) -> Result<(), CoreError>|
@@ -633,7 +641,7 @@ fn emit_constants(
                 out,
                 "{}: {},",
                 quoted_string_literal(&op.id),
-                quoted_string_literal(&command_name(op))
+                quoted_string_literal(&command_invocation(cli, op))
             )
             .map_err(sink)?;
         }
@@ -873,6 +881,7 @@ fn emit_shared_helpers(
     imports.add("flag");
     imports.add("fmt");
     imports.add("os");
+    imports.add("strings");
 
     writeln!(
         out,
@@ -891,24 +900,23 @@ fn emit_shared_helpers(
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "fs.SetOutput(os.Stderr)").map_err(sink)?;
-    writeln!(out, "if err := fs.Parse(args); err != nil {{").map_err(sink)?;
+    writeln!(out, "flags, rest, code := splitFlagArgs(fs, args)").map_err(sink)?;
+    writeln!(out, "if code != 0 {{").map_err(sink)?;
+    writeln!(out, "return false, code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if err := fs.Parse(flags); err != nil {{").map_err(sink)?;
     writeln!(out, "if errors.Is(err, flag.ErrHelp) {{").map_err(sink)?;
     writeln!(out, "return false, 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %v\\n\", err)").map_err(sink)?;
     writeln!(out, "return false, 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "if fs.NArg() > 0 {{").map_err(sink)?;
-    writeln!(
-        out,
-        "fmt.Fprintf(os.Stderr, \"error: unexpected argument %q\\n\", fs.Arg(0))"
-    )
-    .map_err(sink)?;
-    writeln!(out, "return false, 2").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "flagArgs = rest").map_err(sink)?;
     writeln!(out, "return true, 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    emit_split_flag_args(out)?;
+    emit_overlay_helpers(out, imports)?;
     if any_handler_needs_seen(ops, graph)? {
         writeln!(out, "func visited(fs *flag.FlagSet) map[string]bool {{").map_err(sink)?;
         writeln!(out, "seen := map[string]bool{{}}").map_err(sink)?;
@@ -1519,15 +1527,18 @@ func viewRow(raw json.RawMessage) string {{
 		return string(projected)
 	}}
 	if obj, ok := value.(map[string]any); ok && fieldList() == nil {{
-		keys := make([]string, 0, len(obj))
-		for key, item := range obj {{
-			if isScalar(item) {{
-				keys = append(keys, key)
+		keys := previewFields
+		if len(keys) == 0 {{
+			keys = make([]string, 0, len(obj))
+			for key, item := range obj {{
+				if isScalar(item) {{
+					keys = append(keys, key)
+				}}
 			}}
-		}}
-		sort.Strings(keys)
-		if len(keys) > 6 {{
-			keys = keys[:6]
+			sort.Strings(keys)
+			if len(keys) > 6 {{
+				keys = keys[:6]
+			}}
 		}}
 		if len(keys) > 0 {{
 			value = projectValue(obj, keys)
@@ -1878,6 +1889,168 @@ func Confirm(severity, resource string) int {{
     )
 }
 
+fn emit_split_flag_args(out: &mut String) -> Result<(), CoreError> {
+    writeln!(out, "type boolFlag interface {{ IsBoolFlag() bool }}").map_err(sink)?;
+    writeln!(out, "func flagTakesValue(f *flag.Flag) bool {{").map_err(sink)?;
+    writeln!(
+        out,
+        "if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return false").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(
+        out,
+        "func splitFlagArgs(fs *flag.FlagSet, args []string) ([]string, []string, int) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "var flags, positionals []string").map_err(sink)?;
+    writeln!(out, "i := 0").map_err(sink)?;
+    writeln!(out, "for i < len(args) {{").map_err(sink)?;
+    writeln!(out, "arg := args[i]").map_err(sink)?;
+    writeln!(out, "if arg == \"--\" {{").map_err(sink)?;
+    writeln!(out, "positionals = append(positionals, args[i+1:]...)").map_err(sink)?;
+    writeln!(out, "break").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if arg == \"-\" || !strings.HasPrefix(arg, \"-\") {{").map_err(sink)?;
+    writeln!(out, "positionals = append(positionals, arg)").map_err(sink)?;
+    writeln!(out, "i++").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "name := arg").map_err(sink)?;
+    writeln!(out, "if strings.HasPrefix(name, \"--\") {{").map_err(sink)?;
+    writeln!(out, "name = strings.TrimPrefix(name, \"--\")").map_err(sink)?;
+    writeln!(out, "}} else {{").map_err(sink)?;
+    writeln!(out, "name = strings.TrimPrefix(name, \"-\")").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "inline := strings.Contains(name, \"=\")").map_err(sink)?;
+    writeln!(out, "if inline {{").map_err(sink)?;
+    writeln!(out, "name = name[:strings.IndexByte(name, '=')]").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "f := fs.Lookup(name)").map_err(sink)?;
+    writeln!(out, "flags = append(flags, arg)").map_err(sink)?;
+    writeln!(out, "i++").map_err(sink)?;
+    writeln!(
+        out,
+        "if !inline && f != nil && flagTakesValue(f) && i < len(args) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "flags = append(flags, args[i])").map_err(sink)?;
+    writeln!(out, "i++").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return flags, positionals, 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
+fn emit_overlay_helpers(out: &mut String, imports: &mut ImportSet) -> Result<(), CoreError> {
+    imports.add("encoding/json");
+    writeln!(
+        out,
+        "func overlayBody(payload []byte, fields map[string]any) ([]byte, error) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "obj := map[string]any{{}}").map_err(sink)?;
+    writeln!(out, "if len(payload) > 0 {{").map_err(sink)?;
+    writeln!(
+        out,
+        "if err := json.Unmarshal(payload, &obj); err != nil {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return nil, err").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "for key, value := range fields {{").map_err(sink)?;
+    writeln!(out, "obj[key] = value").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return json.Marshal(obj)").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(
+        out,
+        "func splitSelector(token string) (string, string, bool) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "at := strings.LastIndex(token, \"@\")").map_err(sink)?;
+    writeln!(out, "if at <= 0 || at == len(token)-1 {{").map_err(sink)?;
+    writeln!(out, "return \"\", \"\", false").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return token[:at], token[at+1:], true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(
+        out,
+        "func pickSelectedID(raw []byte, selector, matchField, idField string) (string, int) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "items, _, _ := listItems(nil, raw)").map_err(sink)?;
+    writeln!(out, "if items == nil {{").map_err(sink)?;
+    writeln!(out, "var value any").map_err(sink)?;
+    writeln!(out, "if json.Unmarshal(raw, &value) != nil {{").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: selector list is not JSON\\n\")"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return \"\", 1").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "items, _, _ = listItems(value, raw)").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "latest := selector == \"latest\"").map_err(sink)?;
+    writeln!(out, "var best string").map_err(sink)?;
+    writeln!(out, "var bestNum int").map_err(sink)?;
+    writeln!(out, "found := false").map_err(sink)?;
+    writeln!(out, "for _, item := range items {{").map_err(sink)?;
+    writeln!(out, "var obj map[string]any").map_err(sink)?;
+    writeln!(out, "if json.Unmarshal(item, &obj) != nil {{").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "match := fmt.Sprint(obj[matchField])").map_err(sink)?;
+    writeln!(out, "id := fmt.Sprint(obj[idField])").map_err(sink)?;
+    writeln!(out, "if id == \"<nil>\" || id == \"\" {{").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if latest {{").map_err(sink)?;
+    writeln!(out, "n := 0").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Sscanf(strings.TrimPrefix(match, \"v\"), \"%d\", &n)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "if !found || n >= bestNum {{").map_err(sink)?;
+    writeln!(out, "best = id").map_err(sink)?;
+    writeln!(out, "bestNum = n").map_err(sink)?;
+    writeln!(out, "found = true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if match == selector || match == \"v\"+selector || \"v\"+match == selector {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return id, 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if latest && found {{").map_err(sink)?;
+    writeln!(out, "return best, 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: no match for @%s\\n\", selector)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return \"\", 3").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
 fn emit_handlers(
     out: &mut String,
     ops: &[&Operation],
@@ -1912,7 +2085,7 @@ fn emit_handler(
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
     let method = operation_method_name(op);
-    let command = command_name(op);
+    let command = command_verb(cli, op);
     let paging = paging_param_names(graph, op);
     let path_params = ordered_path_params(op)?;
     let request_params: Vec<&Param> = op
@@ -1924,6 +2097,13 @@ fn emit_handler(
     let scheme_ids = operation_scheme_ids(graph, op)?;
     let paged = pagination_policy(graph, op).is_some();
     let prose = operation_prose(op, &[], "");
+    let spec = cli.spec_command(&op.id);
+    let positionals = positional_names(cli, op);
+    let body_fields = body_field_flags(cli, op, graph)?;
+    let fixed_body = spec.and_then(|command| command.fixed_body.as_deref());
+    let switch_flag = spec.and_then(|command| command.switch_flag.as_ref());
+    let selector = spec.and_then(|command| command.selector.as_ref());
+    let severity = spec.map(|command| command.severity).unwrap_or_default();
 
     writeln!(out, "func cmd{method}(args []string) int {{").map_err(sink)?;
     writeln!(
@@ -1933,12 +2113,16 @@ fn emit_handler(
     )
     .map_err(sink)?;
     writeln!(out, "fs.Usage = func() {{").map_err(sink)?;
-    // The group segment is part of the invocation: `bookstore books list-books`, never `bookstore
-    // list-books`. Printing the leaf alone hands the reader a line that exits 2 with `unknown
-    // command`, which is worse than no usage line at all.
-    let invocation = match command_group(op) {
-        Some(group) => format!("{group} {command}"),
-        None => command.clone(),
+    let invocation = command_invocation(cli, op);
+    let positional_tokens = positional_usage(cli, op);
+    let usage = if positional_tokens.is_empty() {
+        format!("\nUsage: %s {} [flags]\n", invocation.replace('%', "%%"))
+    } else {
+        format!(
+            "\nUsage: %s {} {} [flags]\n",
+            invocation.replace('%', "%%"),
+            positional_tokens.replace('%', "%%")
+        )
     };
     // One shape at every level: what this is, how to invoke it, then its flags.
     if let Some(summary) = &prose.summary {
@@ -1967,10 +2151,7 @@ fn emit_handler(
     writeln!(
         out,
         "fmt.Fprintf(fs.Output(), {}, program)",
-        quoted_string_literal(&format!(
-            "\nUsage: %s {} [flags]\n",
-            invocation.replace('%', "%%")
-        ))
+        quoted_string_literal(&usage)
     )
     .map_err(sink)?;
     writeln!(out, "fmt.Fprintln(fs.Output(), \"\\nFlags:\")").map_err(sink)?;
@@ -1995,15 +2176,40 @@ fn emit_handler(
     }
 
     for param in &path_params {
-        emit_flag_decl(out, graph, param, imports)?;
-    }
-    for param in &op.params {
-        if paging.contains(param.name.as_str()) || param.location == "path" {
+        if is_positional_param(cli, op, &param.name) {
             continue;
         }
         emit_flag_decl(out, graph, param, imports)?;
     }
-    if !bodies.is_empty() {
+    for param in &op.params {
+        if paging.contains(param.name.as_str())
+            || param.location == "path"
+            || is_positional_param(cli, op, &param.name)
+        {
+            continue;
+        }
+        emit_flag_decl(out, graph, param, imports)?;
+    }
+    for name in positionals {
+        let Some(param) = op.params.iter().find(|param| param.name == *name) else {
+            continue;
+        };
+        let ident = flag_ident(param);
+        writeln!(out, "{ident} := new(string)").map_err(sink)?;
+    }
+    if let Some(switch) = switch_flag {
+        writeln!(
+            out,
+            "switchFlag := fs.Bool({}, false, {})",
+            quoted_string_literal(&switch.flag),
+            quoted_string_literal("call the alternate operation")
+        )
+        .map_err(sink)?;
+    }
+    for field in &body_fields {
+        emit_body_field_flag(out, graph, field, imports)?;
+    }
+    if fixed_body.is_none() && !bodies.is_empty() {
         writeln!(
             out,
             "body := fs.String(\"body\", \"\", {})",
@@ -2128,6 +2334,17 @@ fn emit_handler(
     writeln!(out, "noInput = true").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "commandPath = {}", quoted_string_literal(&invocation)).map_err(sink)?;
+    if let Some(view) = command_view(cli, graph, op) {
+        let names = view
+            .preview
+            .iter()
+            .map(|name| quoted_string_literal(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(out, "previewFields = []string{{{names}}}").map_err(sink)?;
+    } else {
+        writeln!(out, "previewFields = nil").map_err(sink)?;
+    }
     writeln!(out, "if fieldsSpec == \"help\" {{").map_err(sink)?;
     let field_names = response_field_names(graph, op);
     let names = field_names
@@ -2142,7 +2359,7 @@ fn emit_handler(
     writeln!(out, "return code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    if handler_needs_seen(graph, op, &paging, &bodies, paged)? {
+    if handler_needs_seen(graph, op, &paging, &bodies, paged)? || !body_fields.is_empty() {
         writeln!(out, "seen := visited(fs)").map_err(sink)?;
     }
     if cli.base_url.is_none() {
@@ -2151,17 +2368,51 @@ fn emit_handler(
         writeln!(out, "}}").map_err(sink)?;
     }
 
-    for param in &path_params {
-        emit_required_and_choice_checks(out, graph, param)?;
+    if !positionals.is_empty() {
+        for name in positionals {
+            let Some(param) = op.params.iter().find(|param| param.name == *name) else {
+                continue;
+            };
+            let ident = flag_ident(param);
+            writeln!(out, "if len(flagArgs) == 0 {{").map_err(sink)?;
+            writeln!(
+                out,
+                "fmt.Fprintf(os.Stderr, \"error: missing argument {}\\n\")",
+                quoted_string_literal(&format!("<{name}>"))
+            )
+            .map_err(sink)?;
+            writeln!(out, "return 2").map_err(sink)?;
+            writeln!(out, "}}").map_err(sink)?;
+            writeln!(out, "*{ident} = flagArgs[0]").map_err(sink)?;
+            writeln!(out, "flagArgs = flagArgs[1:]").map_err(sink)?;
+        }
     }
-    for param in &op.params {
-        if paging.contains(param.name.as_str()) || param.location == "path" {
+    writeln!(out, "if len(flagArgs) > 0 {{").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: unexpected argument %q\\n\", flagArgs[0])"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+
+    for param in &path_params {
+        if is_positional_param(cli, op, &param.name) {
             continue;
         }
         emit_required_and_choice_checks(out, graph, param)?;
     }
-    if !bodies.is_empty() {
-        let required = bodies.iter().any(|body| body.required);
+    for param in &op.params {
+        if paging.contains(param.name.as_str())
+            || param.location == "path"
+            || is_positional_param(cli, op, &param.name)
+        {
+            continue;
+        }
+        emit_required_and_choice_checks(out, graph, param)?;
+    }
+    if fixed_body.is_none() && !bodies.is_empty() {
+        let required = bodies.iter().any(|body| body.required) && body_fields.is_empty();
         writeln!(out, "if seen[\"body\"] && seen[\"body-file\"] {{").map_err(sink)?;
         writeln!(
             out,
@@ -2180,6 +2431,30 @@ fn emit_handler(
             writeln!(out, "return 2").map_err(sink)?;
             writeln!(out, "}}").map_err(sink)?;
         }
+    }
+
+    if !matches!(severity, gnr8::sdk::CliSeverity::Mild) {
+        let resource = positionals
+            .first()
+            .and_then(|name| op.params.iter().find(|param| param.name == *name));
+        if let Some(param) = resource {
+            let ident = flag_ident(param);
+            writeln!(
+                out,
+                "if code := Confirm({}, *{ident}); code != 0 {{",
+                quoted_string_literal(severity_token(severity))
+            )
+            .map_err(sink)?;
+        } else {
+            writeln!(
+                out,
+                "if code := Confirm({}, commandPath); code != 0 {{",
+                quoted_string_literal(severity_token(severity))
+            )
+            .map_err(sink)?;
+        }
+        writeln!(out, "return code").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
     }
 
     imports.add("context");
@@ -2202,6 +2477,74 @@ fn emit_handler(
         writeln!(out, "client := buildClient(*baseURL)").map_err(sink)?;
     }
 
+    if let Some(selector) = selector {
+        let Some(first) = positionals.first() else {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} command '{}' declares a selector but no positional",
+                    cli.program, command
+                ),
+            });
+        };
+        let Some(param) = op.params.iter().find(|param| param.name == *first) else {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} command '{}' selector positional '{first}' is missing",
+                    cli.program, command
+                ),
+            });
+        };
+        let ident = flag_ident(param);
+        let list_op = graph
+            .operations
+            .iter()
+            .find(|candidate| candidate.id == selector.list_operation)
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} command '{}' selector lists unknown operation '{}'",
+                    cli.program, command, selector.list_operation
+                ),
+            })?;
+        let list_method = operation_method_name(list_op);
+        if !ordered_path_params(list_op)?.is_empty() {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} command '{}' selector list '{}' takes path parameters",
+                    cli.program, command, selector.list_operation
+                ),
+            });
+        }
+        let list_has_params = list_op.params.iter().any(|param| param.location != "path");
+        let list_call = if list_has_params {
+            format!("client.{list_method}(ctx, {package}.{list_method}Params{{}})")
+        } else {
+            format!("client.{list_method}(ctx)")
+        };
+        writeln!(out, "if base, sel, ok := splitSelector(*{ident}); ok {{").map_err(sink)?;
+        writeln!(out, "listed, err := {list_call}").map_err(sink)?;
+        writeln!(out, "if err != nil {{").map_err(sink)?;
+        writeln!(out, "return handleErr(err)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "raw, err := json.Marshal(listed)").map_err(sink)?;
+        writeln!(out, "if err != nil {{").map_err(sink)?;
+        writeln!(out, "return handleErr(err)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(
+            out,
+            "id, code := pickSelectedID(raw, sel, {}, {})",
+            quoted_string_literal(&selector.match_field),
+            quoted_string_literal(&selector.id_field)
+        )
+        .map_err(sink)?;
+        writeln!(out, "if code != 0 {{").map_err(sink)?;
+        writeln!(out, "return code").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "*{ident} = id").map_err(sink)?;
+        writeln!(out, "_ = base").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        imports.add("encoding/json");
+    }
+
     for param in &path_params {
         emit_path_local(out, graph, param, package)?;
     }
@@ -2215,7 +2558,16 @@ fn emit_handler(
         }
     }
     if let Some(body) = bodies.first() {
-        emit_body_local(out, op, body, &bodies, package, imports)?;
+        emit_body_local(
+            out,
+            op,
+            body,
+            &bodies,
+            package,
+            imports,
+            fixed_body,
+            &body_fields,
+        )?;
     }
 
     let mut call_args = vec!["ctx".to_string()];
@@ -2229,6 +2581,27 @@ fn emit_handler(
         call_args.push("in".to_string());
     }
     let call = call_args.join(", ");
+
+    if let Some(switch) = switch_flag {
+        let other = graph
+            .operations
+            .iter()
+            .find(|candidate| candidate.id == switch.operation)
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} command '{}' switch wraps unknown operation '{}'",
+                    cli.program, command, switch.operation
+                ),
+            })?;
+        let other_method = operation_method_name(other);
+        writeln!(out, "if *switchFlag {{").map_err(sink)?;
+        writeln!(out, "result, err := client.{other_method}({call})").map_err(sink)?;
+        writeln!(out, "if err != nil {{").map_err(sink)?;
+        writeln!(out, "return handleErr(err)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "return printResult(result)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
 
     if paged {
         let item_ty = qualify_go_type(&pagination_item_type(graph, op)?, package);
@@ -2258,6 +2631,73 @@ fn emit_handler(
     writeln!(out, "return printResult(result)").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
+fn severity_token(severity: gnr8::sdk::CliSeverity) -> &'static str {
+    match severity {
+        gnr8::sdk::CliSeverity::Mild => "mild",
+        gnr8::sdk::CliSeverity::Moderate => "moderate",
+        gnr8::sdk::CliSeverity::Severe => "severe",
+    }
+}
+
+fn body_field_ident(flag: &str) -> String {
+    let mut ident = lower_camel(flag);
+    ident.push_str("Body");
+    ident
+}
+
+fn emit_body_field_flag(
+    out: &mut String,
+    graph: &ApiGraph,
+    field: &crate::sdk::emit_common::BodyFieldFlag,
+    imports: &mut ImportSet,
+) -> Result<(), CoreError> {
+    let ident = body_field_ident(&field.flag);
+    let help = field.description.as_deref().unwrap_or("");
+    let kind = flag_kind(graph, &field.schema)?;
+    match kind {
+        FlagKind::Bool => {
+            writeln!(
+                out,
+                "{ident} := fs.Bool({}, false, {})",
+                quoted_string_literal(&field.flag),
+                quoted_string_literal(help)
+            )
+            .map_err(sink)?;
+        }
+        FlagKind::Int => {
+            writeln!(
+                out,
+                "{ident} := fs.Int64({}, 0, {})",
+                quoted_string_literal(&field.flag),
+                quoted_string_literal(help)
+            )
+            .map_err(sink)?;
+        }
+        FlagKind::Float32 | FlagKind::Float64 => {
+            writeln!(
+                out,
+                "{ident} := fs.Float64({}, 0, {})",
+                quoted_string_literal(&field.flag),
+                quoted_string_literal(help)
+            )
+            .map_err(sink)?;
+        }
+        _ => {
+            if matches!(kind, FlagKind::DateTime) {
+                imports.add("time");
+            }
+            writeln!(
+                out,
+                "{ident} := fs.String({}, \"\", {})",
+                quoted_string_literal(&field.flag),
+                quoted_string_literal(help)
+            )
+            .map_err(sink)?;
+        }
+    }
     Ok(())
 }
 
@@ -2380,6 +2820,7 @@ fn any_missing_flag(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> bool 
         let paging = paging_param_names(graph, op);
         op.params.iter().any(|param| {
             !paging.contains(param.name.as_str())
+                && !is_positional_param(cli, op, &param.name)
                 && param.required
                 && !matches!(param.schema, Type::Primitive(Prim::Bool))
         })
@@ -2626,6 +3067,10 @@ fn emit_params_assign(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "body loading, overlay, and unmarshal share one payload"
+)]
 fn emit_body_local(
     out: &mut String,
     op: &Operation,
@@ -2633,16 +3078,46 @@ fn emit_body_local(
     bodies: &[RequestBodyModel],
     package: &str,
     imports: &mut ImportSet,
+    fixed_body: Option<&str>,
+    body_fields: &[crate::sdk::emit_common::BodyFieldFlag],
 ) -> Result<(), CoreError> {
     imports.add("encoding/json");
     writeln!(out, "var payload []byte").map_err(sink)?;
-    writeln!(out, "if seen[\"body\"] || seen[\"body-file\"] {{").map_err(sink)?;
-    writeln!(out, "var err error").map_err(sink)?;
-    writeln!(out, "payload, err = loadBody(*body, *bodyFile)").map_err(sink)?;
-    writeln!(out, "if err != nil {{").map_err(sink)?;
-    writeln!(out, "return handleErr(err)").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
+    if let Some(fixed) = fixed_body {
+        writeln!(out, "payload = []byte({})", quoted_string_literal(fixed)).map_err(sink)?;
+    } else {
+        writeln!(out, "if seen[\"body\"] || seen[\"body-file\"] {{").map_err(sink)?;
+        writeln!(out, "var err error").map_err(sink)?;
+        writeln!(out, "payload, err = loadBody(*body, *bodyFile)").map_err(sink)?;
+        writeln!(out, "if err != nil {{").map_err(sink)?;
+        writeln!(out, "return handleErr(err)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
+    if !body_fields.is_empty() {
+        writeln!(out, "overlay := map[string]any{{}}").map_err(sink)?;
+        for field in body_fields {
+            let ident = body_field_ident(&field.flag);
+            writeln!(out, "if seen[{}] {{", quoted_string_literal(&field.flag)).map_err(sink)?;
+            writeln!(
+                out,
+                "overlay[{}] = *{ident}",
+                quoted_string_literal(&field.json_name)
+            )
+            .map_err(sink)?;
+            writeln!(out, "}}").map_err(sink)?;
+        }
+        writeln!(out, "if len(overlay) > 0 {{").map_err(sink)?;
+        writeln!(out, "var err error").map_err(sink)?;
+        writeln!(out, "payload, err = overlayBody(payload, overlay)").map_err(sink)?;
+        writeln!(out, "if err != nil {{").map_err(sink)?;
+        writeln!(out, "return handleErr(err)").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "if len(payload) == 0 {{").map_err(sink)?;
+        writeln!(out, "payload = []byte(\"{{}}\")").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
     let model = qualify_go_type(&body.model, package);
     if bodies.len() > 1 {
         let method = operation_method_name(op);
@@ -2723,6 +3198,8 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "var yesFlag bool").map_err(sink)?;
     writeln!(out, "var noInput bool").map_err(sink)?;
     writeln!(out, "var commandPath string").map_err(sink)?;
+    writeln!(out, "var flagArgs []string").map_err(sink)?;
+    writeln!(out, "var previewFields []string").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "func versionLine() string {{").map_err(sink)?;
     writeln!(out, "version := active.Version").map_err(sink)?;
@@ -2931,7 +3408,7 @@ fn emit_main(
         })
         .collect();
 
-    emit_help_tables(out, &ungrouped, &grouped, graph, &cli.owned_commands)?;
+    emit_help_tables(out, &ungrouped, &grouped, graph, cli)?;
     emit_help_printers(out, &ungrouped, &grouped, !cli.owned_commands.is_empty())?;
     let has_root = !ungrouped.is_empty() || !cli.owned_commands.is_empty();
     let has_groups = !grouped.is_empty();
@@ -2941,8 +3418,10 @@ fn emit_main(
 
     // `handleErr` lives in errors.go now; only the dispatch tree belongs beside Run.
     for (index, (group, ops)) in grouped.iter().enumerate() {
-        emit_group_dispatch(out, group, index, ops)?;
+        emit_group_dispatch(out, group, index, ops, cli)?;
     }
+
+    emit_rename_checker(out, cli)?;
 
     writeln!(
         out,
@@ -2958,6 +3437,9 @@ fn emit_main(
     writeln!(out, "args = rest").map_err(sink)?;
     writeln!(out, "resolveFormat()").map_err(sink)?;
     writeln!(out, "resolveEnv()").map_err(sink)?;
+    writeln!(out, "if code := checkRename(args); code != 0 {{").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(out, "printRootUsage(os.Stderr)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -2974,7 +3456,12 @@ fn emit_main(
         writeln!(out, "return {}(args[1:], active)", owned_function(command)).map_err(sink)?;
     }
     for op in &ungrouped {
-        writeln!(out, "case {}:", quoted_string_literal(&command_name(op))).map_err(sink)?;
+        writeln!(
+            out,
+            "case {}:",
+            quoted_string_literal(&command_verb(cli, op))
+        )
+        .map_err(sink)?;
         writeln!(out, "return cmd{}(args[1:])", operation_method_name(op)).map_err(sink)?;
     }
     for group in grouped.keys() {
@@ -3016,7 +3503,7 @@ fn emit_help_tables(
     ungrouped: &[&Operation],
     grouped: &BTreeMap<String, Vec<&Operation>>,
     graph: &ApiGraph,
-    owned: &[OwnedCommand],
+    cli: &SdkCli,
 ) -> Result<(), CoreError> {
     writeln!(out, "// One command and the prose its handler states.").map_err(sink)?;
     writeln!(out, "type cliCommand struct {{").map_err(sink)?;
@@ -3035,9 +3522,9 @@ fn emit_help_tables(
         writeln!(out).map_err(sink)?;
     }
 
-    if !ungrouped.is_empty() || !owned.is_empty() {
+    if !ungrouped.is_empty() || !cli.owned_commands.is_empty() {
         writeln!(out, "var cliRootCommands = []cliCommand{{").map_err(sink)?;
-        for command in owned {
+        for command in &cli.owned_commands {
             writeln!(
                 out,
                 "{{name: {}, summary: {}}},",
@@ -3047,7 +3534,7 @@ fn emit_help_tables(
             .map_err(sink)?;
         }
         for op in ungrouped {
-            emit_command_entry(out, op)?;
+            emit_command_entry(out, cli, op)?;
         }
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
@@ -3061,12 +3548,24 @@ fn emit_help_tables(
             writeln!(
                 out,
                 "summary: {},",
-                quoted_string_literal(group_summary(graph, ops))
+                quoted_string_literal(topic_summary(cli, graph, ops))
             )
             .map_err(sink)?;
             writeln!(out, "commands: []cliCommand{{").map_err(sink)?;
+            let mut seen_subs: BTreeSet<String> = BTreeSet::new();
             for op in ops {
-                emit_command_entry(out, op)?;
+                if let Some(sub) = command_sub_noun(cli, op) {
+                    if seen_subs.insert(sub.clone()) {
+                        writeln!(
+                            out,
+                            "{{name: {}, summary: \"\"}},",
+                            quoted_string_literal(&sub)
+                        )
+                        .map_err(sink)?;
+                    }
+                    continue;
+                }
+                emit_command_entry(out, cli, op)?;
             }
             writeln!(out, "}},").map_err(sink)?;
             writeln!(out, "}},").map_err(sink)?;
@@ -3077,16 +3576,27 @@ fn emit_help_tables(
     Ok(())
 }
 
-fn emit_command_entry(out: &mut String, op: &Operation) -> Result<(), CoreError> {
+fn emit_command_entry(out: &mut String, cli: &SdkCli, op: &Operation) -> Result<(), CoreError> {
     let prose = operation_prose(op, &[], "");
     writeln!(
         out,
         "{{name: {}, summary: {}}},",
-        quoted_string_literal(&command_name(op)),
+        quoted_string_literal(&command_verb(cli, op)),
         quoted_string_literal(prose.summary.as_deref().unwrap_or_default())
     )
     .map_err(sink)?;
     Ok(())
+}
+
+fn topic_summary<'a>(cli: &'a SdkCli, graph: &'a ApiGraph, ops: &[&Operation]) -> &'a str {
+    if let Some(name) = ops.first().and_then(|op| command_topic(cli, op)) {
+        if let Some(topic) = cli.topics.iter().find(|topic| topic.name == name) {
+            if let Some(concept) = &topic.concept {
+                return concept;
+            }
+        }
+    }
+    group_summary(graph, ops)
 }
 
 /// The one line a group states about itself, or nothing.
@@ -3384,7 +3894,16 @@ fn emit_group_dispatch(
     group: &str,
     index: usize,
     ops: &[&Operation],
+    cli: &SdkCli,
 ) -> Result<(), CoreError> {
+    let mut direct: Vec<&Operation> = Vec::new();
+    let mut nested: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
+    for op in ops.iter().copied() {
+        match command_sub_noun(cli, op) {
+            Some(sub) => nested.entry(sub).or_default().push(op),
+            None => direct.push(op),
+        }
+    }
     writeln!(
         out,
         "func dispatch{}(args []string) int {{",
@@ -3406,9 +3925,24 @@ fn emit_group_dispatch(
     writeln!(out, "case \"-h\", \"-help\", \"--help\":").map_err(sink)?;
     writeln!(out, "printGroupUsage(os.Stdout, group)").map_err(sink)?;
     writeln!(out, "return 0").map_err(sink)?;
-    for op in ops {
-        writeln!(out, "case {}:", quoted_string_literal(&command_name(op))).map_err(sink)?;
+    for op in &direct {
+        writeln!(
+            out,
+            "case {}:",
+            quoted_string_literal(&command_verb(cli, op))
+        )
+        .map_err(sink)?;
         writeln!(out, "return cmd{}(args[1:])", operation_method_name(op)).map_err(sink)?;
+    }
+    for sub in nested.keys() {
+        writeln!(out, "case {}:", quoted_string_literal(sub)).map_err(sink)?;
+        writeln!(
+            out,
+            "return dispatch{}{}(args[1:])",
+            exported(group),
+            exported(sub)
+        )
+        .map_err(sink)?;
     }
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
@@ -3431,6 +3965,118 @@ fn emit_group_dispatch(
     writeln!(out, "printGroupUsage(os.Stderr, group)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    for (sub, ops) in nested {
+        emit_sub_noun_dispatch(out, group, &sub, &ops, cli)?;
+    }
+    Ok(())
+}
+
+fn emit_sub_noun_dispatch(
+    out: &mut String,
+    group: &str,
+    sub: &str,
+    ops: &[&Operation],
+    cli: &SdkCli,
+) -> Result<(), CoreError> {
+    writeln!(
+        out,
+        "func dispatch{}{}(args []string) int {{",
+        exported(group),
+        exported(sub)
+    )
+    .map_err(sink)?;
+    writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: missing command under %s %s\\n\", {}, {})",
+        quoted_string_literal(group),
+        quoted_string_literal(sub)
+    )
+    .map_err(sink)?;
+    writeln!(out, "return 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "switch args[0] {{").map_err(sink)?;
+    writeln!(out, "case \"-h\", \"-help\", \"--help\":").map_err(sink)?;
+    for op in ops {
+        writeln!(
+            out,
+            "fmt.Fprintln(os.Stdout, {})",
+            quoted_string_literal(&format!("{} {sub} {}", group, command_verb(cli, op)))
+        )
+        .map_err(sink)?;
+    }
+    writeln!(out, "return 0").map_err(sink)?;
+    for op in ops {
+        writeln!(
+            out,
+            "case {}:",
+            quoted_string_literal(&command_verb(cli, op))
+        )
+        .map_err(sink)?;
+        writeln!(out, "return cmd{}(args[1:])", operation_method_name(op)).map_err(sink)?;
+    }
+    writeln!(out, "default:").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: unknown command %q under %s %s\\n\", args[0], {}, {})",
+        quoted_string_literal(group),
+        quoted_string_literal(sub)
+    )
+    .map_err(sink)?;
+    writeln!(out, "return 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
+fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> {
+    writeln!(out, "func checkRename(args []string) int {{").map_err(sink)?;
+    if cli.rename_errors.is_empty() {
+        writeln!(out, "return 0").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "renames := []struct{{ from []string; to string }}{{").map_err(sink)?;
+    for error in &cli.rename_errors {
+        let from = error
+            .from
+            .iter()
+            .map(|token| quoted_string_literal(token))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            out,
+            "{{[]string{{{from}}}, {}}},",
+            quoted_string_literal(&error.to)
+        )
+        .map_err(sink)?;
+    }
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "for _, rename := range renames {{").map_err(sink)?;
+    writeln!(out, "if len(args) < len(rename.from) {{").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "match := true").map_err(sink)?;
+    writeln!(out, "for i, token := range rename.from {{").map_err(sink)?;
+    writeln!(out, "if args[i] != token {{").map_err(sink)?;
+    writeln!(out, "match = false").map_err(sink)?;
+    writeln!(out, "break").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if match {{").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: %s is now %s %s\\n\", strings.Join(rename.from, \" \"), program, rename.to)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())

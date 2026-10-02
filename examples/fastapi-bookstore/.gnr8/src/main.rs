@@ -38,8 +38,35 @@ fn main() -> std::process::ExitCode {
                 PySdk::new()
                     .module("example.com/bookstore/sdk")
                     .to("generated/sdk")
-                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8000")),
+                    .cli(bookstore_cli()),
             )
             .post(Header::generated()),
     )
+}
+
+fn bookstore_cli() -> SdkCli {
+    SdkCli::new("bookstore")
+        .base_url("http://127.0.0.1:8000")
+        .topic(
+            CliTopic::new("books")
+                .concept("Browse and manage the catalogue")
+                .command(CliCommand::operation("list_books", "list"))
+                .command(
+                    CliCommand::operation("get_book", "get")
+                        .positional("book_id")
+                        .selector(CliSelector::new("list_books", "id", "id")),
+                )
+                .command(CliCommand::operation("create_book", "create"))
+                .command(
+                    CliCommand::operation("update_book", "update")
+                        .positional("book_id")
+                        .body_fields(),
+                ),
+        )
+        .rename_error(CliRenameError::new(["books", "list-books"], "books list"))
+        .view(
+            CliView::schema("Book")
+                .preview(["id", "title", "author"])
+                .table(["id", "title", "author"]),
+        )
 }

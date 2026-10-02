@@ -123,6 +123,165 @@ pub(crate) fn command_group(op: &Operation) -> Option<String> {
     op.group.as_deref().map(kebab)
 }
 
+/// The verb a generated command is invoked as: the spec's verb, otherwise [`command_name`].
+pub(crate) fn command_verb(cli: &SdkCli, op: &Operation) -> String {
+    cli.spec_command(&op.id)
+        .map_or_else(|| command_name(op), |command| command.verb.clone())
+}
+
+/// The topic a generated command sits under: the spec's topic, otherwise [`command_group`].
+pub(crate) fn command_topic(cli: &SdkCli, op: &Operation) -> Option<String> {
+    cli.spec_topic(&op.id)
+        .map(|topic| topic.name.clone())
+        .or_else(|| command_group(op))
+}
+
+/// The optional sub-noun between topic and verb.
+pub(crate) fn command_sub_noun(cli: &SdkCli, op: &Operation) -> Option<String> {
+    cli.spec_command(&op.id)
+        .and_then(|command| command.sub_noun.clone())
+}
+
+/// The invocation path printed in usage: `topic [sub-noun] verb`.
+pub(crate) fn command_invocation(cli: &SdkCli, op: &Operation) -> String {
+    let verb = command_verb(cli, op);
+    match (command_topic(cli, op), command_sub_noun(cli, op)) {
+        (Some(topic), Some(sub)) => format!("{topic} {sub} {verb}"),
+        (Some(topic), None) => format!("{topic} {verb}"),
+        (None, Some(sub)) => format!("{sub} {verb}"),
+        (None, None) => verb,
+    }
+}
+
+/// Graph parameter names this command takes positionally, in order.
+pub(crate) fn positional_names<'a>(cli: &'a SdkCli, op: &Operation) -> &'a [String] {
+    cli.spec_command(&op.id)
+        .map_or(&[] as &[String], |command| command.positionals.as_slice())
+}
+
+/// Whether `param` is taken as a positional identifier rather than a flag.
+pub(crate) fn is_positional_param(cli: &SdkCli, op: &Operation, param: &str) -> bool {
+    positional_names(cli, op).iter().any(|name| name == param)
+}
+
+/// Usage tokens for positionals: `<id>`.
+pub(crate) fn positional_usage(cli: &SdkCli, op: &Operation) -> String {
+    let tokens: Vec<String> = positional_names(cli, op)
+        .iter()
+        .map(|name| format!("<{name}>"))
+        .collect();
+    tokens.join(" ")
+}
+
+/// Scalar request-body fields that become flags when the spec asks for them.
+#[derive(Debug, Clone)]
+pub(crate) struct BodyFieldFlag {
+    /// JSON object key overlaid onto `--body`.
+    pub json_name: String,
+    /// Flag spelling (kebab-case of the JSON name).
+    pub flag: String,
+    /// Field schema, for flag kind.
+    pub schema: Type,
+    /// Field prose, when the schema states it.
+    pub description: Option<String>,
+}
+
+/// Body-field flags for `op`, or empty when the spec does not ask for them.
+pub(crate) fn body_field_flags(
+    cli: &SdkCli,
+    op: &Operation,
+    graph: &ApiGraph,
+) -> Result<Vec<BodyFieldFlag>, CoreError> {
+    let Some(command) = cli.spec_command(&op.id) else {
+        return Ok(Vec::new());
+    };
+    if !command.body_fields {
+        return Ok(Vec::new());
+    }
+    let bodies = request_body_models_of(op, graph)?;
+    let Some(body) = bodies.first() else {
+        return Err(CoreError::SdkGen {
+            message: format!(
+                "CLI {:?} command '{}' sets body_fields but operation '{}' has no request body",
+                cli.program, command.verb, op.id
+            ),
+        });
+    };
+    scalar_object_fields(graph, &Type::Named(body.schema_id.clone()), 0)
+}
+
+fn scalar_object_fields(
+    graph: &ApiGraph,
+    ty: &Type,
+    depth: usize,
+) -> Result<Vec<BodyFieldFlag>, CoreError> {
+    if depth > 8 {
+        return Ok(Vec::new());
+    }
+    match ty {
+        Type::Named(id) => {
+            let Some(schema) = graph.schemas.iter().find(|schema| &schema.id == id) else {
+                return Ok(Vec::new());
+            };
+            scalar_object_fields(graph, &schema.body, depth + 1)
+        }
+        Type::Object(fields) => {
+            let mut out = Vec::new();
+            for field in fields {
+                if !is_scalar_flag_schema(graph, &field.schema, 0) {
+                    continue;
+                }
+                out.push(BodyFieldFlag {
+                    json_name: field.json_name.clone(),
+                    flag: kebab(&field.json_name),
+                    schema: field.schema.clone(),
+                    description: field.description.clone(),
+                });
+            }
+            Ok(out)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn is_scalar_flag_schema(graph: &ApiGraph, ty: &Type, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match ty {
+        Type::Primitive(_) | Type::WellKnown(_) | Type::Enum(_) => true,
+        Type::Named(id) => graph
+            .schemas
+            .iter()
+            .find(|schema| &schema.id == id)
+            .is_some_and(|schema| is_scalar_flag_schema(graph, &schema.body, depth + 1)),
+        Type::Array(inner) => is_scalar_flag_schema(graph, inner, depth + 1),
+        Type::Object(_) | Type::Map { .. } | Type::Union(_) | Type::Any {} => false,
+    }
+}
+
+/// View declared for this operation's success body, if any.
+pub(crate) fn command_view<'a>(
+    cli: &'a SdkCli,
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Option<&'a gnr8::sdk::CliView> {
+    let Ok(success) = success_responses_of(op, graph) else {
+        return None;
+    };
+    let model = success.body_model?;
+    cli.views
+        .iter()
+        .find(|view| view.schema == model)
+        .or_else(|| {
+            graph
+                .schemas
+                .iter()
+                .find(|schema| schema.id == model)
+                .and_then(|schema| cli.views.iter().find(|view| view.schema == schema.name))
+        })
+}
+
 /// The CLI flag spelling of a parameter: kebab-case of the wire name.
 ///
 /// The wire name stays `param.name`; only the spelling is re-cased.
@@ -753,40 +912,55 @@ pub(crate) fn check_unique_model_file_names(
 /// top-level command collides with a group name; a flag collides with a global this command binds;
 /// two parameters of one operation kebab to one flag. No auto-rename table — the user fixes the
 /// graph with `RenameOperation` or a source change.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one function enumerates every CLI name collision so the error text stays in one place"
+)]
 pub(crate) fn check_cli_names(
     ops: &[&Operation],
     graph: &ApiGraph,
-    program: &str,
+    cli: &SdkCli,
 ) -> Result<(), CoreError> {
-    let mut commands: BTreeMap<(Option<String>, String), &str> = BTreeMap::new();
+    let program = cli.program.as_str();
+    let mut commands: BTreeMap<(Option<String>, Option<String>, String), &str> = BTreeMap::new();
     for op in ops.iter().copied() {
-        let group = command_group(op);
-        let name = command_name(op);
-        if let Some(previous) = commands.insert((group.clone(), name.clone()), op.id.as_str()) {
-            let command = match group {
-                Some(group) => format!("{group} {name}"),
-                None => name,
-            };
+        let group = command_topic(cli, op);
+        let sub = command_sub_noun(cli, op);
+        let name = command_verb(cli, op);
+        if let Some(previous) =
+            commands.insert((group.clone(), sub.clone(), name.clone()), op.id.as_str())
+        {
+            let command = command_invocation(cli, op);
             return Err(CoreError::SdkGen {
                 message: format!(
-                    "CLI {program:?} commands collide: operations '{previous}' and '{}' both map to '{command}'; rename one with RenameOperation",
+                    "CLI {program:?} commands collide: operations '{previous}' and '{}' both map to '{command}'; rename one with RenameOperation or a command spec",
                     op.id
                 ),
             });
         }
     }
 
-    let groups: BTreeSet<String> = ops.iter().copied().filter_map(command_group).collect();
+    let groups: BTreeSet<String> = ops
+        .iter()
+        .copied()
+        .filter_map(|op| command_topic(cli, op))
+        .collect();
     for op in ops.iter().copied() {
-        if op.group.is_some() {
+        if command_topic(cli, op).is_some()
+            && cli.spec_command(&op.id).is_none()
+            && op.group.is_some()
+        {
             continue;
         }
-        let name = command_name(op);
+        if command_topic(cli, op).is_some() {
+            continue;
+        }
+        let name = command_verb(cli, op);
         if groups.contains(&name) {
             let grouped = ops
                 .iter()
                 .copied()
-                .find(|other| command_group(other).as_deref() == Some(name.as_str()))
+                .find(|other| command_topic(cli, other).as_deref() == Some(name.as_str()))
                 .map_or(name.as_str(), |other| other.id.as_str());
             return Err(CoreError::SdkGen {
                 message: format!(
@@ -804,9 +978,10 @@ pub(crate) fn check_cli_names(
         // Go's `flag` panics on a name already in use and argparse raises `ArgumentError` while
         // building the parser, so the emitted program cannot start — not even `--help`.
         let reserved = reserved_flags_for(op, graph)?;
+        let body_fields = body_field_flags(cli, op, graph)?;
         let mut bound: BTreeMap<String, FlagOrigin<'_>> = BTreeMap::new();
         for param in &op.params {
-            if paging.contains(&param.name) {
+            if paging.contains(&param.name) || is_positional_param(cli, op, &param.name) {
                 continue;
             }
             let flag = flag_name(param);
@@ -843,6 +1018,123 @@ pub(crate) fn check_cli_names(
                     });
                 }
             }
+        }
+        for field in &body_fields {
+            let origin = FlagOrigin {
+                param: &field.json_name,
+                negation: false,
+            };
+            if reserved.contains(&field.flag) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' body field '{}' maps to flag '--{}', which collides with the reserved global '--{}'",
+                        op.id, field.json_name, field.flag, field.flag
+                    ),
+                });
+            }
+            if let Some(previous) = bound.insert(field.flag.clone(), origin) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' binds flag '--{}' twice: for {previous} and for body field '{}'",
+                        op.id, field.flag, field.json_name
+                    ),
+                });
+            }
+        }
+    }
+    check_cli_spec(ops, graph, cli)?;
+    Ok(())
+}
+
+fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<(), CoreError> {
+    let program = cli.program.as_str();
+    let op_ids: BTreeSet<&str> = ops.iter().map(|op| op.id.as_str()).collect();
+    let mut seen_ops: BTreeSet<&str> = BTreeSet::new();
+    let mut seen_topics: BTreeSet<&str> = BTreeSet::new();
+    for topic in &cli.topics {
+        if !seen_topics.insert(topic.name.as_str()) {
+            return Err(CoreError::SdkGen {
+                message: format!("CLI {program:?} declares topic {:?} twice", topic.name),
+            });
+        }
+        for command in &topic.commands {
+            if !op_ids.contains(command.operation.as_str()) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} command spec wraps unknown operation '{}'",
+                        command.operation
+                    ),
+                });
+            }
+            if !seen_ops.insert(command.operation.as_str()) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} wraps operation '{}' more than once",
+                        command.operation
+                    ),
+                });
+            }
+            let op = ops
+                .iter()
+                .copied()
+                .find(|op| op.id == command.operation)
+                .ok_or_else(|| CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} command spec wraps unknown operation '{}'",
+                        command.operation
+                    ),
+                })?;
+            for name in &command.positionals {
+                if !op.params.iter().any(|param| param.name == *name) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} command '{}' positional '{name}' is not a parameter of operation '{}'",
+                            command.verb, op.id
+                        ),
+                    });
+                }
+            }
+            if let Some(switch) = &command.switch_flag {
+                if !op_ids.contains(switch.operation.as_str()) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} command '{}' switch flag wraps unknown operation '{}'",
+                            command.verb, switch.operation
+                        ),
+                    });
+                }
+            }
+            if let Some(selector) = &command.selector {
+                if !op_ids.contains(selector.list_operation.as_str()) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} command '{}' selector lists unknown operation '{}'",
+                            command.verb, selector.list_operation
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    for error in &cli.rename_errors {
+        if error.from.is_empty() {
+            return Err(CoreError::SdkGen {
+                message: format!("CLI {program:?} rename error has an empty retired path"),
+            });
+        }
+    }
+    for view in &cli.views {
+        let known = graph
+            .schemas
+            .iter()
+            .any(|schema| schema.id == view.schema || schema.name == view.schema);
+        if !known {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} view names unknown schema '{}'",
+                    view.schema
+                ),
+            });
         }
     }
     Ok(())
@@ -1765,6 +2057,7 @@ mod tests {
         SecurityScheme, SourceSpan, Type,
     };
     use crate::sdk::layout::SdkFileLayout;
+    use gnr8::sdk::SdkCli;
 
     #[test]
     fn schemas_that_share_a_model_file_name_are_rejected_with_both_names() {
@@ -1976,7 +2269,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("colliding commands must be rejected"),
         };
@@ -1994,7 +2287,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("command/group collision must be rejected"),
         };
@@ -2012,7 +2305,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("reserved flag collision must be rejected"),
         };
@@ -2040,7 +2333,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        check_cli_names(&ops, &graph, "bookstore")
+        check_cli_names(&ops, &graph, &SdkCli::new("bookstore"))
     }
 
     #[test]
@@ -2051,7 +2344,7 @@ mod tests {
                 ..ApiGraph::default()
             };
             let ops: Vec<&Operation> = graph.operations.iter().collect();
-            let message = match check_cli_names(&ops, &graph, "bookstore") {
+            let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
                 Err(error) => error.to_string(),
                 Ok(()) => panic!("--{name} is a reserved global"),
             };
@@ -2078,7 +2371,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("--limit is bound on a paginated command"),
         };
@@ -2158,7 +2451,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("two parameters mapping to one flag must be rejected"),
         };
@@ -2179,7 +2472,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("a collision with a boolean negation must be rejected"),
         };
@@ -2203,7 +2496,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        check_cli_names(&ops, &graph, "bookstore")
+        check_cli_names(&ops, &graph, &SdkCli::new("bookstore"))
     }
 
     #[test]
@@ -2216,7 +2509,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        check_cli_names(&ops, &graph, "bookstore")
+        check_cli_names(&ops, &graph, &SdkCli::new("bookstore"))
     }
 
     #[test]

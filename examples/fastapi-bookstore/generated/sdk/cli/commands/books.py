@@ -1,4 +1,4 @@
-"""The commands that sit directly under the program."""
+"""The `books` command group."""
 
 from __future__ import annotations
 
@@ -15,9 +15,18 @@ from ..credentials import build_client
 
 
 def register(subparsers: Any) -> None:
-    """Add these commands to the program's subparsers."""
-    cmd_list_books = subparsers.add_parser(
-        "list-books",
+    """Add this group and its commands to the program's subparsers."""
+    group = subparsers.add_parser(
+        "books",
+        help="Browse and manage the catalogue",
+        description="Browse and manage the catalogue",
+    )
+    commands = group.add_subparsers(
+        dest="_subcommand",
+        required=True,
+    )
+    cmd_list_books = commands.add_parser(
+        "list",
         help="List books in one genre.",
         description=(
             "List books in one genre.\n\nResults are ordered by title and paginated wit"
@@ -116,11 +125,11 @@ def register(subparsers: Any) -> None:
     )
     cmd_list_books.set_defaults(
         _handler=_list_books,
-        _command="list-books",
+        _command="books list",
         _fields=(),
     )
-    cmd_create_book = subparsers.add_parser(
-        "create-book",
+    cmd_create_book = commands.add_parser(
+        "create",
         help="Add a book to the catalogue.",
         description=(
             "Add a book to the catalogue.\n\nThe book is created immediately and its ge"
@@ -215,11 +224,11 @@ def register(subparsers: Any) -> None:
     )
     cmd_create_book.set_defaults(
         _handler=_create_book,
-        _command="create-book",
+        _command="books create",
         _fields=(),
     )
-    cmd_get_book = subparsers.add_parser(
-        "get-book",
+    cmd_get_book = commands.add_parser(
+        "get",
         help="Fetch one book by its identifier.",
         description=(
             "Fetch one book by its identifier.\n\nReturns the book when it is in stock,"
@@ -302,10 +311,8 @@ def register(subparsers: Any) -> None:
         help="never prompt; refuse commands that would ask",
     )
     cmd_get_book.add_argument(
-        "--book-id",
-        dest="book_id",
-        required=True,
-        type=int,
+        "book_id",
+        metavar="BOOK_ID",
         help="required",
     )
     cmd_get_book.add_argument(
@@ -315,11 +322,11 @@ def register(subparsers: Any) -> None:
     )
     cmd_get_book.set_defaults(
         _handler=_get_book,
-        _command="get-book",
+        _command="books get",
         _fields=(),
     )
-    cmd_update_book = subparsers.add_parser(
-        "update-book",
+    cmd_update_book = commands.add_parser(
+        "update",
         help="Update the stored filters for one book.",
         description=(
             "Update the stored filters for one book.\n\nFilters left unset in the paylo"
@@ -402,13 +409,11 @@ def register(subparsers: Any) -> None:
         help="never prompt; refuse commands that would ask",
     )
     cmd_update_book.add_argument(
-        "--book-id",
-        dest="book_id",
-        required=True,
-        type=int,
+        "book_id",
+        metavar="BOOK_ID",
         help="required",
     )
-    cmd_update_book_body = cmd_update_book.add_mutually_exclusive_group(required=True)
+    cmd_update_book_body = cmd_update_book.add_mutually_exclusive_group(required=False)
     cmd_update_book_body.add_argument(
         "--body",
         dest="body",
@@ -419,9 +424,25 @@ def register(subparsers: Any) -> None:
         dest="body_file",
         help="read the request body from a file, or - for stdin",
     )
+    cmd_update_book.add_argument(
+        "--genre",
+        dest="body_genre",
+    )
+    cmd_update_book.add_argument(
+        "--in-stock",
+        dest="body_in_stock",
+    )
+    cmd_update_book.add_argument(
+        "--published",
+        dest="body_published",
+    )
+    cmd_update_book.add_argument(
+        "--sort",
+        dest="body_sort",
+    )
     cmd_update_book.set_defaults(
         _handler=_update_book,
-        _command="update-book",
+        _command="books update",
         _fields=(),
     )
 
@@ -460,6 +481,22 @@ def _update_book(args: argparse.Namespace) -> Any:
     kwargs: dict[str, Any] = {}
     kwargs["book_id"] = args.book_id
     payload = load_body(args)
+    if getattr(args, "body_genre", None) is not None:
+        if payload is None:
+            payload = {}
+        payload["genre"] = getattr(args, "body_genre")
+    if getattr(args, "body_in_stock", None) is not None:
+        if payload is None:
+            payload = {}
+        payload["in_stock"] = getattr(args, "body_in_stock")
+    if getattr(args, "body_published", None) is not None:
+        if payload is None:
+            payload = {}
+        payload["published"] = getattr(args, "body_published")
+    if getattr(args, "body_sort", None) is not None:
+        if payload is None:
+            payload = {}
+        payload["sort"] = getattr(args, "body_sort")
     if payload is not None:
         kwargs["body"] = BookFilters.model_validate(payload)
     return client.update_book(**kwargs)

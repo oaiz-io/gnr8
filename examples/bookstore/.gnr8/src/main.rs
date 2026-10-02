@@ -38,8 +38,40 @@ fn main() -> std::process::ExitCode {
                 GoSdk::new()
                     .module("example.com/bookstore/sdk")
                     .to("generated/sdk")
-                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8080")),
+                    .cli(bookstore_cli("http://127.0.0.1:8080")),
             )
             .post(Header::generated()),
     )
+}
+
+fn bookstore_cli(base_url: &str) -> SdkCli {
+    SdkCli::new("bookstore")
+        .base_url(base_url)
+        .topic(
+            CliTopic::new("books")
+                .concept("Browse and manage the catalogue")
+                .command(CliCommand::operation("listBooks", "list"))
+                .command(
+                    CliCommand::operation("getBook", "get")
+                        .positional("id")
+                        .selector(CliSelector::new("listBooks", "id", "id")),
+                )
+                .command(CliCommand::operation("createBook", "create").body_fields())
+                .command(
+                    CliCommand::operation("updateBook", "update")
+                        .positional("id")
+                        .body_fields(),
+                )
+                .command(
+                    CliCommand::operation("deleteBook", "delete")
+                        .positional("id")
+                        .severity(CliSeverity::Moderate),
+                ),
+        )
+        .rename_error(CliRenameError::new(["books", "list-books"], "books list"))
+        .view(
+            CliView::schema("Book")
+                .preview(["id", "title", "author"])
+                .table(["id", "title", "author", "genre", "price"]),
+        )
 }
