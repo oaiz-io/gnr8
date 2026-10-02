@@ -156,12 +156,13 @@ pub(crate) fn helper_env_var(program: &str) -> String {
 /// Global flags every generated command binds, whatever the operation carries.
 ///
 /// `--help` is bound by `argparse` on every parser it builds and by the Go dispatcher's own `-h`
-/// handling; `--base-url` is declared on each command so it can follow the subcommand.
+/// handling; `--base-url` is declared on each command so it can follow the subcommand;
+/// `--format` and `--json` are globals every generated command binds.
 ///
 /// Everything else is conditional and computed per command by [`reserved_flags_for`] — reserving a
 /// name no command binds costs a user a legitimate parameter for nothing, and the only remedy
 /// available to them is changing their API's wire contract.
-const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url"];
+const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url", "format", "json"];
 
 /// What each reserved flag does, in the words both emitters print.
 ///
@@ -174,13 +175,42 @@ pub(crate) const BODY_HELP: &str = "request body, as an inline JSON document";
 pub(crate) const BODY_FILE_HELP: &str = "read the request body from a file, or - for stdin";
 pub(crate) const LIMIT_HELP: &str = "stop after this many items";
 pub(crate) const ALL_HELP: &str = "keep following pages until the last one";
+pub(crate) const FORMAT_HELP: &str = "output format: human, ai-friendly, json, or jsonl";
+pub(crate) const JSON_HELP: &str = "print the server body (shorthand for --format json)";
+
+/// Environment variable selecting the output format: `{PROG}_FORMAT`.
+pub(crate) fn format_env_var(program: &str) -> String {
+    format!("{}_FORMAT", screaming_snake(program))
+}
+
+/// The usage string for one parameter flag: its own prose, then whether it is required.
+///
+/// A parameter's description is the one graph fact `--help` prints for it. Whitespace collapses
+/// to a single line because both `flag.PrintDefaults` and argparse `help=` render one line per
+/// flag. A required flag still says `required` after the prose, so omitting it is visible before
+/// a failed invocation.
+pub(crate) fn parameter_flag_help(param: &Param) -> String {
+    let mut parts = Vec::new();
+    if let Some(description) = param
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        parts.push(description.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+    if param.required {
+        parts.push("required".to_string());
+    }
+    parts.join(" ")
+}
 
 /// The global flags one command binds, which its parameter flags may not shadow.
 ///
 /// Conditional because the emitters are: `--body`/`--body-file` exist only where the operation has
 /// a request body, and `--limit`/`--all` only where a `PaginationPolicy` names it. `--version` is
-/// bound on the root parser, which is not a command, so it is not reserved here. `--json` is bound
-/// by neither emitter — output is unconditionally JSON — so it is not reserved either.
+/// bound on the root parser, which is not a command, so it is not reserved here. `--format` and
+/// `--json` are globals every generated command binds.
 fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<String>, CoreError> {
     let mut reserved: BTreeSet<String> = ALWAYS_RESERVED_FLAGS
         .iter()
@@ -1657,10 +1687,10 @@ mod tests {
 
     use super::{
         check_cli_names, check_unique_model_file_names, command_group, command_name,
-        credential_env_var, file_stem, flag_name, helper_env_var, http_auth_features,
-        http_auth_features_for, kebab, operation_auth_alternatives, split_words,
-        success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
-        SuccessResponses,
+        credential_env_var, file_stem, flag_name, format_env_var, helper_env_var,
+        http_auth_features, http_auth_features_for, kebab, operation_auth_alternatives,
+        parameter_flag_help, split_words, success_responses_of, ApiKeyLocation, HttpAuthScheme,
+        OperationAuthScheme, SuccessResponses,
     };
     use crate::graph::{
         ApiGraph, Operation, OperationSecurityPolicy, Param, Response, SecurityRequirementGroup,
@@ -1812,6 +1842,7 @@ mod tests {
             style: None,
             explode: None,
             allow_reserved: false,
+            description: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: cli_span(),
@@ -1833,6 +1864,29 @@ mod tests {
         assert_eq!(flag_name(&grouped.params[0]), "book-id");
         let ungrouped = cli_op("getBook", None, Vec::new());
         assert_eq!(command_group(&ungrouped), None);
+    }
+
+    #[test]
+    fn parameter_flag_help_is_the_graph_description_then_required() {
+        let mut param = cli_param("book_id");
+        param.required = true;
+        param.description = Some("The book's identifier.".to_string());
+        assert_eq!(
+            parameter_flag_help(&param),
+            "The book's identifier. required"
+        );
+        param.description = Some("  Narrows   the list.  ".to_string());
+        param.required = false;
+        assert_eq!(parameter_flag_help(&param), "Narrows the list.");
+        param.description = None;
+        param.required = true;
+        assert_eq!(parameter_flag_help(&param), "required");
+    }
+
+    #[test]
+    fn format_env_var_screams_the_program() {
+        assert_eq!(format_env_var("bookstore"), "BOOKSTORE_FORMAT");
+        assert_eq!(format_env_var("oaiz-cli"), "OAIZ_CLI_FORMAT");
     }
 
     #[test]
@@ -1901,15 +1955,13 @@ mod tests {
 
     #[test]
     fn a_flag_no_command_binds_is_not_reserved() -> Result<(), crate::CoreError> {
-        // `--json` is bound by neither emitter, and `--limit`/`--all`/`--body`/`--body-file` are
-        // bound only where the operation carries the fact that produces them. Reserving them
-        // unconditionally rejected APIs whose only remedy was to rename a wire parameter.
+        // `--limit`/`--all`/`--body`/`--body-file` are bound only where the operation carries the
+        // fact that produces them. `--json` and `--format` are globals, so they are reserved.
         let graph = ApiGraph {
             operations: vec![cli_op(
                 "listBooks",
                 None,
                 vec![
-                    cli_param("json"),
                     cli_param("limit"),
                     cli_param("all"),
                     cli_param("body"),
@@ -1921,6 +1973,22 @@ mod tests {
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
         check_cli_names(&ops, &graph, "bookstore")
+    }
+
+    #[test]
+    fn json_and_format_are_reserved_globals() {
+        for name in ["json", "format"] {
+            let graph = ApiGraph {
+                operations: vec![cli_op("listBooks", None, vec![cli_param(name)])],
+                ..ApiGraph::default()
+            };
+            let ops: Vec<&Operation> = graph.operations.iter().collect();
+            let message = match check_cli_names(&ops, &graph, "bookstore") {
+                Err(error) => error.to_string(),
+                Ok(()) => panic!("--{name} is a reserved global"),
+            };
+            assert!(message.contains(&format!("--{name}")), "{message}");
+        }
     }
 
     #[test]

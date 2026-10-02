@@ -9,6 +9,29 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **Parameter descriptions are a graph fact.** A bound parameter's prose is the field's own doc
+  comment (plain prose, no tag grammar), the imported spec's `description`, or
+  `DocumentOperation::parameter` when the source has neither. A collision is a hard error. Generated
+  CLI `--help` prints that prose on the flag.
+- **Generated CLI output format flags.** `--format human|ai-friendly|json|jsonl`, `--json` as the
+  JSON shorthand, and `{PROG}_FORMAT`. A TTY defaults to `human`; anything else defaults to
+  `ai-friendly`. Exit codes 0–6 name the caller's next action. Errors print `error:` plus optional
+  hints and a request id.
+- **Go CLI library seam.** `Run(args, Options)` is the exported entry. `main.go` stamps
+  `version`/`commit`/`date` as variables so `-ldflags -X` can overwrite them.
+  `SdkCli::hand_owned_main()` skips that file; `SdkCli::owned_command` names a root command whose
+  implementation is hand-owned and never generated. Python rejects both — they are a Go seam.
+
+### Changed
+
+- **Output is no longer unconditionally JSON.** `--json` and `--format` are reserved globals; a
+  parameter named `json` or `format` is a generation error.
+- **Per-flag prose is emitted.** A parameter's description is the one graph fact `--help` prints for
+  it. The three-field `SdkCli` (`program`, `commands`, `base_url`) gains `emit_main` and
+  `owned_commands`.
+
 ## 0.16.3 — 2026-09-30
 
 ### Changed

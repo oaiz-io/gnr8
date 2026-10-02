@@ -5,6 +5,15 @@
 
 use crate::sdk::builtins::OperationSelector;
 
+fn default_true() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// Configuration for a generated command-line client emitted beside a generated SDK.
 ///
 /// This is the CLI gnr8 GENERATES for the user's API. It is unrelated to gnr8's own
@@ -31,6 +40,73 @@ pub struct SdkCli {
     /// to set it a change to the published contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Whether to emit `cmd/<program>/main.go`.
+    ///
+    /// `true` (the default) writes a minimal `package main` that stamps `version`/`commit`/`date`
+    /// as variables — so `-ldflags -X` can overwrite them — and calls `Run`. `false` skips that
+    /// file: the program's `main` is hand-owned, lives beside the generated tree, and is never
+    /// deleted because gnr8 never emitted it.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub emit_main: bool,
+    /// Commands the generated dispatcher names whose implementation is hand-owned.
+    ///
+    /// Each entry becomes a root dispatch arm that calls a function in `package cli`. gnr8 never
+    /// writes that function, so a file the user adds for it is not in the ownership manifest and
+    /// is never deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_commands: Vec<OwnedCommand>,
+}
+
+/// One hand-owned command the generated dispatcher names.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OwnedCommand {
+    /// Invocation name (`login`, `status`). Kebab-case, like every other command.
+    pub name: String,
+    /// One-line summary for root help. Absent means the name stands alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Go function in `package cli` the dispatcher calls. Absent means `run` plus the exported
+    /// form of [`Self::name`] (`login` → `runLogin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+}
+
+impl OwnedCommand {
+    /// A hand-owned root command invoked as `name`.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            summary: None,
+            function: None,
+        }
+    }
+
+    /// The one line root help prints beside this command.
+    #[must_use]
+    pub fn summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
+
+    /// The Go function in `package cli` the dispatcher calls (`runLogin`).
+    #[must_use]
+    pub fn function(mut self, function: impl Into<String>) -> Self {
+        self.function = Some(function.into());
+        self
+    }
+}
+
+impl From<&str> for OwnedCommand {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<String> for OwnedCommand {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
 }
 
 impl SdkCli {
@@ -41,6 +117,8 @@ impl SdkCli {
             program: program.into(),
             commands: None,
             base_url: None,
+            emit_main: true,
+            owned_commands: Vec::new(),
         }
     }
 
@@ -64,6 +142,20 @@ impl SdkCli {
         self.base_url = Some(url.into());
         self
     }
+
+    /// Do not emit `cmd/<program>/main.go`. The program's `main` is hand-owned and calls `Run`.
+    #[must_use]
+    pub fn hand_owned_main(mut self) -> Self {
+        self.emit_main = false;
+        self
+    }
+
+    /// Name a root command whose implementation is hand-owned and never generated.
+    #[must_use]
+    pub fn owned_command(mut self, command: impl Into<OwnedCommand>) -> Self {
+        self.owned_commands.push(command.into());
+        self
+    }
 }
 
 impl From<&str> for SdkCli {
@@ -82,7 +174,7 @@ impl From<String> for SdkCli {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::SdkCli;
+    use super::{OwnedCommand, SdkCli};
     use crate::sdk::builtins::{GoSdk, PySdk};
 
     #[test]
@@ -95,10 +187,21 @@ mod tests {
 
     #[test]
     fn declaration_serde_round_trips() {
-        let cli = SdkCli::new("bookstore");
+        let cli = SdkCli::new("bookstore")
+            .owned_command(OwnedCommand::new("login").summary("Sign in"))
+            .hand_owned_main();
         let json = serde_json::to_string(&cli).expect("serialize");
         let back: SdkCli = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(cli, back);
+        assert!(!back.emit_main);
+        assert_eq!(back.owned_commands[0].name, "login");
+    }
+
+    #[test]
+    fn absent_new_fields_deserialize_to_defaults() {
+        let back: SdkCli = serde_json::from_str(r#"{"program":"bookstore"}"#).expect("deserialize");
+        assert!(back.emit_main);
+        assert!(back.owned_commands.is_empty());
     }
 
     #[test]

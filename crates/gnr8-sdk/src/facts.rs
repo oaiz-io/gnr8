@@ -128,6 +128,10 @@ pub struct ParamFact {
     /// Whether reserved characters may remain unescaped in a query value.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_reserved: bool,
+    /// Human prose about the parameter: the binding field's own doc comment, read as plain prose
+    /// (AGENTS.md rule 0.1 category 2). Absent when the parameter has no declaration to document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Source provenance for the parameter access.
     pub span: SourceSpan,
 }

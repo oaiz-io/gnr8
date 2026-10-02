@@ -597,6 +597,14 @@ pub struct Param {
     /// Whether reserved query characters may remain unescaped.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_reserved: bool,
+    /// Human prose about the parameter, for documentation and generated `--help`.
+    ///
+    /// One source per parameter, like an operation's prose: the binding declaration's own doc
+    /// comment for source-extracted parameters (AGENTS.md rule 0.1 category 2), the spec's
+    /// `description` for `OpenApi`-imported ones, or `DocumentOperation::parameter` for a parameter
+    /// that has neither. It is prose only and never states structure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Exact `OpenAPI` 3 parameter `content` object, when the source used content instead of schema.
     ///
     /// SDK generators use [`Self::schema`] for typing; the `OpenAPI` target uses this value to avoid
@@ -1031,6 +1039,7 @@ impl Param {
             style: param.style,
             explode: param.explode,
             allow_reserved: param.allow_reserved,
+            description: param.description.filter(|text| !text.trim().is_empty()),
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: relativize_span(&param.span, root),

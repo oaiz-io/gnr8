@@ -593,6 +593,21 @@ fn lower_parameter(
     for (_, value) in &mut openapi_fields {
         rewrite_parameter_local_refs(value, ref_to_name);
     }
+    // The typed prose is emitted at the position the Parameter Object's sorted fields give it, so a
+    // parameter documented from its source and one imported with a `description` render alike.
+    if let Some(description) = &param.description {
+        let at = openapi_fields
+            .iter()
+            .position(|(name, _)| name.as_str() > "description")
+            .unwrap_or(openapi_fields.len());
+        openapi_fields.insert(
+            at,
+            (
+                "description".to_string(),
+                serde_json::Value::String(description.clone()),
+            ),
+        );
+    }
     Ok(Parameter {
         name: param.name.clone(),
         location: param.location.clone(),

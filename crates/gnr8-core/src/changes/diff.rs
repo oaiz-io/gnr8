@@ -1141,8 +1141,16 @@ fn compare_existing_parameter(
 }
 
 fn parameter_openapi_value(parameter: &Param) -> serde_json::Value {
-    let fields: serde_json::Map<String, serde_json::Value> =
+    let mut fields: serde_json::Map<String, serde_json::Value> =
         parameter.openapi_fields.iter().cloned().collect();
+    // The typed prose is the same Parameter Object `description` the document carries, so it is
+    // compared, and stripped for the structural comparison, exactly as an imported one was.
+    if let Some(description) = &parameter.description {
+        fields.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.clone()),
+        );
+    }
     serde_json::json!({ "content": parameter.openapi_content, "fields": fields })
 }
 
@@ -2680,6 +2688,7 @@ mod tests {
             style: None,
             explode: None,
             allow_reserved: false,
+            description: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: span("handlers.rs"),

@@ -8,6 +8,101 @@ import (
 	"strings"
 )
 
+// Options configures one invocation of Run.
+//
+// Version, Commit and Date are stampable via -ldflags -X on the caller's main
+// because they are variables, not constants.
+type Options struct {
+	Version   string
+	Commit    string
+	Date      string
+	UserAgent string
+}
+
+var active Options
+var outputFormat string
+
+func versionLine() string {
+	version := active.Version
+	if version == "" {
+		version = defaultVersion
+	}
+	out := program + " " + version
+	if active.Commit != "" && active.Commit != "none" {
+		out += " (" + active.Commit
+		if active.Date != "" && active.Date != "unknown" {
+			out += " " + active.Date
+		}
+		out += ")"
+	}
+	return out
+}
+
+func userAgent() string {
+	if active.UserAgent != "" {
+		return active.UserAgent
+	}
+	return ""
+}
+
+func setFormat(value string) int {
+	switch value {
+	case "human", "ai-friendly", "json", "jsonl":
+		outputFormat = value
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "error: --format must be one of human, ai-friendly, json, jsonl (got %q)\n", value)
+		return 2
+	}
+}
+
+func resolveFormat() {
+	if outputFormat != "" {
+		return
+	}
+	if env := os.Getenv(formatEnv); env != "" {
+		_ = setFormat(env)
+		if outputFormat != "" {
+			return
+		}
+	}
+	if stdoutIsTTY() {
+		outputFormat = "human"
+	} else {
+		outputFormat = "ai-friendly"
+	}
+}
+
+func peelGlobals(args []string) ([]string, int) {
+	rest := args
+	for len(rest) > 0 {
+		arg := rest[0]
+		switch {
+		case arg == "--json" || arg == "-json":
+			outputFormat = "json"
+			rest = rest[1:]
+		case arg == "--format" || arg == "-format":
+			if len(rest) < 2 {
+				fmt.Fprintln(os.Stderr, "error: --format needs a value")
+				return nil, 2
+			}
+			if code := setFormat(rest[1]); code != 0 {
+				return nil, code
+			}
+			rest = rest[2:]
+		case strings.HasPrefix(arg, "--format=") || strings.HasPrefix(arg, "-format="):
+			value := arg[strings.Index(arg, "=")+1:]
+			if code := setFormat(value); code != 0 {
+				return nil, code
+			}
+			rest = rest[1:]
+		default:
+			return rest, -1
+		}
+	}
+	return rest, -1
+}
+
 // One command and the prose its handler states.
 type cliCommand struct {
 	name    string
@@ -154,7 +249,7 @@ func editDistance(from, to string) int {
 func dispatchBooks(args []string) int {
 	group := cliGroups[0]
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "%s: missing command under %s\n", program, group.name)
+		fmt.Fprintf(os.Stderr, "error: missing command under %s\n", group.name)
 		fmt.Fprintln(os.Stderr)
 		printGroupUsage(os.Stderr, group)
 		return 2
@@ -174,7 +269,7 @@ func dispatchBooks(args []string) int {
 	case "update-book":
 		return cmdUpdateBook(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "%s: unknown command %q under %s\n", program, args[0], group.name)
+		fmt.Fprintf(os.Stderr, "error: unknown command %q under %s\n", args[0], group.name)
 		if hint := suggestCommand(args[0], group.commands); hint != "" {
 			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s %s`?\n", program, group.name, hint)
 		}
@@ -185,7 +280,14 @@ func dispatchBooks(args []string) int {
 }
 
 // Run executes one invocation and returns the process exit code.
-func Run(args []string) int {
+func Run(args []string, opts Options) int {
+	active = opts
+	rest, code := peelGlobals(args)
+	if code >= 0 {
+		return code
+	}
+	args = rest
+	resolveFormat()
 	if len(args) == 0 {
 		printRootUsage(os.Stderr)
 		return 2
@@ -195,12 +297,12 @@ func Run(args []string) int {
 		printRootUsage(os.Stdout)
 		return 0
 	case "-version", "--version":
-		fmt.Println(version)
+		fmt.Println(versionLine())
 		return 0
 	case "books":
 		return dispatchBooks(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "%s: unknown command %q\n", program, args[0])
+		fmt.Fprintf(os.Stderr, "error: unknown command %q\n", args[0])
 		if hint := suggestTopLevel(args[0]); hint != "" {
 			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s`?\n", program, hint)
 		}

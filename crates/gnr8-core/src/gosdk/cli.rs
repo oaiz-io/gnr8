@@ -10,17 +10,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use gnr8::facts::LiteralValue;
-use gnr8::sdk::SdkCli;
+use gnr8::sdk::{OwnedCommand, SdkCli};
 
 use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type, WellKnown};
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
-    flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
-    operation_prose, quoted_string_literal, reject_duplicate_command_files, reject_sse_operations,
-    request_body_models_of, success_responses_of, OperationAuthScheme, RequestBodyModel, ALL_HELP,
-    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, LIMIT_HELP,
+    flag_name, format_env_var, helper_env_var, http_auth_features_for, operation_auth_alternatives,
+    operation_prose, parameter_flag_help, quoted_string_literal, reject_duplicate_command_files,
+    reject_sse_operations, request_body_models_of, success_responses_of, OperationAuthScheme,
+    RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, FORMAT_HELP, JSON_HELP,
+    LIMIT_HELP,
 };
 use crate::CoreError;
 
@@ -126,10 +127,45 @@ fn command_files<'a>(
     Ok(files)
 }
 
+fn owned_function(command: &OwnedCommand) -> String {
+    command
+        .function
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("run{}", exported(&command.name)))
+}
+
+fn check_owned_command_names(cli: &SdkCli, ops: &[&Operation]) -> Result<(), CoreError> {
+    let groups: BTreeSet<String> = ops.iter().copied().filter_map(command_group).collect();
+    let mut commands: BTreeSet<String> = BTreeSet::new();
+    for op in ops.iter().copied() {
+        commands.insert(command_name(op));
+    }
+    for command in &cli.owned_commands {
+        if groups.contains(&command.name) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned command {:?} collides with group {:?}; rename one",
+                    cli.program, command.name, command.name
+                ),
+            });
+        }
+        if commands.contains(&command.name) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned command {:?} collides with operation command {:?}; rename one",
+                    cli.program, command.name, command.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Render the `cmd/<program>/` project for one program name.
 ///
-/// `main.go` is `package main` and does nothing but call `cli.Run`. Everything else lives in
-/// `internal/cli`, which Go's own visibility rule keeps unimportable from outside this program.
+/// `main.go` is `package main` and calls `cli.Run` with stampable `Options`. Everything else lives
+/// in `internal/cli`, which Go's own visibility rule keeps unimportable from outside this program.
 ///
 /// # Errors
 ///
@@ -143,6 +179,7 @@ pub(crate) fn emit_cli(
 ) -> Result<Vec<SdkFile>, CoreError> {
     let ops = cli_operations(graph, cli)?;
     check_cli_names(&ops, graph, &cli.program)?;
+    check_owned_command_names(cli, &ops)?;
     reject_sse_operations(&ops, &cli.program)?;
     http_auth_features_for(&ops, graph)?;
     let command_files = command_files(&ops, &cli.program)?;
@@ -160,25 +197,26 @@ pub(crate) fn emit_cli(
         })
     };
 
-    let mut files = vec![
-        SdkFile {
+    let mut files = Vec::new();
+    if cli.emit_main {
+        files.push(SdkFile {
             name: main_file(program),
-            contents: emit_main_go(module, program),
-        },
-        part("config", &|body, _imports| {
-            emit_constants(body, &ops, graph, cli)
-        })?,
-        {
-            let mut body = String::new();
-            let mut imports = ImportSet::default();
-            emit_main(&mut body, &command_files, graph, &mut imports)?;
-            imports.prune_unused(&body, package);
-            SdkFile {
-                name: internal_file(program, "cli"),
-                contents: render_internal_documented(module, package, program, &imports, &body),
-            }
-        },
-    ];
+            contents: emit_main_go(module, program, graph),
+        });
+    }
+    files.push(part("config", &|body, _imports| {
+        emit_constants(body, &ops, graph, cli)
+    })?);
+    files.push({
+        let mut body = String::new();
+        let mut imports = ImportSet::default();
+        emit_main(&mut body, &command_files, graph, cli, &mut imports)?;
+        imports.prune_unused(&body, package);
+        SdkFile {
+            name: internal_file(program, "cli"),
+            contents: render_internal_documented(module, package, program, &imports, &body),
+        }
+    });
     if !ops.is_empty() {
         files.push(part("credentials", &|body, imports| {
             if has_security(graph) {
@@ -189,17 +227,19 @@ pub(crate) fn emit_cli(
         files.push(part("flags", &|body, imports| {
             emit_shared_helpers(body, &ops, graph, cli, imports)
         })?);
-        files.push(part("output", &|body, imports| {
-            emit_print_helpers(body, imports)
-        })?);
-        files.push(part("errors", &|body, imports| {
-            emit_handle_err(body, &ops, graph, package, imports)
-        })?);
         for file in &command_files {
             files.push(part(&file.stem, &|body, imports| {
                 emit_handlers(body, &file.ops, graph, cli, package, imports)
             })?);
         }
+    }
+    files.push(part("output", &|body, imports| {
+        emit_print_helpers(body, imports)
+    })?);
+    if !ops.is_empty() || !cli.owned_commands.is_empty() {
+        files.push(part("errors", &|body, imports| {
+            emit_handle_err(body, &ops, graph, package, imports)
+        })?);
     }
     if has_request_body(&ops, graph)? {
         files.push(part("body", &|body, imports| {
@@ -211,7 +251,10 @@ pub(crate) fn emit_cli(
 }
 
 /// `cmd/<program>/main.go` — the only `package main` file, and the only thing a user runs.
-fn emit_main_go(module: &str, program: &str) -> String {
+///
+/// `version`, `commit` and `date` are variables so `-ldflags -X` can stamp a build identity.
+/// `const` cannot be stamped.
+fn emit_main_go(module: &str, program: &str, graph: &ApiGraph) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "package main");
     out.push('\n');
@@ -225,8 +268,30 @@ fn emit_main_go(module: &str, program: &str) -> String {
     );
     let _ = writeln!(out, ")");
     out.push('\n');
+    let _ = writeln!(out, "// Stamp these with -ldflags -X.");
+    let _ = writeln!(out, "var (");
+    let _ = writeln!(
+        out,
+        "\tversion = {}",
+        quoted_string_literal(
+            graph
+                .openapi_metadata
+                .version
+                .as_deref()
+                .filter(|v| !v.is_empty())
+                .unwrap_or(DEFAULT_API_VERSION)
+        )
+    );
+    let _ = writeln!(out, "\tcommit  = \"none\"");
+    let _ = writeln!(out, "\tdate    = \"unknown\"");
+    let _ = writeln!(out, ")");
+    out.push('\n');
     let _ = writeln!(out, "func main() {{");
-    let _ = writeln!(out, "os.Exit(cli.Run(os.Args[1:]))");
+    let _ = writeln!(out, "\tos.Exit(cli.Run(os.Args[1:], cli.Options{{");
+    let _ = writeln!(out, "\t\tVersion: version,");
+    let _ = writeln!(out, "\t\tCommit:  commit,");
+    let _ = writeln!(out, "\t\tDate:    date,");
+    let _ = writeln!(out, "\t}}))");
     let _ = writeln!(out, "}}");
     out
 }
@@ -338,8 +403,8 @@ fn render_file_with_clause(
 
 /// `internal/cli/cli.go` — `Run`, the command table, and the usage text.
 ///
-/// This is the only exported symbol in the package: `main.go` calls `cli.Run(os.Args[1:])` and
-/// exits with what it returns.
+/// `Run(args, Options)` is the exported entry: `main.go` stamps version variables and exits with
+/// what `Run` returns. A hand-owned `main` calls the same function.
 fn has_security(graph: &ApiGraph) -> bool {
     !graph.security.is_empty()
 }
@@ -392,16 +457,6 @@ fn pagination_policy<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a Pagi
         .pagination
         .iter()
         .find(|policy| policy.operation_id == op.id)
-}
-
-fn program_version(graph: &ApiGraph, program: &str) -> String {
-    let version = graph
-        .openapi_metadata
-        .version
-        .as_deref()
-        .filter(|version| !version.is_empty())
-        .unwrap_or(DEFAULT_API_VERSION);
-    format!("{program} {version}")
 }
 
 fn program_description(graph: &ApiGraph) -> String {
@@ -473,6 +528,10 @@ fn needs_float_list(ops: &[&Operation], graph: &ApiGraph) -> bool {
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "config constants are one gated table of generation-time facts"
+)]
 fn emit_constants(
     out: &mut String,
     ops: &[&Operation],
@@ -495,8 +554,21 @@ fn emit_constants(
     }
     writeln!(
         out,
-        "const version = {}",
-        quoted_string_literal(&program_version(graph, &cli.program))
+        "const defaultVersion = {}",
+        quoted_string_literal(
+            graph
+                .openapi_metadata
+                .version
+                .as_deref()
+                .filter(|version| !version.is_empty())
+                .unwrap_or(DEFAULT_API_VERSION)
+        )
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const formatEnv = {}",
+        quoted_string_literal(&format_env_var(&cli.program))
     )
     .map_err(sink)?;
     writeln!(
@@ -802,13 +874,13 @@ fn emit_shared_helpers(
     writeln!(out, "if errors.Is(err, flag.ErrHelp) {{").map_err(sink)?;
     writeln!(out, "return false, 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"%s: %v\\n\", program, err)").map_err(sink)?;
+    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %v\\n\", err)").map_err(sink)?;
     writeln!(out, "return false, 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if fs.NArg() > 0 {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"%s: unexpected argument %q\\n\", program, fs.Arg(0))"
+        "fmt.Fprintf(os.Stderr, \"error: unexpected argument %q\\n\", fs.Arg(0))"
     )
     .map_err(sink)?;
     writeln!(out, "return false, 2").map_err(sink)?;
@@ -832,7 +904,7 @@ fn emit_shared_helpers(
         writeln!(out, "func missingFlag(name string) int {{").map_err(sink)?;
         writeln!(
             out,
-            "fmt.Fprintf(os.Stderr, \"%s: missing required flag --%s\\n\", program, name)"
+            "fmt.Fprintf(os.Stderr, \"error: missing required flag --%s\\n\", name)"
         )
         .map_err(sink)?;
         writeln!(out, "return 2").map_err(sink)?;
@@ -852,7 +924,7 @@ fn emit_shared_helpers(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(
             out,
-            "fmt.Fprintf(os.Stderr, \"%s: invalid value %q for --%s\\n\", program, value, name)"
+            "fmt.Fprintf(os.Stderr, \"error: invalid value %q for --%s\\n\", value, name)"
         )
         .map_err(sink)?;
         writeln!(out, "return 2").map_err(sink)?;
@@ -936,9 +1008,14 @@ fn emit_client_builder(
     imports.sdk = true;
     if !has_security(graph) {
         writeln!(out, "func buildClient(baseURL string) *{package}.Client {{").map_err(sink)?;
-        writeln!(out, "return {package}.NewClient(baseURL)").map_err(sink)?;
+        writeln!(
+            out,
+            "return {package}.NewClient(baseURL, clientOptions()...)"
+        )
+        .map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
+        emit_client_options(out, package)?;
         return Ok(());
     }
     imports.add("fmt");
@@ -985,7 +1062,25 @@ fn emit_client_builder(
     }
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "opts = append(opts, clientOptions()...)").map_err(sink)?;
     writeln!(out, "return {package}.NewClient(baseURL, opts...), nil").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_client_options(out, package)?;
+    Ok(())
+}
+
+fn emit_client_options(out: &mut String, package: &str) -> Result<(), CoreError> {
+    writeln!(out, "func clientOptions() []{package}.Option {{").map_err(sink)?;
+    writeln!(out, "var opts []{package}.Option").map_err(sink)?;
+    writeln!(out, "if ua := userAgent(); ua != \"\" {{").map_err(sink)?;
+    writeln!(
+        out,
+        "opts = append(opts, {package}.WithHeader(\"User-Agent\", ua))"
+    )
+    .map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return opts").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
@@ -995,19 +1090,29 @@ fn emit_print_helpers(out: &mut String, imports: &mut ImportSet) -> Result<(), C
     imports.add("encoding/json");
     imports.add("fmt");
     imports.add("os");
+    writeln!(out, "func stdoutIsTTY() bool {{").map_err(sink)?;
+    writeln!(out, "info, err := os.Stdout.Stat()").map_err(sink)?;
+    writeln!(out, "if err != nil {{").map_err(sink)?;
+    writeln!(out, "return false").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return info.Mode()&os.ModeCharDevice != 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "func printResult(result any) int {{").map_err(sink)?;
     writeln!(out, "switch value := result.(type) {{").map_err(sink)?;
     writeln!(out, "case []byte:").map_err(sink)?;
     writeln!(out, "if _, err := os.Stdout.Write(value); err != nil {{").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"%s: %v\\n\", program, err)").map_err(sink)?;
+    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %v\\n\", err)").map_err(sink)?;
     writeln!(out, "return 1").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "return 0").map_err(sink)?;
     writeln!(out, "default:").map_err(sink)?;
     writeln!(out, "encoder := json.NewEncoder(os.Stdout)").map_err(sink)?;
+    writeln!(out, "if outputFormat != \"jsonl\" {{").map_err(sink)?;
     writeln!(out, "encoder.SetIndent(\"\", \"  \")").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if err := encoder.Encode(value); err != nil {{").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"%s: %v\\n\", program, err)").map_err(sink)?;
+    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %v\\n\", err)").map_err(sink)?;
     writeln!(out, "return 1").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "return 0").map_err(sink)?;
@@ -1092,6 +1197,17 @@ fn emit_handler(
         )
         .map_err(sink)?;
     }
+    if !prose.description.is_empty() {
+        writeln!(
+            out,
+            "fmt.Fprintln(fs.Output(), {})",
+            quoted_string_literal(&format!(
+                "\n{}",
+                prose.description.join("\n").replace('%', "%%")
+            ))
+        )
+        .map_err(sink)?;
+    }
     writeln!(
         out,
         "fmt.Fprintf(fs.Output(), {}, program)",
@@ -1159,10 +1275,29 @@ fn emit_handler(
         )
         .map_err(sink)?;
     }
+    writeln!(
+        out,
+        "jsonFlag := fs.Bool(\"json\", false, {})",
+        quoted_string_literal(JSON_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "formatFlag := fs.String(\"format\", \"\", {})",
+        quoted_string_literal(FORMAT_HELP)
+    )
+    .map_err(sink)?;
 
     writeln!(out, "parsed, code := parseFlags(fs, args)").map_err(sink)?;
     writeln!(out, "if !parsed {{").map_err(sink)?;
     writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *jsonFlag {{").map_err(sink)?;
+    writeln!(out, "outputFormat = \"json\"").map_err(sink)?;
+    writeln!(out, "}} else if *formatFlag != \"\" {{").map_err(sink)?;
+    writeln!(out, "if code := setFormat(*formatFlag); code != 0 {{").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     if handler_needs_seen(graph, op, &paging, &bodies, paged)? {
         writeln!(out, "seen := visited(fs)").map_err(sink)?;
@@ -1187,7 +1322,7 @@ fn emit_handler(
         writeln!(out, "if seen[\"body\"] && seen[\"body-file\"] {{").map_err(sink)?;
         writeln!(
             out,
-            "fmt.Fprintf(os.Stderr, \"%s: --body and --body-file are mutually exclusive\\n\", program)"
+            "fmt.Fprintf(os.Stderr, \"error: --body and --body-file are mutually exclusive\\n\")"
         )
         .map_err(sink)?;
         writeln!(out, "return 2").map_err(sink)?;
@@ -1196,7 +1331,7 @@ fn emit_handler(
             writeln!(out, "if !seen[\"body\"] && !seen[\"body-file\"] {{").map_err(sink)?;
             writeln!(
                 out,
-                "fmt.Fprintf(os.Stderr, \"%s: --body or --body-file is required\\n\", program)"
+                "fmt.Fprintf(os.Stderr, \"error: --body or --body-file is required\\n\")"
             )
             .map_err(sink)?;
             writeln!(out, "return 2").map_err(sink)?;
@@ -1314,8 +1449,9 @@ fn emit_flag_decl(
             };
             writeln!(
                 out,
-                "{ident} := fs.Float64({}, {default}, \"\")",
-                quoted_string_literal(&flag)
+                "{ident} := fs.Float64({}, {default}, {})",
+                quoted_string_literal(&flag),
+                quoted_string_literal(&flag_usage(param))
             )
             .map_err(sink)?;
         }
@@ -1505,7 +1641,7 @@ fn emit_required_and_choice_checks(
             .map_err(sink)?;
             writeln!(
                 out,
-                "fmt.Fprintf(os.Stderr, \"%s: invalid value %q for --%s\\n\", program, *{ident}, {})",
+                "fmt.Fprintf(os.Stderr, \"error: invalid value %q for --%s\\n\", *{ident}, {})",
                 quoted_string_literal(&flag)
             )
             .map_err(sink)?;
@@ -1631,7 +1767,7 @@ fn emit_params_assign(
             .map_err(sink)?;
             writeln!(
                 out,
-                "fmt.Fprintf(os.Stderr, \"%s: invalid value %q for --%s\\n\", program, *{ident}, {})",
+                "fmt.Fprintf(os.Stderr, \"error: invalid value %q for --%s\\n\", *{ident}, {})",
                 quoted_string_literal(&flag)
             )
             .map_err(sink)?;
@@ -1714,14 +1850,146 @@ fn emit_body_local(
     Ok(())
 }
 
+/// Options, format selection, and TTY detection — the invocation state `Run` fills in.
+#[expect(
+    clippy::too_many_lines,
+    reason = "format peeling and version/user-agent are one invocation-state surface"
+)]
+fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
+    writeln!(out, "// Options configures one invocation of Run.").map_err(sink)?;
+    writeln!(out, "//").map_err(sink)?;
+    writeln!(
+        out,
+        "// Version, Commit and Date are stampable via -ldflags -X on the caller's main"
+    )
+    .map_err(sink)?;
+    writeln!(out, "// because they are variables, not constants.").map_err(sink)?;
+    writeln!(out, "type Options struct {{").map_err(sink)?;
+    writeln!(out, "Version   string").map_err(sink)?;
+    writeln!(out, "Commit    string").map_err(sink)?;
+    writeln!(out, "Date      string").map_err(sink)?;
+    writeln!(out, "UserAgent string").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "var active Options").map_err(sink)?;
+    writeln!(out, "var outputFormat string").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "func versionLine() string {{").map_err(sink)?;
+    writeln!(out, "version := active.Version").map_err(sink)?;
+    writeln!(out, "if version == \"\" {{").map_err(sink)?;
+    writeln!(out, "version = defaultVersion").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "out := program + \" \" + version").map_err(sink)?;
+    writeln!(
+        out,
+        "if active.Commit != \"\" && active.Commit != \"none\" {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "out += \" (\" + active.Commit").map_err(sink)?;
+    writeln!(
+        out,
+        "if active.Date != \"\" && active.Date != \"unknown\" {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "out += \" \" + active.Date").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "out += \")\"").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return out").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "func userAgent() string {{").map_err(sink)?;
+    writeln!(out, "if active.UserAgent != \"\" {{").map_err(sink)?;
+    writeln!(out, "return active.UserAgent").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return \"\"").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "func setFormat(value string) int {{").map_err(sink)?;
+    writeln!(out, "switch value {{").map_err(sink)?;
+    writeln!(out, "case \"human\", \"ai-friendly\", \"json\", \"jsonl\":").map_err(sink)?;
+    writeln!(out, "outputFormat = value").map_err(sink)?;
+    writeln!(out, "return 0").map_err(sink)?;
+    writeln!(out, "default:").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: --format must be one of human, ai-friendly, json, jsonl (got %q)\\n\", value)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "func resolveFormat() {{").map_err(sink)?;
+    writeln!(out, "if outputFormat != \"\" {{").map_err(sink)?;
+    writeln!(out, "return").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if env := os.Getenv(formatEnv); env != \"\" {{").map_err(sink)?;
+    writeln!(out, "_ = setFormat(env)").map_err(sink)?;
+    writeln!(out, "if outputFormat != \"\" {{").map_err(sink)?;
+    writeln!(out, "return").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if stdoutIsTTY() {{").map_err(sink)?;
+    writeln!(out, "outputFormat = \"human\"").map_err(sink)?;
+    writeln!(out, "}} else {{").map_err(sink)?;
+    writeln!(out, "outputFormat = \"ai-friendly\"").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "func peelGlobals(args []string) ([]string, int) {{").map_err(sink)?;
+    writeln!(out, "rest := args").map_err(sink)?;
+    writeln!(out, "for len(rest) > 0 {{").map_err(sink)?;
+    writeln!(out, "arg := rest[0]").map_err(sink)?;
+    writeln!(out, "switch {{").map_err(sink)?;
+    writeln!(out, "case arg == \"--json\" || arg == \"-json\":").map_err(sink)?;
+    writeln!(out, "outputFormat = \"json\"").map_err(sink)?;
+    writeln!(out, "rest = rest[1:]").map_err(sink)?;
+    writeln!(out, "case arg == \"--format\" || arg == \"-format\":").map_err(sink)?;
+    writeln!(out, "if len(rest) < 2 {{").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintln(os.Stderr, \"error: --format needs a value\")"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return nil, 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if code := setFormat(rest[1]); code != 0 {{").map_err(sink)?;
+    writeln!(out, "return nil, code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "rest = rest[2:]").map_err(sink)?;
+    writeln!(
+        out,
+        "case strings.HasPrefix(arg, \"--format=\") || strings.HasPrefix(arg, \"-format=\"):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "value := arg[strings.Index(arg, \"=\")+1:]").map_err(sink)?;
+    writeln!(out, "if code := setFormat(value); code != 0 {{").map_err(sink)?;
+    writeln!(out, "return nil, code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "rest = rest[1:]").map_err(sink)?;
+    writeln!(out, "default:").map_err(sink)?;
+    writeln!(out, "return rest, -1").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return rest, -1").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
 fn emit_main(
     out: &mut String,
     command_files: &[CommandFile<'_>],
     graph: &ApiGraph,
+    cli: &SdkCli,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
     imports.add("fmt");
     imports.add("os");
+    imports.add("strings");
+
+    emit_runtime(out)?;
 
     let ungrouped: Vec<&Operation> = command_files
         .iter()
@@ -1737,12 +2005,11 @@ fn emit_main(
         })
         .collect();
 
-    emit_help_tables(out, &ungrouped, &grouped, graph)?;
-    emit_help_printers(out, &ungrouped, &grouped)?;
-    let has_root = !ungrouped.is_empty();
+    emit_help_tables(out, &ungrouped, &grouped, graph, &cli.owned_commands)?;
+    emit_help_printers(out, &ungrouped, &grouped, !cli.owned_commands.is_empty())?;
+    let has_root = !ungrouped.is_empty() || !cli.owned_commands.is_empty();
     let has_groups = !grouped.is_empty();
     if has_root || has_groups {
-        imports.add("strings");
         emit_suggestions(out, has_root, has_groups)?;
     }
 
@@ -1756,7 +2023,14 @@ fn emit_main(
         "// Run executes one invocation and returns the process exit code."
     )
     .map_err(sink)?;
-    writeln!(out, "func Run(args []string) int {{").map_err(sink)?;
+    writeln!(out, "func Run(args []string, opts Options) int {{").map_err(sink)?;
+    writeln!(out, "active = opts").map_err(sink)?;
+    writeln!(out, "rest, code := peelGlobals(args)").map_err(sink)?;
+    writeln!(out, "if code >= 0 {{").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "args = rest").map_err(sink)?;
+    writeln!(out, "resolveFormat()").map_err(sink)?;
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(out, "printRootUsage(os.Stderr)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -1766,8 +2040,12 @@ fn emit_main(
     writeln!(out, "printRootUsage(os.Stdout)").map_err(sink)?;
     writeln!(out, "return 0").map_err(sink)?;
     writeln!(out, "case \"-version\", \"--version\":").map_err(sink)?;
-    writeln!(out, "fmt.Println(version)").map_err(sink)?;
+    writeln!(out, "fmt.Println(versionLine())").map_err(sink)?;
     writeln!(out, "return 0").map_err(sink)?;
+    for command in &cli.owned_commands {
+        writeln!(out, "case {}:", quoted_string_literal(&command.name)).map_err(sink)?;
+        writeln!(out, "return {}(args[1:], active)", owned_function(command)).map_err(sink)?;
+    }
     for op in &ungrouped {
         writeln!(out, "case {}:", quoted_string_literal(&command_name(op))).map_err(sink)?;
         writeln!(out, "return cmd{}(args[1:])", operation_method_name(op)).map_err(sink)?;
@@ -1779,7 +2057,7 @@ fn emit_main(
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"%s: unknown command %q\\n\", program, args[0])"
+        "fmt.Fprintf(os.Stderr, \"error: unknown command %q\\n\", args[0])"
     )
     .map_err(sink)?;
     if has_root || has_groups {
@@ -1811,6 +2089,7 @@ fn emit_help_tables(
     ungrouped: &[&Operation],
     grouped: &BTreeMap<String, Vec<&Operation>>,
     graph: &ApiGraph,
+    owned: &[OwnedCommand],
 ) -> Result<(), CoreError> {
     writeln!(out, "// One command and the prose its handler states.").map_err(sink)?;
     writeln!(out, "type cliCommand struct {{").map_err(sink)?;
@@ -1829,8 +2108,17 @@ fn emit_help_tables(
         writeln!(out).map_err(sink)?;
     }
 
-    if !ungrouped.is_empty() {
+    if !ungrouped.is_empty() || !owned.is_empty() {
         writeln!(out, "var cliRootCommands = []cliCommand{{").map_err(sink)?;
+        for command in owned {
+            writeln!(
+                out,
+                "{{name: {}, summary: {}}},",
+                quoted_string_literal(&command.name),
+                quoted_string_literal(command.summary.as_deref().unwrap_or_default())
+            )
+            .map_err(sink)?;
+        }
         for op in ungrouped {
             emit_command_entry(out, op)?;
         }
@@ -1896,9 +2184,10 @@ fn emit_help_printers(
     out: &mut String,
     ungrouped: &[&Operation],
     grouped: &BTreeMap<String, Vec<&Operation>>,
+    has_owned: bool,
 ) -> Result<(), CoreError> {
-    emit_entry_printer(out, ungrouped, grouped)?;
-    emit_root_usage(out, ungrouped, grouped)?;
+    emit_entry_printer(out, ungrouped, grouped, has_owned)?;
+    emit_root_usage(out, ungrouped, grouped, has_owned)?;
     emit_group_usage(out, grouped)
 }
 
@@ -1907,8 +2196,9 @@ fn emit_entry_printer(
     out: &mut String,
     ungrouped: &[&Operation],
     grouped: &BTreeMap<String, Vec<&Operation>>,
+    has_owned: bool,
 ) -> Result<(), CoreError> {
-    if !ungrouped.is_empty() || !grouped.is_empty() {
+    if !ungrouped.is_empty() || !grouped.is_empty() || has_owned {
         writeln!(
             out,
             "// columnWidth is the width of the widest name in one help column."
@@ -1966,6 +2256,7 @@ fn emit_root_usage(
     out: &mut String,
     ungrouped: &[&Operation],
     grouped: &BTreeMap<String, Vec<&Operation>>,
+    has_owned: bool,
 ) -> Result<(), CoreError> {
     writeln!(out, "func printRootUsage(out *os.File) {{").map_err(sink)?;
     writeln!(out, "fmt.Fprintln(out, description)").map_err(sink)?;
@@ -1974,7 +2265,7 @@ fn emit_root_usage(
         "fmt.Fprintf(out, \"\\nUsage: %s <command> [flags]\\n\", program)"
     )
     .map_err(sink)?;
-    if !ungrouped.is_empty() {
+    if !ungrouped.is_empty() || has_owned {
         writeln!(out, "fmt.Fprintln(out, \"\\nCommands:\")").map_err(sink)?;
         writeln!(out, "printEntries(out, \"  \", cliRootCommands)").map_err(sink)?;
     }
@@ -2177,7 +2468,7 @@ fn emit_group_dispatch(
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"%s: missing command under %s\\n\", program, group.name)"
+        "fmt.Fprintf(os.Stderr, \"error: missing command under %s\\n\", group.name)"
     )
     .map_err(sink)?;
     writeln!(out, "fmt.Fprintln(os.Stderr)").map_err(sink)?;
@@ -2195,7 +2486,7 @@ fn emit_group_dispatch(
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"%s: unknown command %q under %s\\n\", program, args[0], group.name)"
+        "fmt.Fprintf(os.Stderr, \"error: unknown command %q under %s\\n\", args[0], group.name)"
     )
     .map_err(sink)?;
     writeln!(
@@ -2218,6 +2509,10 @@ fn emit_group_dispatch(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "typed errors map to one exit-code surface"
+)]
 fn emit_handle_err(
     out: &mut String,
     ops: &[&Operation],
@@ -2225,21 +2520,112 @@ fn emit_handle_err(
     package: &str,
     imports: &mut ImportSet,
 ) -> Result<(), CoreError> {
+    imports.add("encoding/json");
     imports.add("errors");
     imports.add("fmt");
     imports.add("os");
-    // Every branch matches a typed error the generated client defines.
     imports.sdk = true;
+    writeln!(out, "func exitCodeForStatus(status int) int {{").map_err(sink)?;
+    writeln!(out, "switch status {{").map_err(sink)?;
+    writeln!(out, "case 404, 410:").map_err(sink)?;
+    writeln!(out, "return 3").map_err(sink)?;
+    writeln!(out, "case 401, 403:").map_err(sink)?;
+    writeln!(out, "return 4").map_err(sink)?;
+    writeln!(out, "case 400, 409, 412, 422:").map_err(sink)?;
+    writeln!(out, "return 5").map_err(sink)?;
+    writeln!(out, "case 408, 429, 502, 503, 504:").map_err(sink)?;
+    writeln!(out, "return 6").map_err(sink)?;
+    writeln!(out, "default:").map_err(sink)?;
+    writeln!(out, "return 1").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "func kindForExit(code int) string {{").map_err(sink)?;
+    writeln!(out, "switch code {{").map_err(sink)?;
+    writeln!(out, "case 2:").map_err(sink)?;
+    writeln!(out, "return \"usage\"").map_err(sink)?;
+    writeln!(out, "case 3:").map_err(sink)?;
+    writeln!(out, "return \"not_found\"").map_err(sink)?;
+    writeln!(out, "case 4:").map_err(sink)?;
+    writeln!(out, "return \"auth\"").map_err(sink)?;
+    writeln!(out, "case 5:").map_err(sink)?;
+    writeln!(out, "return \"refused\"").map_err(sink)?;
+    writeln!(out, "case 6:").map_err(sink)?;
+    writeln!(out, "return \"retry\"").map_err(sink)?;
+    writeln!(out, "default:").map_err(sink)?;
+    writeln!(out, "return \"error\"").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "type jsonError struct {{").map_err(sink)?;
+    writeln!(out, "Error jsonErrorBody `json:\"error\"`").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "type jsonErrorBody struct {{").map_err(sink)?;
+    writeln!(out, "ExitCode  int      `json:\"exitCode\"`").map_err(sink)?;
+    writeln!(out, "Kind      string   `json:\"kind\"`").map_err(sink)?;
+    writeln!(out, "Status    int      `json:\"status,omitempty\"`").map_err(sink)?;
+    writeln!(out, "Slug      string   `json:\"slug,omitempty\"`").map_err(sink)?;
+    writeln!(out, "Message   string   `json:\"message\"`").map_err(sink)?;
+    writeln!(out, "Hints     []string `json:\"hints,omitempty\"`").map_err(sink)?;
+    writeln!(out, "RequestID string   `json:\"requestId,omitempty\"`").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(
+        out,
+        "func printError(message string, hints []string, requestID string, status, code int) int {{"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "if outputFormat == \"json\" || outputFormat == \"jsonl\" {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "payload := jsonError{{").map_err(sink)?;
+    writeln!(out, "Error: jsonErrorBody{{").map_err(sink)?;
+    writeln!(out, "ExitCode: code,").map_err(sink)?;
+    writeln!(out, "Kind: kindForExit(code),").map_err(sink)?;
+    writeln!(out, "Status: status,").map_err(sink)?;
+    writeln!(out, "Message: message,").map_err(sink)?;
+    writeln!(out, "Hints: hints,").map_err(sink)?;
+    writeln!(out, "RequestID: requestID,").map_err(sink)?;
+    writeln!(out, "}},").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "line, err := json.Marshal(payload)").map_err(sink)?;
+    writeln!(out, "if err != nil {{").map_err(sink)?;
+    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %s\\n\", message)").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "fmt.Fprintf(os.Stderr, \"%s\\n\", line)").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %s\\n\", message)").map_err(sink)?;
+    writeln!(out, "n := 1").map_err(sink)?;
+    writeln!(out, "for _, hint := range hints {{").map_err(sink)?;
+    writeln!(out, "if n >= 6 {{").map_err(sink)?;
+    writeln!(out, "break").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "fmt.Fprintf(os.Stderr, \"  hint: %s\\n\", hint)").map_err(sink)?;
+    writeln!(out, "n++").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if requestID != \"\" && n < 6 {{").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"  request id: %s\\n\", requestID)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "func handleErr(err error) int {{").map_err(sink)?;
-    if has_security(graph) {
+    if has_security(graph) && !ops.is_empty() {
         writeln!(out, "var helper *helperError").map_err(sink)?;
         writeln!(out, "if errors.As(err, &helper) {{").map_err(sink)?;
         writeln!(
             out,
-            "fmt.Fprintf(os.Stderr, \"%s: credential helper failed (%s)\\n\", program, helper.reason)"
+            "return printError(fmt.Sprintf(\"credential helper failed (%s)\", helper.reason), nil, \"\", 0, 1)"
         )
         .map_err(sink)?;
-        writeln!(out, "return 1").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out, "var authErr *{package}.AuthConfigurationError").map_err(sink)?;
         writeln!(out, "if errors.As(err, &authErr) {{").map_err(sink)?;
@@ -2249,7 +2635,7 @@ fn emit_handle_err(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(
             out,
-            "fmt.Fprintf(os.Stderr, \"%s: no credentials configured for `%s`\\n\", program, command)"
+            "fmt.Fprintf(os.Stderr, \"error: no credentials configured for `%s`\\n\", command)"
         )
         .map_err(sink)?;
         writeln!(out, "fmt.Fprintln(os.Stderr, \"  set one of:\")").map_err(sink)?;
@@ -2273,31 +2659,41 @@ fn emit_handle_err(
             "fmt.Fprintf(os.Stderr, \"  or set %s to a command that prints the secret\\n\", helperEnv)"
         )
         .map_err(sink)?;
-        writeln!(out, "return 1").map_err(sink)?;
+        writeln!(out, "return 4").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
     }
     if has_request_body(ops, graph)? {
         writeln!(out, "var input *inputError").map_err(sink)?;
         writeln!(out, "if errors.As(err, &input) {{").map_err(sink)?;
-        writeln!(
-            out,
-            "fmt.Fprintf(os.Stderr, \"%s: %s\\n\", program, input.reason)"
-        )
-        .map_err(sink)?;
-        writeln!(out, "return 2").map_err(sink)?;
+        writeln!(out, "return printError(input.reason, nil, \"\", 0, 2)").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
     }
     writeln!(out, "var apiErr *{package}.APIError").map_err(sink)?;
     writeln!(out, "if errors.As(err, &apiErr) {{").map_err(sink)?;
+    writeln!(out, "code := exitCodeForStatus(apiErr.StatusCode)").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"%s: %d %s (%s)\\n\", program, apiErr.StatusCode, apiErr.Message, apiErr.Slug)"
+        "message := fmt.Sprintf(\"%s (%d %s)\", apiErr.Message, apiErr.StatusCode, apiErr.Slug)"
     )
     .map_err(sink)?;
-    writeln!(out, "return 1").map_err(sink)?;
+    writeln!(out, "if apiErr.Message == \"\" && apiErr.Slug == \"\" {{").map_err(sink)?;
+    writeln!(
+        out,
+        "message = fmt.Sprintf(\"the API returned %d with a non-JSON body\", apiErr.StatusCode)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "if apiErr.StatusCode >= 500 {{").map_err(sink)?;
+    writeln!(out, "message += \"; retry later\"").map_err(sink)?;
+    writeln!(out, "code = 6").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"%s: %v\\n\", program, err)").map_err(sink)?;
-    writeln!(out, "return 1").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "return printError(message, apiErr.Hints, apiErr.RequestID, apiErr.StatusCode, code)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return printError(err.Error(), nil, \"\", 0, 6)").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
@@ -2363,13 +2759,16 @@ fn emit_bool_flag_decl(
 /// one failed invocation later. A source default still rides along for a `flag.Value`, which has no
 /// default for `PrintDefaults` to read.
 fn flag_usage(param: &Param) -> String {
-    let default = default_usage(param);
-    match (param.required, default.is_empty()) {
-        (false, true) => String::new(),
-        (false, false) => default,
-        (true, true) => "required".to_string(),
-        (true, false) => format!("required {default}"),
+    let mut parts = Vec::new();
+    let help = parameter_flag_help(param);
+    if !help.is_empty() {
+        parts.push(help);
     }
+    let default = default_usage(param);
+    if !default.is_empty() {
+        parts.push(default);
+    }
+    parts.join(" ")
 }
 
 fn default_usage(param: &Param) -> String {
@@ -2399,6 +2798,10 @@ fn flag_ident(param: &Param) -> String {
         || ident == "in"
         || ident == "payload"
         || ident == "baseURL"
+        || ident == "json"
+        || ident == "format"
+        || ident == "jsonFlag"
+        || ident == "formatFlag"
     {
         ident.push_str("Flag");
     }

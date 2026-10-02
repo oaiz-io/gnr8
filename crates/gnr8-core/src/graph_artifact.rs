@@ -144,6 +144,18 @@ pub(crate) fn validate_comparison_identities(graph: &ApiGraph) -> Result<(), Str
                     operation.id, parameter.location, parameter.name
                 ));
             }
+            if parameter.description.is_some()
+                && parameter
+                    .openapi_fields
+                    .iter()
+                    .any(|(name, _)| name == "description")
+            {
+                return Err(format!(
+                    "operation {:?} parameter {:?} states its description twice: as `description` \
+                     and as an OpenAPI field",
+                    operation.id, parameter.name
+                ));
+            }
             ensure_unique_strings(
                 parameter
                     .openapi_fields

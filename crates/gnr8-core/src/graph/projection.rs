@@ -542,6 +542,7 @@ mod tests {
             style: None,
             explode: None,
             allow_reserved: false,
+            description: None,
             openapi_content: Some(serde_json::json!({
                 "application/json": { "schema": reference }
             })),

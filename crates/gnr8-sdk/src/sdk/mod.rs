@@ -61,7 +61,7 @@ use std::path::PathBuf;
 use crate::graph::{ApiGraph, Diagnostic, DiagnosticCategory, SourceSpan};
 use crate::Error;
 
-pub use cli::SdkCli;
+pub use cli::{OwnedCommand, SdkCli};
 pub use docs::SdkDocs;
 pub use layout::{OperationFileSplit, SdkFileLayout};
 pub use model_style::PyModelStyle;
@@ -718,7 +718,7 @@ pub mod prelude {
         SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticFiles, TsSdk,
     };
-    pub use super::cli::SdkCli;
+    pub use super::cli::{OwnedCommand, SdkCli};
     pub use super::docs::SdkDocs;
     pub use super::layout::{OperationFileSplit, SdkFileLayout};
     pub use super::model_style::PyModelStyle;

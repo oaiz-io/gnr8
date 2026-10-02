@@ -1273,6 +1273,7 @@ fn apply_typed_parameter_override(
         style: requested.style.clone(),
         explode: requested.explode,
         allow_reserved: requested.allow_reserved,
+        description: None,
         openapi_content: None,
         openapi_fields: Vec::new(),
         provenance: span.clone(),
@@ -2258,6 +2259,7 @@ impl TransformExec for DocumentOperation {
         for operation in &ir.operations {
             if operation_selector_matches(&self.selector, operation, &base_path) {
                 check_operation_prose_conflict(operation, self)?;
+                check_parameter_prose_conflict(operation, self)?;
             }
         }
 
@@ -2269,6 +2271,7 @@ impl TransformExec for DocumentOperation {
             matched += 1;
             let operation_id = ir.operations[index].id.clone();
             apply_operation_prose(&mut ir.operations[index], self);
+            apply_parameter_prose(&mut ir.operations[index], self);
             apply_documented_error_responses(&mut ir.operations[index], &resolved_errors);
             let mut policy = policies
                 .iter()
@@ -2328,6 +2331,19 @@ impl DocumentOperationChecks for DocumentOperation {
                 "documented error response description",
                 response.description.as_deref(),
             )?;
+        }
+        let mut seen_parameters = BTreeSet::new();
+        for doc in &self.parameter_docs {
+            validate_metadata_value("parameter documentation name", &doc.name)?;
+            validate_metadata_value("parameter documentation", &doc.description)?;
+            if !seen_parameters.insert(doc.name.as_str()) {
+                return Err(CoreError::Config {
+                    message: format!(
+                        "DocumentOperation::parameter names {name:?} twice",
+                        name = doc.name
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -2405,6 +2421,51 @@ fn apply_operation_prose(operation: &mut crate::graph::Operation, update: &Docum
     }
     if update.description.is_some() {
         operation.description.clone_from(&update.description);
+    }
+}
+
+fn check_parameter_prose_conflict(
+    operation: &crate::graph::Operation,
+    update: &DocumentOperation,
+) -> Result<(), CoreError> {
+    for doc in &update.parameter_docs {
+        let Some(parameter) = operation
+            .params
+            .iter()
+            .find(|parameter| parameter.name == doc.name)
+        else {
+            return Err(CoreError::Config {
+                message: format!(
+                    "operation '{}' has no parameter named {:?}, so `DocumentOperation::parameter` \
+                     cannot document it",
+                    operation.id, doc.name
+                ),
+            });
+        };
+        if parameter.description.is_some() {
+            return Err(CoreError::Config {
+                message: format!(
+                    "operation '{}' parameter {:?} already has a description from its source (its \
+                     binding field's doc comment, or the imported spec), so \
+                     `DocumentOperation::parameter` would be a second source for one fact. Edit \
+                     the source prose instead, or drop this parameter from the transform.",
+                    operation.id, doc.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn apply_parameter_prose(operation: &mut crate::graph::Operation, update: &DocumentOperation) {
+    for doc in &update.parameter_docs {
+        if let Some(parameter) = operation
+            .params
+            .iter_mut()
+            .find(|parameter| parameter.name == doc.name)
+        {
+            parameter.description = Some(doc.description.clone());
+        }
     }
 }
 
@@ -2968,7 +3029,7 @@ impl TargetExec for GoSdk {
             });
         }
         if let Some(cli) = &self.cli {
-            validate_gosdk_cli(&cli.program)?;
+            validate_gosdk_cli(cli)?;
         }
         let projected = crate::graph::projection::for_generation(ir)?;
         let ir = &*projected;
@@ -3089,7 +3150,7 @@ impl TargetExec for PySdk {
             });
         }
         if let Some(cli) = &self.cli {
-            validate_pysdk_cli(&cli.program, self.package_metadata)?;
+            validate_pysdk_cli(cli, self.package_metadata)?;
         }
         let projected = crate::graph::projection::for_generation(ir)?;
         let ir = &*projected;
@@ -3747,8 +3808,15 @@ fn validate_cli_program(target: &str, program: &str) -> Result<(), CoreError> {
 ///
 /// Combining `.cli(...)` with `.source_only()` / `.package_metadata(false)` is a contradiction:
 /// without `pyproject.toml` there is nowhere for `[project.scripts]` to go.
-fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreError> {
-    validate_cli_program("PySdk", program)?;
+fn validate_pysdk_cli(cli: &gnr8::sdk::SdkCli, package_metadata: bool) -> Result<(), CoreError> {
+    validate_cli_program("PySdk", &cli.program)?;
+    if !cli.emit_main || !cli.owned_commands.is_empty() {
+        return Err(CoreError::Config {
+            message: "hand-owned main and owned commands are a Go CLI library seam; PySdk::cli \
+                      does not emit them"
+                .to_string(),
+        });
+    }
     if !package_metadata {
         return Err(CoreError::Config {
             message: "PySdk::cli(...) requires package metadata so [project.scripts] can be written; do not combine .cli(...) with .source_only() or .package_metadata(false)".to_string(),
@@ -3763,8 +3831,24 @@ fn validate_pysdk_cli(program: &str, package_metadata: bool) -> Result<(), CoreE
 /// `package main` that compiles without `go.mod` being the thing that registers it, so `.cli()`
 /// does **not** require package metadata — the asymmetry with [`validate_pysdk_cli`] is
 /// intentional and documented on [`GoSdk::cli`].
-fn validate_gosdk_cli(program: &str) -> Result<(), CoreError> {
-    validate_cli_program("GoSdk", program)
+fn validate_gosdk_cli(cli: &gnr8::sdk::SdkCli) -> Result<(), CoreError> {
+    validate_cli_program("GoSdk", &cli.program)?;
+    let mut seen = BTreeSet::new();
+    for command in &cli.owned_commands {
+        validate_cli_program("SdkCli::owned_command", &command.name)?;
+        if !seen.insert(command.name.as_str()) {
+            return Err(CoreError::Config {
+                message: format!("SdkCli::owned_command names {:?} twice", command.name),
+            });
+        }
+        if let Some(function) = &command.function {
+            validate_metadata_value("owned command function", function)?;
+        }
+        if let Some(summary) = &command.summary {
+            validate_metadata_value("owned command summary", summary)?;
+        }
+    }
+    Ok(())
 }
 
 fn write_sdk_files(
@@ -4977,6 +5061,7 @@ mod tests {
             style: None,
             explode: None,
             allow_reserved: false,
+            description: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: span(),

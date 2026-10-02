@@ -4296,6 +4296,7 @@ mod tests {
                 style: None,
                 explode: None,
                 allow_reserved,
+                description: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: SourceSpan {
@@ -4538,6 +4539,7 @@ mod tests {
                 style: None,
                 explode: None,
                 allow_reserved: false,
+                description: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: crate::graph::SourceSpan {
@@ -4834,6 +4836,7 @@ mod tests {
                 style: None,
                 explode: None,
                 allow_reserved: false,
+                description: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: crate::graph::SourceSpan {
@@ -4881,6 +4884,7 @@ mod tests {
                 style: None,
                 explode: None,
                 allow_reserved: false,
+                description: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: crate::graph::SourceSpan {

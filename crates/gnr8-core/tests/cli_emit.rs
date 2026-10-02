@@ -118,15 +118,20 @@ fn gofmt_available() -> bool {
 }
 
 fn generate_go_cli(graph: &ApiGraph, program: &str) -> String {
+    generate_go_cli_with(graph, SdkCli::new(program))
+}
+
+fn generate_go_cli_with(graph: &ApiGraph, cli: SdkCli) -> String {
+    let program = cli.program.clone();
     let mut out = Artifacts::new();
     GoSdk::new()
         .module("example.com/bookstore/sdk")
         .to("generated/sdk-go")
         .without_contract_tests()
-        .cli(program)
+        .cli(cli)
         .generate(graph, &mut out, &cx(), None)
         .expect("GoSdk with .cli() must generate");
-    go_cli_source(&out, "generated/sdk-go", program)
+    go_cli_source(&out, "generated/sdk-go", &program)
 }
 
 fn generate_go_cli_result(
@@ -876,8 +881,14 @@ fn go_parser_declares_subcommands_and_flags() {
     assert!(text.contains("\"body\""), "{text}");
     assert!(text.contains("\"body-file\""), "{text}");
     assert!(text.contains("\"base-url\""), "{text}");
+    assert!(text.contains("const defaultVersion = \"0.1.0\""), "{text}");
     assert!(
-        text.contains("const version = \"bookstore 0.1.0\""),
+        text.contains("func Run(args []string, opts Options) int"),
+        "{text}"
+    );
+    assert!(text.contains("var ("), "{text}");
+    assert!(
+        text.contains("os.Exit(cli.Run(os.Args[1:], cli.Options{"),
         "{text}"
     );
     assert!(
@@ -1710,17 +1721,29 @@ fn one_query_param_graph(name: &str) -> ApiGraph {
 
 #[test]
 fn a_flag_no_command_binds_no_longer_blocks_generation() {
-    // `--json` is bound by neither emitter: output is unconditionally JSON. `--limit`/`--all` are
-    // bound only on a paginated command, `--body`/`--body-file` only where there is a request body,
-    // and `--version` on the root parser, which is not a command. Reserving these unconditionally
-    // cost a legitimate parameter, and the only remedy was changing the API's wire contract.
-    for name in ["json", "limit", "all", "body", "body_file", "version"] {
+    // `--json` and `--format` are reserved globals. `--limit`/`--all` are bound only on a
+    // paginated command, `--body`/`--body-file` only where there is a request body, and
+    // `--version` on the root parser, which is not a command.
+    for name in ["limit", "all", "body", "body_file", "version"] {
         let graph = one_query_param_graph(name);
         let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
         let flag = name.replace('_', "-");
         assert!(
             text.contains(&format!("\"--{flag}\",")),
             "--{flag} must be available to a parameter no command shadows:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn json_and_format_are_reserved_command_flags() {
+    for name in ["json", "format"] {
+        let graph = one_query_param_graph(name);
+        let error = generate_cli_result(&graph, SdkCli::new("bookstore")).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("--{name}")),
+            "--{name} is a reserved global:\n{message}"
         );
     }
 }
@@ -2860,4 +2883,123 @@ fn a_group_is_described_by_the_name_its_operations_carry() {
         text.contains("\"Event type definitions\","),
         "the source spelling of the group is what carries its prose: {text}"
     );
+}
+
+#[test]
+fn json_and_format_flags_are_emitted() {
+    let text = generate_cli_with(&bookstore_graph(), SdkCli::new("bookstore"));
+    assert!(text.contains("\"--json\","), "{text}");
+    assert!(text.contains("\"--format\","), "{text}");
+    assert!(text.contains("FORMAT_ENV"), "{text}");
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli(&bookstore_graph(), "bookstore");
+    assert!(go.contains("\"json\""), "{go}");
+    assert!(go.contains("\"format\""), "{go}");
+    assert!(go.contains("peelGlobals"), "{go}");
+}
+
+#[test]
+fn parameter_description_reaches_cli_help() {
+    use gnr8_engine::sdk::TransformExec as _;
+    let mut graph = bookstore_graph();
+    DocumentOperation::when(OperationSelector::operation("getBook"))
+        .parameter("book_id", "The book's identifier.")
+        .apply(&mut graph, &cx())
+        .expect("documenting a parameter with no source prose");
+    let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
+    assert!(
+        text.contains("The book's identifier."),
+        "Python --help must print the parameter's prose:\n{text}"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli(&graph, "bookstore");
+    assert!(
+        go.contains("The book's identifier."),
+        "Go --help must print the parameter's prose:\n{go}"
+    );
+}
+
+#[test]
+fn document_operation_parameter_collision_is_an_error() {
+    use gnr8_engine::sdk::TransformExec as _;
+    let mut graph = bookstore_graph();
+    DocumentOperation::when(OperationSelector::operation("getBook"))
+        .parameter("book_id", "first")
+        .apply(&mut graph, &cx())
+        .expect("first write");
+    let err = DocumentOperation::when(OperationSelector::operation("getBook"))
+        .parameter("book_id", "second")
+        .apply(&mut graph, &cx())
+        .expect_err("a second source for one parameter is a hard error");
+    let message = err.to_string();
+    assert!(message.contains("book_id"), "{message}");
+    assert!(
+        message.contains("DocumentOperation::parameter") || message.contains("second source"),
+        "{message}"
+    );
+}
+
+#[test]
+fn document_operation_parameter_unknown_name_is_an_error() {
+    use gnr8_engine::sdk::TransformExec as _;
+    let mut graph = bookstore_graph();
+    let err = DocumentOperation::when(OperationSelector::operation("getBook"))
+        .parameter("no_such_param", "prose")
+        .apply(&mut graph, &cx())
+        .expect_err("a name the operation does not carry is a configuration error");
+    let message = err.to_string();
+    assert!(message.contains("no_such_param"), "{message}");
+}
+
+#[test]
+fn python_cli_rejects_owned_commands_and_hand_owned_main() {
+    let owned = generate_cli_result(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").owned_command("login"),
+    )
+    .unwrap_err();
+    assert!(owned.to_string().contains("Go CLI library seam"), "{owned}");
+    let main = generate_cli_result(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").hand_owned_main(),
+    )
+    .unwrap_err();
+    assert!(main.to_string().contains("Go CLI library seam"), "{main}");
+}
+
+#[test]
+fn go_hand_owned_main_skips_main_go_and_owned_command_is_dispatched() {
+    if skip_go() {
+        return;
+    }
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(
+            SdkCli::new("bookstore")
+                .hand_owned_main()
+                .owned_command(OwnedCommand::new("login").summary("Sign in")),
+        )
+        .generate(&bookstore_graph(), &mut out, &cx(), None)
+        .expect("GoSdk owned-command generation");
+    assert!(
+        out.files()
+            .iter()
+            .all(|file| !file.path.ends_with("/main.go")),
+        "hand-owned main must not emit main.go: {:?}",
+        out.files()
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>()
+    );
+    let text = go_cli_source(&out, "generated/sdk-go", "bookstore");
+    assert!(text.contains("case \"login\":"), "{text}");
+    assert!(text.contains("return runLogin(args[1:], active)"), "{text}");
+    assert!(text.contains("\"Sign in\""), "{text}");
 }

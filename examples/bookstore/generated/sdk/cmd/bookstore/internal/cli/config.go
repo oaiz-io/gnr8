@@ -3,7 +3,8 @@ package cli
 
 const program = "bookstore"
 const defaultBaseURL = "http://127.0.0.1:8080"
-const version = "bookstore 0.1.0"
+const defaultVersion = "0.1.0"
+const formatEnv = "BOOKSTORE_FORMAT"
 const description = "Bookstore API"
 const helperEnv = "BOOKSTORE_CREDENTIAL_HELPER"
 

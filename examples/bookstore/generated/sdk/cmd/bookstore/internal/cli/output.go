@@ -7,19 +7,29 @@ import (
 	"os"
 )
 
+func stdoutIsTTY() bool {
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
 func printResult(result any) int {
 	switch value := result.(type) {
 	case []byte:
 		if _, err := os.Stdout.Write(value); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", program, err)
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 1
 		}
 		return 0
 	default:
 		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
+		if outputFormat != "jsonl" {
+			encoder.SetIndent("", "  ")
+		}
 		if err := encoder.Encode(value); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", program, err)
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 1
 		}
 		return 0

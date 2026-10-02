@@ -5839,3 +5839,87 @@ func (s Server) rawCookie(c *gin.Context) {
 
 // The header name the provenance fixture declares as a Go constant.
 const sessionHeaderConstant = "X-Session-ID"
+
+// A bound parameter's prose is the binding field's own doc comment, read as plain prose:
+// the Go "Name " lead-in is dropped exactly as it is for handler prose, a field with no
+// doc comment has no description, and a trailing line comment is not a doc comment.
+func TestBoundParameterDescriptionIsTheFieldDocComment(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), `module example.com/paramdocs
+
+go 1.22
+
+require github.com/gin-gonic/gin v0.0.0
+
+replace github.com/gin-gonic/gin => ./ginstub
+`)
+	if err := os.Mkdir(filepath.Join(dir, "ginstub"), 0o755); err != nil {
+		t.Fatalf("mkdir ginstub: %v", err)
+	}
+	mustWrite(t, filepath.Join(dir, "ginstub", "go.mod"), "module github.com/gin-gonic/gin\n\ngo 1.22\n")
+	mustWrite(t, filepath.Join(dir, "ginstub", "gin.go"), `package gin
+
+type HandlerFunc func(*Context)
+type Engine struct{}
+type Context struct{}
+
+func (e *Engine) GET(string, HandlerFunc) {}
+func (c *Context) ShouldBindQuery(any) error { return nil }
+func (c *Context) ShouldBindUri(any) error { return nil }
+func (c *Context) JSON(int, any) {}
+`)
+	mustWrite(t, filepath.Join(dir, "app.go"), `package paramdocs
+
+import "github.com/gin-gonic/gin"
+
+type Query struct {
+	// Genre narrows the list to one genre.
+	//
+	// Omit it to list every genre.
+	Genre string `+"`form:\"genre\"`"+`
+	Cursor string `+"`form:\"cursor\"`"+` // not a doc comment
+}
+
+type URI struct {
+	// The book's identifier.
+	ID string `+"`uri:\"id\" binding:\"required\"`"+`
+}
+
+type Server struct{ R *gin.Engine }
+type Result struct { OK bool `+"`json:\"ok\"`"+` }
+
+func (s Server) Register() {
+	s.R.GET("/books/:id", s.get)
+}
+
+func (s Server) get(c *gin.Context) {
+	var query Query
+	var uri URI
+	_ = c.ShouldBindQuery(&query)
+	_ = c.ShouldBindUri(&uri)
+	c.JSON(200, Result{OK: true})
+}
+`)
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load param doc fixture: %v", err)
+	}
+	diagnostics := diag.New()
+	analyzer := handlers.NewAnalyzer(res, "example.com/paramdocs", diagnostics)
+	var code handlers.CodeFacts
+	for _, route := range routes.Recognize(res) {
+		code = analyzer.Analyze(route, diagnostics)
+	}
+	genre, ok := paramByName(code.Params, "genre")
+	if !ok || genre.Description != "Narrows the list to one genre.\n\nOmit it to list every genre." {
+		t.Fatalf("genre description = %q", genre.Description)
+	}
+	cursor, _ := paramByName(code.Params, "cursor")
+	if cursor.Description != "" {
+		t.Fatalf("a trailing line comment is not a doc comment: %q", cursor.Description)
+	}
+	id, _ := paramByName(code.Params, "id")
+	if id.Description != "The book's identifier." {
+		t.Fatalf("id description = %q", id.Description)
+	}
+}

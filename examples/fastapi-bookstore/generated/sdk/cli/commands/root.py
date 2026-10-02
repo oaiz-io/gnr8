@@ -32,6 +32,20 @@ def register(subparsers: Any) -> None:
         default=DEFAULT_BASE_URL,
     )
     cmd_list_books.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print the server body (shorthand for --format json)",
+    )
+    cmd_list_books.add_argument(
+        "--format",
+        dest="format",
+        choices=("human", "ai-friendly", "json", "jsonl"),
+        default=argparse.SUPPRESS,
+        help="output format: human, ai-friendly, json, or jsonl",
+    )
+    cmd_list_books.add_argument(
         "--cursor",
         dest="cursor",
     )
@@ -39,6 +53,7 @@ def register(subparsers: Any) -> None:
         "--genre",
         dest="genre",
         required=True,
+        help="required",
     )
     cmd_list_books.add_argument(
         "--sort",
@@ -58,6 +73,20 @@ def register(subparsers: Any) -> None:
         dest="base_url",
         help="host to send requests to (default: http://127.0.0.1:8000)",
         default=DEFAULT_BASE_URL,
+    )
+    cmd_create_book.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print the server body (shorthand for --format json)",
+    )
+    cmd_create_book.add_argument(
+        "--format",
+        dest="format",
+        choices=("human", "ai-friendly", "json", "jsonl"),
+        default=argparse.SUPPRESS,
+        help="output format: human, ai-friendly, json, or jsonl",
     )
     cmd_create_book_body = cmd_create_book.add_mutually_exclusive_group(required=True)
     cmd_create_book_body.add_argument(
@@ -86,10 +115,25 @@ def register(subparsers: Any) -> None:
         default=DEFAULT_BASE_URL,
     )
     cmd_get_book.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print the server body (shorthand for --format json)",
+    )
+    cmd_get_book.add_argument(
+        "--format",
+        dest="format",
+        choices=("human", "ai-friendly", "json", "jsonl"),
+        default=argparse.SUPPRESS,
+        help="output format: human, ai-friendly, json, or jsonl",
+    )
+    cmd_get_book.add_argument(
         "--book-id",
         dest="book_id",
         required=True,
         type=int,
+        help="required",
     )
     cmd_get_book.add_argument(
         "--fmt",
@@ -112,10 +156,25 @@ def register(subparsers: Any) -> None:
         default=DEFAULT_BASE_URL,
     )
     cmd_update_book.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print the server body (shorthand for --format json)",
+    )
+    cmd_update_book.add_argument(
+        "--format",
+        dest="format",
+        choices=("human", "ai-friendly", "json", "jsonl"),
+        default=argparse.SUPPRESS,
+        help="output format: human, ai-friendly, json, or jsonl",
+    )
+    cmd_update_book.add_argument(
         "--book-id",
         dest="book_id",
         required=True,
         type=int,
+        help="required",
     )
     cmd_update_book_body = cmd_update_book.add_mutually_exclusive_group(required=True)
     cmd_update_book_body.add_argument(

@@ -2095,11 +2095,11 @@ def run(argv):
 
 # Port 1 is bound by nothing: urllib raises URLError, which is an OSError.
 code, stderr = run(["get-book", "--book-id", "1", "--base-url", "http://127.0.0.1:1"])
-assert code == 1, (code, stderr)
+assert code == 6, (code, stderr)
 assert "Traceback" not in stderr, stderr
 lines = [line for line in stderr.splitlines() if line.strip()]
 assert len(lines) == 1, stderr
-assert lines[0].startswith("bookstore: "), stderr
+assert lines[0].startswith("error: "), stderr
 
 code, stderr = run(["create-book", "--body", "{oops", "--base-url", "http://127.0.0.1:1"])
 assert code == 2, (code, stderr)

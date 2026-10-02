@@ -1779,7 +1779,7 @@ fn generated_cli_go_shows_a_default_without_sending_it() {
     );
 
     let (code, _, stderr) = run_cli(&dir, "bookstore", &["list-books"], &[]);
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 6, "{stderr}");
     assert!(
         !stderr.contains("page_size"),
         "an omitted flag must not put its default on the wire: {stderr}"
@@ -1795,7 +1795,7 @@ fn generated_cli_go_shows_a_default_without_sending_it() {
         &["list-books", "--page-size", "5", "--verified"],
         &[],
     );
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 6, "{stderr}");
     assert!(
         stderr.contains("page_size=5"),
         "a supplied flag must be sent: {stderr}"
@@ -1849,7 +1849,7 @@ fn generated_cli_go_uses_the_declared_base_url() {
     );
     // With a default compiled in, omitting the flag reaches the network instead of failing usage.
     let (code, _, stderr) = run_cli(&dir, "bookstore", &["get-book", "--book-id", "1"], &[]);
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 6, "{stderr}");
     assert!(stderr.contains("127.0.0.1:1"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1918,13 +1918,13 @@ fn generated_cli_error_paths_are_diagnostics_with_documented_exit_codes() {
         ],
         &[],
     );
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 6, "{stderr}");
     let lines: Vec<&str> = stderr
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
     assert_eq!(lines.len(), 1, "{stderr}");
-    assert!(lines[0].starts_with("bookstore:"), "{stderr}");
+    assert!(lines[0].starts_with("error:"), "{stderr}");
     assert!(!stderr.contains("panic:"), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&dir);

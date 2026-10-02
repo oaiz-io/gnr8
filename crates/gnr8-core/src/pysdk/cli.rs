@@ -16,10 +16,10 @@ use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
     check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
-    flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
-    operation_prose, reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
-    OperationAuthScheme, RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP,
-    LIMIT_HELP,
+    flag_name, format_env_var, helper_env_var, http_auth_features_for, operation_auth_alternatives,
+    operation_prose, parameter_flag_help, reject_duplicate_command_files, reject_sse_operations,
+    request_body_models_of, OperationAuthScheme, RequestBodyModel, ALL_HELP, BASE_URL_HELP,
+    BODY_FILE_HELP, BODY_HELP, FORMAT_HELP, JSON_HELP, LIMIT_HELP,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -398,7 +398,11 @@ fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<Str
     writeln!(
         out,
         "{}",
-        py_docstring("Rendering a result on stdout: JSON for a document, raw bytes for a file.")
+        py_docstring(
+            "Rendering a result on stdout and an error on stderr.\n\n`--format` selects JSON \
+             indent; `--json` is the JSON shorthand.\nErrors print `error:` plus optional hints \
+             and a request id, at most six lines.",
+        )
     )
     .map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -408,12 +412,15 @@ fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<Str
         writeln!(out, "import dataclasses").map_err(sink)?;
     }
     writeln!(out, "import json").map_err(sink)?;
+    writeln!(out, "import os").map_err(sink)?;
     writeln!(out, "import sys").map_err(sink)?;
-    writeln!(out, "from typing import Any").map_err(sink)?;
+    writeln!(out, "from typing import Any, Optional").map_err(sink)?;
     if model_style == PyModelStyle::Pydantic && has_object_schema(graph) {
         writeln!(out).map_err(sink)?;
         writeln!(out, "from pydantic import BaseModel").map_err(sink)?;
     }
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from .config import FORMAT_ENV").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     emit_print_helpers(&mut out, graph, model_style)?;
@@ -598,6 +605,12 @@ fn emit_constants(
         out,
         "VERSION = {}",
         py_string_literal(&program_version(graph, &cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "FORMAT_ENV = {}",
+        py_string_literal(&format_env_var(&cli.program))
     )
     .map_err(sink)?;
     writeln!(
@@ -838,11 +851,18 @@ fn emit_client_builder(out: &mut String, graph: &ApiGraph) -> Result<(), CoreErr
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "format selection, error layout, and print_result are one stdout/stderr surface"
+)]
 fn emit_print_helpers(
     out: &mut String,
     graph: &ApiGraph,
     model_style: PyModelStyle,
 ) -> Result<(), CoreError> {
+    writeln!(out, "OUTPUT_FORMAT = \"\"").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "def _jsonable(value: Any) -> Any:").map_err(sink)?;
     if model_style == PyModelStyle::Pydantic && has_object_schema(graph) {
         writeln!(out, "    if isinstance(value, BaseModel):").map_err(sink)?;
@@ -867,13 +887,113 @@ fn emit_print_helpers(
     writeln!(out, "    return value").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    writeln!(
+        out,
+        "def resolve_format(json_flag: bool, format_flag: Optional[str]) -> None:"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    global OUTPUT_FORMAT").map_err(sink)?;
+    writeln!(out, "    if json_flag:").map_err(sink)?;
+    writeln!(out, "        OUTPUT_FORMAT = \"json\"").map_err(sink)?;
+    writeln!(out, "        return").map_err(sink)?;
+    writeln!(out, "    if format_flag:").map_err(sink)?;
+    writeln!(out, "        OUTPUT_FORMAT = format_flag").map_err(sink)?;
+    writeln!(out, "        return").map_err(sink)?;
+    writeln!(out, "    env = os.getenv(FORMAT_ENV, \"\")").map_err(sink)?;
+    writeln!(
+        out,
+        "    if env in (\"human\", \"ai-friendly\", \"json\", \"jsonl\"):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        OUTPUT_FORMAT = env").map_err(sink)?;
+    writeln!(out, "        return").map_err(sink)?;
+    writeln!(
+        out,
+        "    OUTPUT_FORMAT = \"human\" if sys.stdout.isatty() else \"ai-friendly\""
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "def exit_code_for_status(status: int) -> int:").map_err(sink)?;
+    writeln!(out, "    if status in (404, 410):").map_err(sink)?;
+    writeln!(out, "        return 3").map_err(sink)?;
+    writeln!(out, "    if status in (401, 403):").map_err(sink)?;
+    writeln!(out, "        return 4").map_err(sink)?;
+    writeln!(out, "    if status in (400, 409, 412, 422):").map_err(sink)?;
+    writeln!(out, "        return 5").map_err(sink)?;
+    writeln!(out, "    if status in (408, 429, 502, 503, 504):").map_err(sink)?;
+    writeln!(out, "        return 6").map_err(sink)?;
+    writeln!(out, "    return 1").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "def kind_for_exit(code: int) -> str:").map_err(sink)?;
+    writeln!(out, "    if code == 2:").map_err(sink)?;
+    writeln!(out, "        return \"usage\"").map_err(sink)?;
+    writeln!(out, "    if code == 3:").map_err(sink)?;
+    writeln!(out, "        return \"not_found\"").map_err(sink)?;
+    writeln!(out, "    if code == 4:").map_err(sink)?;
+    writeln!(out, "        return \"auth\"").map_err(sink)?;
+    writeln!(out, "    if code == 5:").map_err(sink)?;
+    writeln!(out, "        return \"refused\"").map_err(sink)?;
+    writeln!(out, "    if code == 6:").map_err(sink)?;
+    writeln!(out, "        return \"retry\"").map_err(sink)?;
+    writeln!(out, "    return \"error\"").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "def print_error(").map_err(sink)?;
+    writeln!(out, "    message: str,").map_err(sink)?;
+    writeln!(out, "    hints: Optional[list[str]] = None,").map_err(sink)?;
+    writeln!(out, "    request_id: str = \"\",").map_err(sink)?;
+    writeln!(out, "    status: int = 0,").map_err(sink)?;
+    writeln!(out, "    code: int = 1,").map_err(sink)?;
+    writeln!(out, ") -> int:").map_err(sink)?;
+    writeln!(out, "    hints = hints or []").map_err(sink)?;
+    writeln!(out, "    if OUTPUT_FORMAT in (\"json\", \"jsonl\"):").map_err(sink)?;
+    writeln!(out, "        body: dict[str, Any] = {{").map_err(sink)?;
+    writeln!(out, "            \"exitCode\": code,").map_err(sink)?;
+    writeln!(out, "            \"kind\": kind_for_exit(code),").map_err(sink)?;
+    writeln!(out, "            \"message\": message,").map_err(sink)?;
+    writeln!(out, "        }}").map_err(sink)?;
+    writeln!(out, "        if status:").map_err(sink)?;
+    writeln!(out, "            body[\"status\"] = status").map_err(sink)?;
+    writeln!(out, "        if hints:").map_err(sink)?;
+    writeln!(out, "            body[\"hints\"] = hints").map_err(sink)?;
+    writeln!(out, "        if request_id:").map_err(sink)?;
+    writeln!(out, "            body[\"requestId\"] = request_id").map_err(sink)?;
+    writeln!(
+        out,
+        "        print(json.dumps({{\"error\": body}}, separators=(\",\", \":\")), file=sys.stderr)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        return code").map_err(sink)?;
+    writeln!(out, "    print(f\"error: {{message}}\", file=sys.stderr)").map_err(sink)?;
+    writeln!(out, "    n = 1").map_err(sink)?;
+    writeln!(out, "    for hint in hints:").map_err(sink)?;
+    writeln!(out, "        if n >= 6:").map_err(sink)?;
+    writeln!(out, "            break").map_err(sink)?;
+    writeln!(out, "        print(f\"  hint: {{hint}}\", file=sys.stderr)").map_err(sink)?;
+    writeln!(out, "        n += 1").map_err(sink)?;
+    writeln!(out, "    if request_id and n < 6:").map_err(sink)?;
+    writeln!(
+        out,
+        "        print(f\"  request id: {{request_id}}\", file=sys.stderr)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    return code").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "def print_result(result: Any) -> None:").map_err(sink)?;
     writeln!(out, "    if isinstance(result, (bytes, bytearray)):").map_err(sink)?;
     writeln!(out, "        sys.stdout.buffer.write(result)").map_err(sink)?;
     writeln!(out, "        return").map_err(sink)?;
     writeln!(
         out,
-        "    json.dump(_jsonable(result), sys.stdout, indent=2)"
+        "    indent: Optional[int] = None if OUTPUT_FORMAT == \"jsonl\" else 2"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "    json.dump(_jsonable(result), sys.stdout, indent=indent)"
     )
     .map_err(sink)?;
     writeln!(out, "    sys.stdout.write(\"\\n\")").map_err(sink)?;
@@ -1051,6 +1171,7 @@ fn emit_parser_module(modules: &[CommandModule<'_>], cli: &SdkCli) -> Result<Str
     writeln!(out, "        action=\"version\",").map_err(sink)?;
     writeln!(out, "        version=VERSION,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
+    emit_format_flags(&mut out, "parser", true)?;
     if modules.is_empty() {
         writeln!(out, "    return parser").map_err(sink)?;
         return Ok(finish(out));
@@ -1232,6 +1353,7 @@ fn emit_command_parser(
         writeln!(out, "        required=True,").map_err(sink)?;
     }
     writeln!(out, "    )").map_err(sink)?;
+    emit_format_flags(out, &ident, false)?;
     let idents = resolve_op_args_for(op, graph)?;
     let paging = paging_param_names(graph, op);
     for param in &op.params {
@@ -1306,7 +1428,7 @@ fn emit_flag(
         writeln!(out, "        dest={},", py_string_literal(dest)).map_err(sink)?;
         writeln!(out, "        action=\"store_true\",").map_err(sink)?;
         writeln!(out, "        default=None,").map_err(sink)?;
-        emit_default_help(out, param)?;
+        emit_flag_help(out, param)?;
         writeln!(out, "    )").map_err(sink)?;
         writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
         writeln!(
@@ -1327,25 +1449,53 @@ fn emit_flag(
         writeln!(out, "        required=True,").map_err(sink)?;
     }
     emit_flag_type_kwargs(out, graph, &param.schema)?;
-    emit_default_help(out, param)?;
+    emit_flag_help(out, param)?;
     writeln!(out, "    )").map_err(sink)?;
     Ok(())
 }
 
-/// State a parameter's source default in `--help`, and nowhere else.
-///
-/// `OpenAPI` says the Schema Object's `default` "documents the receiver's behavior rather than
-/// inserting the value into the data", and JSON Schema files it under annotations with no directive
-/// to insert it anywhere. So the CLI shows it and does not send it: an omitted flag produces the
-/// same request the SDK's own method produces, and the server applies its own default. Binding it
-/// as `default=` would make an omitted flag indistinguishable from a user who typed the value, and
-/// would pin every CLI caller to today's value if the server's changed.
-fn emit_default_help(out: &mut String, param: &Param) -> Result<(), CoreError> {
-    let Some(default) = &param.default else {
+/// The usage string for one parameter flag: its own prose, then whether it is required,
+/// then a source default. A default is shown and never sent.
+fn emit_flag_help(out: &mut String, param: &Param) -> Result<(), CoreError> {
+    let mut parts = Vec::new();
+    let help = parameter_flag_help(param);
+    if !help.is_empty() {
+        parts.push(help);
+    }
+    if let Some(default) = &param.default {
+        parts.push(format!("default: {}", literal_python(default)));
+    }
+    if parts.is_empty() {
         return Ok(());
-    };
-    let text = argparse_help_text(&format!("default: {}", literal_python(default)));
+    }
+    let text = argparse_help_text(&parts.join(" "));
     writeln!(out, "        help={},", py_string_literal(&text)).map_err(sink)?;
+    Ok(())
+}
+
+fn emit_format_flags(out: &mut String, parser: &str, root: bool) -> Result<(), CoreError> {
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"--json\",").map_err(sink)?;
+    writeln!(out, "        dest=\"json\",").map_err(sink)?;
+    writeln!(out, "        action=\"store_true\",").map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(JSON_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"--format\",").map_err(sink)?;
+    writeln!(out, "        dest=\"format\",").map_err(sink)?;
+    writeln!(
+        out,
+        "        choices=(\"human\", \"ai-friendly\", \"json\", \"jsonl\"),"
+    )
+    .map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(FORMAT_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
     Ok(())
 }
 
@@ -1469,8 +1619,8 @@ fn emit_main_module(ops: &[&Operation], graph: &ApiGraph) -> Result<String, Core
         out,
         "{}",
         py_docstring(
-            "Dispatch and exit codes.\n\n0 on success, 1 for a failed request, 2 for a usage or \
-             input error."
+            "Dispatch and exit codes.\n\n0 on success, 2 for usage, 3 not found, 4 auth, 5 refused,\n\
+             6 retry later, 1 for any other failed request."
         )
     )
     .map_err(sink)?;
@@ -1481,7 +1631,8 @@ fn emit_main_module(ops: &[&Operation], graph: &ApiGraph) -> Result<String, Core
     writeln!(out, "from typing import Optional").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     let mut imports = vec![
-        "from .output import print_result".to_string(),
+        "from .output import exit_code_for_status, print_error, print_result, resolve_format"
+            .to_string(),
         "from .parser import build_parser".to_string(),
     ];
     if has_security(graph) {
@@ -1489,12 +1640,9 @@ fn emit_main_module(ops: &[&Operation], graph: &ApiGraph) -> Result<String, Core
         imports.push("from .credentials import HelperError".to_string());
         // The "no credentials configured" diagnostic names the command and every variable that
         // would satisfy it, so the tables are read here rather than in credentials.py.
-        imports.push(
-            "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELPER_ENV, PROGRAM".to_string(),
-        );
+        imports.push("from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELPER_ENV".to_string());
     } else {
         imports.push("from ..errors import ApiError".to_string());
-        imports.push("from .config import PROGRAM".to_string());
     }
     if has_request_body(ops, graph)? {
         imports.push("from .body import InputError".to_string());
@@ -1510,6 +1658,11 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "def main(argv: Optional[list[str]] = None) -> int:").map_err(sink)?;
     writeln!(out, "    parser = build_parser()").map_err(sink)?;
     writeln!(out, "    args = parser.parse_args(argv)").map_err(sink)?;
+    writeln!(
+        out,
+        "    resolve_format(bool(getattr(args, \"json\", False)), getattr(args, \"format\", None))"
+    )
+    .map_err(sink)?;
     writeln!(out, "    handler = getattr(args, \"_handler\", None)").map_err(sink)?;
     writeln!(out, "    if handler is None:").map_err(sink)?;
     writeln!(out, "        parser.print_help(sys.stderr)").map_err(sink)?;
@@ -1519,15 +1672,27 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "        print_result(result)").map_err(sink)?;
     writeln!(out, "        return 0").map_err(sink)?;
     writeln!(out, "    except ApiError as exc:").map_err(sink)?;
-    writeln!(out, "        print(").map_err(sink)?;
+    writeln!(out, "        code = exit_code_for_status(exc.status_code)").map_err(sink)?;
     writeln!(
         out,
-        "            f\"{{PROGRAM}}: {{exc.status_code}} {{exc.message}} ({{exc.slug}})\","
+        "        message = f\"{{exc.message}} ({{exc.status_code}} {{exc.slug}})\""
     )
     .map_err(sink)?;
-    writeln!(out, "            file=sys.stderr,").map_err(sink)?;
-    writeln!(out, "        )").map_err(sink)?;
-    writeln!(out, "        return 1").map_err(sink)?;
+    writeln!(out, "        if not exc.message and not exc.slug:").map_err(sink)?;
+    writeln!(
+        out,
+        "            message = f\"the API returned {{exc.status_code}} with a non-JSON body\""
+    )
+    .map_err(sink)?;
+    writeln!(out, "            if exc.status_code >= 500:").map_err(sink)?;
+    writeln!(out, "                message += \"; retry later\"").map_err(sink)?;
+    writeln!(out, "                code = 6").map_err(sink)?;
+    writeln!(out, "        hints = [str(hint) for hint in exc.hints]").map_err(sink)?;
+    writeln!(
+        out,
+        "        return print_error(message, hints, exc.request_id, exc.status_code, code)"
+    )
+    .map_err(sink)?;
     if has_security(graph) {
         writeln!(out, "    except AuthConfigurationError as exc:").map_err(sink)?;
         writeln!(
@@ -1535,14 +1700,11 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
             "        command = COMMAND_BY_ID.get(exc.operation_id, exc.operation_id)"
         )
         .map_err(sink)?;
-        writeln!(out, "        print(").map_err(sink)?;
         writeln!(
             out,
-            "            f\"{{PROGRAM}}: no credentials configured for `{{command}}`\","
+            "        print(f\"error: no credentials configured for `{{command}}`\", file=sys.stderr)"
         )
         .map_err(sink)?;
-        writeln!(out, "            file=sys.stderr,").map_err(sink)?;
-        writeln!(out, "        )").map_err(sink)?;
         writeln!(out, "        print(\"  set one of:\", file=sys.stderr)").map_err(sink)?;
         writeln!(out, "        names: list[str] = []").map_err(sink)?;
         writeln!(out, "        for alternative in exc.alternatives:").map_err(sink)?;
@@ -1572,37 +1734,23 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
         .map_err(sink)?;
         writeln!(out, "            file=sys.stderr,").map_err(sink)?;
         writeln!(out, "        )").map_err(sink)?;
-        writeln!(out, "        return 1").map_err(sink)?;
+        writeln!(out, "        return 4").map_err(sink)?;
         writeln!(out, "    except HelperError as exc:").map_err(sink)?;
-        writeln!(out, "        print(").map_err(sink)?;
         writeln!(
             out,
-            "            f\"{{PROGRAM}}: credential helper failed ({{exc.reason}})\","
+            "        return print_error(f\"credential helper failed ({{exc.reason}})\", code=1)"
         )
         .map_err(sink)?;
-        writeln!(out, "            file=sys.stderr,").map_err(sink)?;
-        writeln!(out, "        )").map_err(sink)?;
-        writeln!(out, "        return 1").map_err(sink)?;
     }
     if has_request_body(ops, graph)? {
         writeln!(out, "    except InputError as exc:").map_err(sink)?;
-        writeln!(
-            out,
-            "        print(f\"{{PROGRAM}}: {{exc.reason}}\", file=sys.stderr)"
-        )
-        .map_err(sink)?;
-        writeln!(out, "        return 2").map_err(sink)?;
+        writeln!(out, "        return print_error(exc.reason, code=2)").map_err(sink)?;
     }
     // `urllib.error.URLError` — a refused connection, an unresolvable host, a timeout — is an
     // `OSError`, and so is every read the CLI itself performs. A generated program that prints a
     // Python traceback because a server is down is not a command-line program.
     writeln!(out, "    except OSError as exc:").map_err(sink)?;
-    writeln!(
-        out,
-        "        print(f\"{{PROGRAM}}: {{exc}}\", file=sys.stderr)"
-    )
-    .map_err(sink)?;
-    writeln!(out, "        return 1").map_err(sink)?;
+    writeln!(out, "        return print_error(str(exc), code=6)").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())

@@ -15,15 +15,25 @@ func cmdListBooks(args []string) int {
 	fs := flag.NewFlagSet("list-books", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books list-books — Returns every book in the catalogue.\n", program)
+		fmt.Fprintln(fs.Output(), "\nPass a genre to narrow the results to one genre; omit it to list everything.")
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books list-books [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	genre := fs.String("genre", "", "")
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
+	}
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
 	}
 	seen := visited(fs)
 	ctx := context.Background()
@@ -46,6 +56,7 @@ func cmdCreateBook(args []string) int {
 	fs := flag.NewFlagSet("create-book", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books create-book — Adds a book to the catalogue.\n", program)
+		fmt.Fprintln(fs.Output(), "\nThe book is stored immediately and returned with its generated identifier.")
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books create-book [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
@@ -53,17 +64,26 @@ func cmdCreateBook(args []string) int {
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	body := fs.String("body", "", "request body, as an inline JSON document")
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
 	}
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
 	seen := visited(fs)
 	if seen["body"] && seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "%s: --body and --body-file are mutually exclusive\n", program)
+		fmt.Fprintf(os.Stderr, "error: --body and --body-file are mutually exclusive\n")
 		return 2
 	}
 	if !seen["body"] && !seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "%s: --body or --body-file is required\n", program)
+		fmt.Fprintf(os.Stderr, "error: --body or --body-file is required\n")
 		return 2
 	}
 	ctx := context.Background()
@@ -100,9 +120,18 @@ func cmdDeleteBook(args []string) int {
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	id := fs.String("id", "", "required")
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
+	}
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
 	}
 	seen := visited(fs)
 	if !seen["id"] {
@@ -131,9 +160,18 @@ func cmdGetBook(args []string) int {
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	id := fs.String("id", "", "required")
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
+	}
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
 	}
 	seen := visited(fs)
 	if !seen["id"] {
@@ -156,6 +194,7 @@ func cmdUpdateBook(args []string) int {
 	fs := flag.NewFlagSet("update-book", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books update-book — Replaces the mutable fields of one book.\n", program)
+		fmt.Fprintln(fs.Output(), "\nFields omitted from the payload keep their current values.")
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books update-book [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
@@ -164,20 +203,29 @@ func cmdUpdateBook(args []string) int {
 	id := fs.String("id", "", "required")
 	body := fs.String("body", "", "request body, as an inline JSON document")
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
+	}
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
 	}
 	seen := visited(fs)
 	if !seen["id"] {
 		return missingFlag("id")
 	}
 	if seen["body"] && seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "%s: --body and --body-file are mutually exclusive\n", program)
+		fmt.Fprintf(os.Stderr, "error: --body and --body-file are mutually exclusive\n")
 		return 2
 	}
 	if !seen["body"] && !seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "%s: --body or --body-file is required\n", program)
+		fmt.Fprintf(os.Stderr, "error: --body or --body-file is required\n")
 		return 2
 	}
 	ctx := context.Background()

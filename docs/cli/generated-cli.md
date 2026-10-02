@@ -38,6 +38,8 @@ is written.
 | `SdkCli::new(program)` | the name it is invoked as |
 | [`base_url(url)`](#the-host-the-program-talks-to) | the host it talks to unless `--base-url` says otherwise |
 | [`commands(selector)`](#command-scope) | which operations become commands |
+| `hand_owned_main()` | skip emitting `main.go`; a hand-owned `main` calls `Run` (Go only) |
+| `owned_command(...)` | a root command whose implementation is hand-owned and never generated (Go only) |
 
 `.cli("bookstore")` is still accepted — a program name converts into an `SdkCli` — so a program that
 needs nothing but a name says nothing but a name. `SdkCli` is unrelated to gnr8's own CLI.
@@ -94,13 +96,13 @@ it finds there.
 
 ```text
 <sdk dir>/cmd/<program>/
-  main.go                     package main: os.Exit(cli.Run(os.Args[1:]))
+  main.go                     package main: stamp version vars, os.Exit(cli.Run(args, Options))
   internal/cli/
-    cli.go                    Run, the dispatch tree, the usage text
+    cli.go                    Run(args, Options), the dispatch tree, the usage text
     config.go                 every fact fixed at generation time
     credentials.go            env var + helper resolution, and buildClient
     flags.go                  the flag.Value types and the parse helpers
-    output.go                 printResult
+    output.go                 printResult and TTY detection
     body.go                   loadBody               (only where a body exists)
     errors.go                 handleErr: every typed error to its exit code
     <group>.go                one group's commands
@@ -109,7 +111,8 @@ it finds there.
 
 `internal/` is Go's own visibility rule, not a convention: the package is importable from
 `cmd/<program>/...` and nowhere else, so splitting the program up does not widen anything's API.
-`Run` is the only exported symbol. Standard library only, plus the sibling generated client.
+`Run` and `Options` are the exported symbols. `version`, `commit` and `date` in `main.go` are
+variables so `-ldflags -X` can stamp them. Standard library only, plus the sibling generated client.
 `flag.NewFlagSet` per subcommand, `os.Args[1]` dispatch, `encoding/json` on stdout, `os/exec` for the
 credential helper (`CommandContext`, 10s timeout, stdin nil, stderr discarded, first stdout line
 only). Every file is `gofmt`-normalized through the same seam the rest of the Go SDK uses, and
@@ -269,17 +272,18 @@ The last class matters because the emitted program would not start at all: Go's 
 name already in use, and `argparse` raises `ArgumentError` while building the parser, so even
 `--help` fails.
 
-Reserved flags are computed per command from what that command actually binds: `help` and
-`base-url` always; `body`/`body-file` where the operation has a request body; `limit`/`all` where a
-`PaginationPolicy` names it; and `no-<flag>` for each boolean parameter. Nothing else is reserved —
-`--version` is bound on the root parser, which is not a command, and `--json` is bound by neither
-emitter because output is unconditionally JSON. A parameter named `json`, `limit`, `version` or
-`body` on a command that does not bind that flag is therefore fine.
+Reserved flags are computed per command from what that command actually binds: `help`, `base-url`,
+`format` and `json` always; `body`/`body-file` where the operation has a request body; `limit`/`all`
+where a `PaginationPolicy` names it; and `no-<flag>` for each boolean parameter. `--version` is
+bound on the root parser, which is not a command. A parameter named `json` or `format` is therefore
+a generation error: those flags select the output format.
 
 ## Flag defaults in `--help`
 
-Per-flag prose is not emitted: a parameter's own description is not a fact the graph carries. What a
-flag's `--help` does carry is whether omitting it is an error, and a source default.
+A parameter's `--help` line is its own description (the graph fact: the binding field's doc comment,
+the imported spec's `description`, or `DocumentOperation::parameter` when the source has neither),
+then whether omitting it is an error, then a source default. Whitespace in the description collapses
+to one line because both `flag.PrintDefaults` and argparse `help=` render one line per flag.
 
 A required flag says `required`. The command already refuses to run without it; saying so in
 `--help` puts that where the reader is looking instead of one failed invocation later. Python states
@@ -287,7 +291,7 @@ the same fact through `argparse`'s own `required=True`.
 
 ```text
   -id string
-    	required
+    	The book's identifier. required
 ```
 
 | | Where the default appears | Why |
@@ -397,22 +401,30 @@ alias bkls='bookstore list-books'
 
 ## Output and exit codes
 
-| Code | When | Where |
-|---|---|---|
-| 0 | success | JSON on stdout (`indent=2`); binary bodies on `sys.stdout.buffer` |
-| 1 | `ApiError` | `bookstore: 404 not found (book.missing)` on stderr |
-| 1 | missing credentials | names the env vars that would satisfy the command |
-| 1 | helper failure | `bookstore: credential helper failed (exit 1)` on stderr |
-| 1 | transport failure | `bookstore: <urlopen error [Errno 111] Connection refused>` on stderr |
-| 2 | usage | argparse's own message on stderr |
-| 2 | a required flag was omitted | `bookstore: missing required flag --base-url` on stderr |
-| 2 | unreadable or malformed body | `bookstore: body is not valid JSON: ...` on stderr |
+`--format human|ai-friendly|json|jsonl` selects how a success is printed. `--json` is shorthand for
+`--format json`. `{PROG}_FORMAT` is the environment default when neither flag is set. A TTY stdout
+defaults to `human`; anything else defaults to `ai-friendly`. Until the dedicated renderers land,
+`human`, `ai-friendly` and `json` all print indented JSON (the same document `printResult` always
+printed); `jsonl` is compact.
 
-`--help` and `--version` go to stdout and exit 0. Every one of those is a single line of prose:
-a wrong `--base-url`, a mistyped `--body` and a missing `--body-file` are the errors a human hits
-first, and a generated program answers them with a diagnostic rather than a Python traceback. A
-response the SDK cannot decode is the exception — that is the API disagreeing with the SDK, and it
-surfaces raw.
+Errors print `error:` plus the message, then optional `hint:` lines and a `request id:`, at most six
+lines. Under `--json`/`--format json` the same facts are one JSON object on stderr. Exit codes name
+the caller's next action:
+
+| Code | When |
+|---|---|
+| 0 | success |
+| 1 | a failed request that is none of the classes below |
+| 2 | usage: missing/unknown flags, malformed `--body`, unknown command |
+| 3 | not found (HTTP 404/410) |
+| 4 | auth: missing credentials, HTTP 401/403 |
+| 5 | refused (HTTP 400/409/412/422) |
+| 6 | retry later: transport failure, HTTP 408/429/5xx |
+| 130 | interrupted (SIGINT; not emitted yet) |
+
+`--help` and `--version` go to stdout and exit 0. A wrong `--base-url`, a mistyped `--body` and a
+missing `--body-file` are the errors a human hits first, and a generated program answers them with a
+diagnostic rather than a stack trace.
 
 ## Credentials
 

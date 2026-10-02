@@ -21,11 +21,11 @@ func parseFlags(fs *flag.FlagSet, args []string) (bool, int) {
 		if errors.Is(err, flag.ErrHelp) {
 			return false, 0
 		}
-		fmt.Fprintf(os.Stderr, "%s: %v\n", program, err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return false, 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "%s: unexpected argument %q\n", program, fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", fs.Arg(0))
 		return false, 2
 	}
 	return true, 0
@@ -38,6 +38,6 @@ func visited(fs *flag.FlagSet) map[string]bool {
 }
 
 func missingFlag(name string) int {
-	fmt.Fprintf(os.Stderr, "%s: missing required flag --%s\n", program, name)
+	fmt.Fprintf(os.Stderr, "error: missing required flag --%s\n", name)
 	return 2
 }
