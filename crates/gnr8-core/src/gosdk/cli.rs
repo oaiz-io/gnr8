@@ -16,9 +16,10 @@ use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type, Wel
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    body_field_flags, check_cli_names, cli_operations, command_invocation, command_sub_noun,
-    command_topic, command_verb, command_view, credential_env_var, debug_env_var, file_stem,
-    flag_name, format_env_var, helper_env_var, http_auth_features_for, is_positional_param,
+    body_field_flags, check_cli_names, cli_operations, command_docs_url, command_examples,
+    command_invocation, command_output_note, command_see_also, command_sub_noun, command_topic,
+    command_verb, command_view, credential_env_var, debug_env_var, file_stem, flag_name,
+    format_env_var, help_spec_json, helper_env_var, http_auth_features_for, is_positional_param,
     no_input_env_var, operation_auth_alternatives, operation_prose, output_dir_env_var,
     parameter_flag_help, positional_names, positional_usage, quoted_string_literal,
     reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
@@ -604,6 +605,12 @@ fn emit_constants(
         out,
         "const description = {}",
         quoted_string_literal(&program_description(graph))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const helpSpecJSON = {}",
+        quoted_string_literal(&help_spec_json(cli, ops, graph)?)
     )
     .map_err(sink)?;
     if has_security(graph) && !ops.is_empty() {
@@ -2074,6 +2081,52 @@ fn emit_handlers(
     Ok(())
 }
 
+fn emit_help_extras(
+    out: &mut String,
+    cli: &SdkCli,
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Result<(), CoreError> {
+    let examples = command_examples(cli, op);
+    if !examples.is_empty() {
+        writeln!(out, "fmt.Fprintln(fs.Output(), \"\\nExamples:\")").map_err(sink)?;
+        for example in examples {
+            writeln!(
+                out,
+                "fmt.Fprintln(fs.Output(), {})",
+                quoted_string_literal(&format!("  {example}"))
+            )
+            .map_err(sink)?;
+        }
+    }
+    if let Some(note) = command_output_note(cli, graph, op) {
+        writeln!(
+            out,
+            "fmt.Fprintln(fs.Output(), {})",
+            quoted_string_literal(&format!("\nOutput\n  {note}"))
+        )
+        .map_err(sink)?;
+    }
+    let see_also = command_see_also(cli, op);
+    if !see_also.is_empty() {
+        writeln!(
+            out,
+            "fmt.Fprintln(fs.Output(), {})",
+            quoted_string_literal(&format!("\nSee also  {}", see_also.join(", ")))
+        )
+        .map_err(sink)?;
+    }
+    if let Some(url) = command_docs_url(cli, op) {
+        writeln!(
+            out,
+            "fmt.Fprintln(fs.Output(), {})",
+            quoted_string_literal(&format!("\nDocs      {url}"))
+        )
+        .map_err(sink)?;
+    }
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "each generated command is one linear flag-parse → client-call sequence"
@@ -2156,8 +2209,31 @@ fn emit_handler(
         quoted_string_literal(&usage)
     )
     .map_err(sink)?;
+    if !positionals.is_empty() {
+        writeln!(out, "fmt.Fprintln(fs.Output(), \"\\nArguments:\")").map_err(sink)?;
+        for name in positionals {
+            let help = op
+                .params
+                .iter()
+                .find(|param| param.name == *name)
+                .map(parameter_flag_help)
+                .unwrap_or_default();
+            let line = if help.is_empty() {
+                format!("  <{name}>")
+            } else {
+                format!("  <{name}>  {help}")
+            };
+            writeln!(
+                out,
+                "fmt.Fprintln(fs.Output(), {})",
+                quoted_string_literal(&line)
+            )
+            .map_err(sink)?;
+        }
+    }
     writeln!(out, "fmt.Fprintln(fs.Output(), \"\\nFlags:\")").map_err(sink)?;
     writeln!(out, "fs.PrintDefaults()").map_err(sink)?;
+    emit_help_extras(out, cli, graph, op)?;
     writeln!(out, "}}").map_err(sink)?;
     if cli.base_url.is_some() {
         writeln!(
@@ -3535,6 +3611,8 @@ fn emit_main(
     writeln!(out, "case \"-version\", \"--version\":").map_err(sink)?;
     writeln!(out, "fmt.Println(versionLine())").map_err(sink)?;
     writeln!(out, "return 0").map_err(sink)?;
+    writeln!(out, "case \"help\":").map_err(sink)?;
+    writeln!(out, "return printHelp(args[1:])").map_err(sink)?;
     for command in &cli.owned_commands {
         writeln!(out, "case {}:", quoted_string_literal(&command.name)).map_err(sink)?;
         writeln!(out, "return {}(args[1:], active)", owned_function(command)).map_err(sink)?;
@@ -3571,6 +3649,37 @@ fn emit_main(
     writeln!(out, "printRootUsage(os.Stderr)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_print_help(out)?;
+    Ok(())
+}
+
+fn emit_print_help(out: &mut String) -> Result<(), CoreError> {
+    writeln!(out, "func printHelp(args []string) int {{").map_err(sink)?;
+    writeln!(out, "jsonOut := outputFormat == \"json\"").map_err(sink)?;
+    writeln!(out, "rest := make([]string, 0, len(args))").map_err(sink)?;
+    writeln!(out, "for _, arg := range args {{").map_err(sink)?;
+    writeln!(out, "if arg == \"--json\" {{").map_err(sink)?;
+    writeln!(out, "jsonOut = true").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "rest = append(rest, arg)").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if jsonOut {{").map_err(sink)?;
+    writeln!(out, "fmt.Println(helpSpecJSON)").map_err(sink)?;
+    writeln!(out, "return 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if len(rest) == 0 {{").map_err(sink)?;
+    writeln!(out, "printRootUsage(os.Stdout)").map_err(sink)?;
+    writeln!(out, "return 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "next := append(append([]string{{}}, rest...), \"--help\")"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return Run(next, active)").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())

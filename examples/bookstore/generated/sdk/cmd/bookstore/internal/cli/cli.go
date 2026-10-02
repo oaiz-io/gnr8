@@ -398,6 +398,8 @@ func Run(args []string, opts Options) int {
 	case "-version", "--version":
 		fmt.Println(versionLine())
 		return 0
+	case "help":
+		return printHelp(args[1:])
 	case "books":
 		return dispatchBooks(args[1:])
 	default:
@@ -409,4 +411,26 @@ func Run(args []string, opts Options) int {
 		printRootUsage(os.Stderr)
 		return 2
 	}
+}
+
+func printHelp(args []string) int {
+	jsonOut := outputFormat == "json"
+	rest := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOut = true
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	if jsonOut {
+		fmt.Println(helpSpecJSON)
+		return 0
+	}
+	if len(rest) == 0 {
+		printRootUsage(os.Stdout)
+		return 0
+	}
+	next := append(append([]string{}, rest...), "--help")
+	return Run(next, active)
 }

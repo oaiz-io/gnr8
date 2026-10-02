@@ -15,9 +15,10 @@ use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type};
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    body_field_flags, check_cli_names, cli_operations, command_invocation, command_sub_noun,
-    command_topic, command_verb, credential_env_var, debug_env_var, file_stem, flag_name,
-    format_env_var, helper_env_var, http_auth_features_for, is_positional_param, no_input_env_var,
+    body_field_flags, check_cli_names, cli_operations, command_docs_url, command_examples,
+    command_invocation, command_output_note, command_see_also, command_sub_noun, command_topic,
+    command_verb, credential_env_var, debug_env_var, file_stem, flag_name, format_env_var,
+    help_spec_json, helper_env_var, http_auth_features_for, is_positional_param, no_input_env_var,
     operation_auth_alternatives, operation_prose, output_dir_env_var, parameter_flag_help,
     positional_names, reject_duplicate_command_files, reject_sse_operations,
     request_body_models_of, response_field_names, OperationAuthScheme, RequestBodyModel, ALL_HELP,
@@ -159,6 +160,42 @@ fn emit_string_kwarg(
         }
     }
     writeln!(out, "{pad}),").map_err(sink)?;
+    Ok(())
+}
+
+/// Write `NAME = <python string>` wrapping with implicit concatenation so the line stays at 88 columns.
+fn emit_string_assign(out: &mut String, name: &str, value: &str) -> Result<(), CoreError> {
+    let literal = py_string_literal(value);
+    let line = format!("{name} = {literal}");
+    if line.len() <= 88 {
+        writeln!(out, "{line}").map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "{name} = (").map_err(sink)?;
+    let inner = "    ";
+    let mut rest = value;
+    while !rest.is_empty() {
+        let min = rest.chars().next().map_or(0, char::len_utf8);
+        let budget = 88usize.saturating_sub(inner.len());
+        let mut take = rest.len().min(budget.max(min));
+        while take > min && !rest.is_char_boundary(take) {
+            take -= 1;
+        }
+        loop {
+            let chunk = rest.get(..take).unwrap_or(rest);
+            let literal = py_string_literal(chunk);
+            if inner.len() + literal.len() <= 88 || take <= min {
+                writeln!(out, "{inner}{literal}").map_err(sink)?;
+                rest = &rest[chunk.len()..];
+                break;
+            }
+            take -= 1;
+            while take > min && !rest.is_char_boundary(take) {
+                take -= 1;
+            }
+        }
+    }
+    writeln!(out, ")").map_err(sink)?;
     Ok(())
 }
 
@@ -654,6 +691,7 @@ fn emit_constants(
         py_string_literal(&program_description(graph))
     )
     .map_err(sink)?;
+    emit_string_assign(out, "HELP_SPEC", &help_spec_json(cli, ops, graph)?)?;
     if has_security(graph) {
         writeln!(
             out,
@@ -2022,6 +2060,15 @@ fn emit_command_parser(
         };
         emit_string_kwarg(out, 8, "description", &description)?;
     }
+    let epilog = python_help_epilog(cli, graph, op);
+    if !epilog.is_empty() {
+        emit_string_kwarg(out, 8, "epilog", &argparse_help_text(&epilog))?;
+        writeln!(
+            out,
+            "        formatter_class=argparse.RawDescriptionHelpFormatter,"
+        )
+        .map_err(sink)?;
+    }
     writeln!(out, "    )").map_err(sink)?;
     writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
     writeln!(out, "        \"--base-url\",").map_err(sink)?;
@@ -2172,6 +2219,30 @@ fn emit_command_parser(
     }
     writeln!(out, "    )").map_err(sink)?;
     Ok(())
+}
+
+fn python_help_epilog(cli: &SdkCli, graph: &ApiGraph, op: &Operation) -> String {
+    let mut sections = Vec::new();
+    let examples = command_examples(cli, op);
+    if !examples.is_empty() {
+        let mut block = String::from("Examples:");
+        for example in examples {
+            block.push_str("\n  ");
+            block.push_str(example);
+        }
+        sections.push(block);
+    }
+    if let Some(note) = command_output_note(cli, graph, op) {
+        sections.push(format!("Output\n  {note}"));
+    }
+    let see_also = command_see_also(cli, op);
+    if !see_also.is_empty() {
+        sections.push(format!("See also  {}", see_also.join(", ")));
+    }
+    if let Some(url) = command_docs_url(cli, op) {
+        sections.push(format!("Docs      {url}"));
+    }
+    sections.join("\n\n")
 }
 
 /// Escape prose for argparse's `help=`, which is a format string and not a literal.
@@ -2466,11 +2537,12 @@ fn emit_main_module(
         // The "no credentials configured" diagnostic names the command and every variable that
         // would satisfy it, so the tables are read here rather than in credentials.py.
         imports.push(
-            "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELPER_ENV, PROGRAM".to_string(),
+            "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELPER_ENV, HELP_SPEC, PROGRAM"
+                .to_string(),
         );
     } else {
         imports.push("from ..errors import ApiError".to_string());
-        imports.push("from .config import PROGRAM".to_string());
+        imports.push("from .config import HELP_SPEC, PROGRAM".to_string());
     }
     if has_request_body(ops, graph)? {
         imports.push("from .body import InputError".to_string());
@@ -2529,11 +2601,41 @@ fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> 
     reason = "dispatch, format/preflight, and every failure class share one main()"
 )]
 fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(), CoreError> {
+    writeln!(out, "def _print_help(argv: list[str]) -> int:").map_err(sink)?;
+    writeln!(out, "    json_out = False").map_err(sink)?;
+    writeln!(out, "    rest: list[str] = []").map_err(sink)?;
+    writeln!(out, "    for arg in argv:").map_err(sink)?;
+    writeln!(out, "        if arg == \"--json\":").map_err(sink)?;
+    writeln!(out, "            json_out = True").map_err(sink)?;
+    writeln!(out, "            continue").map_err(sink)?;
+    writeln!(out, "        rest.append(arg)").map_err(sink)?;
+    writeln!(out, "    if json_out:").map_err(sink)?;
+    writeln!(out, "        print(HELP_SPEC)").map_err(sink)?;
+    writeln!(out, "        return 0").map_err(sink)?;
+    writeln!(out, "    parser = build_parser()").map_err(sink)?;
+    writeln!(out, "    if not rest:").map_err(sink)?;
+    writeln!(out, "        parser.print_help()").map_err(sink)?;
+    writeln!(out, "        return 0").map_err(sink)?;
+    writeln!(out, "    try:").map_err(sink)?;
+    writeln!(out, "        parser.parse_args([*rest, \"--help\"])").map_err(sink)?;
+    writeln!(out, "    except SystemExit as exc:").map_err(sink)?;
+    writeln!(out, "        if exc.code in (0, None):").map_err(sink)?;
+    writeln!(out, "            return 0").map_err(sink)?;
+    writeln!(
+        out,
+        "        return exc.code if isinstance(exc.code, int) else 1"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    return 0").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "def main(argv: Optional[list[str]] = None) -> int:").map_err(sink)?;
     writeln!(out, "    argv = sys.argv[1:] if argv is None else argv").map_err(sink)?;
     writeln!(out, "    code = _check_rename(argv)").map_err(sink)?;
     writeln!(out, "    if code:").map_err(sink)?;
     writeln!(out, "        return code").map_err(sink)?;
+    writeln!(out, "    if argv and argv[0] == \"help\":").map_err(sink)?;
+    writeln!(out, "        return _print_help(argv[1:])").map_err(sink)?;
     writeln!(out, "    parser = build_parser()").map_err(sink)?;
     writeln!(out, "    args = parser.parse_args(argv)").map_err(sink)?;
     writeln!(out, "    output.apply_globals(args)").map_err(sink)?;

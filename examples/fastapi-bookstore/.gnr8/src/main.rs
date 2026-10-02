@@ -57,17 +57,27 @@ fn bookstore_cli() -> SdkCli {
         .topic(
             CliTopic::new("books")
                 .concept("Browse and manage the catalogue")
-                .command(CliCommand::operation("list_books", "list"))
+                .command(
+                    CliCommand::operation("list_books", "list")
+                        .example("bookstore books list --genre fiction")
+                        .see_also(["books get"])
+                        .docs_url("https://example.com/cli/books/list"),
+                )
                 .command(
                     CliCommand::operation("get_book", "get")
                         .positional("book_id")
-                        .selector(CliSelector::new("list_books", "id", "id")),
+                        .selector(CliSelector::new("list_books", "id", "id"))
+                        .example("bookstore books get 1"),
                 )
-                .command(CliCommand::operation("create_book", "create"))
+                .command(
+                    CliCommand::operation("create_book", "create")
+                        .example("bookstore books create --body '{\"title\":\"Dune\"}'"),
+                )
                 .command(
                     CliCommand::operation("update_book", "update")
                         .positional("book_id")
-                        .body_fields(),
+                        .body_fields()
+                        .example("bookstore books update 1 --title Dune"),
                 ),
         )
         .rename_error(CliRenameError::new(["books", "list-books"], "books list"))

@@ -12,7 +12,7 @@ from typing import Optional
 from ..errors import ApiError
 from . import output
 from .body import InputError
-from .config import PROGRAM
+from .config import HELP_SPEC, PROGRAM
 from .parser import build_parser
 
 
@@ -31,11 +31,37 @@ def _check_rename(argv: list[str]) -> int:
     return 0
 
 
+def _print_help(argv: list[str]) -> int:
+    json_out = False
+    rest: list[str] = []
+    for arg in argv:
+        if arg == "--json":
+            json_out = True
+            continue
+        rest.append(arg)
+    if json_out:
+        print(HELP_SPEC)
+        return 0
+    parser = build_parser()
+    if not rest:
+        parser.print_help()
+        return 0
+    try:
+        parser.parse_args([*rest, "--help"])
+    except SystemExit as exc:
+        if exc.code in (0, None):
+            return 0
+        return exc.code if isinstance(exc.code, int) else 1
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     code = _check_rename(argv)
     if code:
         return code
+    if argv and argv[0] == "help":
+        return _print_help(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     output.apply_globals(args)

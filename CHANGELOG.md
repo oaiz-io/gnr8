@@ -37,6 +37,9 @@ must move the minor version.
   into `{itemsKey: […], "hasMore": …}` instead of a bare array, so `--json` is not the last page's
   body. `--page-size` is a rename error naming `--limit`. A `ConfigurePagination` cursor policy
   seeds `--cursor` onto the request.
+- **Help layout and `help --json`.** A declared command spec prints Arguments, Examples, Output,
+  See also, and Docs on `--help`. Generation fails when a spec command has no example.
+  `help --json` prints the command spec, including each flag's type and enum members.
 
 ### Changed
 

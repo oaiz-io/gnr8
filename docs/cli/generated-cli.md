@@ -40,7 +40,7 @@ is written.
 | [`commands(selector)`](#command-scope) | which operations become commands |
 | `hand_owned_main()` | skip emitting `main.go`; a hand-owned `main` calls `Run` (Go only) |
 | `owned_command(...)` | a root command whose implementation is hand-owned and never generated (Go only) |
-| `topic(...)` | a declared topic, its verbs, positionals, and compositions |
+| `topic(...)` | a declared topic, its verbs, positionals, compositions, examples, see-also, and docs URL |
 | `rename_error(...)` | a retired invocation that names its replacement and exits 2 |
 | `view(...)` | preview and table fields for one response schema |
 
@@ -228,6 +228,41 @@ Usage: bookstore books <command> [flags]
 Commands:
   get-book    Fetch one book by its identifier.
   list-books  List books in one genre.
+```
+
+A declared command spec adds the rest of the page from facts the pipeline already has. `--help` on a
+command prints Arguments for each positional, Flags with that parameter's description and any enum
+values argparse/`flag` already list, then Examples, Output, See also, and Docs when the spec names
+them. `CliCommand::example` is required once a spec is declared: generation fails rather than emit a
+command that cannot show how to invoke it. Output is generated from the success schema and `view`
+when the command does not override it.
+
+`help` is a root command. `bookstore help` is the program index; `bookstore help books list` is the
+same page as `bookstore books list --help`. `bookstore help --json` prints the command spec as one
+JSON document: each command's invocation, operation id, arguments, flags (name, type, required, help,
+enum, default), examples, see-also, docs URL, and output note. Topic/verb tokens after `--json` are
+not a second encoding of that spec; they still rewrite to `--help` for the human page, and `--json`
+always prints the full document.
+
+```text
+bookstore books get — Fetch one book by its identifier.
+
+Usage: bookstore books get <id> [flags]
+
+Arguments:
+  <id>  The book's identifier. required
+
+Flags:
+  ...
+
+Examples:
+  bookstore books get 1
+
+Output
+  Book: id, title, author
+
+See also  books list
+Docs      https://example.com/cli/books/get
 ```
 
 An unrecognized name prints the closest one it could have meant, then the page the reader wanted:

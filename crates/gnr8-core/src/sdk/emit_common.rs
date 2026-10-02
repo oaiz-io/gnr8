@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use gnr8::facts::LiteralValue;
 use gnr8::sdk::SdkCli;
 
 use crate::graph::{ApiGraph, Operation, Param, Prim, Schema, Type};
@@ -280,6 +281,256 @@ pub(crate) fn command_view<'a>(
                 .find(|schema| schema.id == model)
                 .and_then(|schema| cli.views.iter().find(|view| view.schema == schema.name))
         })
+}
+
+/// Runnable examples declared on this command's spec.
+pub(crate) fn command_examples<'a>(cli: &'a SdkCli, op: &Operation) -> &'a [String] {
+    cli.spec_command(&op.id)
+        .map_or(&[] as &[String], |command| command.examples.as_slice())
+}
+
+/// See-also invocations declared on this command's spec.
+pub(crate) fn command_see_also<'a>(cli: &'a SdkCli, op: &Operation) -> &'a [String] {
+    cli.spec_command(&op.id)
+        .map_or(&[] as &[String], |command| command.see_also.as_slice())
+}
+
+/// Docs URL declared on this command's spec.
+pub(crate) fn command_docs_url<'a>(cli: &'a SdkCli, op: &Operation) -> Option<&'a str> {
+    cli.spec_command(&op.id)
+        .and_then(|command| command.docs_url.as_deref())
+}
+
+/// Output note: spec override, else schema name plus view preview fields.
+pub(crate) fn command_output_note(
+    cli: &SdkCli,
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Option<String> {
+    if let Some(note) = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.output.clone())
+    {
+        return Some(note);
+    }
+    let success = success_responses_of(op, graph).ok()?;
+    let model = success.body_model?;
+    let name = graph
+        .schemas
+        .iter()
+        .find(|schema| schema.id == model)
+        .map_or(model.as_str(), |schema| schema.name.as_str());
+    if let Some(view) = command_view(cli, graph, op) {
+        if !view.preview.is_empty() {
+            return Some(format!("{name}: {}", view.preview.join(", ")));
+        }
+        if !view.table.is_empty() {
+            return Some(format!("{name}: {}", view.table.join(", ")));
+        }
+    }
+    Some(name.to_string())
+}
+
+/// Machine-readable command spec for `help --json`.
+pub(crate) fn help_spec_json(
+    cli: &SdkCli,
+    ops: &[&Operation],
+    graph: &ApiGraph,
+) -> Result<String, CoreError> {
+    let mut commands = Vec::new();
+    for op in ops {
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "invocation".to_string(),
+            serde_json::Value::String(command_invocation(cli, op)),
+        );
+        object.insert(
+            "operation".to_string(),
+            serde_json::Value::String(op.id.clone()),
+        );
+        object.insert(
+            "arguments".to_string(),
+            serde_json::to_value(positional_names(cli, op)).map_err(|error| CoreError::SdkGen {
+                message: format!("failed to encode help spec: {error}"),
+            })?,
+        );
+        object.insert(
+            "examples".to_string(),
+            serde_json::to_value(command_examples(cli, op)).map_err(|error| CoreError::SdkGen {
+                message: format!("failed to encode help spec: {error}"),
+            })?,
+        );
+        object.insert(
+            "seeAlso".to_string(),
+            serde_json::to_value(command_see_also(cli, op)).map_err(|error| CoreError::SdkGen {
+                message: format!("failed to encode help spec: {error}"),
+            })?,
+        );
+        if let Some(url) = command_docs_url(cli, op) {
+            object.insert(
+                "docsUrl".to_string(),
+                serde_json::Value::String(url.to_string()),
+            );
+        }
+        if let Some(note) = command_output_note(cli, graph, op) {
+            object.insert("output".to_string(), serde_json::Value::String(note));
+        }
+        object.insert(
+            "flags".to_string(),
+            serde_json::Value::Array(command_flag_specs(cli, graph, op)?),
+        );
+        commands.push(serde_json::Value::Object(object));
+    }
+    let mut root = serde_json::Map::new();
+    root.insert(
+        "program".to_string(),
+        serde_json::Value::String(cli.program.clone()),
+    );
+    root.insert("commands".to_string(), serde_json::Value::Array(commands));
+    Ok(serde_json::Value::Object(root).to_string())
+}
+
+fn command_flag_specs(
+    cli: &SdkCli,
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Result<Vec<serde_json::Value>, CoreError> {
+    let mut flags = Vec::new();
+    let paging = paging_param_names(graph, op);
+    for param in &op.params {
+        if param.location == "path"
+            || is_positional_param(cli, op, &param.name)
+            || paging.contains(param.name.as_str())
+        {
+            continue;
+        }
+        flags.push(param_flag_spec(graph, param));
+    }
+    for field in body_field_flags(cli, op, graph)? {
+        flags.push(flag_spec(
+            &field.flag,
+            false,
+            field.description.as_deref().unwrap_or(""),
+            "string",
+            &[],
+            None,
+        ));
+    }
+    if !paging.is_empty() {
+        flags.push(flag_spec("limit", false, LIMIT_HELP, "integer", &[], None));
+        flags.push(flag_spec("all", false, ALL_HELP, "boolean", &[], None));
+        if graph
+            .pagination
+            .iter()
+            .any(|policy| policy.operation_id == op.id && policy.cursor_param.is_some())
+        {
+            flags.push(flag_spec("cursor", false, CURSOR_HELP, "string", &[], None));
+        }
+    }
+    let bodies = request_body_models_of(op, graph)?;
+    let fixed_body = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.fixed_body.as_deref());
+    if fixed_body.is_none() && !bodies.is_empty() {
+        flags.push(flag_spec("body", false, BODY_HELP, "string", &[], None));
+        flags.push(flag_spec(
+            "body-file",
+            false,
+            BODY_FILE_HELP,
+            "string",
+            &[],
+            None,
+        ));
+    }
+    Ok(flags)
+}
+
+fn param_flag_spec(graph: &ApiGraph, param: &Param) -> serde_json::Value {
+    let (type_name, enum_values) = json_flag_type(graph, &param.schema);
+    let enum_values = if enum_values.is_empty() {
+        param.constraints.enum_values.clone()
+    } else {
+        enum_values
+    };
+    let default = param.default.as_ref().map(literal_text);
+    flag_spec(
+        &flag_name(param),
+        param.required,
+        &parameter_flag_help(param),
+        type_name,
+        &enum_values,
+        default.as_deref(),
+    )
+}
+
+fn json_flag_type(graph: &ApiGraph, ty: &Type) -> (&'static str, Vec<String>) {
+    match ty {
+        Type::Primitive(Prim::Bool) => ("boolean", Vec::new()),
+        Type::Primitive(Prim::Int { .. }) => ("integer", Vec::new()),
+        Type::Primitive(Prim::Float { .. }) => ("number", Vec::new()),
+        Type::Enum(members) => ("string", members.clone()),
+        Type::Array(_) => ("array", Vec::new()),
+        Type::Named(id) => graph
+            .schemas
+            .iter()
+            .find(|schema| &schema.id == id)
+            .map_or(("string", Vec::new()), |schema| {
+                json_flag_type(graph, &schema.body)
+            }),
+        _ => ("string", Vec::new()),
+    }
+}
+
+fn literal_text(value: &LiteralValue) -> String {
+    match value {
+        LiteralValue::String(text) | LiteralValue::Number(text) => text.clone(),
+        LiteralValue::Bool(flag) => flag.to_string(),
+        LiteralValue::Null => "null".to_string(),
+    }
+}
+
+fn flag_spec(
+    name: &str,
+    required: bool,
+    help: &str,
+    type_name: &str,
+    enum_values: &[String],
+    default: Option<&str>,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(name.to_string()),
+    );
+    object.insert("required".to_string(), serde_json::Value::Bool(required));
+    if !help.is_empty() {
+        object.insert(
+            "help".to_string(),
+            serde_json::Value::String(help.to_string()),
+        );
+    }
+    object.insert(
+        "type".to_string(),
+        serde_json::Value::String(type_name.to_string()),
+    );
+    if !enum_values.is_empty() {
+        object.insert(
+            "enum".to_string(),
+            serde_json::Value::Array(
+                enum_values
+                    .iter()
+                    .map(|member| serde_json::Value::String(member.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(default) = default {
+        object.insert(
+            "default".to_string(),
+            serde_json::Value::String(default.to_string()),
+        );
+    }
+    serde_json::Value::Object(object)
 }
 
 /// The CLI flag spelling of a parameter: kebab-case of the wire name.
@@ -1117,6 +1368,14 @@ fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<
                         ),
                     });
                 }
+            }
+            if command.examples.is_empty() {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} command '{}' must declare at least one example",
+                        command.verb
+                    ),
+                });
             }
         }
     }

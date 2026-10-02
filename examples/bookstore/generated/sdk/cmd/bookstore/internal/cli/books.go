@@ -19,6 +19,11 @@ func cmdListBooks(args []string) int {
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books list [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books list")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  BookList")
+		fmt.Fprintln(fs.Output(), "\nSee also  books get")
+		fmt.Fprintln(fs.Output(), "\nDocs      https://example.com/cli/books/list")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	genre := fs.String("genre", "", "")
@@ -101,6 +106,9 @@ func cmdCreateBook(args []string) int {
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books create [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books create --title Dune --author Herbert --genre fiction")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  Book: id, title, author")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	authorBody := fs.String("author", "", "")
@@ -228,8 +236,13 @@ func cmdDeleteBook(args []string) int {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books delete — Permanently removes one book from the catalogue.\n", program)
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books delete <id> [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nArguments:")
+		fmt.Fprintln(fs.Output(), "  <id>  required")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books delete 1 --yes")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  ErrorResponse")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	id := new(string)
@@ -315,8 +328,13 @@ func cmdGetBook(args []string) int {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books get — Returns one book by its identifier.\n", program)
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books get <id> [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nArguments:")
+		fmt.Fprintln(fs.Output(), "  <id>  required")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books get 1")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  Book: id, title, author")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	id := new(string)
@@ -416,8 +434,13 @@ func cmdUpdateBook(args []string) int {
 		fmt.Fprintf(fs.Output(), "%s books update — Replaces the mutable fields of one book.\n", program)
 		fmt.Fprintln(fs.Output(), "\nFields omitted from the payload keep their current values.")
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books update <id> [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nArguments:")
+		fmt.Fprintln(fs.Output(), "  <id>  required")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books update 1 --title Dune")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  Book: id, title, author")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	id := new(string)

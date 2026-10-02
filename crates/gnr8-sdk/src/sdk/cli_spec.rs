@@ -104,6 +104,18 @@ pub struct CliCommand {
     /// `@v12` / `@latest` selector resolved with one list call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<CliSelector>,
+    /// Runnable examples printed on the command's help page. Required when a spec is declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
+    /// Other invocations listed under See also.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub see_also: Vec<String>,
+    /// Docs URL printed on the help page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_url: Option<String>,
+    /// One-line output note. Generated from the response schema when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 impl CliCommand {
@@ -120,6 +132,10 @@ impl CliCommand {
             fixed_body: None,
             switch_flag: None,
             selector: None,
+            examples: Vec::new(),
+            see_also: Vec::new(),
+            docs_url: None,
+            output: None,
         }
     }
 
@@ -172,6 +188,38 @@ impl CliCommand {
     #[must_use]
     pub fn selector(mut self, selector: CliSelector) -> Self {
         self.selector = Some(selector);
+        self
+    }
+
+    /// A runnable example printed on this command's help page.
+    #[must_use]
+    pub fn example(mut self, example: impl Into<String>) -> Self {
+        self.examples.push(example.into());
+        self
+    }
+
+    /// Other invocations listed under See also.
+    #[must_use]
+    pub fn see_also<I, S>(mut self, invocations: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.see_also = invocations.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Docs URL printed on the help page.
+    #[must_use]
+    pub fn docs_url(mut self, url: impl Into<String>) -> Self {
+        self.docs_url = Some(url.into());
+        self
+    }
+
+    /// Override the generated output note.
+    #[must_use]
+    pub fn output(mut self, note: impl Into<String>) -> Self {
+        self.output = Some(note.into());
         self
     }
 }

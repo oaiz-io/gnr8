@@ -2695,8 +2695,8 @@ fn go_a_group_answers_the_questions_asked_at_its_own_level() {
     // `--help`, a bare group, and an unknown command are all answered by the group's own page.
     assert_eq!(text.matches("printGroupUsage(os.Stdout, group)").count(), 2);
     assert_eq!(text.matches("printGroupUsage(os.Stderr, group)").count(), 4);
-    // Only `Run` still prints the root index.
-    assert_eq!(text.matches("printRootUsage(os.Stdout)").count(), 1);
+    // Root `--help` and `help` with no tokens both print the program index.
+    assert_eq!(text.matches("printRootUsage(os.Stdout)").count(), 2);
     assert!(
         text.contains("func printGroupUsage(out *os.File, group cliGroup)"),
         "{text}"
@@ -3051,11 +3051,12 @@ fn spec_cli() -> SdkCli {
     SdkCli::new("bookstore").topic(
         CliTopic::new("books")
             .concept("Browse and manage the catalogue")
-            .command(CliCommand::operation("listBooks", "list"))
+            .command(CliCommand::operation("listBooks", "list").example("bookstore books list"))
             .command(
                 CliCommand::operation("getBook", "get")
                     .positional("id")
-                    .selector(CliSelector::new("listBooks", "id", "id")),
+                    .selector(CliSelector::new("listBooks", "id", "id"))
+                    .example("bookstore books get 1"),
             ),
     )
 }
@@ -3106,11 +3107,16 @@ fn spec_rename_error_exits_without_dispatch() {
 fn spec_body_fields_and_severity() {
     let cli = SdkCli::new("bookstore").topic(
         CliTopic::new("books")
-            .command(CliCommand::operation("createBook", "create").body_fields())
+            .command(
+                CliCommand::operation("createBook", "create")
+                    .body_fields()
+                    .example("bookstore books create --title Dune"),
+            )
             .command(
                 CliCommand::operation("getBook", "get")
                     .positional("book_id")
-                    .severity(CliSeverity::Moderate),
+                    .severity(CliSeverity::Moderate)
+                    .example("bookstore books get 1"),
             ),
     );
     let graph = bookstore_graph();
@@ -3132,7 +3138,8 @@ fn spec_sub_noun_nests_dispatch() {
         CliTopic::new("books").command(
             CliCommand::operation("getBook", "get")
                 .sub_noun("copy")
-                .positional("id"),
+                .positional("id")
+                .example("bookstore books copy get 1"),
         ),
     );
     let graph = grouped_graph("");
@@ -3215,4 +3222,67 @@ fn cursor_flag_seeds_the_request_and_documents_itself() {
         go.contains("Ptr(*cursorFlag)"),
         "Go must assign the cursor flag:\n{go}"
     );
+}
+
+#[test]
+fn spec_command_without_example_is_a_generation_error() {
+    let error = generate_cli_result(
+        &grouped_graph(""),
+        SdkCli::new("bookstore")
+            .topic(CliTopic::new("books").command(CliCommand::operation("listBooks", "list"))),
+    )
+    .expect_err("a spec command without an example must be rejected");
+    assert!(
+        matches!(error, gnr8_engine::CoreError::SdkGen { .. }),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("must declare at least one example"),
+        "{error}"
+    );
+}
+
+#[test]
+fn spec_help_layout_and_help_json() {
+    let graph = grouped_graph("");
+    let py = generate_cli_with(&graph, spec_cli());
+    assert!(py.contains("Examples:"), "missing Examples in Python CLI");
+    assert!(
+        py.contains("HELP_SPEC ="),
+        "missing HELP_SPEC in Python CLI"
+    );
+    assert!(
+        py.contains("seeAlso") || py.contains("flags"),
+        "missing help spec fields in Python CLI"
+    );
+    assert!(
+        py.contains("def _print_help"),
+        "missing _print_help in Python CLI"
+    );
+    assert!(
+        py.contains("argv[0] == \"help\""),
+        "missing help dispatch in Python CLI"
+    );
+    assert!(
+        py.contains("formatter_class=argparse.RawDescriptionHelpFormatter"),
+        "epilog must keep example newlines"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, spec_cli());
+    assert!(go.contains("Examples:"), "missing Examples in Go CLI");
+    assert!(
+        go.contains("const helpSpecJSON"),
+        "missing helpSpecJSON in Go CLI"
+    );
+    assert!(go.contains("Arguments:"), "missing Arguments in Go CLI");
+    assert!(
+        go.contains("case \"help\":"),
+        "missing help dispatch in Go CLI"
+    );
+    assert!(go.contains("func printHelp"), "missing printHelp in Go CLI");
+    assert!(go.contains("seeAlso"), "missing seeAlso in Go help spec");
 }

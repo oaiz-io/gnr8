@@ -34,6 +34,12 @@ def register(subparsers: Any) -> None:
             "h an opaque cursor. Pass the\ncursor from the previous page to continue; o"
             "mit it to start from the\nbeginning."
         ),
+        epilog=(
+            "Examples:\n  bookstore books list --genre fiction\n\nOutput\n  ListBooksRe"
+            "sponse\n\nSee also  books get\n\nDocs      https://example.com/cli/books/l"
+            "ist"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     cmd_list_books.add_argument(
         "--base-url",
@@ -154,6 +160,11 @@ def register(subparsers: Any) -> None:
             "Add a book to the catalogue.\n\nThe book is created immediately and its ge"
             "nerated identifier is returned."
         ),
+        epilog=(
+            "Examples:\n  bookstore books create --body '{\"title\":\"Dune\"}'\n\nOutpu"
+            "t\n  CreatedMessage"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     cmd_create_book.add_argument(
         "--base-url",
@@ -253,6 +264,8 @@ def register(subparsers: Any) -> None:
             "Fetch one book by its identifier.\n\nReturns the book when it is in stock,"
             " and an out-of-stock notice otherwise."
         ),
+        epilog="Examples:\n  bookstore books get 1\n\nOutput\n  BookOrError",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     cmd_get_book.add_argument(
         "--base-url",
@@ -351,6 +364,11 @@ def register(subparsers: Any) -> None:
             "Update the stored filters for one book.\n\nFilters left unset in the paylo"
             "ad keep their current values."
         ),
+        epilog=(
+            "Examples:\n  bookstore books update 1 --title Dune\n\nOutput\n  CreatedMes"
+            "sage"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     cmd_update_book.add_argument(
         "--base-url",
