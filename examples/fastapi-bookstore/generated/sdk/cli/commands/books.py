@@ -9,6 +9,7 @@ from ...models import (
     Book,
     BookFilters,
 )
+from .. import output
 from ..body import load_body
 from ..config import DEFAULT_BASE_URL
 from ..credentials import build_client
@@ -110,10 +111,6 @@ def register(subparsers: Any) -> None:
         help="never prompt; refuse commands that would ask",
     )
     cmd_list_books.add_argument(
-        "--cursor",
-        dest="cursor",
-    )
-    cmd_list_books.add_argument(
         "--genre",
         dest="genre",
         required=True,
@@ -122,6 +119,28 @@ def register(subparsers: Any) -> None:
     cmd_list_books.add_argument(
         "--sort",
         dest="sort",
+    )
+    cmd_list_books.add_argument(
+        "--limit",
+        dest="limit",
+        type=int,
+        help="stop after this many items",
+    )
+    cmd_list_books.add_argument(
+        "--all",
+        dest="all",
+        action="store_true",
+        help="keep following pages until the last one",
+    )
+    cmd_list_books.add_argument(
+        "--cursor",
+        dest="cursor",
+        help="resume from this cursor",
+    )
+    cmd_list_books.add_argument(
+        "--page-size",
+        dest="retired_page_size",
+        help=argparse.SUPPRESS,
     )
     cmd_list_books.set_defaults(
         _handler=_list_books,
@@ -448,13 +467,27 @@ def register(subparsers: Any) -> None:
 
 
 def _list_books(args: argparse.Namespace) -> Any:
+    if getattr(args, "retired_page_size", None) is not None:
+        print("error: --page-size is now --limit", file=sys.stderr)
+        raise SystemExit(2)
     client = build_client(args.base_url)
     kwargs: dict[str, Any] = {}
-    if args.cursor is not None:
-        kwargs["cursor"] = args.cursor
     kwargs["genre"] = args.genre
     if args.sort is not None:
         kwargs["sort"] = args.sort
+    if args.cursor is not None:
+        kwargs["cursor"] = args.cursor
+    if args.all or args.limit is not None:
+        items: list[Any] = []
+        for item in client.iter_list_books(**kwargs):
+            items.append(item)
+            if args.limit is not None and len(items) >= args.limit:
+                break
+        output.LAST_ANSWER["body"] = None
+        return {
+            "books": items,
+            "hasMore": args.limit is not None and len(items) >= args.limit,
+        }
     return client.list_books(**kwargs)
 
 

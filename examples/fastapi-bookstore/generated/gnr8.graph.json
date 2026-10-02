@@ -675,6 +675,16 @@
     "diagnostics": [],
     "base_path": "/",
     "title": "Bookstore API",
-    "security": []
+    "security": [],
+    "pagination": [
+      {
+        "operation_id": "list_books",
+        "mode": "cursor",
+        "items_field": "books",
+        "cursor_param": "cursor",
+        "next_cursor_field": "next_cursor",
+        "termination": "no_next_cursor"
+      }
+    ]
   }
 }

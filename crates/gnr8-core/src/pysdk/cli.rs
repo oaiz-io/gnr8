@@ -21,8 +21,8 @@ use crate::sdk::emit_common::{
     operation_auth_alternatives, operation_prose, output_dir_env_var, parameter_flag_help,
     positional_names, reject_duplicate_command_files, reject_sse_operations,
     request_body_models_of, response_field_names, OperationAuthScheme, RequestBodyModel, ALL_HELP,
-    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP,
-    LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
+    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP,
+    JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -1406,6 +1406,8 @@ def print_ai_friendly(result: Any) -> None:
         cursor = ""
         if isinstance(value, dict):
             raw_cursor = value.get("nextCursor")
+            if not isinstance(raw_cursor, str):
+                raw_cursor = value.get("next_cursor")
             if isinstance(raw_cursor, str):
                 cursor = raw_cursor
         next_page = ""
@@ -1527,6 +1529,10 @@ fn emit_handlers(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "each generated command is one linear parse → client-call sequence"
+)]
 fn emit_handler(
     out: &mut String,
     graph: &ApiGraph,
@@ -1569,6 +1575,19 @@ fn emit_handler(
         writeln!(out, "    if code:").map_err(sink)?;
         writeln!(out, "        raise SystemExit(code)").map_err(sink)?;
     }
+    if pagination_policy(graph, op).is_some() {
+        writeln!(
+            out,
+            "    if getattr(args, \"retired_page_size\", None) is not None:"
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "        print(\"error: --page-size is now --limit\", file=sys.stderr)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "        raise SystemExit(2)").map_err(sink)?;
+    }
     if has_security(graph) {
         let ids = scheme_ids
             .iter()
@@ -1610,6 +1629,32 @@ fn emit_handler(
             .map_err(sink)?;
         }
     }
+    if let Some(policy) = pagination_policy(graph, op) {
+        if let Some(name) = policy.cursor_param.as_deref() {
+            let ident = idents
+                .get(name)
+                .map_or_else(|| name.to_string(), Clone::clone);
+            writeln!(out, "    if args.cursor is not None:").map_err(sink)?;
+            writeln!(
+                out,
+                "        kwargs[{}] = args.cursor",
+                py_string_literal(&ident)
+            )
+            .map_err(sink)?;
+        }
+        if let Some(name) = policy.page_size_param.as_deref() {
+            let ident = idents
+                .get(name)
+                .map_or_else(|| name.to_string(), Clone::clone);
+            writeln!(out, "    if args.limit is not None:").map_err(sink)?;
+            writeln!(
+                out,
+                "        kwargs[{}] = args.limit",
+                py_string_literal(&ident)
+            )
+            .map_err(sink)?;
+        }
+    }
     if let Some(body) = bodies.first() {
         emit_body_kwargs(out, graph, cli, op, body, model_style)?;
     }
@@ -1624,7 +1669,17 @@ fn emit_handler(
         )
         .map_err(sink)?;
         writeln!(out, "                break").map_err(sink)?;
-        writeln!(out, "        return items").map_err(sink)?;
+        writeln!(out, "        output.LAST_ANSWER[\"body\"] = None").map_err(sink)?;
+        let items_key =
+            pagination_policy(graph, op).map_or("items", |policy| policy.items_field.as_str());
+        writeln!(out, "        return {{").map_err(sink)?;
+        writeln!(out, "            {}: items,", py_string_literal(items_key)).map_err(sink)?;
+        writeln!(
+            out,
+            "            \"hasMore\": args.limit is not None and len(items) >= args.limit,"
+        )
+        .map_err(sink)?;
+        writeln!(out, "        }}").map_err(sink)?;
         writeln!(out, "    return client.{method}(**kwargs)").map_err(sink)?;
     } else {
         writeln!(out, "    return client.{method}(**kwargs)").map_err(sink)?;
@@ -1795,12 +1850,13 @@ fn emit_command_module(
     writeln!(out).map_err(sink)?;
     let mut imports = vec!["from ..credentials import build_client".to_string()];
     if module.ops.iter().any(|op| {
-        !matches!(
-            cli.spec_command(&op.id)
-                .map(|command| command.severity)
-                .unwrap_or_default(),
-            gnr8::sdk::CliSeverity::Mild
-        )
+        pagination_policy(graph, op).is_some()
+            || !matches!(
+                cli.spec_command(&op.id)
+                    .map(|command| command.severity)
+                    .unwrap_or_default(),
+                gnr8::sdk::CliSeverity::Mild
+            )
     }) {
         imports.push("from .. import output".to_string());
     }
@@ -2083,6 +2139,21 @@ fn emit_command_parser(
         writeln!(out, "        dest=\"all\",").map_err(sink)?;
         writeln!(out, "        action=\"store_true\",").map_err(sink)?;
         emit_string_kwarg(out, 8, "help", &argparse_help_text(ALL_HELP))?;
+        writeln!(out, "    )").map_err(sink)?;
+        if pagination_policy(graph, op)
+            .and_then(|policy| policy.cursor_param.as_ref())
+            .is_some()
+        {
+            writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
+            writeln!(out, "        \"--cursor\",").map_err(sink)?;
+            writeln!(out, "        dest=\"cursor\",").map_err(sink)?;
+            emit_string_kwarg(out, 8, "help", &argparse_help_text(CURSOR_HELP))?;
+            writeln!(out, "    )").map_err(sink)?;
+        }
+        writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
+        writeln!(out, "        \"--page-size\",").map_err(sink)?;
+        writeln!(out, "        dest=\"retired_page_size\",").map_err(sink)?;
+        writeln!(out, "        help=argparse.SUPPRESS,").map_err(sink)?;
         writeln!(out, "    )").map_err(sink)?;
     }
     writeln!(out, "    {ident}.set_defaults(").map_err(sink)?;

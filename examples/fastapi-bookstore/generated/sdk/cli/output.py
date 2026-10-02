@@ -483,6 +483,8 @@ def print_ai_friendly(result: Any) -> None:
         cursor = ""
         if isinstance(value, dict):
             raw_cursor = value.get("nextCursor")
+            if not isinstance(raw_cursor, str):
+                raw_cursor = value.get("next_cursor")
             if isinstance(raw_cursor, str):
                 cursor = raw_cursor
         next_page = ""

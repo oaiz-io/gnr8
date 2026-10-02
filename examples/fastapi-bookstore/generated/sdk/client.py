@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -541,6 +541,33 @@ class Client:
             _data = json.loads(_raw) if _raw else {}
             return ListBooksResponse.model_validate(_data)
         raise self._error(_status, _headers, _raw)
+
+    def list_books_pages(
+        self,
+        genre: str,
+        cursor: Optional[str] = None,
+        sort: Optional[str] = None,
+        request_options: Optional[RequestOptions] = None,
+    ) -> Iterator[ListBooksResponse]:
+        while True:
+            _page = self.list_books(genre=genre, cursor=cursor, sort=sort, request_options=request_options)
+            _items = _page.books or []
+            yield _page
+            _next_cursor = _page.next_cursor
+            if not _next_cursor:
+                break
+            cursor = _next_cursor
+
+    def iter_list_books(
+        self,
+        genre: str,
+        cursor: Optional[str] = None,
+        sort: Optional[str] = None,
+        request_options: Optional[RequestOptions] = None,
+    ) -> Iterator[Book]:
+        for _page in self.list_books_pages(genre=genre, cursor=cursor, sort=sort, request_options=request_options):
+            for _item in _page.books or []:
+                yield _item
 
     def create_book(
         self,

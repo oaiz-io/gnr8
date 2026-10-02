@@ -33,6 +33,10 @@ must move the minor version.
   `rename_error` prints the replacement and exits 2 without sending a request. `view` names the
   preview fields for one response schema. Absent a spec, command names stay the kebab-case
   operation ids.
+- **Paginated commands emit `--cursor` and merged page JSON.** `--limit` / `--all` collect items
+  into `{itemsKey: […], "hasMore": …}` instead of a bare array, so `--json` is not the last page's
+  body. `--page-size` is a rename error naming `--limit`. A `ConfigurePagination` cursor policy
+  seeds `--cursor` onto the request.
 
 ### Changed
 

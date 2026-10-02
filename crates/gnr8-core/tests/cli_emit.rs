@@ -1721,10 +1721,18 @@ fn one_query_param_graph(name: &str) -> ApiGraph {
 
 #[test]
 fn a_flag_no_command_binds_no_longer_blocks_generation() {
-    // `--json` and `--format` are reserved globals. `--limit`/`--all` are bound only on a
-    // paginated command, `--body`/`--body-file` only where there is a request body, and
-    // `--version` on the root parser, which is not a command.
-    for name in ["limit", "all", "body", "body_file", "version"] {
+    // `--json` and `--format` are reserved globals. `--limit`/`--all`/`--cursor` are bound only on a
+    // paginated command, `--page-size` is a rename error on those same commands, `--body`/`--body-file`
+    // only where there is a request body, and `--version` on the root parser, which is not a command.
+    for name in [
+        "limit",
+        "all",
+        "body",
+        "body_file",
+        "version",
+        "cursor",
+        "page_size",
+    ] {
         let graph = one_query_param_graph(name);
         let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
         let flag = name.replace('_', "-");
@@ -2425,6 +2433,18 @@ fn the_reserved_flags_document_themselves() {
         );
     }
     assert!(
+        python.contains("error: --page-size is now --limit"),
+        "retired --page-size must name --limit:\n{python}"
+    );
+    assert!(
+        python.contains("\"hasMore\""),
+        "merged pages keep the page shape:\n{python}"
+    );
+    assert!(
+        python.contains("LAST_ANSWER[\"body\"] = None"),
+        "merged pages must not print the last HTTP body:\n{python}"
+    );
+    assert!(
         !python.contains("help=\"\""),
         "an empty help string is worse than none:\n{python}"
     );
@@ -2456,6 +2476,18 @@ fn the_reserved_flags_document_themselves() {
     ] {
         assert!(go.contains(expected), "Go help missing {expected}:\n{go}");
     }
+    assert!(
+        go.contains("error: --page-size is now --limit"),
+        "retired --page-size must name --limit:\n{go}"
+    );
+    assert!(
+        go.contains("\"hasMore\": hasMore"),
+        "merged pages keep the page shape:\n{go}"
+    );
+    assert!(
+        go.contains("lastAnswer.body = nil"),
+        "merged pages must not print the last HTTP body:\n{go}"
+    );
 }
 
 /// One operation that both carries a request body and is paginated, so every reserved flag binds.
@@ -3112,4 +3144,75 @@ fn spec_sub_noun_nests_dispatch() {
     let go = generate_go_cli_with(&graph, cli);
     assert!(go.contains("case \"copy\":"), "{go}");
     assert!(go.contains("dispatchBooksCopy"), "{go}");
+}
+
+fn cursor_paged_graph() -> ApiGraph {
+    let mut graph = paginated_body_graph();
+    graph.operations[0].params[0].name = "cursor".to_string();
+    graph.operations[0].params[0].schema =
+        gnr8_engine::graph::Type::Primitive(gnr8_engine::graph::Prim::String);
+    let gnr8_engine::graph::Type::Object(fields) = &mut graph.schemas[1].body else {
+        panic!("Page schema");
+    };
+    let mut next = fields[0].clone();
+    next.json_name = "next_cursor".to_string();
+    next.schema = gnr8_engine::graph::Type::Primitive(gnr8_engine::graph::Prim::String);
+    next.serializer_may_omit = true;
+    next.deserializer_accepts_absent = true;
+    next.deserializer_accepts_null = true;
+    next.serializer_may_emit_null = true;
+    next.validator_requires_presence = false;
+    next.validator_rejects_null = false;
+    next.description = None;
+    next.example = None;
+    fields.push(next);
+    graph.pagination = vec![gnr8_engine::graph::PaginationPolicy {
+        operation_id: "listBooks".to_string(),
+        mode: gnr8_engine::graph::PaginationMode::Cursor,
+        items_field: "items".to_string(),
+        cursor_param: Some("cursor".to_string()),
+        next_cursor_field: Some("next_cursor".to_string()),
+        page_param: None,
+        page_size_param: None,
+        offset_param: None,
+        limit_param: None,
+        termination: gnr8_engine::graph::PaginationTermination::NoNextCursor,
+    }];
+    graph
+}
+
+#[test]
+fn cursor_flag_seeds_the_request_and_documents_itself() {
+    let graph = cursor_paged_graph();
+    let python = generate_cli_with(
+        &graph,
+        SdkCli::new("bookstore").base_url("https://api.test"),
+    );
+    assert!(
+        python.contains("resume from this cursor"),
+        "Python help missing --cursor:\n{python}"
+    );
+    assert!(
+        python.contains("kwargs[\"cursor\"] = args.cursor"),
+        "Python must seed the cursor param:\n{python}"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(
+        &graph,
+        SdkCli::new("bookstore").base_url("https://api.test"),
+    );
+    assert!(
+        go.contains(r#"cursorFlag := fs.String("cursor", "", "resume from this cursor")"#),
+        "Go help missing --cursor:\n{go}"
+    );
+    assert!(
+        go.contains("if seen[\"cursor\"]"),
+        "Go must seed the cursor param:\n{go}"
+    );
+    assert!(
+        go.contains("Ptr(*cursorFlag)"),
+        "Go must assign the cursor flag:\n{go}"
+    );
 }

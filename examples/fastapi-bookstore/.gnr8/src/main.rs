@@ -18,6 +18,7 @@
 //!   inputs            → FastApi::new().inputs(["."])     (the static `app/` package; never executed)
 //!   route prefix      → extracted from APIRouter(prefix="/books")
 //!   title             → SetTitle::new("Bookstore API")
+//!   pagination        → ConfigurePagination::cursor(list_books, cursor, next_cursor, books)
 //!   output.openapi    → OpenApi31::new().to("generated/openapi.yaml")
 //!   output.sdk + module → PySdk::new().module("example.com/bookstore/sdk").to("generated/sdk")
 //!                              .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8000"))
@@ -33,6 +34,12 @@ fn main() -> std::process::ExitCode {
         Pipeline::new()
             .source(FastApi::new().inputs(["."]))
             .transform(SetTitle::new("Bookstore API"))
+            .transform(ConfigurePagination::cursor(
+                OperationSelector::operation("list_books"),
+                "cursor",
+                "next_cursor",
+                "books",
+            ))
             .target(OpenApi31::new().to("generated/openapi.yaml"))
             .target(
                 PySdk::new()

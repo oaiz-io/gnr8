@@ -194,7 +194,7 @@ there.
 | `choices=` | an enum, or a named type whose body is an enum |
 | `action="append"` | an array |
 | `--body` / `--body-file` | request body; `-` on `--body-file` is stdin |
-| `--limit` / `--all` | a `PaginationPolicy` for this operation |
+| `--limit` / `--all` / `--cursor` | a `PaginationPolicy` for this operation |
 | `--base-url` | `SdkCli::base_url`, and nothing else |
 
 Ungrouped operations sit at the program root. There is no `"default"` group level.
@@ -256,7 +256,11 @@ states — unset, explicitly true, explicitly false — and is sent only when on
 passed.
 
 Paging parameters named by a `PaginationPolicy` are not ordinary flags. They are replaced by
-`--limit N` / `--all`.
+`--limit N` / `--all` / `--cursor`. Passing `--page-size` is a rename error naming `--limit`.
+`--limit` and `--all` walk pages and print one object in the page's own shape
+(`{itemsKey: […every item…], "hasMore": false}`) instead of a bare array. `--json` on a single page
+is still the server's bytes; merged pages clear that capture so the constructed object is what
+prints.
 
 A success response whose `body_kind` is `sse` is a generation error naming the operation. Leave it out
 of the program with `SdkCli::commands(...)` — see [Command scope](#command-scope).
@@ -276,10 +280,10 @@ name already in use, and `argparse` raises `ArgumentError` while building the pa
 `--help` fails.
 
 Reserved flags are computed per command from what that command actually binds: `help`, `base-url`,
-`format` and `json` always; `body`/`body-file` where the operation has a request body; `limit`/`all`
-where a `PaginationPolicy` names it; and `no-<flag>` for each boolean parameter. `--version` is
-bound on the root parser, which is not a command. A parameter named `json` or `format` is therefore
-a generation error: those flags select the output format.
+`format` and `json` always; `body`/`body-file` where the operation has a request body; `limit`/`all`/
+`cursor`/`page-size` where a `PaginationPolicy` names it; and `no-<flag>` for each boolean parameter.
+`--version` is bound on the root parser, which is not a command. A parameter named `json` or `format`
+is therefore a generation error: those flags select the output format.
 
 ## Flag defaults in `--help`
 

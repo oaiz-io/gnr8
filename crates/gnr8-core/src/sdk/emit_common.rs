@@ -337,6 +337,7 @@ pub(crate) const BODY_HELP: &str = "request body, as an inline JSON document";
 pub(crate) const BODY_FILE_HELP: &str = "read the request body from a file, or - for stdin";
 pub(crate) const LIMIT_HELP: &str = "stop after this many items";
 pub(crate) const ALL_HELP: &str = "keep following pages until the last one";
+pub(crate) const CURSOR_HELP: &str = "resume from this cursor";
 pub(crate) const FORMAT_HELP: &str = "output format: human, ai-friendly, json, or jsonl";
 pub(crate) const JSON_HELP: &str = "print the server body (shorthand for --format json)";
 pub(crate) const FIELDS_HELP: &str = "comma-separated response fields, or help to list them";
@@ -434,8 +435,9 @@ pub(crate) fn parameter_flag_help(param: &Param) -> String {
 /// The global flags one command binds, which its parameter flags may not shadow.
 ///
 /// Conditional because the emitters are: `--body`/`--body-file` exist only where the operation has
-/// a request body, and `--limit`/`--all` only where a `PaginationPolicy` names it. `--version` is
-/// bound on the root parser, which is not a command, so it is not reserved here. `--format`,
+/// a request body, and `--limit`/`--all`/`--cursor` only where a `PaginationPolicy` names it.
+/// `--page-size` is reserved on those same commands as a rename error naming `--limit`. `--version`
+/// is bound on the root parser, which is not a command, so it is not reserved here. `--format`,
 /// `--json`, `--fields`, `--output`, `--quiet`, `--debug`, `--yes` and `--no-input` are globals
 /// every generated command binds.
 fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<String>, CoreError> {
@@ -454,6 +456,8 @@ fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<Strin
     {
         reserved.insert("limit".to_string());
         reserved.insert("all".to_string());
+        reserved.insert("cursor".to_string());
+        reserved.insert("page-size".to_string());
     }
     Ok(reserved)
 }

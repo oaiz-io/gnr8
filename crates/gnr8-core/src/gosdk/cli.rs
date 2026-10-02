@@ -23,8 +23,8 @@ use crate::sdk::emit_common::{
     parameter_flag_help, positional_names, positional_usage, quoted_string_literal,
     reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
     response_field_names, success_responses_of, OperationAuthScheme, RequestBodyModel, ALL_HELP,
-    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP,
-    LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
+    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP,
+    JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
 };
 use crate::CoreError;
 
@@ -1583,7 +1583,9 @@ func aiSummary(result any, value any, raw []byte) (string, []string, string) {{
 		outcome := fmt.Sprintf("%d %s", len(items), noun)
 		next := ""
 		if obj, ok := value.(map[string]any); ok {{
-			if cursor, ok := obj["nextCursor"].(string); ok && cursor != "" {{
+            if cursor, ok := obj["nextCursor"].(string); ok && cursor != "" {{
+				next = "Next page: " + program + " " + commandPath + " --cursor " + cursor + "    Every page: " + program + " " + commandPath + " --all"
+			}} else if cursor, ok := obj["next_cursor"].(string); ok && cursor != "" {{
 				next = "Next page: " + program + " " + commandPath + " --cursor " + cursor + "    Every page: " + program + " " + commandPath + " --all"
 			}}
 		}}
@@ -2223,6 +2225,7 @@ fn emit_handler(
         )
         .map_err(sink)?;
     }
+    let cursor_param = pagination_policy(graph, op).and_then(|policy| policy.cursor_param.clone());
     if paged {
         writeln!(
             out,
@@ -2236,6 +2239,15 @@ fn emit_handler(
             quoted_string_literal(ALL_HELP)
         )
         .map_err(sink)?;
+        if cursor_param.is_some() {
+            writeln!(
+                out,
+                "cursorFlag := fs.String(\"cursor\", \"\", {})",
+                quoted_string_literal(CURSOR_HELP)
+            )
+            .map_err(sink)?;
+        }
+        imports.add("strings");
     }
     writeln!(
         out,
@@ -2304,6 +2316,22 @@ fn emit_handler(
     )
     .map_err(sink)?;
 
+    if paged {
+        writeln!(out, "for _, arg := range args {{").map_err(sink)?;
+        writeln!(
+            out,
+            "if arg == \"--page-size\" || strings.HasPrefix(arg, \"--page-size=\") {{"
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "fmt.Fprintf(os.Stderr, \"error: --page-size is now --limit\\n\")"
+        )
+        .map_err(sink)?;
+        writeln!(out, "return 2").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
     writeln!(out, "parsed, code := parseFlags(fs, args)").map_err(sink)?;
     writeln!(out, "if !parsed {{").map_err(sink)?;
     writeln!(out, "return code").map_err(sink)?;
@@ -2556,6 +2584,7 @@ fn emit_handler(
             }
             emit_params_assign(out, graph, param, package, imports)?;
         }
+        emit_paging_seed(out, graph, op, package)?;
     }
     if let Some(body) = bodies.first() {
         emit_body_local(
@@ -2620,7 +2649,20 @@ fn emit_handler(
         writeln!(out, "}}); err != nil {{").map_err(sink)?;
         writeln!(out, "return handleErr(err)").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
-        writeln!(out, "return printResult(items)").map_err(sink)?;
+        writeln!(
+            out,
+            "hasMore := seen[\"limit\"] && int64(len(items)) >= *limit"
+        )
+        .map_err(sink)?;
+        writeln!(out, "lastAnswer.body = nil").map_err(sink)?;
+        let items_key =
+            pagination_policy(graph, op).map_or("items", |policy| policy.items_field.as_str());
+        writeln!(
+            out,
+            "return printResult(map[string]any{{{}: items, \"hasMore\": hasMore}})",
+            quoted_string_literal(items_key)
+        )
+        .map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
     }
 
@@ -2975,6 +3017,48 @@ fn emit_path_local(
         _ => {
             writeln!(out, "{ident}Value := *{ident}").map_err(sink)?;
         }
+    }
+    Ok(())
+}
+
+fn emit_paging_seed(
+    out: &mut String,
+    graph: &ApiGraph,
+    op: &Operation,
+    package: &str,
+) -> Result<(), CoreError> {
+    let Some(policy) = pagination_policy(graph, op) else {
+        return Ok(());
+    };
+    if let Some(name) = policy.cursor_param.as_deref() {
+        let field = exported(name);
+        let pointer = op
+            .params
+            .iter()
+            .find(|param| param.name == name)
+            .is_none_or(|param| !param.required);
+        writeln!(out, "if seen[\"cursor\"] {{").map_err(sink)?;
+        if pointer {
+            writeln!(out, "params.{field} = {package}.Ptr(*cursorFlag)").map_err(sink)?;
+        } else {
+            writeln!(out, "params.{field} = *cursorFlag").map_err(sink)?;
+        }
+        writeln!(out, "}}").map_err(sink)?;
+    }
+    if let Some(name) = policy.page_size_param.as_deref() {
+        let field = exported(name);
+        let pointer = op
+            .params
+            .iter()
+            .find(|param| param.name == name)
+            .is_none_or(|param| !param.required);
+        writeln!(out, "if seen[\"limit\"] {{").map_err(sink)?;
+        if pointer {
+            writeln!(out, "params.{field} = {package}.Ptr(*limit)").map_err(sink)?;
+        } else {
+            writeln!(out, "params.{field} = *limit").map_err(sink)?;
+        }
+        writeln!(out, "}}").map_err(sink)?;
     }
     Ok(())
 }
@@ -4359,6 +4443,8 @@ fn flag_ident(param: &Param) -> String {
     }
     if ident == "all"
         || ident == "limit"
+        || ident == "cursor"
+        || ident == "cursorFlag"
         || ident == "body"
         || ident == "args"
         || ident == "seen"

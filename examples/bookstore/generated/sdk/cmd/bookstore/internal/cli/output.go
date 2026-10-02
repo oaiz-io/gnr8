@@ -454,6 +454,8 @@ func aiSummary(result any, value any, raw []byte) (string, []string, string) {
 		if obj, ok := value.(map[string]any); ok {
 			if cursor, ok := obj["nextCursor"].(string); ok && cursor != "" {
 				next = "Next page: " + program + " " + commandPath + " --cursor " + cursor + "    Every page: " + program + " " + commandPath + " --all"
+			} else if cursor, ok := obj["next_cursor"].(string); ok && cursor != "" {
+				next = "Next page: " + program + " " + commandPath + " --cursor " + cursor + "    Every page: " + program + " " + commandPath + " --all"
 			}
 		}
 		return outcome, rows, next
