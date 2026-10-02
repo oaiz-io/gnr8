@@ -1737,7 +1737,9 @@ fn a_flag_no_command_binds_no_longer_blocks_generation() {
 
 #[test]
 fn json_and_format_are_reserved_command_flags() {
-    for name in ["json", "format"] {
+    for name in [
+        "json", "format", "fields", "output", "quiet", "debug", "yes", "no-input",
+    ] {
         let graph = one_query_param_graph(name);
         let error = generate_cli_result(&graph, SdkCli::new("bookstore")).unwrap_err();
         let message = error.to_string();
@@ -2890,6 +2892,12 @@ fn json_and_format_flags_are_emitted() {
     let text = generate_cli_with(&bookstore_graph(), SdkCli::new("bookstore"));
     assert!(text.contains("\"--json\","), "{text}");
     assert!(text.contains("\"--format\","), "{text}");
+    assert!(text.contains("\"--fields\","), "{text}");
+    assert!(text.contains("\"--output\","), "{text}");
+    assert!(text.contains("\"--quiet\","), "{text}");
+    assert!(text.contains("\"--debug\","), "{text}");
+    assert!(text.contains("\"--yes\","), "{text}");
+    assert!(text.contains("\"--no-input\","), "{text}");
     assert!(text.contains("FORMAT_ENV"), "{text}");
     if skip_go() {
         return;
@@ -2897,6 +2905,9 @@ fn json_and_format_flags_are_emitted() {
     let go = generate_go_cli(&bookstore_graph(), "bookstore");
     assert!(go.contains("\"json\""), "{go}");
     assert!(go.contains("\"format\""), "{go}");
+    assert!(go.contains("\"fields\""), "{go}");
+    assert!(go.contains("printAIFriendly"), "{go}");
+    assert!(go.contains("PreflightOutput"), "{go}");
     assert!(go.contains("peelGlobals"), "{go}");
 }
 

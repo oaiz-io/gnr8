@@ -137,5 +137,7 @@ func clientOptions() []sdk.Option {
 	if ua := userAgent(); ua != "" {
 		opts = append(opts, sdk.WithHeader("User-Agent", ua))
 	}
+	opts = append(opts, sdk.WithRequestHook(captureRequest))
+	opts = append(opts, sdk.WithResponseHook(captureResponse))
 	return opts
 }

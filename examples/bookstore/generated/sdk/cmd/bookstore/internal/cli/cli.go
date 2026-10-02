@@ -21,6 +21,13 @@ type Options struct {
 
 var active Options
 var outputFormat string
+var fieldsSpec string
+var outputPath string
+var quiet bool
+var debugEnabled bool
+var yesFlag bool
+var noInput bool
+var commandPath string
 
 func versionLine() string {
 	version := active.Version
@@ -73,34 +80,94 @@ func resolveFormat() {
 	}
 }
 
+func peelBool(arg string, names ...string) bool {
+	for _, name := range names {
+		if arg == "--"+name || arg == "-"+name {
+			return true
+		}
+	}
+	return false
+}
+
+func peelValue(rest []string, names ...string) (string, []string, int) {
+	arg := rest[0]
+	for _, name := range names {
+		prefix := "--" + name + "="
+		short := "-" + name + "="
+		if strings.HasPrefix(arg, prefix) || strings.HasPrefix(arg, short) {
+			return arg[strings.Index(arg, "=")+1:], rest[1:], 0
+		}
+		if arg == "--"+name || arg == "-"+name {
+			if len(rest) < 2 {
+				fmt.Fprintf(os.Stderr, "error: --%s needs a value\n", name)
+				return "", nil, 2
+			}
+			return rest[1], rest[2:], 0
+		}
+	}
+	return "", rest, -1
+}
+
 func peelGlobals(args []string) ([]string, int) {
 	rest := args
 	for len(rest) > 0 {
 		arg := rest[0]
 		switch {
-		case arg == "--json" || arg == "-json":
+		case peelBool(arg, "json"):
 			outputFormat = "json"
 			rest = rest[1:]
-		case arg == "--format" || arg == "-format":
-			if len(rest) < 2 {
-				fmt.Fprintln(os.Stderr, "error: --format needs a value")
-				return nil, 2
-			}
-			if code := setFormat(rest[1]); code != 0 {
-				return nil, code
-			}
-			rest = rest[2:]
-		case strings.HasPrefix(arg, "--format=") || strings.HasPrefix(arg, "-format="):
-			value := arg[strings.Index(arg, "=")+1:]
-			if code := setFormat(value); code != 0 {
-				return nil, code
-			}
+		case peelBool(arg, "quiet", "q"):
+			quiet = true
+			rest = rest[1:]
+		case peelBool(arg, "debug"):
+			debugEnabled = true
+			rest = rest[1:]
+		case peelBool(arg, "yes", "y"):
+			yesFlag = true
+			rest = rest[1:]
+		case peelBool(arg, "no-input"):
+			noInput = true
 			rest = rest[1:]
 		default:
+			if value, next, code := peelValue(rest, "format"); code != -1 {
+				if code != 0 {
+					return nil, code
+				}
+				if code := setFormat(value); code != 0 {
+					return nil, code
+				}
+				rest = next
+				continue
+			}
+			if value, next, code := peelValue(rest, "fields"); code != -1 {
+				if code != 0 {
+					return nil, code
+				}
+				fieldsSpec = value
+				rest = next
+				continue
+			}
+			if value, next, code := peelValue(rest, "output", "o"); code != -1 {
+				if code != 0 {
+					return nil, code
+				}
+				outputPath = value
+				rest = next
+				continue
+			}
 			return rest, -1
 		}
 	}
 	return rest, -1
+}
+
+func resolveEnv() {
+	if os.Getenv(debugEnv) != "" {
+		debugEnabled = true
+	}
+	if os.Getenv(noInputEnv) != "" {
+		noInput = true
+	}
 }
 
 // One command and the prose its handler states.
@@ -288,6 +355,7 @@ func Run(args []string, opts Options) int {
 	}
 	args = rest
 	resolveFormat()
+	resolveEnv()
 	if len(args) == 0 {
 		printRootUsage(os.Stderr)
 		return 2

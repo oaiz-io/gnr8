@@ -46,6 +46,61 @@ def register(subparsers: Any) -> None:
         help="output format: human, ai-friendly, json, or jsonl",
     )
     cmd_list_books.add_argument(
+        "--fields",
+        dest="fields",
+        default=argparse.SUPPRESS,
+        help="comma-separated response fields, or help to list them",
+    )
+    cmd_list_books.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        default=argparse.SUPPRESS,
+        help="write the full result to a file, or - for stdout",
+    )
+    cmd_list_books.add_argument(
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print less on success",
+    )
+    cmd_list_books.add_argument(
+        "-q",
+        dest="quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print less on success",
+    )
+    cmd_list_books.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="write a request trace to stderr",
+    )
+    cmd_list_books.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not ask before a destructive command",
+    )
+    cmd_list_books.add_argument(
+        "-y",
+        dest="yes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not ask before a destructive command",
+    )
+    cmd_list_books.add_argument(
+        "--no-input",
+        dest="no_input",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="never prompt; refuse commands that would ask",
+    )
+    cmd_list_books.add_argument(
         "--cursor",
         dest="cursor",
     )
@@ -59,7 +114,11 @@ def register(subparsers: Any) -> None:
         "--sort",
         dest="sort",
     )
-    cmd_list_books.set_defaults(_handler=_list_books)
+    cmd_list_books.set_defaults(
+        _handler=_list_books,
+        _command="list-books",
+        _fields=(),
+    )
     cmd_create_book = subparsers.add_parser(
         "create-book",
         help="Add a book to the catalogue.",
@@ -88,6 +147,61 @@ def register(subparsers: Any) -> None:
         default=argparse.SUPPRESS,
         help="output format: human, ai-friendly, json, or jsonl",
     )
+    cmd_create_book.add_argument(
+        "--fields",
+        dest="fields",
+        default=argparse.SUPPRESS,
+        help="comma-separated response fields, or help to list them",
+    )
+    cmd_create_book.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        default=argparse.SUPPRESS,
+        help="write the full result to a file, or - for stdout",
+    )
+    cmd_create_book.add_argument(
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print less on success",
+    )
+    cmd_create_book.add_argument(
+        "-q",
+        dest="quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print less on success",
+    )
+    cmd_create_book.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="write a request trace to stderr",
+    )
+    cmd_create_book.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not ask before a destructive command",
+    )
+    cmd_create_book.add_argument(
+        "-y",
+        dest="yes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not ask before a destructive command",
+    )
+    cmd_create_book.add_argument(
+        "--no-input",
+        dest="no_input",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="never prompt; refuse commands that would ask",
+    )
     cmd_create_book_body = cmd_create_book.add_mutually_exclusive_group(required=True)
     cmd_create_book_body.add_argument(
         "--body",
@@ -99,7 +213,11 @@ def register(subparsers: Any) -> None:
         dest="body_file",
         help="read the request body from a file, or - for stdin",
     )
-    cmd_create_book.set_defaults(_handler=_create_book)
+    cmd_create_book.set_defaults(
+        _handler=_create_book,
+        _command="create-book",
+        _fields=(),
+    )
     cmd_get_book = subparsers.add_parser(
         "get-book",
         help="Fetch one book by its identifier.",
@@ -129,6 +247,61 @@ def register(subparsers: Any) -> None:
         help="output format: human, ai-friendly, json, or jsonl",
     )
     cmd_get_book.add_argument(
+        "--fields",
+        dest="fields",
+        default=argparse.SUPPRESS,
+        help="comma-separated response fields, or help to list them",
+    )
+    cmd_get_book.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        default=argparse.SUPPRESS,
+        help="write the full result to a file, or - for stdout",
+    )
+    cmd_get_book.add_argument(
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print less on success",
+    )
+    cmd_get_book.add_argument(
+        "-q",
+        dest="quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print less on success",
+    )
+    cmd_get_book.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="write a request trace to stderr",
+    )
+    cmd_get_book.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not ask before a destructive command",
+    )
+    cmd_get_book.add_argument(
+        "-y",
+        dest="yes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not ask before a destructive command",
+    )
+    cmd_get_book.add_argument(
+        "--no-input",
+        dest="no_input",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="never prompt; refuse commands that would ask",
+    )
+    cmd_get_book.add_argument(
         "--book-id",
         dest="book_id",
         required=True,
@@ -140,7 +313,11 @@ def register(subparsers: Any) -> None:
         dest="fmt",
         choices=("hardcover", "paperback"),
     )
-    cmd_get_book.set_defaults(_handler=_get_book)
+    cmd_get_book.set_defaults(
+        _handler=_get_book,
+        _command="get-book",
+        _fields=(),
+    )
     cmd_update_book = subparsers.add_parser(
         "update-book",
         help="Update the stored filters for one book.",
@@ -170,6 +347,61 @@ def register(subparsers: Any) -> None:
         help="output format: human, ai-friendly, json, or jsonl",
     )
     cmd_update_book.add_argument(
+        "--fields",
+        dest="fields",
+        default=argparse.SUPPRESS,
+        help="comma-separated response fields, or help to list them",
+    )
+    cmd_update_book.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        default=argparse.SUPPRESS,
+        help="write the full result to a file, or - for stdout",
+    )
+    cmd_update_book.add_argument(
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print less on success",
+    )
+    cmd_update_book.add_argument(
+        "-q",
+        dest="quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print less on success",
+    )
+    cmd_update_book.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="write a request trace to stderr",
+    )
+    cmd_update_book.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not ask before a destructive command",
+    )
+    cmd_update_book.add_argument(
+        "-y",
+        dest="yes",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="do not ask before a destructive command",
+    )
+    cmd_update_book.add_argument(
+        "--no-input",
+        dest="no_input",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="never prompt; refuse commands that would ask",
+    )
+    cmd_update_book.add_argument(
         "--book-id",
         dest="book_id",
         required=True,
@@ -187,7 +419,11 @@ def register(subparsers: Any) -> None:
         dest="body_file",
         help="read the request body from a file, or - for stdin",
     )
-    cmd_update_book.set_defaults(_handler=_update_book)
+    cmd_update_book.set_defaults(
+        _handler=_update_book,
+        _command="update-book",
+        _fields=(),
+    )
 
 
 def _list_books(args: argparse.Namespace) -> Any:

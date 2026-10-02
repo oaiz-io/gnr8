@@ -157,12 +157,15 @@ pub(crate) fn helper_env_var(program: &str) -> String {
 ///
 /// `--help` is bound by `argparse` on every parser it builds and by the Go dispatcher's own `-h`
 /// handling; `--base-url` is declared on each command so it can follow the subcommand;
-/// `--format` and `--json` are globals every generated command binds.
+/// `--format` and `--json` are globals every generated command binds, as are the output-contract
+/// flags (`fields`, `output`, `quiet`, `debug`) and the prompt flags (`yes`, `no-input`).
 ///
 /// Everything else is conditional and computed per command by [`reserved_flags_for`] — reserving a
 /// name no command binds costs a user a legitimate parameter for nothing, and the only remedy
 /// available to them is changing their API's wire contract.
-const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url", "format", "json"];
+const ALWAYS_RESERVED_FLAGS: &[&str] = &[
+    "help", "base-url", "format", "json", "fields", "output", "quiet", "debug", "yes", "no-input",
+];
 
 /// What each reserved flag does, in the words both emitters print.
 ///
@@ -177,10 +180,74 @@ pub(crate) const LIMIT_HELP: &str = "stop after this many items";
 pub(crate) const ALL_HELP: &str = "keep following pages until the last one";
 pub(crate) const FORMAT_HELP: &str = "output format: human, ai-friendly, json, or jsonl";
 pub(crate) const JSON_HELP: &str = "print the server body (shorthand for --format json)";
+pub(crate) const FIELDS_HELP: &str = "comma-separated response fields, or help to list them";
+pub(crate) const OUTPUT_HELP: &str = "write the full result to a file, or - for stdout";
+pub(crate) const QUIET_HELP: &str = "print less on success";
+pub(crate) const DEBUG_HELP: &str = "write a request trace to stderr";
+pub(crate) const YES_HELP: &str = "do not ask before a destructive command";
+pub(crate) const NO_INPUT_HELP: &str = "never prompt; refuse commands that would ask";
 
 /// Environment variable selecting the output format: `{PROG}_FORMAT`.
 pub(crate) fn format_env_var(program: &str) -> String {
     format!("{}_FORMAT", screaming_snake(program))
+}
+
+/// Environment variable enabling a request trace: `{PROG}_DEBUG`.
+pub(crate) fn debug_env_var(program: &str) -> String {
+    format!("{}_DEBUG", screaming_snake(program))
+}
+
+/// Environment variable forbidding prompts: `{PROG}_NO_INPUT`.
+pub(crate) fn no_input_env_var(program: &str) -> String {
+    format!("{}_NO_INPUT", screaming_snake(program))
+}
+
+/// Environment variable overriding the ai-friendly output directory: `{PROG}_OUTPUT_DIR`.
+pub(crate) fn output_dir_env_var(program: &str) -> String {
+    format!("{}_OUTPUT_DIR", screaming_snake(program))
+}
+
+/// JSON object keys of an operation's success body, for `--fields help`.
+///
+/// A named schema or inline object contributes its wire names. An array contributes the item's
+/// keys. Anything else has no fields to list — `--fields help` then says so, rather than inventing
+/// names from the Go or Python type.
+pub(crate) fn response_field_names(graph: &ApiGraph, op: &Operation) -> Vec<String> {
+    let Ok(success) = success_responses_of(op, graph) else {
+        return Vec::new();
+    };
+    let Some(model) = success.body_model else {
+        return Vec::new();
+    };
+    object_json_names(graph, &Type::Named(model), 0)
+}
+
+fn object_json_names(graph: &ApiGraph, ty: &Type, depth: usize) -> Vec<String> {
+    if depth > 8 {
+        return Vec::new();
+    }
+    match ty {
+        Type::Named(id) => {
+            let Some(schema) = graph.schemas.iter().find(|schema| &schema.id == id) else {
+                return Vec::new();
+            };
+            object_json_names(graph, &schema.body, depth + 1)
+        }
+        Type::Object(fields) => fields.iter().map(|field| field.json_name.clone()).collect(),
+        Type::Array(inner) => object_json_names(graph, inner, depth + 1),
+        Type::Union(members) => members
+            .iter()
+            .find_map(|member| {
+                let names = object_json_names(graph, member, depth + 1);
+                (!names.is_empty()).then_some(names)
+            })
+            .unwrap_or_default(),
+        Type::Primitive(_)
+        | Type::WellKnown(_)
+        | Type::Map { .. }
+        | Type::Enum(_)
+        | Type::Any {} => Vec::new(),
+    }
 }
 
 /// The usage string for one parameter flag: its own prose, then whether it is required.
@@ -209,8 +276,9 @@ pub(crate) fn parameter_flag_help(param: &Param) -> String {
 ///
 /// Conditional because the emitters are: `--body`/`--body-file` exist only where the operation has
 /// a request body, and `--limit`/`--all` only where a `PaginationPolicy` names it. `--version` is
-/// bound on the root parser, which is not a command, so it is not reserved here. `--format` and
-/// `--json` are globals every generated command binds.
+/// bound on the root parser, which is not a command, so it is not reserved here. `--format`,
+/// `--json`, `--fields`, `--output`, `--quiet`, `--debug`, `--yes` and `--no-input` are globals
+/// every generated command binds.
 fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<String>, CoreError> {
     let mut reserved: BTreeSet<String> = ALWAYS_RESERVED_FLAGS
         .iter()

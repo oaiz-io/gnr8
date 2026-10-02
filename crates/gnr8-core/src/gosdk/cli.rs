@@ -16,12 +16,14 @@ use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type, Wel
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
-    flag_name, format_env_var, helper_env_var, http_auth_features_for, operation_auth_alternatives,
-    operation_prose, parameter_flag_help, quoted_string_literal, reject_duplicate_command_files,
-    reject_sse_operations, request_body_models_of, success_responses_of, OperationAuthScheme,
-    RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, FORMAT_HELP, JSON_HELP,
-    LIMIT_HELP,
+    check_cli_names, cli_operations, command_group, command_name, credential_env_var,
+    debug_env_var, file_stem, flag_name, format_env_var, helper_env_var, http_auth_features_for,
+    no_input_env_var, operation_auth_alternatives, operation_prose, output_dir_env_var,
+    parameter_flag_help, quoted_string_literal, reject_duplicate_command_files,
+    reject_sse_operations, request_body_models_of, response_field_names, success_responses_of,
+    OperationAuthScheme, RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP,
+    DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, OUTPUT_HELP,
+    QUIET_HELP, YES_HELP,
 };
 use crate::CoreError;
 
@@ -234,7 +236,8 @@ pub(crate) fn emit_cli(
         }
     }
     files.push(part("output", &|body, imports| {
-        emit_print_helpers(body, imports)
+        emit_print_helpers(body, package, imports);
+        Ok(())
     })?);
     if !ops.is_empty() || !cli.owned_commands.is_empty() {
         files.push(part("errors", &|body, imports| {
@@ -569,6 +572,24 @@ fn emit_constants(
         out,
         "const formatEnv = {}",
         quoted_string_literal(&format_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const debugEnv = {}",
+        quoted_string_literal(&debug_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const noInputEnv = {}",
+        quoted_string_literal(&no_input_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "const outputDirEnv = {}",
+        quoted_string_literal(&output_dir_env_var(&cli.program))
     )
     .map_err(sink)?;
     writeln!(
@@ -1080,46 +1101,781 @@ fn emit_client_options(out: &mut String, package: &str) -> Result<(), CoreError>
     )
     .map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "opts = append(opts, {package}.WithRequestHook(captureRequest))"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "opts = append(opts, {package}.WithResponseHook(captureResponse))"
+    )
+    .map_err(sink)?;
     writeln!(out, "return opts").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
 }
 
-fn emit_print_helpers(out: &mut String, imports: &mut ImportSet) -> Result<(), CoreError> {
+fn emit_print_helpers(out: &mut String, package: &str, imports: &mut ImportSet) {
+    imports.sdk = true;
+    imports.add("bytes");
+    imports.add("context");
+    imports.add("crypto/sha256");
+    imports.add("encoding/hex");
     imports.add("encoding/json");
     imports.add("fmt");
+    imports.add("io");
+    imports.add("net/http");
     imports.add("os");
-    writeln!(out, "func stdoutIsTTY() bool {{").map_err(sink)?;
-    writeln!(out, "info, err := os.Stdout.Stat()").map_err(sink)?;
-    writeln!(out, "if err != nil {{").map_err(sink)?;
-    writeln!(out, "return false").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "return info.Mode()&os.ModeCharDevice != 0").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
-    writeln!(out, "func printResult(result any) int {{").map_err(sink)?;
-    writeln!(out, "switch value := result.(type) {{").map_err(sink)?;
-    writeln!(out, "case []byte:").map_err(sink)?;
-    writeln!(out, "if _, err := os.Stdout.Write(value); err != nil {{").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %v\\n\", err)").map_err(sink)?;
-    writeln!(out, "return 1").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "return 0").map_err(sink)?;
-    writeln!(out, "default:").map_err(sink)?;
-    writeln!(out, "encoder := json.NewEncoder(os.Stdout)").map_err(sink)?;
-    writeln!(out, "if outputFormat != \"jsonl\" {{").map_err(sink)?;
-    writeln!(out, "encoder.SetIndent(\"\", \"  \")").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "if err := encoder.Encode(value); err != nil {{").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %v\\n\", err)").map_err(sink)?;
-    writeln!(out, "return 1").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "return 0").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
-    Ok(())
+    imports.add("path/filepath");
+    imports.add("sort");
+    imports.add("strconv");
+    imports.add("strings");
+    imports.add("time");
+    out.push_str(&output_runtime_go(package));
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the generated output runtime is one stdout/envelope/prompt surface"
+)]
+fn output_runtime_go(package: &str) -> String {
+    format!(
+        r#"
+type capturedAnswer struct {{
+	body        []byte
+	status      int
+	requestID   string
+	contentType string
+	method      string
+	url         string
+	started     time.Time
+	elapsed     time.Duration
+}}
+
+var lastAnswer capturedAnswer
+
+func captureRequest(_ context.Context, _ {package}.RequestContext, _ *http.Request) error {{
+	lastAnswer = capturedAnswer{{started: time.Now()}}
+	return nil
+}}
+
+func captureResponse(_ context.Context, ctx {package}.RequestContext, resp *http.Response) error {{
+	lastAnswer.method = ctx.Method
+	lastAnswer.url = ctx.URL
+	if !lastAnswer.started.IsZero() {{
+		lastAnswer.elapsed = time.Since(lastAnswer.started)
+	}}
+	if resp == nil {{
+		return nil
+	}}
+	lastAnswer.status = resp.StatusCode
+	lastAnswer.requestID = resp.Header.Get("X-Request-ID")
+	if lastAnswer.requestID == "" {{
+		lastAnswer.requestID = resp.Header.Get("X-Request-Id")
+	}}
+	lastAnswer.contentType = resp.Header.Get("Content-Type")
+	if resp.Body != nil {{
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {{
+			return err
+		}}
+		lastAnswer.body = body
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+	}}
+	if debugEnabled {{
+		fmt.Fprintf(os.Stderr, "debug: %s %s -> %d", lastAnswer.method, lastAnswer.url, lastAnswer.status)
+		if lastAnswer.requestID != "" {{
+			fmt.Fprintf(os.Stderr, " request-id=%s", lastAnswer.requestID)
+		}}
+		if lastAnswer.elapsed > 0 {{
+			fmt.Fprintf(os.Stderr, " %s", lastAnswer.elapsed)
+		}}
+		fmt.Fprintln(os.Stderr)
+	}}
+	return nil
+}}
+
+func fileIsTTY(file *os.File) bool {{
+	info, err := file.Stat()
+	if err != nil {{
+		return false
+	}}
+	return info.Mode()&os.ModeCharDevice != 0
+}}
+
+func stdoutIsTTY() bool {{ return fileIsTTY(os.Stdout) }}
+func stderrIsTTY() bool {{ return fileIsTTY(os.Stderr) }}
+func stdinIsTTY() bool  {{ return fileIsTTY(os.Stdin) }}
+
+func printResult(result any) int {{
+	if outputPath != "" && outputPath != "-" {{
+		if code := writeOutputFile(result); code != 0 {{
+			return code
+		}}
+	}}
+	switch outputFormat {{
+	case "json":
+		return printJSON(result)
+	case "jsonl":
+		return printJSONL(result)
+	case "ai-friendly":
+		return printAIFriendly(result)
+	default:
+		if quiet {{
+			return 0
+		}}
+		return printHuman(result)
+	}}
+}}
+
+func printJSON(result any) int {{
+	raw, err := resultBytes(result)
+	if err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	if len(raw) == 0 {{
+		return 0
+	}}
+	if stdoutIsTTY() && json.Valid(raw) {{
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, raw, "", "  "); err == nil {{
+			buf.WriteByte('\n')
+			_, err = os.Stdout.Write(buf.Bytes())
+			if err != nil {{
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				return 1
+			}}
+			return 0
+		}}
+	}}
+	if _, err := os.Stdout.Write(raw); err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	if raw[len(raw)-1] != '\n' {{
+		_, _ = os.Stdout.Write([]byte("\n"))
+	}}
+	return 0
+}}
+
+func printJSONL(result any) int {{
+	value, raw, err := decodeResult(result)
+	if err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	items, _, _ := listItems(value, raw)
+	if items == nil {{
+		items = []json.RawMessage{{raw}}
+		if len(raw) == 0 {{
+			return 0
+		}}
+	}}
+	for _, item := range items {{
+		projected := projectRaw(item)
+		if _, err := os.Stdout.Write(projected); err != nil {{
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1
+		}}
+		if len(projected) == 0 || projected[len(projected)-1] != '\n' {{
+			_, _ = os.Stdout.Write([]byte("\n"))
+		}}
+	}}
+	return 0
+}}
+
+func printHuman(result any) int {{
+	raw, err := resultBytes(result)
+	if err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	if len(raw) == 0 {{
+		return 0
+	}}
+	if json.Valid(raw) {{
+		projected := projectRaw(raw)
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, projected, "", "  "); err == nil {{
+			buf.WriteByte('\n')
+			_, err = os.Stdout.Write(buf.Bytes())
+			if err != nil {{
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				return 1
+			}}
+			return 0
+		}}
+	}}
+	if _, err := os.Stdout.Write(raw); err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	if raw[len(raw)-1] != '\n' {{
+		_, _ = os.Stdout.Write([]byte("\n"))
+	}}
+	return 0
+}}
+
+func printAIFriendly(result any) int {{
+	value, raw, err := decodeResult(result)
+	if err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	saved, saveErr := writeEnvelope(result, value, raw)
+	outcome, rows, nextPage := aiSummary(result, value, raw)
+	line1 := program + " " + commandPath + ": " + outcome + ". Full JSON: "
+	if saveErr != nil {{
+		line1 += "not saved (" + saveErr.Error() + ")"
+	}} else {{
+		line1 += saved
+	}}
+	var buf bytes.Buffer
+	buf.WriteString(line1)
+	buf.WriteByte('\n')
+	if !quiet {{
+		const budget = 4000
+		shown := 0
+		for _, row := range rows {{
+			next := row + "\n"
+			if buf.Len()+len(next) > budget && shown > 0 {{
+				fmt.Fprintf(&buf, "Showing %d of %d; the rest is in the file.\n", shown, len(rows))
+				break
+			}}
+			buf.WriteString(next)
+			shown++
+		}}
+		if nextPage != "" && buf.Len()+len(nextPage)+1 <= budget {{
+			buf.WriteString(nextPage)
+			buf.WriteByte('\n')
+		}}
+		if saved != "" && saveErr == nil {{
+			recipes := aiRecipes(saved, value, raw)
+			if buf.Len()+len(recipes) <= budget {{
+				buf.WriteString(recipes)
+			}}
+		}}
+	}}
+	if _, err := os.Stdout.Write(buf.Bytes()); err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	return 0
+}}
+
+func resultBytes(result any) ([]byte, error) {{
+	if len(lastAnswer.body) > 0 {{
+		return lastAnswer.body, nil
+	}}
+	switch value := result.(type) {{
+	case nil:
+		return nil, nil
+	case []byte:
+		return value, nil
+	default:
+		return json.Marshal(value)
+	}}
+}}
+
+func decodeResult(result any) (any, []byte, error) {{
+	raw, err := resultBytes(result)
+	if err != nil {{
+		return nil, nil, err
+	}}
+	if len(raw) == 0 {{
+		return nil, raw, nil
+	}}
+	if !json.Valid(raw) {{
+		return nil, raw, nil
+	}}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {{
+		return nil, raw, err
+	}}
+	return value, raw, nil
+}}
+
+func listItems(value any, raw []byte) ([]json.RawMessage, string, json.RawMessage) {{
+	switch typed := value.(type) {{
+	case []any:
+		items := make([]json.RawMessage, 0, len(typed))
+		var array []json.RawMessage
+		if json.Unmarshal(raw, &array) == nil {{
+			return array, "", nil
+		}}
+		for _, item := range typed {{
+			encoded, err := json.Marshal(item)
+			if err != nil {{
+				continue
+			}}
+			items = append(items, encoded)
+		}}
+		return items, "", nil
+	case map[string]any:
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(raw, &obj) != nil {{
+			obj = map[string]json.RawMessage{{}}
+		}}
+		bestKey := ""
+		bestLen := -1
+		keys := make([]string, 0, len(typed))
+		for key := range typed {{
+			keys = append(keys, key)
+		}}
+		sort.Strings(keys)
+		for _, key := range keys {{
+			arr, ok := typed[key].([]any)
+			if !ok {{
+				continue
+			}}
+			if len(arr) > bestLen {{
+				bestKey = key
+				bestLen = len(arr)
+			}}
+		}}
+		if bestKey == "" {{
+			return nil, "", nil
+		}}
+		itemsRaw := obj[bestKey]
+		var items []json.RawMessage
+		if json.Unmarshal(itemsRaw, &items) != nil {{
+			return nil, bestKey, nil
+		}}
+		meta := map[string]json.RawMessage{{}}
+		for key, item := range obj {{
+			if key == bestKey {{
+				continue
+			}}
+			meta[key] = item
+		}}
+		metaRaw, _ := json.Marshal(meta)
+		return items, bestKey, metaRaw
+	default:
+		return nil, "", nil
+	}}
+}}
+
+func fieldList() []string {{
+	if fieldsSpec == "" || fieldsSpec == "help" {{
+		return nil
+	}}
+	parts := strings.Split(fieldsSpec, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {{
+		part = strings.TrimSpace(part)
+		if part != "" {{
+			out = append(out, part)
+		}}
+	}}
+	return out
+}}
+
+func projectRaw(raw json.RawMessage) []byte {{
+	fields := fieldList()
+	if len(fields) == 0 || !json.Valid(raw) {{
+		return raw
+	}}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {{
+		return raw
+	}}
+	projected := projectValue(value, fields)
+	encoded, err := json.Marshal(projected)
+	if err != nil {{
+		return raw
+	}}
+	return encoded
+}}
+
+func projectValue(value any, fields []string) any {{
+	switch typed := value.(type) {{
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {{
+			out = append(out, projectValue(item, fields))
+		}}
+		return out
+	case map[string]any:
+		out := map[string]any{{}}
+		for _, field := range fields {{
+			if item, ok := typed[field]; ok {{
+				out[field] = item
+			}}
+		}}
+		return out
+	default:
+		return value
+	}}
+}}
+
+func viewRow(raw json.RawMessage) string {{
+	projected := projectRaw(raw)
+	var value any
+	if json.Unmarshal(projected, &value) != nil {{
+		return string(projected)
+	}}
+	if obj, ok := value.(map[string]any); ok && fieldList() == nil {{
+		keys := make([]string, 0, len(obj))
+		for key, item := range obj {{
+			if isScalar(item) {{
+				keys = append(keys, key)
+			}}
+		}}
+		sort.Strings(keys)
+		if len(keys) > 6 {{
+			keys = keys[:6]
+		}}
+		if len(keys) > 0 {{
+			value = projectValue(obj, keys)
+		}}
+	}}
+	encoded, err := json.Marshal(value)
+	if err != nil {{
+		return string(projected)
+	}}
+	if len(encoded) > 80 {{
+		return string(encoded[:79]) + "…"
+	}}
+	return string(encoded)
+}}
+
+func isScalar(value any) bool {{
+	switch value.(type) {{
+	case nil, bool, float64, json.Number, string:
+		return true
+	default:
+		return false
+	}}
+}}
+
+func aiSummary(result any, value any, raw []byte) (string, []string, string) {{
+	if data, ok := result.([]byte); ok {{
+		return fmt.Sprintf("saved %d bytes", len(data)), nil, ""
+	}}
+	if len(raw) == 0 || value == nil {{
+		return "empty", nil, ""
+	}}
+	items, key, _ := listItems(value, raw)
+	if items != nil {{
+		noun := "items"
+		if key != "" {{
+			noun = key
+		}}
+		rows := make([]string, 0, len(items))
+		for _, item := range items {{
+			rows = append(rows, viewRow(item))
+		}}
+		outcome := fmt.Sprintf("%d %s", len(items), noun)
+		next := ""
+		if obj, ok := value.(map[string]any); ok {{
+			if cursor, ok := obj["nextCursor"].(string); ok && cursor != "" {{
+				next = "Next page: " + program + " " + commandPath + " --cursor " + cursor + "    Every page: " + program + " " + commandPath + " --all"
+			}}
+		}}
+		return outcome, rows, next
+	}}
+	return "ok", []string{{viewRow(raw)}}, ""
+}}
+
+func aiRecipes(path string, value any, raw []byte) string {{
+	quoted := shellQuote(path)
+	items, _, _ := listItems(value, raw)
+	var b strings.Builder
+	b.WriteString("Query the saved result instead of re-running (do not cat it):\n")
+	if items != nil {{
+		b.WriteString("  jq '.items[]' " + quoted + "\n")
+		b.WriteString("  jq '.items | length' " + quoted + "\n")
+	}} else {{
+		b.WriteString("  jq 'keys' " + quoted + "\n")
+		b.WriteString("  jq '.' " + quoted + "\n")
+	}}
+	return b.String()
+}}
+
+func shellQuote(value string) string {{
+	if value == "" {{
+		return "''"
+	}}
+	if !strings.ContainsAny(value, " \t\n'\"\\\\$`") {{
+		return value
+	}}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}}
+
+func writeOutputFile(result any) int {{
+	raw, err := resultBytes(result)
+	if err != nil {{
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}}
+	if err := os.WriteFile(outputPath, raw, 0o600); err != nil {{
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", outputPath, err)
+		return 1
+	}}
+	return 0
+}}
+
+func outputDirPath() string {{
+	if env := os.Getenv(outputDirEnv); env != "" {{
+		return env
+	}}
+	return filepath.Join("."+program, "output")
+}}
+
+func PreflightOutput() int {{
+	dir := outputDirPath()
+	root := filepath.Dir(dir)
+	if err := os.MkdirAll(root, 0o700); err != nil {{
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		return 2
+	}}
+	gitignore := filepath.Join(root, ".gitignore")
+	if _, err := os.Stat(gitignore); err != nil {{
+		if err := os.WriteFile(gitignore, []byte("*\n"), 0o600); err != nil {{
+			fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+			return 2
+		}}
+	}}
+	if err := os.MkdirAll(dir, 0o700); err != nil {{
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		return 2
+	}}
+	tmp, err := os.CreateTemp(dir, ".preflight-*")
+	if err != nil {{
+		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		return 2
+	}}
+	name := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(name)
+	return 0
+}}
+
+func writeEnvelope(result any, value any, raw []byte) (string, error) {{
+	dir := outputDirPath()
+	if err := os.MkdirAll(dir, 0o700); err != nil {{
+		return "", err
+	}}
+	kind := "object"
+	var items json.RawMessage
+	var meta json.RawMessage
+	var data json.RawMessage
+	var fileMeta map[string]any
+	page := map[string]any{{}}
+	switch typed := result.(type) {{
+	case []byte:
+		kind = "file"
+		name := strings.ReplaceAll(commandPath, " ", "-")
+		if name == "" {{
+			name = "download"
+		}}
+		binPath := filepath.Join(dir, name+"-"+shortID(typed)+".bin")
+		if err := os.WriteFile(binPath, typed, 0o600); err != nil {{
+			return "", err
+		}}
+		sum := sha256.Sum256(typed)
+		fileMeta = map[string]any{{
+			"path":        binPath,
+			"bytes":       len(typed),
+			"contentType": lastAnswer.contentType,
+			"sha256":      hex.EncodeToString(sum[:]),
+		}}
+	default:
+		if len(raw) == 0 {{
+			kind = "empty"
+		}} else {{
+			list, key, listMeta := listItems(value, raw)
+			if list != nil {{
+				kind = "list"
+				encoded, err := json.Marshal(list)
+				if err != nil {{
+					return "", err
+				}}
+				items = encoded
+				meta = listMeta
+				page["count"] = len(list)
+				if key != "" {{
+					page["itemsKey"] = key
+				}}
+			}} else {{
+				data = append(json.RawMessage(nil), raw...)
+			}}
+		}}
+	}}
+	stem := strings.ReplaceAll(commandPath, " ", "-")
+	if stem == "" {{
+		stem = "result"
+	}}
+	id := shortID(raw)
+	if id == "" {{
+		id = shortID([]byte(strconv.FormatInt(time.Now().UnixNano(), 10)))
+	}}
+	path := filepath.Join(dir, stem+"-"+id+".json")
+	payload := map[string]any{{
+		"schema":  "https://gnr8.dev/schemas/cli-result-v1.json",
+		"version": 1,
+		"tool":    map[string]string{{"name": program, "version": active.Version}},
+		"command": map[string]any{{"path": commandPath}},
+		"request": map[string]any{{"method": lastAnswer.method, "url": lastAnswer.url}},
+		"response": map[string]any{{
+			"status":      lastAnswer.status,
+			"requestId":   lastAnswer.requestID,
+			"contentType": lastAnswer.contentType,
+			"bytes":       len(raw),
+		}},
+		"kind":    kind,
+		"savedAt": time.Now().UTC().Format(time.RFC3339),
+	}}
+	if len(items) > 0 {{
+		payload["items"] = items
+	}}
+	if len(meta) > 0 && string(meta) != "{{}}" && string(meta) != "null" {{
+		payload["meta"] = meta
+	}}
+	if len(data) > 0 {{
+		payload["data"] = data
+	}}
+	if len(page) > 0 {{
+		payload["page"] = page
+	}}
+	if fileMeta != nil {{
+		payload["file"] = fileMeta
+	}}
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {{
+		return "", err
+	}}
+	encoded = append(encoded, '\n')
+	if err := atomicWrite(path, encoded); err != nil {{
+		return "", err
+	}}
+	latest := filepath.Join(dir, "latest.json")
+	if err := atomicWrite(latest, encoded); err != nil {{
+		return path, nil
+	}}
+	pruneOutput(dir)
+	return path, nil
+}}
+
+func shortID(raw []byte) string {{
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:3])
+}}
+
+func atomicWrite(path string, body []byte) error {{
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {{
+		return err
+	}}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(body); err != nil {{
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}}
+	if err := tmp.Chmod(0o600); err != nil {{
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}}
+	if err := tmp.Close(); err != nil {{
+		_ = os.Remove(tmpName)
+		return err
+	}}
+	return os.Rename(tmpName, path)
+}}
+
+func pruneOutput(dir string) {{
+	entries, err := os.ReadDir(dir)
+	if err != nil {{
+		return
+	}}
+	type item struct {{
+		name string
+		mod  time.Time
+		size int64
+	}}
+	var files []item
+	var total int64
+	for _, entry := range entries {{
+		if entry.IsDir() || entry.Name() == "latest.json" || !strings.HasSuffix(entry.Name(), ".json") {{
+			continue
+		}}
+		info, err := entry.Info()
+		if err != nil {{
+			continue
+		}}
+		files = append(files, item{{name: entry.Name(), mod: info.ModTime(), size: info.Size()}})
+		total += info.Size()
+	}}
+	for i := 0; i < len(files); i++ {{
+		for j := i + 1; j < len(files); j++ {{
+			if files[j].mod.Before(files[i].mod) {{
+				files[i], files[j] = files[j], files[i]
+			}}
+		}}
+	}}
+	for len(files) > 100 || total > 100*1024*1024 {{
+		if len(files) == 0 {{
+			return
+		}}
+		oldest := files[0]
+		_ = os.Remove(filepath.Join(dir, oldest.name))
+		total -= oldest.size
+		files = files[1:]
+	}}
+}}
+
+func PrintFieldsHelp(names []string) int {{
+	if len(names) == 0 {{
+		fmt.Fprintln(os.Stdout, "no declared response fields")
+		return 0
+	}}
+	for _, name := range names {{
+		fmt.Fprintln(os.Stdout, name)
+	}}
+	return 0
+}}
+
+func Confirm(severity, resource string) int {{
+	if severity == "" || severity == "mild" {{
+		return 0
+	}}
+	if yesFlag {{
+		return 0
+	}}
+	if noInput || !stdinIsTTY() || !stderrIsTTY() {{
+		fmt.Fprintf(os.Stderr, "error: %s requires confirmation; pass --yes\n", commandPath)
+		return 2
+	}}
+	if severity == "severe" {{
+		fmt.Fprintf(os.Stderr, "Type %s to confirm: ", resource)
+		var answer string
+		if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil || answer != resource {{
+			fmt.Fprintln(os.Stderr, "error: confirmation failed")
+			return 2
+		}}
+		return 0
+	}}
+	fmt.Fprintf(os.Stderr, "Proceed with %s %s? [y/N] ", commandPath, resource)
+	var answer string
+	if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil {{
+		fmt.Fprintln(os.Stderr, "error: confirmation failed")
+		return 2
+	}}
+	if answer != "y" && answer != "yes" && answer != "Y" && answer != "YES" {{
+		fmt.Fprintln(os.Stderr, "error: confirmation failed")
+		return 2
+	}}
+	return 0
+}}
+"#
+    )
 }
 
 fn emit_handlers(
@@ -1287,6 +2043,60 @@ fn emit_handler(
         quoted_string_literal(FORMAT_HELP)
     )
     .map_err(sink)?;
+    writeln!(
+        out,
+        "fieldsFlag := fs.String(\"fields\", \"\", {})",
+        quoted_string_literal(FIELDS_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "outputFlag := fs.String(\"output\", \"\", {})",
+        quoted_string_literal(OUTPUT_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "fs.StringVar(outputFlag, \"o\", \"\", {})",
+        quoted_string_literal(OUTPUT_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "quietFlag := fs.Bool(\"quiet\", false, {})",
+        quoted_string_literal(QUIET_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "fs.BoolVar(quietFlag, \"q\", false, {})",
+        quoted_string_literal(QUIET_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "debugFlag := fs.Bool(\"debug\", false, {})",
+        quoted_string_literal(DEBUG_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "yesBind := fs.Bool(\"yes\", false, {})",
+        quoted_string_literal(YES_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "fs.BoolVar(yesBind, \"y\", false, {})",
+        quoted_string_literal(YES_HELP)
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "noInputFlag := fs.Bool(\"no-input\", false, {})",
+        quoted_string_literal(NO_INPUT_HELP)
+    )
+    .map_err(sink)?;
 
     writeln!(out, "parsed, code := parseFlags(fs, args)").map_err(sink)?;
     writeln!(out, "if !parsed {{").map_err(sink)?;
@@ -1296,6 +2106,39 @@ fn emit_handler(
     writeln!(out, "outputFormat = \"json\"").map_err(sink)?;
     writeln!(out, "}} else if *formatFlag != \"\" {{").map_err(sink)?;
     writeln!(out, "if code := setFormat(*formatFlag); code != 0 {{").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *fieldsFlag != \"\" {{").map_err(sink)?;
+    writeln!(out, "fieldsSpec = *fieldsFlag").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *outputFlag != \"\" {{").map_err(sink)?;
+    writeln!(out, "outputPath = *outputFlag").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *quietFlag {{").map_err(sink)?;
+    writeln!(out, "quiet = true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *debugFlag {{").map_err(sink)?;
+    writeln!(out, "debugEnabled = true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *yesBind {{").map_err(sink)?;
+    writeln!(out, "yesFlag = true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if *noInputFlag {{").map_err(sink)?;
+    writeln!(out, "noInput = true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "commandPath = {}", quoted_string_literal(&invocation)).map_err(sink)?;
+    writeln!(out, "if fieldsSpec == \"help\" {{").map_err(sink)?;
+    let field_names = response_field_names(graph, op);
+    let names = field_names
+        .iter()
+        .map(|name| quoted_string_literal(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(out, "return PrintFieldsHelp([]string{{{names}}})").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if outputFormat == \"ai-friendly\" {{").map_err(sink)?;
+    writeln!(out, "if code := PreflightOutput(); code != 0 {{").map_err(sink)?;
     writeln!(out, "return code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
@@ -1873,6 +2716,13 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out).map_err(sink)?;
     writeln!(out, "var active Options").map_err(sink)?;
     writeln!(out, "var outputFormat string").map_err(sink)?;
+    writeln!(out, "var fieldsSpec string").map_err(sink)?;
+    writeln!(out, "var outputPath string").map_err(sink)?;
+    writeln!(out, "var quiet bool").map_err(sink)?;
+    writeln!(out, "var debugEnabled bool").map_err(sink)?;
+    writeln!(out, "var yesFlag bool").map_err(sink)?;
+    writeln!(out, "var noInput bool").map_err(sink)?;
+    writeln!(out, "var commandPath string").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "func versionLine() string {{").map_err(sink)?;
     writeln!(out, "version := active.Version").map_err(sink)?;
@@ -1937,42 +2787,118 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    writeln!(out, "func peelBool(arg string, names ...string) bool {{").map_err(sink)?;
+    writeln!(out, "for _, name := range names {{").map_err(sink)?;
+    writeln!(out, "if arg == \"--\"+name || arg == \"-\"+name {{").map_err(sink)?;
+    writeln!(out, "return true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return false").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(
+        out,
+        "func peelValue(rest []string, names ...string) (string, []string, int) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "arg := rest[0]").map_err(sink)?;
+    writeln!(out, "for _, name := range names {{").map_err(sink)?;
+    writeln!(out, "prefix := \"--\" + name + \"=\"").map_err(sink)?;
+    writeln!(out, "short := \"-\" + name + \"=\"").map_err(sink)?;
+    writeln!(
+        out,
+        "if strings.HasPrefix(arg, prefix) || strings.HasPrefix(arg, short) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return arg[strings.Index(arg, \"=\")+1:], rest[1:], 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if arg == \"--\"+name || arg == \"-\"+name {{").map_err(sink)?;
+    writeln!(out, "if len(rest) < 2 {{").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"error: --%s needs a value\\n\", name)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return \"\", nil, 2").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return rest[1], rest[2:], 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "return \"\", rest, -1").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "func peelGlobals(args []string) ([]string, int) {{").map_err(sink)?;
     writeln!(out, "rest := args").map_err(sink)?;
     writeln!(out, "for len(rest) > 0 {{").map_err(sink)?;
     writeln!(out, "arg := rest[0]").map_err(sink)?;
     writeln!(out, "switch {{").map_err(sink)?;
-    writeln!(out, "case arg == \"--json\" || arg == \"-json\":").map_err(sink)?;
+    writeln!(out, "case peelBool(arg, \"json\"):").map_err(sink)?;
     writeln!(out, "outputFormat = \"json\"").map_err(sink)?;
     writeln!(out, "rest = rest[1:]").map_err(sink)?;
-    writeln!(out, "case arg == \"--format\" || arg == \"-format\":").map_err(sink)?;
-    writeln!(out, "if len(rest) < 2 {{").map_err(sink)?;
+    writeln!(out, "case peelBool(arg, \"quiet\", \"q\"):").map_err(sink)?;
+    writeln!(out, "quiet = true").map_err(sink)?;
+    writeln!(out, "rest = rest[1:]").map_err(sink)?;
+    writeln!(out, "case peelBool(arg, \"debug\"):").map_err(sink)?;
+    writeln!(out, "debugEnabled = true").map_err(sink)?;
+    writeln!(out, "rest = rest[1:]").map_err(sink)?;
+    writeln!(out, "case peelBool(arg, \"yes\", \"y\"):").map_err(sink)?;
+    writeln!(out, "yesFlag = true").map_err(sink)?;
+    writeln!(out, "rest = rest[1:]").map_err(sink)?;
+    writeln!(out, "case peelBool(arg, \"no-input\"):").map_err(sink)?;
+    writeln!(out, "noInput = true").map_err(sink)?;
+    writeln!(out, "rest = rest[1:]").map_err(sink)?;
+    writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintln(os.Stderr, \"error: --format needs a value\")"
+        "if value, next, code := peelValue(rest, \"format\"); code != -1 {{"
     )
     .map_err(sink)?;
-    writeln!(out, "return nil, 2").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "if code := setFormat(rest[1]); code != 0 {{").map_err(sink)?;
+    writeln!(out, "if code != 0 {{").map_err(sink)?;
     writeln!(out, "return nil, code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "rest = rest[2:]").map_err(sink)?;
-    writeln!(
-        out,
-        "case strings.HasPrefix(arg, \"--format=\") || strings.HasPrefix(arg, \"-format=\"):"
-    )
-    .map_err(sink)?;
-    writeln!(out, "value := arg[strings.Index(arg, \"=\")+1:]").map_err(sink)?;
     writeln!(out, "if code := setFormat(value); code != 0 {{").map_err(sink)?;
     writeln!(out, "return nil, code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "rest = rest[1:]").map_err(sink)?;
-    writeln!(out, "default:").map_err(sink)?;
+    writeln!(out, "rest = next").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if value, next, code := peelValue(rest, \"fields\"); code != -1 {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "if code != 0 {{").map_err(sink)?;
+    writeln!(out, "return nil, code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "fieldsSpec = value").map_err(sink)?;
+    writeln!(out, "rest = next").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if value, next, code := peelValue(rest, \"output\", \"o\"); code != -1 {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "if code != 0 {{").map_err(sink)?;
+    writeln!(out, "return nil, code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "outputPath = value").map_err(sink)?;
+    writeln!(out, "rest = next").map_err(sink)?;
+    writeln!(out, "continue").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "return rest, -1").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "return rest, -1").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "func resolveEnv() {{").map_err(sink)?;
+    writeln!(out, "if os.Getenv(debugEnv) != \"\" {{").map_err(sink)?;
+    writeln!(out, "debugEnabled = true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "if os.Getenv(noInputEnv) != \"\" {{").map_err(sink)?;
+    writeln!(out, "noInput = true").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
@@ -2031,6 +2957,7 @@ fn emit_main(
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "args = rest").map_err(sink)?;
     writeln!(out, "resolveFormat()").map_err(sink)?;
+    writeln!(out, "resolveEnv()").map_err(sink)?;
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(out, "printRootUsage(os.Stderr)").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -2802,6 +3729,18 @@ fn flag_ident(param: &Param) -> String {
         || ident == "format"
         || ident == "jsonFlag"
         || ident == "formatFlag"
+        || ident == "fieldsFlag"
+        || ident == "outputFlag"
+        || ident == "quietFlag"
+        || ident == "debugFlag"
+        || ident == "yesBind"
+        || ident == "noInputFlag"
+        || ident == "fields"
+        || ident == "output"
+        || ident == "quiet"
+        || ident == "debug"
+        || ident == "yes"
+        || ident == "noInput"
     {
         ident.push_str("Flag");
     }

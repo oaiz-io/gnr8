@@ -24,6 +24,15 @@ func cmdListBooks(args []string) int {
 	genre := fs.String("genre", "", "")
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
 	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -32,6 +41,33 @@ func cmdListBooks(args []string) int {
 		outputFormat = "json"
 	} else if *formatFlag != "" {
 		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	commandPath = "books list-books"
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"books"})
+	}
+	if outputFormat == "ai-friendly" {
+		if code := PreflightOutput(); code != 0 {
 			return code
 		}
 	}
@@ -66,6 +102,15 @@ func cmdCreateBook(args []string) int {
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
 	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -74,6 +119,33 @@ func cmdCreateBook(args []string) int {
 		outputFormat = "json"
 	} else if *formatFlag != "" {
 		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	commandPath = "books create-book"
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
+	}
+	if outputFormat == "ai-friendly" {
+		if code := PreflightOutput(); code != 0 {
 			return code
 		}
 	}
@@ -122,6 +194,15 @@ func cmdDeleteBook(args []string) int {
 	id := fs.String("id", "", "required")
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
 	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -130,6 +211,33 @@ func cmdDeleteBook(args []string) int {
 		outputFormat = "json"
 	} else if *formatFlag != "" {
 		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	commandPath = "books delete-book"
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"code", "message"})
+	}
+	if outputFormat == "ai-friendly" {
+		if code := PreflightOutput(); code != 0 {
 			return code
 		}
 	}
@@ -162,6 +270,15 @@ func cmdGetBook(args []string) int {
 	id := fs.String("id", "", "required")
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
 	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -170,6 +287,33 @@ func cmdGetBook(args []string) int {
 		outputFormat = "json"
 	} else if *formatFlag != "" {
 		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	commandPath = "books get-book"
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
+	}
+	if outputFormat == "ai-friendly" {
+		if code := PreflightOutput(); code != 0 {
 			return code
 		}
 	}
@@ -205,6 +349,15 @@ func cmdUpdateBook(args []string) int {
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
 	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
 	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
@@ -213,6 +366,33 @@ func cmdUpdateBook(args []string) int {
 		outputFormat = "json"
 	} else if *formatFlag != "" {
 		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	commandPath = "books update-book"
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
+	}
+	if outputFormat == "ai-friendly" {
+		if code := PreflightOutput(); code != 0 {
 			return code
 		}
 	}

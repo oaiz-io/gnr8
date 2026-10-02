@@ -17,8 +17,13 @@ must move the minor version.
   CLI `--help` prints that prose on the flag.
 - **Generated CLI output format flags.** `--format human|ai-friendly|json|jsonl`, `--json` as the
   JSON shorthand, and `{PROG}_FORMAT`. A TTY defaults to `human`; anything else defaults to
-  `ai-friendly`. Exit codes 0–6 name the caller's next action. Errors print `error:` plus optional
-  hints and a request id.
+  `ai-friendly`. `--fields`, `-o/--output`, `-q/--quiet`, `--debug`, `-y/--yes` and `--no-input`
+  are reserved globals. Exit codes 0–6 name the caller's next action. Errors print `error:` plus
+  optional hints and a request id.
+- **ai-friendly result envelopes.** Off-TTY default output is a bounded summary whose first line
+  names a versioned envelope written under `.{program}/output/` (or `{PROG}_OUTPUT_DIR`): atomic
+  0600 files, a `.gitignore`, a 100-file / 100 MB retention cap, and a preflight before the
+  request. `--json` prints the captured server body.
 - **Go CLI library seam.** `Run(args, Options)` is the exported entry. `main.go` stamps
   `version`/`commit`/`date` as variables so `-ldflags -X` can overwrite them.
   `SdkCli::hand_owned_main()` skips that file; `SdkCli::owned_command` names a root command whose

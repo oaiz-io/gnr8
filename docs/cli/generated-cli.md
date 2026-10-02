@@ -403,9 +403,25 @@ alias bkls='bookstore list-books'
 
 `--format human|ai-friendly|json|jsonl` selects how a success is printed. `--json` is shorthand for
 `--format json`. `{PROG}_FORMAT` is the environment default when neither flag is set. A TTY stdout
-defaults to `human`; anything else defaults to `ai-friendly`. Until the dedicated renderers land,
-`human`, `ai-friendly` and `json` all print indented JSON (the same document `printResult` always
-printed); `jsonl` is compact.
+defaults to `human`; anything else defaults to `ai-friendly`.
+
+| Format | stdout | Side effect |
+|---|---|---|
+| `human` | indented JSON (tables and cards come later) | none |
+| `ai-friendly` | a bounded summary (≤4,000 bytes) whose first line names a saved file | a versioned envelope under `.{program}/output/` |
+| `json` | the server body, compact off-TTY and indented on a TTY | none |
+| `jsonl` | one compact item per line | none |
+
+`--fields` projects items (or the object) in every format; `--fields help` lists the success
+schema's wire names and exits 0. `-o/--output` writes the full result to a file. `-q/--quiet`
+prints only the outcome line in ai-friendly mode, and nothing on success in human mode. `--debug`
+(or `{PROG}_DEBUG`) writes a request trace to stderr. `-y/--yes` and `--no-input` (or
+`{PROG}_NO_INPUT`) are the two-TTY confirmation rules: a prompt runs only when stdin and stderr
+are both TTYs.
+
+The envelope is `gnr8-cli-result` version 1. `{PROG}_OUTPUT_DIR` overrides the directory. A
+preflight runs before the request when the format is `ai-friendly`; a save that fails after a
+successful request still exits 0.
 
 Errors print `error:` plus the message, then optional `hint:` lines and a `request id:`, at most six
 lines. Under `--json`/`--format json` the same facts are one JSON object on stderr. Exit codes name

@@ -2014,6 +2014,7 @@ def main():
         sys.stdout = buf
         code = cli.main(
             [
+                "--json",
                 "get-book",
                 "--book-id",
                 "1",
@@ -2173,7 +2174,7 @@ fn generated_cli_dispatches_get_book_against_stdlib_http_server() {
     let result = run_python(&[driver_str], &dir);
     assert!(
         result.is_ok(),
-        "cli.main([get-book, --book-id, 1]) must round-trip JSON: {result:?}"
+        "cli.main([--json, get-book, --book-id, 1]) must round-trip JSON: {result:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
