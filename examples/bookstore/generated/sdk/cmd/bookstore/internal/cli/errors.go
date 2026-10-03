@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 
 	"example.com/bookstore/sdk"
 )
@@ -78,17 +79,22 @@ func printError(slug, message string, hints []string, requestID string, status, 
 		fmt.Fprintf(os.Stderr, "%s\n", line)
 		return code
 	}
-	fmt.Fprintf(os.Stderr, "%s %s\n", colorize("31", "error:"), message)
+	escapeLine := strings.NewReplacer("\r", "\\r", "\n", "\\n", "\t", "\\t")
+	limit := 6
+	if requestID != "" {
+		limit--
+	}
+	fmt.Fprintf(os.Stderr, "%s %s\n", colorize("31", "error:"), escapeLine.Replace(message))
 	n := 1
 	for _, hint := range hints {
-		if n >= 6 {
+		if n >= limit {
 			break
 		}
-		fmt.Fprintf(os.Stderr, "  hint: %s\n", hint)
+		fmt.Fprintf(os.Stderr, "  hint: %s\n", escapeLine.Replace(hint))
 		n++
 	}
 	if requestID != "" && n < 6 {
-		fmt.Fprintf(os.Stderr, "  request id: %s\n", requestID)
+		fmt.Fprintf(os.Stderr, "  request id: %s\n", escapeLine.Replace(requestID))
 	}
 	return code
 }

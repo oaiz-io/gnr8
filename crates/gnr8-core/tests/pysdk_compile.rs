@@ -2404,8 +2404,12 @@ args = ["books", "get", "b1", "--format", "jsonl", "--base-url", BASE]
 code, out, err = run(args, (200, BOOK))
 check(code == 0 and len(out.splitlines()) == 1, f"an object is one jsonl line: {out!r}")
 
-code, out, err = run(["books", "list", "--archived", "--json", "--base-url", BASE], (200, json.dumps({"books": [], "next_cursor": ""})))
+code, out, err = run(["books", "list", "--archived", "--switch-flag", "user-value", "--json", "--base-url", BASE], (200, json.dumps({"books": [], "next_cursor": ""})))
 check(code == 0 and SEEN[-1].startswith("/archived-books"), f"switch did not call alternate: {SEEN} {err}")
+check("switch_flag=user-value" in SEEN[-1], f"switch lost query binding: {SEEN[-1]}")
+code, out, err = run(["books", "list", "--switch-flag", "user-value", "--json", "--base-url", BASE], (200, json.dumps({"books": [], "next_cursor": ""})))
+check(code == 0 and SEEN[-1].startswith("/books?"), f"query parameter triggered switch: {SEEN} {err}")
+check("switch_flag=user-value" in SEEN[-1], f"query binding lost: {SEEN[-1]}")
 
 code, out, err = run(["--json", "help"])
 check(code == 0 and json.loads(out)["commands"], f"leading global flag failed: {code} {err}")
@@ -2440,6 +2444,19 @@ with redirect_stdout(stream):
     output.print_json({})
 projected = json.loads(stream.getvalue())
 check(projected == {"books":[{"id":9007199254740993}],"next_cursor":"c2"}, f"projection changed page: {projected}")
+
+output.OUTPUT_FORMAT = "human"
+stream = io.StringIO()
+with redirect_stderr(stream):
+    code = output.print_error("first\nsecond", ["a\nmore", "b", "c", "d", "e"], "request-123", 422, 5)
+lines = stream.getvalue().splitlines()
+check(code == 5 and len(lines) <= 6 and lines[-1].endswith("request-123"), f"error dropped request id or exceeded six lines: {stream.getvalue()}")
+output.OUTPUT_FORMAT = "json"
+stream = io.StringIO()
+with redirect_stderr(stream):
+    output.print_error("first\nsecond", ["a\nmore", "b", "c", "d", "e"], "request-123", 422, 5)
+payload = json.loads(stream.getvalue())["error"]
+check(payload["message"] == "first\nsecond" and len(payload["hints"]) == 5 and payload["requestId"] == "request-123", "machine error lost full details")
 
 # Separate runs preserve their envelopes even when the response is unchanged.
 args = ["books", "get", "b1", "--format", "ai-friendly", "--base-url", BASE]
@@ -2560,6 +2577,9 @@ fn generated_cli_python_command_spec_keeps_the_output_contract() {
     let dir = unique_temp_dir("cli-spec");
     let mut out = Artifacts::new();
     let mut graph = cli_spec_graph();
+    let mut switch_parameter = graph.operations[0].params[0].clone();
+    switch_parameter.name = "switch_flag".to_string();
+    graph.operations[0].params.push(switch_parameter);
     let mut alternate = graph.operations[0].clone();
     alternate.id = "listArchivedBooks".to_string();
     alternate.path = "/archived-books".to_string();

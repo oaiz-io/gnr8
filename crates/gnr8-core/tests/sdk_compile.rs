@@ -2322,6 +2322,22 @@ func TestBinaryJSONOutputIsByteExact(t *testing.T) {
     if err != nil || !bytes.Equal(got, raw) { t.Fatal("binary bytes changed", got, err) }
 }
 
+func TestErrorKeepsRequestIDWithinSixLines(t *testing.T) {
+    resetInvocation(Options{})
+    outputFormat = "human"
+    original := os.Stderr
+    f, err := os.CreateTemp(t.TempDir(), "stderr")
+    if err != nil { t.Fatal(err) }
+    os.Stderr = f
+    printError("test", "first\nsecond", []string{"a\nmore", "b", "c", "d", "e"}, "request-123", 422, 5)
+    os.Stderr = original
+    f.Close()
+    got, _ := os.ReadFile(f.Name())
+    if len(strings.Split(strings.TrimSpace(string(got)), "\n")) > 6 || !strings.Contains(string(got), "request-123") {
+        t.Fatalf("diagnostic must retain the request id within six lines: %s", got)
+    }
+}
+
 func TestHTTPExitClassesAreStructured(t *testing.T) {
     for status, want := range map[int]int{400:5, 401:4, 403:4, 404:3, 408:6, 409:5, 410:3, 412:5, 422:5, 429:6, 500:1, 502:6, 503:6, 504:6} {
         original := os.Stderr
@@ -2464,6 +2480,9 @@ fn generated_cli_go_command_spec_builds_vets_and_behaves() {
         signed: true,
     });
     graph.operations.push(edition);
+    let mut switch_parameter = graph.operations[0].params[0].clone();
+    switch_parameter.name = "switch_flag".to_string();
+    graph.operations[0].params.push(switch_parameter);
     let mut alternate = graph.operations[0].clone();
     alternate.id = "listArchivedBooks".to_string();
     alternate.path = "/archived-books".to_string();
@@ -2566,6 +2585,8 @@ fn generated_cli_go_command_spec_builds_vets_and_behaves() {
             "books",
             "list",
             "--archived",
+            "--switch-flag",
+            "user-value",
             "--json",
             "--base-url",
             &switched_base,
@@ -2573,7 +2594,29 @@ fn generated_cli_go_command_spec_builds_vets_and_behaves() {
         &envs,
     );
     assert_eq!(code, 0, "{stderr}");
-    assert!(server.join().unwrap().starts_with("GET /archived-books"));
+    let request = server.join().unwrap();
+    assert!(request.starts_with("GET /archived-books"), "{request}");
+    assert!(request.contains("switch_flag=user-value"), "{request}");
+    let (port, server) = serve_once("200 OK", r#"{"books":[],"next_cursor":""}"#.to_string());
+    let primary_base = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "books",
+            "list",
+            "--switch-flag",
+            "user-value",
+            "--json",
+            "--base-url",
+            &primary_base,
+        ],
+        &envs,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let request = server.join().unwrap();
+    assert!(request.starts_with("GET /books?"), "{request}");
+    assert!(request.contains("switch_flag=user-value"), "{request}");
     let (code, help, stderr) = run_cli(&dir, "bookstore", &["help", "--json"], &envs);
     assert_eq!(code, 0, "{stderr}");
     let help: serde_json::Value = serde_json::from_str(&help).expect("help must be JSON");
@@ -2603,7 +2646,7 @@ fn generated_cli_go_command_spec_builds_vets_and_behaves() {
     ] {
         let (code, stdout, stderr) = run_cli(&dir, "bookstore", &args, &envs);
         assert_eq!(code, 2, "{stderr}");
-        assert!(stdout.is_empty());
+        assert_eq!(stdout, "");
         let error: serde_json::Value =
             serde_json::from_str(&stderr).expect("usage error must be one JSON object");
         assert_eq!(error["error"]["exitCode"], 2);

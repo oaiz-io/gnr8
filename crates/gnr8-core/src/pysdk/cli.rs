@@ -1092,6 +1092,12 @@ fn emit_print_helpers(
     )
     .map_err(sink)?;
     writeln!(out, "        return code").map_err(sink)?;
+    out.push_str(
+        r#"    escape_line = str.maketrans({"\r": r"\r", "\n": r"\n", "\t": r"\t"})
+    limit = 5 if request_id else 6
+"#,
+    );
+    writeln!(out, "    message = message.translate(escape_line)").map_err(sink)?;
     writeln!(
         out,
         "    print(f\"{{colorize('31', 'error:')}} {{message}}\", file=sys.stderr)"
@@ -1099,14 +1105,18 @@ fn emit_print_helpers(
     .map_err(sink)?;
     writeln!(out, "    n = 1").map_err(sink)?;
     writeln!(out, "    for hint in hints:").map_err(sink)?;
-    writeln!(out, "        if n >= 6:").map_err(sink)?;
+    writeln!(out, "        if n >= limit:").map_err(sink)?;
     writeln!(out, "            break").map_err(sink)?;
-    writeln!(out, "        print(f\"  hint: {{hint}}\", file=sys.stderr)").map_err(sink)?;
+    writeln!(
+        out,
+        "        print(f\"  hint: {{hint.translate(escape_line)}}\", file=sys.stderr)"
+    )
+    .map_err(sink)?;
     writeln!(out, "        n += 1").map_err(sink)?;
     writeln!(out, "    if request_id and n < 6:").map_err(sink)?;
     writeln!(
         out,
-        "        print(f\"  request id: {{request_id}}\", file=sys.stderr)"
+        "        print(f\"  request id: {{request_id.translate(escape_line)}}\", file=sys.stderr)"
     )
     .map_err(sink)?;
     writeln!(out, "    return code").map_err(sink)?;
@@ -1385,7 +1395,8 @@ def preflight_output() -> int:
     if len((PROGRAM + COMMAND_PATH + _shell_quote(sample) * 4).encode("utf-8")) > 2400:
         return print_error(
             "output path is too long for ai-friendly output; "
-            "use --json or a shorter output directory", code=2
+            "use --json or a shorter output directory",
+            code=2,
         )
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1696,6 +1707,14 @@ def confirm(severity: str, resource: str) -> int:
     .to_string()
 }
 
+fn switch_arg_name(idents: &std::collections::BTreeMap<String, String>) -> String {
+    let mut name = "_switch_flag".to_string();
+    while idents.values().any(|ident| ident == &name) {
+        name.insert(0, '_');
+    }
+    name
+}
+
 fn emit_handlers(
     out: &mut String,
     ops: &[&Operation],
@@ -1738,7 +1757,7 @@ fn emit_handler(
             })?;
         let other_method = operation_method_name(other);
         writeln!(out, "    selected_method = {}", py_string_literal(&method)).map_err(sink)?;
-        writeln!(out, "    if args.switch_flag:").map_err(sink)?;
+        writeln!(out, "    if args.{}:", switch_arg_name(&idents)).map_err(sink)?;
         writeln!(
             out,
             "        selected_method = {}",
@@ -2487,7 +2506,12 @@ fn emit_command_parser(
             py_string_literal(&format!("--{}", switch.flag))
         )
         .map_err(sink)?;
-        writeln!(out, "        dest=\"switch_flag\",").map_err(sink)?;
+        writeln!(
+            out,
+            "        dest={},",
+            py_string_literal(&switch_arg_name(&idents))
+        )
+        .map_err(sink)?;
         writeln!(out, "        action=\"store_true\",").map_err(sink)?;
         writeln!(out, "    )").map_err(sink)?;
     }
@@ -3353,8 +3377,19 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "        output.OUTPUT_FORMAT = \"json\"").map_err(sink)?;
     out.push_str(
         r#"    global_names = {
-        "--json", "--format", "--fields", "--output", "-o", "--quiet", "-q",
-        "--debug", "--yes", "--no-input", "--color", "--no-pager", "--base-url",
+        "--json",
+        "--format",
+        "--fields",
+        "--output",
+        "-o",
+        "--quiet",
+        "-q",
+        "--debug",
+        "--yes",
+        "--no-input",
+        "--color",
+        "--no-pager",
+        "--base-url",
     }
     prefix: list[str] = []
     start = 0
@@ -3453,7 +3488,7 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
             "            command = COMMAND_BY_ID.get(exc.operation_id, exc.operation_id)"
         )
         .map_err(sink)?;
-        writeln!(out, "            hints = [\"set \" + CREDENTIAL_ENV[id] for group in exc.alternatives for id in group]").map_err(sink)?;
+        out.push_str("            hints = [\n                \"set \" + CREDENTIAL_ENV[id]\n                for group in exc.alternatives\n                for id in group\n            ]\n");
         writeln!(out, "            return output.print_error(").map_err(sink)?;
         writeln!(
             out,

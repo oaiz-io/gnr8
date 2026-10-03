@@ -2471,7 +2471,7 @@ fn emit_handler(
     if let Some(switch) = switch_flag {
         writeln!(
             out,
-            "switchFlag := fs.Bool({}, false, {})",
+            "_switchFlag := fs.Bool({}, false, {})",
             quoted_string_literal(&switch.flag),
             quoted_string_literal("call the alternate operation")
         )
@@ -2944,7 +2944,7 @@ fn emit_handler(
                 ),
             })?;
         let other_method = operation_method_name(other);
-        writeln!(out, "if *switchFlag {{").map_err(sink)?;
+        writeln!(out, "if *_switchFlag {{").map_err(sink)?;
         let mut alternate_args = call_args.clone();
         if !request_params.is_empty() {
             let at = 1 + path_params.len();
@@ -4712,6 +4712,7 @@ fn emit_handle_err(
     imports.add("errors");
     imports.add("fmt");
     imports.add("os");
+    imports.add("strings");
     imports.sdk = true;
     writeln!(out, "func exitCodeForStatus(status int) int {{").map_err(sink)?;
     writeln!(out, "switch status {{").map_err(sink)?;
@@ -4787,23 +4788,33 @@ fn emit_handle_err(
     writeln!(out, "fmt.Fprintf(os.Stderr, \"%s\\n\", line)").map_err(sink)?;
     writeln!(out, "return code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
+    out.push_str(
+        r#"escapeLine := strings.NewReplacer("\r", "\\r", "\n", "\\n", "\t", "\\t")
+limit := 6
+if requestID != "" { limit-- }
+"#,
+    );
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"%s %s\\n\", colorize(\"31\", \"error:\"), message)"
+        "fmt.Fprintf(os.Stderr, \"%s %s\\n\", colorize(\"31\", \"error:\"), escapeLine.Replace(message))"
     )
     .map_err(sink)?;
     writeln!(out, "n := 1").map_err(sink)?;
     writeln!(out, "for _, hint := range hints {{").map_err(sink)?;
-    writeln!(out, "if n >= 6 {{").map_err(sink)?;
+    writeln!(out, "if n >= limit {{").map_err(sink)?;
     writeln!(out, "break").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"  hint: %s\\n\", hint)").map_err(sink)?;
+    writeln!(
+        out,
+        "fmt.Fprintf(os.Stderr, \"  hint: %s\\n\", escapeLine.Replace(hint))"
+    )
+    .map_err(sink)?;
     writeln!(out, "n++").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if requestID != \"\" && n < 6 {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"  request id: %s\\n\", requestID)"
+        "fmt.Fprintf(os.Stderr, \"  request id: %s\\n\", escapeLine.Replace(requestID))"
     )
     .map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;

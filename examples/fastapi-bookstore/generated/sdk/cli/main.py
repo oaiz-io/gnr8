@@ -90,8 +90,19 @@ def _main(argv: Optional[list[str]]) -> int:
     if json_flag:
         output.OUTPUT_FORMAT = "json"
     global_names = {
-        "--json", "--format", "--fields", "--output", "-o", "--quiet", "-q",
-        "--debug", "--yes", "--no-input", "--color", "--no-pager", "--base-url",
+        "--json",
+        "--format",
+        "--fields",
+        "--output",
+        "-o",
+        "--quiet",
+        "-q",
+        "--debug",
+        "--yes",
+        "--no-input",
+        "--color",
+        "--no-pager",
+        "--base-url",
     }
     prefix: list[str] = []
     start = 0

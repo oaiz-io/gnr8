@@ -124,15 +124,18 @@ def print_error(
             body["requestId"] = request_id
         print(json.dumps({"error": body}, separators=(",", ":")), file=sys.stderr)
         return code
+    escape_line = str.maketrans({"\r": r"\r", "\n": r"\n", "\t": r"\t"})
+    limit = 5 if request_id else 6
+    message = message.translate(escape_line)
     print(f"{colorize('31', 'error:')} {message}", file=sys.stderr)
     n = 1
     for hint in hints:
-        if n >= 6:
+        if n >= limit:
             break
-        print(f"  hint: {hint}", file=sys.stderr)
+        print(f"  hint: {hint.translate(escape_line)}", file=sys.stderr)
         n += 1
     if request_id and n < 6:
-        print(f"  request id: {request_id}", file=sys.stderr)
+        print(f"  request id: {request_id.translate(escape_line)}", file=sys.stderr)
     return code
 
 
@@ -399,7 +402,8 @@ def preflight_output() -> int:
     if len((PROGRAM + COMMAND_PATH + _shell_quote(sample) * 4).encode("utf-8")) > 2400:
         return print_error(
             "output path is too long for ai-friendly output; "
-            "use --json or a shorter output directory", code=2
+            "use --json or a shorter output directory",
+            code=2,
         )
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)

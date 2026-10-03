@@ -491,7 +491,8 @@ object is one resource, however many arrays it holds. `Next page:` appears only 
 binds `--cursor`, reading the policy's next-cursor field.
 
 Errors print `error:` plus the message, then optional `hint:` lines and a `request id:`, at most six
-lines. Under `--json`/`--format json` the same facts are one JSON object on stderr, with the
+lines. The request id keeps the final line when present; embedded line breaks are displayed as
+escapes. Under `--json`/`--format json` the same facts are one JSON object on stderr, with the
 server's `slug` when it sent one. Exit codes name the caller's next action:
 
 | Code | When |

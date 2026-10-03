@@ -61,6 +61,8 @@ must move the minor version.
   and use the alternate operation's Go parameter type and result shape. Paginated switches honor
   limits, retain server metadata, request the remaining size, and preserve only boundary cursors.
 - Each generated CLI ships its versioned result JSON Schema, checked against persisted envelopes.
+- Human errors retain the request id within six lines, including when the server sends many hints
+  or embedded line breaks.
 - Machine help includes path, body, switch, and global flag types. JSON usage and authentication
   errors use the structured error renderer, and one large preview row cannot exceed the byte budget.
 - `--fields` projects JSON items while preserving page metadata and large integer values; `-o -`
