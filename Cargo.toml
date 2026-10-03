@@ -75,6 +75,6 @@ ctrlc = "3.5"                   # graceful Ctrl-C → AtomicBool for the watch l
                                 # the FSEvents backend suppresses the default SIGINT disposition, so the
                                 # std-only approach proved insufficient — RESEARCH A5 sanctioned fallback)
 # The published thin SDK a project's `.gnr8/` worker links.
-gnr8 = { path = "crates/gnr8-sdk", version = "0.17.0" }
+gnr8 = { path = "crates/gnr8-sdk", version = "0.16.3" }
 # The host engine: extraction, lowering, SDK emission, lifecycle. Never a `.gnr8/` dependency.
-gnr8-engine = { path = "crates/gnr8-core", version = "0.17.0" }
+gnr8-engine = { path = "crates/gnr8-core", version = "0.16.3" }
