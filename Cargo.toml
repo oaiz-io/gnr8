@@ -6,7 +6,7 @@ members = ["crates/gnr8-sdk", "crates/gnr8-core", "crates/gnr8"]
 resolver = "2"
 
 [workspace.package]
-version = "0.17.0"
+version = "0.16.3"
 edition = "2021"        # D-08
 rust-version = "1.85"   # MSRV floor: clap 4.6 requires 1.85
 license = "MIT"         # matches repo LICENSE
