@@ -32,6 +32,29 @@ var flagArgs []string
 var previewFields []string
 var colorMode = "auto"
 var noPager bool
+var resultIsList bool
+var itemsKey string
+var nextCursorField string
+
+func resetInvocation(opts Options) {
+	active = opts
+	outputFormat = ""
+	fieldsSpec = ""
+	outputPath = ""
+	quiet = false
+	debugEnabled = false
+	yesFlag = false
+	noInput = false
+	commandPath = ""
+	flagArgs = nil
+	previewFields = nil
+	colorMode = "auto"
+	noPager = false
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
+	lastAnswer = capturedAnswer{}
+}
 
 func versionLine() string {
 	version := active.Version
@@ -402,7 +425,7 @@ func checkRename(args []string) int {
 
 // Run executes one invocation and returns the process exit code.
 func Run(args []string, opts Options) int {
-	active = opts
+	resetInvocation(opts)
 	rest, code := peelGlobals(args)
 	if code >= 0 {
 		return code

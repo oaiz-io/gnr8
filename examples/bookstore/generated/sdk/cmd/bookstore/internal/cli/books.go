@@ -21,7 +21,7 @@ func cmdListBooks(args []string) int {
 		fs.PrintDefaults()
 		fmt.Fprintln(fs.Output(), "\nExamples:")
 		fmt.Fprintln(fs.Output(), "  bookstore books list")
-		fmt.Fprintln(fs.Output(), "\nOutput\n  BookList")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  Book: id, title, author")
 		fmt.Fprintln(fs.Output(), "\nSee also  books get")
 		fmt.Fprintln(fs.Output(), "\nDocs      https://example.com/cli/books/list")
 	}
@@ -78,7 +78,10 @@ func cmdListBooks(args []string) int {
 		noPager = true
 	}
 	commandPath = "books list"
-	previewFields = nil
+	previewFields = []string{"id", "title", "author"}
+	resultIsList = false
+	itemsKey = "books"
+	nextCursorField = ""
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"books"})
 	}
@@ -181,6 +184,9 @@ func cmdCreateBook(args []string) int {
 	}
 	commandPath = "books create"
 	previewFields = []string{"id", "title", "author"}
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
@@ -318,6 +324,9 @@ func cmdDeleteBook(args []string) int {
 	}
 	commandPath = "books delete"
 	previewFields = nil
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"code", "message"})
 	}
@@ -326,9 +335,8 @@ func cmdDeleteBook(args []string) int {
 			return code
 		}
 	}
-	seen := visited(fs)
 	if len(flagArgs) == 0 {
-		fmt.Fprintf(os.Stderr, "error: missing argument " < id > "\n")
+		fmt.Fprintln(os.Stderr, "error: missing argument <id>")
 		return 2
 	}
 	*id = flagArgs[0]
@@ -420,6 +428,9 @@ func cmdGetBook(args []string) int {
 	}
 	commandPath = "books get"
 	previewFields = []string{"id", "title", "author"}
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
@@ -428,9 +439,8 @@ func cmdGetBook(args []string) int {
 			return code
 		}
 	}
-	seen := visited(fs)
 	if len(flagArgs) == 0 {
-		fmt.Fprintf(os.Stderr, "error: missing argument " < id > "\n")
+		fmt.Fprintln(os.Stderr, "error: missing argument <id>")
 		return 2
 	}
 	*id = flagArgs[0]
@@ -453,11 +463,11 @@ func cmdGetBook(args []string) int {
 		if err != nil {
 			return handleErr(err)
 		}
-		id, code := pickSelectedID(raw, sel, "id", "id")
+		picked, code := pickSelectedID(raw, false, "books", sel, "id", "id")
 		if code != 0 {
 			return code
 		}
-		*id = id
+		*id = picked
 		_ = base
 	}
 	idValue := *id
@@ -544,6 +554,9 @@ func cmdUpdateBook(args []string) int {
 	}
 	commandPath = "books update"
 	previewFields = []string{"id", "title", "author"}
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
@@ -554,7 +567,7 @@ func cmdUpdateBook(args []string) int {
 	}
 	seen := visited(fs)
 	if len(flagArgs) == 0 {
-		fmt.Fprintf(os.Stderr, "error: missing argument " < id > "\n")
+		fmt.Fprintln(os.Stderr, "error: missing argument <id>")
 		return 2
 	}
 	*id = flagArgs[0]

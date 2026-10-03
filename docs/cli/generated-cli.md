@@ -42,7 +42,7 @@ is written.
 | `owned_command(...)` | a root command whose implementation is hand-owned and never generated (Go only) |
 | `topic(...)` | a declared topic, its verbs, positionals, compositions, examples, see-also, and docs URL |
 | `rename_error(...)` | a retired invocation that names its replacement and exits 2 |
-| `view(...)` | preview and table fields for one response schema |
+| `view(...)` | preview and table fields for the rows of one schema |
 
 `.cli("bookstore")` is still accepted — a program name converts into an `SdkCli` — so a program that
 needs nothing but a name says nothing but a name. `SdkCli` is unrelated to gnr8's own CLI.
@@ -63,7 +63,7 @@ there is no `[project.scripts]` equivalent to write.
   __main__.py          what `python -m <package>.cli` runs
   config.py            every fact fixed at generation time
   credentials.py       env var + helper resolution, and build_client
-  output.py            JSON for a document, raw bytes for a file
+  output.py            formats, ai-friendly envelopes, errors, prompts
   body.py              --body / --body-file / stdin      (only where a body exists)
   parser.py            the root parser; nothing about any one command
   commands/
@@ -115,7 +115,9 @@ it finds there.
 `internal/` is Go's own visibility rule, not a convention: the package is importable from
 `cmd/<program>/...` and nowhere else, so splitting the program up does not widen anything's API.
 `Run` and `Options` are the exported symbols. `version`, `commit` and `date` in `main.go` are
-variables so `-ldflags -X` can stamp them. Standard library only, plus the sibling generated client.
+variables so `-ldflags -X` can stamp them. `Run` starts every invocation from a clean state, so a
+hand-owned `main`, a REPL or a test may call it more than once in one process without one call's
+`--yes` leaking into the next. Standard library only, plus the sibling generated client.
 `flag.NewFlagSet` per subcommand, `os.Args[1]` dispatch, `encoding/json` on stdout, `os/exec` for the
 credential helper (`CommandContext`, 10s timeout, stdin nil, stderr discarded, first stdout line
 only). Every file is `gofmt`-normalized through the same seam the rest of the Go SDK uses, and
@@ -316,10 +318,13 @@ name already in use, and `argparse` raises `ArgumentError` while building the pa
 
 Reserved flags are computed per command from what that command actually binds: `help`, `base-url`,
 `format`, `json`, `fields`, `output`, `quiet`, `debug`, `yes`, `no-input`, `color`, and `no-pager`
-always; `body`/`body-file` where the operation has a request body; `limit`/`all`/`cursor`/`page-size`
+always, plus `o`, `q` and `y` — the short spellings of `output`, `quiet` and `yes`, which Go's `flag`
+treats as the same name as `--o`, `--q` and `--y`; `body`/`body-file` where the operation has a request body; `limit`/`all`/`cursor`/`page-size`
 where a `PaginationPolicy` names it; and `no-<flag>` for each boolean parameter. `--version` is bound
 on the root parser, which is not a command. A parameter named `json`, `format`, or `color` is
-therefore a generation error: those flags select the output format and color mode.
+therefore a generation error: those flags select the output format and color mode. So is a parameter
+named `q`, `o` or `y`; like every collision there is no auto-rename, and the remedy is a source change
+or leaving the operation out of the program with `SdkCli::commands(...)`.
 
 ## Flag defaults in `--help`
 
@@ -464,22 +469,39 @@ are both TTYs.
 
 The envelope is `gnr8-cli-result` version 1. `{PROG}_OUTPUT_DIR` overrides the directory. A
 preflight runs before the request when the format is `ai-friendly`; a save that fails after a
-successful request still exits 0.
+successful request still exits 0, says `not saved (…)` on the first line, and prints a `warning:` on
+stderr. Envelopes are written to a temporary file and renamed into place, mode 0600, and so are
+downloaded files (`.bin`). Retention counts both: past 100 files or 100 MB the oldest go first, but
+never `latest.json` or the files the current run wrote, so one result over the byte cap still
+survives under the path stdout names.
+
+The summary reserves room for the `Next page:` line and the two `jq` recipes before it spends the
+budget on rows, so a full page always says how to continue. Rows print the `view(...)` preview
+fields for the row's schema in their declared order, cutting only strings over 80 characters;
+without a view they print the first six scalar fields by name. Whether a result is a list is fixed
+at generation time from the graph: an array body is a list, a `PaginationPolicy` names a page's
+items field, and an object whose only field is an array is a page keyed by that field. Any other
+object is one resource, however many arrays it holds. `Next page:` appears only on a command that
+binds `--cursor`, reading the policy's next-cursor field.
 
 Errors print `error:` plus the message, then optional `hint:` lines and a `request id:`, at most six
-lines. Under `--json`/`--format json` the same facts are one JSON object on stderr. Exit codes name
-the caller's next action:
+lines. Under `--json`/`--format json` the same facts are one JSON object on stderr, with the
+server's `slug` when it sent one. Exit codes name the caller's next action:
 
 | Code | When |
 |---|---|
 | 0 | success |
-| 1 | a failed request that is none of the classes below |
-| 2 | usage: missing/unknown flags, malformed `--body`, unknown command |
+| 1 | anything not below: HTTP 500 and other statuses, a success body that does not decode, a local write that failed after the request |
+| 2 | usage: missing/unknown flags, malformed `--body`, unknown command, a retired invocation |
 | 3 | not found (HTTP 404/410) |
 | 4 | auth: missing credentials, HTTP 401/403 |
 | 5 | refused (HTTP 400/409/412/422) |
-| 6 | retry later: transport failure, HTTP 408/429/5xx |
-| 130 | interrupted (SIGINT; not emitted yet) |
+| 6 | retry later: a failed connection or a timeout, HTTP 408/429/502/503/504 |
+| 130 | interrupted: Python catches Ctrl-C and returns 130; a Go program is ended by SIGINT, which the shell reports as 130 |
+
+Only code 6 means the request may not have reached the server. Everything after an answer arrived —
+a body that does not decode, an `-o` file that cannot be written — is 1, so a caller never re-runs a
+mutation that already happened.
 
 `--color auto|always|never` colors human output (the `error:` prefix today). `NO_COLOR` and
 `TERM=dumb` turn it off in `auto`; color is never the only signal. Human lines longer than

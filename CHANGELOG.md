@@ -20,12 +20,16 @@ must move the minor version.
 - **Generated CLI output format flags.** `--format human|ai-friendly|json|jsonl`, `--json` as the
   JSON shorthand, and `{PROG}_FORMAT`. A TTY defaults to `human`; anything else defaults to
   `ai-friendly`. `--fields`, `-o/--output`, `-q/--quiet`, `--debug`, `-y/--yes` and `--no-input`
-  are reserved globals. Exit codes 0–6 name the caller's next action. Errors print `error:` plus
-  optional hints and a request id.
+  are reserved globals. Exit codes 0–6 name the caller's next action; only a failed connection or a
+  timeout is 6 ("retry later"), so a success body that does not decode or a failed `-o` write is 1.
+  Python returns 130 on Ctrl-C. Errors print `error:` plus optional hints and a request id; under
+  `--json` they are one object on stderr carrying the server's `slug`.
 - **ai-friendly result envelopes.** Off-TTY default output is a bounded summary whose first line
   names a versioned envelope written under `.{program}/output/` (or `{PROG}_OUTPUT_DIR`): atomic
-  0600 files, a `.gitignore`, a 100-file / 100 MB retention cap, and a preflight before the
-  request. `--json` prints the captured server body.
+  0600 files, a `.gitignore`, a 100-file / 100 MB retention cap over envelopes and downloads that
+  never deletes the files the current run wrote, and a preflight before the request. The summary
+  reserves room for the next-page line and `jq` recipes; whether a result is a list is decided at
+  generation time from the graph. `--json` prints the captured server body.
 - **Go CLI library seam.** `Run(args, Options)` is the exported entry. `main.go` stamps
   `version`/`commit`/`date` as variables so `-ldflags -X` can overwrite them.
   `SdkCli::hand_owned_main()` skips that file; `SdkCli::owned_command` names a root command whose
@@ -33,8 +37,8 @@ must move the minor version.
 - **Declared CLI command spec.** `SdkCli::topic` names verbs, sub-nouns, positional identifiers,
   body-field flags, switch flags, `@vN`/`@latest` selectors, and confirmation severity.
   `rename_error` prints the replacement and exits 2 without sending a request. `view` names the
-  preview fields for one response schema. Absent a spec, command names stay the kebab-case
-  operation ids.
+  preview fields for the rows of one schema, in declared order. Absent a spec, command names stay
+  the kebab-case operation ids.
 - **Paginated commands emit `--cursor` and merged page JSON.** `--limit` / `--all` collect items
   into `{itemsKey: […], "hasMore": …}` instead of a bare array, so `--json` is not the last page's
   body. `--page-size` is a rename error naming `--limit`. A `ConfigurePagination` cursor policy
@@ -51,7 +55,8 @@ must move the minor version.
 ### Changed
 
 - **Output is no longer unconditionally JSON.** `--format` and `--json` are reserved globals; a
-  parameter named `json` or `format` is a generation error.
+  parameter named `json` or `format` is a generation error, and so is one named `q`, `o` or `y`
+  (the short spellings of `--quiet`, `--output` and `--yes`).
 - **Per-flag prose is emitted.** A parameter's description is the one graph fact `--help` prints for
   it. `SdkCli` is no longer a three-field type: it carries the program name, command scope, host,
   library seam, and the declared command spec.

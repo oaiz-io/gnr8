@@ -3819,20 +3819,32 @@ mod tests {
             assert_eq!(py_string_literal("\u{0}7"), r#""\x007""#);
         }
 
-        /// Text that needs no escape hatch keeps the bytes `format!("{value:?}")` produced, so no
-        /// committed generated file moves.
+        /// Text that needs no escape hatch, and holds no more double quotes than single ones,
+        /// keeps the bytes `format!("{value:?}")` produced.
         #[test]
         fn printable_text_is_unchanged_from_debug() {
             for value in [
                 "plain",
                 "it's",
-                "say \"hi\"",
+                "say \"hi\" isn't 'x'",
                 "back\\slash",
                 "line\nbreak\ttab\r",
                 "caf\u{e9} — 中 😀",
             ] {
                 assert_eq!(py_string_literal(value), format!("{value:?}"), "{value:?}");
             }
+        }
+
+        /// More double quotes than single ones: single quotes, as `ruff format` would rewrite the
+        /// literal. This deliberately moves such strings away from Rust's `Debug` spelling — the
+        /// generated SDK and CLI must be format-clean as emitted.
+        #[test]
+        fn text_with_more_double_quotes_is_single_quoted() {
+            assert_eq!(py_string_literal("say \"hi\""), "'say \"hi\"'");
+            assert_eq!(
+                py_string_literal("{\"a\":\"it's\"}"),
+                "'{\"a\":\"it\\'s\"}'"
+            );
         }
     }
 

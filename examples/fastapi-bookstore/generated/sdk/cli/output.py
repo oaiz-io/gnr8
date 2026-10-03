@@ -39,6 +39,10 @@ NO_INPUT = False
 COMMAND_PATH = ""
 COLOR_MODE = "auto"
 NO_PAGER = False
+PREVIEW: tuple[str, ...] = ()
+RESULT_IS_LIST = False
+ITEMS_KEY = ""
+NEXT_CURSOR_FIELD = ""
 LAST_ANSWER: dict[str, Any] = {}
 
 
@@ -99,6 +103,7 @@ def print_error(
     request_id: str = "",
     status: int = 0,
     code: int = 1,
+    slug: str = "",
 ) -> int:
     hints = hints or []
     if OUTPUT_FORMAT in ("json", "jsonl"):
@@ -109,6 +114,8 @@ def print_error(
         }
         if status:
             body["status"] = status
+        if slug:
+            body["slug"] = slug
         if hints:
             body["hints"] = hints
         if request_id:
@@ -220,36 +227,29 @@ def capture_response(ctx: Any) -> None:
 
 
 def apply_globals(args: Any) -> None:
+    # Every global is assigned, not only set: main may run more than once in one
+    # process, and an invocation must not inherit the previous one's --yes.
     global OUTPUT_FORMAT, FIELDS, OUTPUT_PATH, QUIET, DEBUG, YES
     global NO_INPUT, COMMAND_PATH, COLOR_MODE, NO_PAGER
+    global PREVIEW, RESULT_IS_LIST, ITEMS_KEY, NEXT_CURSOR_FIELD
     resolve_format(
         bool(getattr(args, "json", False)),
         getattr(args, "format", None),
     )
-    fields = getattr(args, "fields", None)
-    if fields:
-        FIELDS = fields
-    output = getattr(args, "output", None)
-    if output:
-        OUTPUT_PATH = output
-    if getattr(args, "quiet", False):
-        QUIET = True
-    if getattr(args, "debug", False):
-        DEBUG = True
-    if getattr(args, "yes", False):
-        YES = True
-    if getattr(args, "no_input", False):
-        NO_INPUT = True
-    color = getattr(args, "color", None)
-    if color:
-        COLOR_MODE = color
-    if getattr(args, "no_pager", False):
-        NO_PAGER = True
+    FIELDS = getattr(args, "fields", None) or ""
+    OUTPUT_PATH = getattr(args, "output", None) or ""
+    QUIET = bool(getattr(args, "quiet", False))
+    DEBUG = bool(getattr(args, "debug", False)) or bool(os.getenv(DEBUG_ENV))
+    YES = bool(getattr(args, "yes", False))
+    NO_INPUT = bool(getattr(args, "no_input", False)) or bool(os.getenv(NO_INPUT_ENV))
+    COLOR_MODE = getattr(args, "color", None) or "auto"
+    NO_PAGER = bool(getattr(args, "no_pager", False))
     COMMAND_PATH = getattr(args, "_command", "") or ""
-    if os.getenv(DEBUG_ENV):
-        DEBUG = True
-    if os.getenv(NO_INPUT_ENV):
-        NO_INPUT = True
+    PREVIEW = tuple(getattr(args, "_preview", ()) or ())
+    RESULT_IS_LIST = bool(getattr(args, "_is_list", False))
+    ITEMS_KEY = getattr(args, "_items_key", "") or ""
+    NEXT_CURSOR_FIELD = getattr(args, "_next_cursor", "") or ""
+    LAST_ANSWER.clear()
 
 
 def print_fields_help(names: tuple[str, ...]) -> int:
@@ -297,20 +297,19 @@ def decode_result(result: Any) -> tuple[Any, bytes]:
 
 
 def list_items(value: Any) -> tuple[Optional[list[Any]], str, dict[str, Any]]:
-    if isinstance(value, list):
-        return value, "", {}
-    if isinstance(value, dict):
-        best_key = ""
-        best: Optional[list[Any]] = None
-        for key, item in value.items():
-            if isinstance(item, list) and (best is None or len(item) > len(best)):
-                best_key = key
-                best = item
-        if best is None:
-            return None, "", {}
-        meta = {key: item for key, item in value.items() if key != best_key}
-        return best, best_key, meta
-    return None, "", {}
+    # The command's result shape is a graph fact fixed at generation time: an array
+    # body, or a page whose items sit under ITEMS_KEY. Any other object is one resource.
+    if RESULT_IS_LIST:
+        return (value if isinstance(value, list) else None), "", {}
+    if not ITEMS_KEY or not isinstance(value, dict):
+        return None, "", {}
+    items = value.get(ITEMS_KEY)
+    if items is None:
+        items = []
+    if not isinstance(items, list):
+        return None, "", {}
+    meta = {name: item for name, item in value.items() if name != ITEMS_KEY}
+    return items, ITEMS_KEY, meta
 
 
 def _write_stdout(raw: bytes) -> None:
@@ -414,17 +413,33 @@ def _short_id(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()[:6]
 
 
-def _prune_output(directory: Path) -> None:
-    files = [path for path in directory.glob("*.json") if path.name != "latest.json"]
-    files.sort(key=lambda path: path.stat().st_mtime)
-    total = sum(path.stat().st_size for path in files)
-    while files and (len(files) > 100 or total > 100 * 1024 * 1024):
-        oldest = files.pop(0)
-        total -= oldest.stat().st_size if oldest.exists() else 0
+def _prune_output(directory: Path, keep: tuple[Path, ...] = ()) -> None:
+    # Envelopes and downloads alike, oldest first, down to 100 files and 100 MB.
+    # latest.json and the files this run wrote are never deleted, so one result over
+    # the byte cap survives with the path stdout names.
+    kept = {"latest.json", *(path.name for path in keep)}
+    files = [
+        (path.stat(), path)
+        for path in directory.iterdir()
+        if path.suffix in (".json", ".bin")
+        and not path.name.startswith(".")
+        and path.name != "latest.json"
+        and path.is_file()
+    ]
+    files.sort(key=lambda entry: entry[0].st_mtime)
+    count = len(files)
+    total = sum(stat.st_size for stat, _path in files)
+    for stat, path in files:
+        if count <= 100 and total <= 100 * 1024 * 1024:
+            return
+        if path.name in kept:
+            continue
         try:
-            oldest.unlink()
+            path.unlink()
         except OSError:
-            pass
+            continue
+        count -= 1
+        total -= stat.st_size
 
 
 def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
@@ -435,13 +450,13 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
     meta = None
     data = None
     file_meta = None
+    bin_path: Optional[Path] = None
     page: dict[str, Any] = {}
     if isinstance(result, (bytes, bytearray)) and not LAST_ANSWER.get("body"):
         kind = "file"
         name = COMMAND_PATH.replace(" ", "-") or "download"
         bin_path = directory / f"{name}-{_short_id(bytes(result))}.bin"
-        bin_path.write_bytes(bytes(result))
-        bin_path.chmod(0o600)
+        _atomic_write(bin_path, bytes(result))
         file_meta = {
             "path": str(bin_path),
             "bytes": len(result),
@@ -495,7 +510,7 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
     encoded = json.dumps(payload, indent=2).encode() + b"\n"
     _atomic_write(path, encoded)
     _atomic_write(directory / "latest.json", encoded)
-    _prune_output(directory)
+    _prune_output(directory, (path,) if bin_path is None else (path, bin_path))
     return str(path), ""
 
 
@@ -507,24 +522,32 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
+def _preview_value(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > 80:
+        return value[:79] + "…"
+    return value
+
+
 def _view_row(item: Any) -> str:
+    # The declared view fields in their declared order, cutting only a long string;
+    # without a view, the first six scalar fields by name.
     fields = field_list()
-    if fields:
-        item = project_value(item, fields)
-    elif isinstance(item, dict):
-        keys = [
+    if fields or not isinstance(item, dict):
+        shown = project_value(item, fields) if fields else item
+        return json.dumps(shown, separators=(",", ":"), ensure_ascii=False)
+    keys = list(PREVIEW)
+    if not keys:
+        keys = sorted(
             key
             for key, val in item.items()
             if val is None or isinstance(val, (str, int, float, bool))
-        ]
-        keys.sort()
-        keys = keys[:6]
-        if keys:
-            item = project_value(item, keys)
-    encoded = json.dumps(item, separators=(",", ":"))
-    if len(encoded) > 80:
-        return encoded[:79] + "…"
-    return encoded
+        )[:6]
+    row = {key: _preview_value(item[key]) for key in keys if key in item}
+    return json.dumps(row, separators=(",", ":"), ensure_ascii=False)
+
+
+def _showing_line(shown: int, total: int) -> str:
+    return f"Showing {shown} of {total}; the rest is in the file."
 
 
 def print_ai_friendly(result: Any) -> None:
@@ -535,74 +558,69 @@ def print_ai_friendly(result: Any) -> None:
         saved, save_err = write_envelope(result, value, raw)
     except OSError as exc:
         save_err = str(exc)
+    if save_err:
+        print(f"warning: the full result was not saved: {save_err}", file=sys.stderr)
     listed, key, _meta = list_items(value)
+    next_page = ""
     if isinstance(result, (bytes, bytearray)) and not LAST_ANSWER.get("body"):
         outcome = f"saved {len(result)} bytes"
         rows: list[str] = []
-        next_page = ""
     elif not raw:
         outcome = "empty"
         rows = []
-        next_page = ""
     elif listed is not None:
-        noun = key or "items"
-        outcome = f"{len(listed)} {noun}"
+        outcome = f"{len(listed)} {key or 'items'}"
         rows = [_view_row(item) for item in listed]
-        cursor = ""
-        if isinstance(value, dict):
-            raw_cursor = value.get("nextCursor")
-            if not isinstance(raw_cursor, str):
-                raw_cursor = value.get("next_cursor")
-            if isinstance(raw_cursor, str):
-                cursor = raw_cursor
-        next_page = ""
-        if cursor:
+        # NEXT_CURSOR_FIELD is set only on a command that binds --cursor, from its
+        # PaginationPolicy, so the hint never names a flag the command lacks.
+        cursor = value.get(NEXT_CURSOR_FIELD) if NEXT_CURSOR_FIELD else None
+        if isinstance(cursor, str) and cursor:
             next_page = (
-                f"Next page: {PROGRAM} {COMMAND_PATH} --cursor {cursor}"
+                f"Next page: {PROGRAM} {COMMAND_PATH} --cursor {_shell_quote(cursor)}"
                 f"    Every page: {PROGRAM} {COMMAND_PATH} --all"
             )
     else:
         outcome = "ok"
         rows = [_view_row(value)]
-        next_page = ""
     full = f"not saved ({save_err})" if save_err else saved
     line1 = f"{PROGRAM} {COMMAND_PATH}: {outcome}. Full JSON: {full}"
     chunks = [line1]
     if not QUIET:
+        # The next-page line and the jq recipes are what a caller needs next, so
+        # they are reserved first and the rows take what is left of the budget.
         budget = 4000
-        shown = 0
+        tail: list[str] = []
+        if next_page:
+            tail.append(next_page)
+        if saved and not save_err:
+            quoted = _shell_quote(saved)
+            if listed is not None:
+                queries = [
+                    f"  jq '.items[]' {quoted}",
+                    f"  jq '.items | length' {quoted}",
+                ]
+            else:
+                queries = [f"  jq 'keys' {quoted}", f"  jq '.' {quoted}"]
+            tail.append(
+                "Query the saved result instead of re-running (do not cat it):\n"
+                + "\n".join(queries)
+            )
+        reserve = sum(len(part) + 1 for part in tail)
         size = len(line1) + 1
-        for row in rows:
+        shown = 0
+        for index, row in enumerate(rows):
             extra = len(row) + 1
-            if size + extra > budget and shown > 0:
-                chunks.append(
-                    f"Showing {shown} of {len(rows)}; the rest is in the file."
-                )
+            more = 0
+            if index < len(rows) - 1:
+                more = len(_showing_line(len(rows), len(rows))) + 1
+            if size + extra + reserve + more > budget and shown > 0:
                 break
             chunks.append(row)
             shown += 1
             size += extra
-        if next_page and size + len(next_page) + 1 <= budget:
-            chunks.append(next_page)
-            size += len(next_page) + 1
-        if saved and not save_err:
-            quoted = _shell_quote(saved)
-            if listed is not None:
-                recipes = (
-                    "Query the saved result instead of re-running "
-                    "(do not cat it):\n"
-                    f"  jq '.items[]' {quoted}\n"
-                    f"  jq '.items | length' {quoted}"
-                )
-            else:
-                recipes = (
-                    "Query the saved result instead of re-running "
-                    "(do not cat it):\n"
-                    f"  jq 'keys' {quoted}\n"
-                    f"  jq '.' {quoted}"
-                )
-            if size + len(recipes) + 1 <= budget:
-                chunks.append(recipes)
+        if shown < len(rows):
+            chunks.append(_showing_line(shown, len(rows)))
+        chunks.extend(tail)
     sys.stdout.write("\n".join(chunks) + "\n")
 
 

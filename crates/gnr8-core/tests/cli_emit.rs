@@ -1882,8 +1882,10 @@ fn a_percent_in_a_default_is_escaped_for_argparse_help() {
     )
     .unwrap();
     let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
+    // Single-quoted because the text holds more double quotes than single ones: the literal is
+    // spelled the way `ruff format` would rewrite it.
     assert!(
-        text.contains(r#"help="default: \"100%%\"","#),
+        text.contains(r#"help='default: "100%%"',"#),
         "a percent in a default must be doubled:\n{text}"
     );
 }

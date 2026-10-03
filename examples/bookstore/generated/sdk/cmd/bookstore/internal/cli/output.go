@@ -221,12 +221,12 @@ func printJSON(result any) int {
 }
 
 func printJSONL(result any) int {
-	value, raw, err := decodeResult(result)
+	_, raw, err := decodeResult(result)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
-	items, _, _ := listItems(value, raw)
+	items, _, _ := listItems(raw)
 	if items == nil {
 		items = []json.RawMessage{raw}
 		if len(raw) == 0 {
@@ -276,7 +276,10 @@ func printAIFriendly(result any) int {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
-	saved, saveErr := writeEnvelope(result, value, raw)
+	saved, saveErr := writeEnvelope(result, raw)
+	if saveErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: the full result was not saved: %v\n", saveErr)
+	}
 	outcome, rows, nextPage := aiSummary(result, value, raw)
 	line1 := program + " " + commandPath + ": " + outcome + ". Full JSON: "
 	if saveErr != nil {
@@ -288,33 +291,44 @@ func printAIFriendly(result any) int {
 	buf.WriteString(line1)
 	buf.WriteByte('\n')
 	if !quiet {
+		// The next-page line and the jq recipes are what a caller needs next, so they are
+		// reserved first and the rows take what is left of the budget.
 		const budget = 4000
+		var tail strings.Builder
+		if nextPage != "" {
+			tail.WriteString(nextPage)
+			tail.WriteByte('\n')
+		}
+		if saved != "" && saveErr == nil {
+			tail.WriteString(aiRecipes(saved, raw))
+		}
 		shown := 0
-		for _, row := range rows {
+		for i, row := range rows {
 			next := row + "\n"
-			if buf.Len()+len(next) > budget && shown > 0 {
-				fmt.Fprintf(&buf, "Showing %d of %d; the rest is in the file.\n", shown, len(rows))
+			reserve := tail.Len()
+			if i < len(rows)-1 {
+				reserve += len(showingLine(len(rows), len(rows)))
+			}
+			if buf.Len()+len(next)+reserve > budget && shown > 0 {
 				break
 			}
 			buf.WriteString(next)
 			shown++
 		}
-		if nextPage != "" && buf.Len()+len(nextPage)+1 <= budget {
-			buf.WriteString(nextPage)
-			buf.WriteByte('\n')
+		if shown < len(rows) {
+			buf.WriteString(showingLine(shown, len(rows)))
 		}
-		if saved != "" && saveErr == nil {
-			recipes := aiRecipes(saved, value, raw)
-			if buf.Len()+len(recipes) <= budget {
-				buf.WriteString(recipes)
-			}
-		}
+		buf.WriteString(tail.String())
 	}
 	if _, err := os.Stdout.Write(buf.Bytes()); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func showingLine(shown, total int) string {
+	return fmt.Sprintf("Showing %d of %d; the rest is in the file.\n", shown, total)
 }
 
 func resultBytes(result any) ([]byte, error) {
@@ -349,64 +363,46 @@ func decodeResult(result any) (any, []byte, error) {
 	return value, raw, nil
 }
 
-func listItems(value any, raw []byte) ([]json.RawMessage, string, json.RawMessage) {
-	switch typed := value.(type) {
-	case []any:
-		items := make([]json.RawMessage, 0, len(typed))
+func listItems(raw []byte) ([]json.RawMessage, string, json.RawMessage) {
+	return splitList(raw, resultIsList, itemsKey)
+}
+
+// splitList reads a result as a list only when the graph says it is one: a success body whose
+// schema is an array, or a page whose PaginationPolicy names its items field. Every other
+// object is one resource, however many arrays it holds.
+func splitList(raw []byte, isList bool, key string) ([]json.RawMessage, string, json.RawMessage) {
+	if isList {
 		var array []json.RawMessage
-		if json.Unmarshal(raw, &array) == nil {
-			return array, "", nil
-		}
-		for _, item := range typed {
-			encoded, err := json.Marshal(item)
-			if err != nil {
-				continue
-			}
-			items = append(items, encoded)
-		}
-		return items, "", nil
-	case map[string]any:
-		var obj map[string]json.RawMessage
-		if json.Unmarshal(raw, &obj) != nil {
-			obj = map[string]json.RawMessage{}
-		}
-		bestKey := ""
-		bestLen := -1
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			arr, ok := typed[key].([]any)
-			if !ok {
-				continue
-			}
-			if len(arr) > bestLen {
-				bestKey = key
-				bestLen = len(arr)
-			}
-		}
-		if bestKey == "" {
+		if json.Unmarshal(raw, &array) != nil {
 			return nil, "", nil
 		}
-		itemsRaw := obj[bestKey]
-		var items []json.RawMessage
-		if json.Unmarshal(itemsRaw, &items) != nil {
-			return nil, bestKey, nil
+		if array == nil {
+			array = []json.RawMessage{}
 		}
-		meta := map[string]json.RawMessage{}
-		for key, item := range obj {
-			if key == bestKey {
-				continue
-			}
-			meta[key] = item
-		}
-		metaRaw, _ := json.Marshal(meta)
-		return items, bestKey, metaRaw
-	default:
+		return array, "", nil
+	}
+	if key == "" {
 		return nil, "", nil
 	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil, "", nil
+	}
+	var items []json.RawMessage
+	if itemsRaw, ok := obj[key]; ok && json.Unmarshal(itemsRaw, &items) != nil {
+		return nil, "", nil
+	}
+	if items == nil {
+		items = []json.RawMessage{}
+	}
+	meta := map[string]json.RawMessage{}
+	for name, item := range obj {
+		if name != key {
+			meta[name] = item
+		}
+	}
+	metaRaw, _ := json.Marshal(meta)
+	return items, key, metaRaw
 }
 
 func fieldList() []string {
@@ -462,38 +458,62 @@ func projectValue(value any, fields []string) any {
 	}
 }
 
+// viewRow prints the declared view fields in their declared order, byte-exact, cutting only a
+// long string; without a view it prints the first six scalar fields by name.
 func viewRow(raw json.RawMessage) string {
 	projected := projectRaw(raw)
-	var value any
-	if json.Unmarshal(projected, &value) != nil {
+	var obj map[string]json.RawMessage
+	if fieldList() != nil || json.Unmarshal(projected, &obj) != nil {
 		return string(projected)
 	}
-	if obj, ok := value.(map[string]any); ok && fieldList() == nil {
-		keys := previewFields
-		if len(keys) == 0 {
-			keys = make([]string, 0, len(obj))
-			for key, item := range obj {
-				if isScalar(item) {
-					keys = append(keys, key)
-				}
-			}
-			sort.Strings(keys)
-			if len(keys) > 6 {
-				keys = keys[:6]
+	keys := previewFields
+	if len(keys) == 0 {
+		keys = make([]string, 0, len(obj))
+		for key, item := range obj {
+			var value any
+			if json.Unmarshal(item, &value) == nil && isScalar(value) {
+				keys = append(keys, key)
 			}
 		}
-		if len(keys) > 0 {
-			value = projectValue(obj, keys)
+		sort.Strings(keys)
+		if len(keys) > 6 {
+			keys = keys[:6]
 		}
 	}
-	encoded, err := json.Marshal(value)
+	var b strings.Builder
+	b.WriteByte('{')
+	for _, key := range keys {
+		item, ok := obj[key]
+		if !ok {
+			continue
+		}
+		if b.Len() > 1 {
+			b.WriteByte(',')
+		}
+		name, _ := json.Marshal(key)
+		b.Write(name)
+		b.WriteByte(':')
+		b.Write(previewValue(item))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// previewValue cuts a string longer than 80 characters; every other value prints as sent.
+func previewValue(item json.RawMessage) []byte {
+	var text string
+	if json.Unmarshal(item, &text) != nil {
+		return item
+	}
+	runes := []rune(text)
+	if len(runes) <= 80 {
+		return item
+	}
+	encoded, err := json.Marshal(string(runes[:79]) + "…")
 	if err != nil {
-		return string(projected)
+		return item
 	}
-	if len(encoded) > 80 {
-		return string(encoded[:79]) + "…"
-	}
-	return string(encoded)
+	return encoded
 }
 
 func isScalar(value any) bool {
@@ -512,7 +532,7 @@ func aiSummary(result any, value any, raw []byte) (string, []string, string) {
 	if len(raw) == 0 || value == nil {
 		return "empty", nil, ""
 	}
-	items, key, _ := listItems(value, raw)
+	items, key, _ := listItems(raw)
 	if items != nil {
 		noun := "items"
 		if key != "" {
@@ -524,11 +544,11 @@ func aiSummary(result any, value any, raw []byte) (string, []string, string) {
 		}
 		outcome := fmt.Sprintf("%d %s", len(items), noun)
 		next := ""
-		if obj, ok := value.(map[string]any); ok {
-			if cursor, ok := obj["nextCursor"].(string); ok && cursor != "" {
-				next = "Next page: " + program + " " + commandPath + " --cursor " + cursor + "    Every page: " + program + " " + commandPath + " --all"
-			} else if cursor, ok := obj["next_cursor"].(string); ok && cursor != "" {
-				next = "Next page: " + program + " " + commandPath + " --cursor " + cursor + "    Every page: " + program + " " + commandPath + " --all"
+		// nextCursorField is set only on a command that binds --cursor, from its
+		// PaginationPolicy, so the line never names a flag the command lacks.
+		if obj, ok := value.(map[string]any); ok && nextCursorField != "" {
+			if cursor, ok := obj[nextCursorField].(string); ok && cursor != "" {
+				next = "Next page: " + program + " " + commandPath + " --cursor " + shellQuote(cursor) + "    Every page: " + program + " " + commandPath + " --all"
 			}
 		}
 		return outcome, rows, next
@@ -536,9 +556,9 @@ func aiSummary(result any, value any, raw []byte) (string, []string, string) {
 	return "ok", []string{viewRow(raw)}, ""
 }
 
-func aiRecipes(path string, value any, raw []byte) string {
+func aiRecipes(path string, raw []byte) string {
 	quoted := shellQuote(path)
-	items, _, _ := listItems(value, raw)
+	items, _, _ := listItems(raw)
 	var b strings.Builder
 	b.WriteString("Query the saved result instead of re-running (do not cat it):\n")
 	if items != nil {
@@ -610,7 +630,7 @@ func PreflightOutput() int {
 	return 0
 }
 
-func writeEnvelope(result any, value any, raw []byte) (string, error) {
+func writeEnvelope(result any, raw []byte) (string, error) {
 	dir := outputDirPath()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -620,6 +640,7 @@ func writeEnvelope(result any, value any, raw []byte) (string, error) {
 	var meta json.RawMessage
 	var data json.RawMessage
 	var fileMeta map[string]any
+	var binPath string
 	page := map[string]any{}
 	switch typed := result.(type) {
 	case []byte:
@@ -628,8 +649,8 @@ func writeEnvelope(result any, value any, raw []byte) (string, error) {
 		if name == "" {
 			name = "download"
 		}
-		binPath := filepath.Join(dir, name+"-"+shortID(typed)+".bin")
-		if err := os.WriteFile(binPath, typed, 0o600); err != nil {
+		binPath = filepath.Join(dir, name+"-"+shortID(typed)+".bin")
+		if err := atomicWrite(binPath, typed); err != nil {
 			return "", err
 		}
 		sum := sha256.Sum256(typed)
@@ -643,7 +664,7 @@ func writeEnvelope(result any, value any, raw []byte) (string, error) {
 		if len(raw) == 0 {
 			kind = "empty"
 		} else {
-			list, key, listMeta := listItems(value, raw)
+			list, key, listMeta := listItems(raw)
 			if list != nil {
 				kind = "list"
 				encoded, err := json.Marshal(list)
@@ -712,7 +733,7 @@ func writeEnvelope(result any, value any, raw []byte) (string, error) {
 	if err := atomicWrite(latest, encoded); err != nil {
 		return path, nil
 	}
-	pruneOutput(dir)
+	pruneOutput(dir, path, binPath)
 	return path, nil
 }
 
@@ -745,10 +766,19 @@ func atomicWrite(path string, body []byte) error {
 	return os.Rename(tmpName, path)
 }
 
-func pruneOutput(dir string) {
+// pruneOutput keeps the output directory at 100 files and 100 MB, envelopes and downloads
+// alike, deleting the oldest first. latest.json and the files this run just wrote are never
+// deleted, so a single result over the byte cap still survives with the path stdout names.
+func pruneOutput(dir string, keep ...string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
+	}
+	kept := map[string]bool{"latest.json": true}
+	for _, path := range keep {
+		if path != "" {
+			kept[filepath.Base(path)] = true
+		}
 	}
 	type item struct {
 		name string
@@ -758,31 +788,33 @@ func pruneOutput(dir string) {
 	var files []item
 	var total int64
 	for _, entry := range entries {
-		if entry.IsDir() || entry.Name() == "latest.json" || !strings.HasSuffix(entry.Name(), ".json") {
+		name := entry.Name()
+		if entry.IsDir() || name == "latest.json" || strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, ".bin") {
 			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		files = append(files, item{name: entry.Name(), mod: info.ModTime(), size: info.Size()})
+		files = append(files, item{name: name, mod: info.ModTime(), size: info.Size()})
 		total += info.Size()
 	}
-	for i := 0; i < len(files); i++ {
-		for j := i + 1; j < len(files); j++ {
-			if files[j].mod.Before(files[i].mod) {
-				files[i], files[j] = files[j], files[i]
-			}
-		}
-	}
-	for len(files) > 100 || total > 100*1024*1024 {
-		if len(files) == 0 {
+	sort.SliceStable(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	count := len(files)
+	for _, file := range files {
+		if count <= 100 && total <= 100*1024*1024 {
 			return
 		}
-		oldest := files[0]
-		_ = os.Remove(filepath.Join(dir, oldest.name))
-		total -= oldest.size
-		files = files[1:]
+		if kept[file.name] {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, file.name)) == nil {
+			count--
+			total -= file.size
+		}
 	}
 }
 

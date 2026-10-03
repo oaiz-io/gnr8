@@ -2,9 +2,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 
 	"example.com/bookstore/sdk"
@@ -55,13 +57,14 @@ type jsonErrorBody struct {
 	RequestID string   `json:"requestId,omitempty"`
 }
 
-func printError(message string, hints []string, requestID string, status, code int) int {
+func printError(slug, message string, hints []string, requestID string, status, code int) int {
 	if outputFormat == "json" || outputFormat == "jsonl" {
 		payload := jsonError{
 			Error: jsonErrorBody{
 				ExitCode:  code,
 				Kind:      kindForExit(code),
 				Status:    status,
+				Slug:      slug,
 				Message:   message,
 				Hints:     hints,
 				RequestID: requestID,
@@ -93,7 +96,7 @@ func printError(message string, hints []string, requestID string, status, code i
 func handleErr(err error) int {
 	var helper *helperError
 	if errors.As(err, &helper) {
-		return printError(fmt.Sprintf("credential helper failed (%s)", helper.reason), nil, "", 0, 1)
+		return printError("", fmt.Sprintf("credential helper failed (%s)", helper.reason), nil, "", 0, 1)
 	}
 	var authErr *sdk.AuthConfigurationError
 	if errors.As(err, &authErr) {
@@ -119,7 +122,7 @@ func handleErr(err error) int {
 	}
 	var input *inputError
 	if errors.As(err, &input) {
-		return printError(input.reason, nil, "", 0, 2)
+		return printError("", input.reason, nil, "", 0, 2)
 	}
 	var apiErr *sdk.APIError
 	if errors.As(err, &apiErr) {
@@ -127,12 +130,15 @@ func handleErr(err error) int {
 		message := fmt.Sprintf("%s (%d %s)", apiErr.Message, apiErr.StatusCode, apiErr.Slug)
 		if apiErr.Message == "" && apiErr.Slug == "" {
 			message = fmt.Sprintf("the API returned %d with a non-JSON body", apiErr.StatusCode)
-			if apiErr.StatusCode >= 500 {
+			if code == 6 {
 				message += "; retry later"
-				code = 6
 			}
 		}
-		return printError(message, apiErr.Hints, apiErr.RequestID, apiErr.StatusCode, code)
+		return printError(apiErr.Slug, message, apiErr.Hints, apiErr.RequestID, apiErr.StatusCode, code)
 	}
-	return printError(err.Error(), nil, "", 0, 6)
+	var transport *url.Error
+	if errors.As(err, &transport) || errors.Is(err, context.DeadlineExceeded) {
+		return printError("", err.Error(), nil, "", 0, 6)
+	}
+	return printError("", err.Error(), nil, "", 0, 1)
 }

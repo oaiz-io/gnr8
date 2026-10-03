@@ -99,15 +99,11 @@ func splitSelector(token string) (string, string, bool) {
 	return token[:at], token[at+1:], true
 }
 
-func pickSelectedID(raw []byte, selector, matchField, idField string) (string, int) {
-	items, _, _ := listItems(nil, raw)
+func pickSelectedID(raw []byte, isList bool, key, selector, matchField, idField string) (string, int) {
+	items, _, _ := splitList(raw, isList, key)
 	if items == nil {
-		var value any
-		if json.Unmarshal(raw, &value) != nil {
-			fmt.Fprintf(os.Stderr, "error: selector list is not JSON\n")
-			return "", 1
-		}
-		items, _, _ = listItems(value, raw)
+		fmt.Fprintf(os.Stderr, "error: the selector's list answer is not a list\n")
+		return "", 1
 	}
 	latest := selector == "latest"
 	var best string

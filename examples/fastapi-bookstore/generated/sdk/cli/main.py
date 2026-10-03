@@ -57,6 +57,14 @@ def _print_help(argv: list[str]) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("error: interrupted", file=sys.stderr)
+        return 130
+
+
+def _main(argv: Optional[list[str]]) -> int:
     argv = sys.argv[1:] if argv is None else argv
     code = _check_rename(argv)
     if code:
@@ -82,19 +90,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     try:
         result = handler(args)
-        output.print_result(result)
-        return 0
     except ApiError as exc:
         code = output.exit_code_for_status(exc.status_code)
         message = f"{exc.message} ({exc.status_code} {exc.slug})"
         if not exc.message and not exc.slug:
             message = f"the API returned {exc.status_code} with a non-JSON body"
-            if exc.status_code >= 500:
+            if code == 6:
                 message += "; retry later"
-                code = 6
         hints = [str(hint) for hint in exc.hints]
-        return output.print_error(message, hints, exc.request_id, exc.status_code, code)
+        return output.print_error(
+            message, hints, exc.request_id, exc.status_code, code, exc.slug
+        )
     except InputError as exc:
         return output.print_error(exc.reason, code=2)
     except OSError as exc:
         return output.print_error(str(exc), code=6)
+    except ValueError as exc:
+        return output.print_error(f"the response could not be read: {exc}", code=1)
+    try:
+        output.print_result(result)
+    except OSError as exc:
+        return output.print_error(str(exc), code=1)
+    return 0

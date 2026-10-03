@@ -267,20 +267,37 @@ pub(crate) fn command_view<'a>(
     graph: &ApiGraph,
     op: &Operation,
 ) -> Option<&'a gnr8::sdk::CliView> {
-    let Ok(success) = success_responses_of(op, graph) else {
+    let name = row_schema_name(graph, op)?;
+    cli.views.iter().find(|view| view.schema == name)
+}
+
+/// The name of the schema one printed row of this command is: the item schema of a list or page,
+/// otherwise the success body's own schema. A view is declared for the thing a row shows.
+fn row_schema_name<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a str> {
+    let schema = success_schema(graph, op)?;
+    let items = match (
+        cli_result_shape(graph, op),
+        resolve_alias(graph, &schema.body, 0),
+    ) {
+        (CliResultShape::Object, _) => return Some(schema.name.as_str()),
+        (CliResultShape::List, Type::Array(inner)) => inner.as_ref(),
+        (CliResultShape::Page(key), Type::Object(fields)) => {
+            let field = fields.iter().find(|field| field.json_name == key)?;
+            let Type::Array(inner) = resolve_alias(graph, &field.schema, 0) else {
+                return None;
+            };
+            inner.as_ref()
+        }
+        _ => return None,
+    };
+    let Type::Named(id) = items else {
         return None;
     };
-    let model = success.body_model?;
-    cli.views
+    graph
+        .schemas
         .iter()
-        .find(|view| view.schema == model)
-        .or_else(|| {
-            graph
-                .schemas
-                .iter()
-                .find(|schema| schema.id == model)
-                .and_then(|schema| cli.views.iter().find(|view| view.schema == schema.name))
-        })
+        .find(|schema| &schema.id == id)
+        .map(|schema| schema.name.as_str())
 }
 
 /// Runnable examples declared on this command's spec.
@@ -313,19 +330,13 @@ pub(crate) fn command_output_note(
     {
         return Some(note);
     }
-    let success = success_responses_of(op, graph).ok()?;
-    let model = success.body_model?;
-    let name = graph
-        .schemas
-        .iter()
-        .find(|schema| schema.id == model)
-        .map_or(model.as_str(), |schema| schema.name.as_str());
+    let name = success_schema(graph, op)?.name.as_str();
     if let Some(view) = command_view(cli, graph, op) {
         if !view.preview.is_empty() {
-            return Some(format!("{name}: {}", view.preview.join(", ")));
+            return Some(format!("{}: {}", view.schema, view.preview.join(", ")));
         }
         if !view.table.is_empty() {
-            return Some(format!("{name}: {}", view.table.join(", ")));
+            return Some(format!("{}: {}", view.schema, view.table.join(", ")));
         }
     }
     Some(name.to_string())
@@ -569,14 +580,16 @@ pub(crate) fn helper_env_var(program: &str) -> String {
 /// handling; `--base-url` is declared on each command so it can follow the subcommand;
 /// `--format` and `--json` are globals every generated command binds, as are the output-contract
 /// flags (`fields`, `output`, `quiet`, `debug`), the prompt flags (`yes`, `--no-input`), and the
-/// polish flags (`color`, `no-pager`).
+/// polish flags (`color`, `no-pager`). `o`, `q` and `y` are the short spellings of `output`,
+/// `quiet` and `yes`: Go's `flag` treats `-q` and `--q` as one name, so a parameter flag `q`
+/// would be a second registration and the command would panic before parsing a single argument.
 ///
 /// Everything else is conditional and computed per command by [`reserved_flags_for`] — reserving a
 /// name no command binds costs a user a legitimate parameter for nothing, and the only remedy
 /// available to them is changing their API's wire contract.
 const ALWAYS_RESERVED_FLAGS: &[&str] = &[
     "help", "base-url", "format", "json", "fields", "output", "quiet", "debug", "yes", "no-input",
-    "color", "no-pager",
+    "color", "no-pager", "o", "q", "y",
 ];
 
 /// What each reserved flag does, in the words both emitters print.
@@ -633,13 +646,87 @@ pub(crate) fn pager_env_var(program: &str) -> String {
 /// keys. Anything else has no fields to list — `--fields help` then says so, rather than inventing
 /// names from the Go or Python type.
 pub(crate) fn response_field_names(graph: &ApiGraph, op: &Operation) -> Vec<String> {
-    let Ok(success) = success_responses_of(op, graph) else {
+    let Some(schema) = success_schema(graph, op) else {
         return Vec::new();
     };
-    let Some(model) = success.body_model else {
-        return Vec::new();
+    object_json_names(graph, &schema.body, 1)
+}
+
+/// The schema of an operation's one typed JSON success body.
+///
+/// [`SuccessResponses::body_model`] carries the schema's *name* (the SDK model it decodes into),
+/// not its id, so it is resolved by name here.
+fn success_schema<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a Schema> {
+    let model = success_responses_of(op, graph).ok()?.body_model?;
+    graph.schemas.iter().find(|schema| schema.name == model)
+}
+
+/// How a generated CLI reads one operation's success body: as a list of items, or as one value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CliResultShape {
+    /// The body is a JSON array; each element is an item.
+    List,
+    /// The body is an object whose items sit under one key.
+    Page(String),
+    /// The body is one resource, however many arrays it holds.
+    Object,
+}
+
+/// Classify an operation's success body from the graph, at generation time.
+///
+/// An array body is a list. A `PaginationPolicy` names the items field of a page. An object whose
+/// only field is an array has nothing but its items to describe, so it is a page keyed by that
+/// field — a policy, where one exists, names that same field. Every other object is one resource:
+/// the generated program never guesses a list from the shape of a response it received.
+pub(crate) fn cli_result_shape(graph: &ApiGraph, op: &Operation) -> CliResultShape {
+    let Some(schema) = success_schema(graph, op) else {
+        return CliResultShape::Object;
     };
-    object_json_names(graph, &Type::Named(model), 0)
+    let body = resolve_alias(graph, &schema.body, 0);
+    if matches!(body, Type::Array(_)) {
+        return CliResultShape::List;
+    }
+    if let Some(policy) = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)
+    {
+        return CliResultShape::Page(policy.items_field.clone());
+    }
+    if let Type::Object(fields) = body {
+        if let [only] = fields.as_slice() {
+            if matches!(resolve_alias(graph, &only.schema, 0), Type::Array(_)) {
+                return CliResultShape::Page(only.json_name.clone());
+            }
+        }
+    }
+    CliResultShape::Object
+}
+
+/// Follow named references to the type they stand for, bounded against a cyclic alias.
+fn resolve_alias<'a>(graph: &'a ApiGraph, ty: &'a Type, depth: usize) -> &'a Type {
+    if depth > 8 {
+        return ty;
+    }
+    if let Type::Named(id) = ty {
+        if let Some(schema) = graph.schemas.iter().find(|schema| &schema.id == id) {
+            return resolve_alias(graph, &schema.body, depth + 1);
+        }
+    }
+    ty
+}
+
+/// The response field holding the next cursor, for a command that binds `--cursor`.
+///
+/// Only a cursor `PaginationPolicy` with both a request cursor parameter and a response
+/// next-cursor field produces one, so a "Next page" hint never names a flag the command lacks.
+pub(crate) fn cli_next_cursor_field<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a str> {
+    let policy = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)?;
+    policy.cursor_param.as_ref()?;
+    policy.next_cursor_field.as_deref()
 }
 
 fn object_json_names(graph: &ApiGraph, ty: &Type, depth: usize) -> Vec<String> {
@@ -2641,6 +2728,26 @@ mod tests {
                 Ok(()) => panic!("--{name} is a reserved global"),
             };
             assert!(message.contains(&format!("--{name}")), "{message}");
+        }
+    }
+
+    #[test]
+    fn short_global_spellings_are_reserved() {
+        // `-q`, `-o` and `-y` are registered on every Go command, and Go's `flag` treats `-q` and
+        // `--q` as one name: a parameter flag `q` would panic the command before it parsed an
+        // argument, so it must be a generation error naming the parameter.
+        for name in ["q", "o", "y"] {
+            let graph = ApiGraph {
+                operations: vec![cli_op("searchBooks", None, vec![cli_param(name)])],
+                ..ApiGraph::default()
+            };
+            let ops: Vec<&Operation> = graph.operations.iter().collect();
+            let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
+                Err(error) => error.to_string(),
+                Ok(()) => panic!("-{name} is the short spelling of a reserved global"),
+            };
+            assert!(message.contains("searchBooks"), "{message}");
+            assert!(message.contains(&format!("'--{name}'")), "{message}");
         }
     }
 

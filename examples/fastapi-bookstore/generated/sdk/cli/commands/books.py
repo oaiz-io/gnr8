@@ -36,9 +36,9 @@ def register(subparsers: Any) -> None:
             "mit it to start from the\nbeginning."
         ),
         epilog=(
-            "Examples:\n  bookstore books list --genre fiction\n\nOutput\n  ListBooksRe"
-            "sponse\n\nSee also  books get\n\nDocs      https://example.com/cli/books/l"
-            "ist"
+            "Examples:\n  bookstore books list --genre fiction\n\nOutput\n  Book: id, t"
+            "itle, author\n\nSee also  books get\n\nDocs      https://example.com/cli/b"
+            "ooks/list"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -166,7 +166,19 @@ def register(subparsers: Any) -> None:
     cmd_list_books.set_defaults(
         _handler=_list_books,
         _command="books list",
-        _fields=(),
+        _fields=(
+            "books",
+            "next_cursor",
+            "total",
+        ),
+        _preview=(
+            "id",
+            "title",
+            "author",
+        ),
+        _is_list=False,
+        _items_key="books",
+        _next_cursor="next_cursor",
     )
     cmd_create_book = commands.add_parser(
         "create",
@@ -284,7 +296,14 @@ def register(subparsers: Any) -> None:
     cmd_create_book.set_defaults(
         _handler=_create_book,
         _command="books create",
-        _fields=(),
+        _fields=(
+            "id",
+            "message",
+        ),
+        _preview=(),
+        _is_list=False,
+        _items_key="",
+        _next_cursor="",
     )
     cmd_get_book = commands.add_parser(
         "get",
@@ -398,7 +417,18 @@ def register(subparsers: Any) -> None:
     cmd_get_book.set_defaults(
         _handler=_get_book,
         _command="books get",
-        _fields=(),
+        _fields=(
+            "author",
+            "format",
+            "id",
+            "rating",
+            "tags",
+            "title",
+        ),
+        _preview=(),
+        _is_list=False,
+        _items_key="",
+        _next_cursor="",
     )
     cmd_update_book = commands.add_parser(
         "update",
@@ -537,7 +567,14 @@ def register(subparsers: Any) -> None:
     cmd_update_book.set_defaults(
         _handler=_update_book,
         _command="books update",
-        _fields=(),
+        _fields=(
+            "id",
+            "message",
+        ),
+        _preview=(),
+        _is_list=False,
+        _items_key="",
+        _next_cursor="",
     )
 
 
