@@ -5358,7 +5358,11 @@ mod tests {
             vec!["ActiveSchoolAuth", "CSRFAuth"]
         );
         assert_eq!(ir.operations[2].security, vec!["CSRFAuth"]);
-        assert!(ir.operations[3].security.is_empty());
+        assert!(
+            ir.operations[3].security.is_empty(),
+            "{:?}",
+            ir.operations[3].security
+        );
     }
 
     #[test]
@@ -5906,7 +5910,7 @@ mod tests {
             .deny("request.body.unresolved")
             .apply(&mut ir, &cx())
             .unwrap();
-        assert!(ir.diagnostics.is_empty());
+        assert!(ir.diagnostics.is_empty(), "{:?}", ir.diagnostics);
     }
 
     #[test]
@@ -5961,7 +5965,7 @@ mod tests {
             .deny("response.media_type.unresolved")
             .apply(&mut ir, &cx())
             .unwrap();
-        assert!(ir.diagnostics.is_empty());
+        assert!(ir.diagnostics.is_empty(), "{:?}", ir.diagnostics);
     }
 
     #[test]
@@ -6008,7 +6012,7 @@ mod tests {
             .apply(&mut ir, &cx())
             .unwrap();
 
-        assert!(ir.diagnostics.is_empty());
+        assert!(ir.diagnostics.is_empty(), "{:?}", ir.diagnostics);
         let mut out = Artifacts::new();
         OpenApi31::new()
             .to("openapi.yaml")
@@ -7473,11 +7477,11 @@ mod tests {
                 "generated/typescript",
             )]
         );
-        assert!(StaticFiles::new()
+        let leftover = StaticFiles::new()
             .to("generated/python")
             .include(["support.py"])
-            .readiness_targets()
-            .is_empty());
+            .readiness_targets();
+        assert!(leftover.is_empty(), "{leftover:?}");
     }
 
     #[test]
@@ -7671,7 +7675,8 @@ mod tests {
             target.output_anchors(),
             vec!["generated/sdk-py".to_string()]
         );
-        assert!(PySdk::new().output_anchors().is_empty());
+        let leftover = PySdk::new().output_anchors();
+        assert!(leftover.is_empty(), "{leftover:?}");
 
         // Two fresh runs over the same IR yield byte-identical Artifacts (T-03-02-05).
         let mut out2 = Artifacts::new();
@@ -8069,7 +8074,8 @@ mod tests {
             target.output_anchors(),
             vec!["generated/sdk-ts".to_string()]
         );
-        assert!(TsSdk::new().output_anchors().is_empty());
+        let leftover = TsSdk::new().output_anchors();
+        assert!(leftover.is_empty(), "{leftover:?}");
 
         // Two fresh runs over the same IR yield byte-identical Artifacts (T-05-02-03 determinism).
         let mut out2 = Artifacts::new();

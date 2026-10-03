@@ -810,7 +810,8 @@ mod tests {
         let mut out = Artifacts::from_files(vec![super::Artifact::new("a.txt", "a")]);
         out.begin_stage("post[0]:Real");
         out.rewrite("a.txt", |text| format!("{text}!")).unwrap();
-        assert!(out.take_diagnostics().is_empty());
+        let leftover = out.take_diagnostics();
+        assert!(leftover.is_empty(), "{leftover:?}");
     }
 
     #[test]
@@ -819,7 +820,8 @@ mod tests {
             super::Artifact::new("a.txt", "a"),
             super::Artifact::new("b.txt", "b"),
         ]);
-        assert!(out.changes().is_empty());
+        let leftover = out.changes();
+        assert!(leftover.is_empty(), "{leftover:?}");
     }
     use crate::sdk::stage::PlanStage;
     use crate::Error;

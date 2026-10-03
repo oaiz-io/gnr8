@@ -2445,7 +2445,8 @@ mod tests {
         let empty = ApiGraph::default();
         let policy = exemptions(&["internal", "beta"]);
 
-        assert!(diff_graphs(&empty, &empty, &policy).changes.is_empty());
+        let leftover = diff_graphs(&empty, &empty, &policy).changes;
+        assert!(leftover.is_empty(), "{leftover:?}");
 
         for added in [&checked, &exempt] {
             let finding = change(&diff_graphs(&empty, added, &policy), "operation.added").clone();
@@ -3016,9 +3017,8 @@ mod tests {
             ..ApiGraph::default()
         };
 
-        assert!(diff_graphs(&base, &current, &BTreeSet::new())
-            .changes
-            .is_empty());
+        let leftover = diff_graphs(&base, &current, &BTreeSet::new()).changes;
+        assert!(leftover.is_empty(), "{leftover:?}");
     }
 
     #[test]

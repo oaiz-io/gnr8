@@ -4202,7 +4202,11 @@ components:
         )
         .unwrap();
         assert_eq!(graph.operations[0].id, "publicEndpoint");
-        assert!(graph.operations[0].security.is_empty());
+        assert!(
+            graph.operations[0].security.is_empty(),
+            "{:?}",
+            graph.operations[0].security
+        );
         assert!(graph.operations[0].security_overrides_global);
         assert!(graph.diagnostics.is_empty(), "{:?}", graph.diagnostics);
 

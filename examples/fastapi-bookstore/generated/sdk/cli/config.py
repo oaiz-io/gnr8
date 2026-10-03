@@ -10,31 +10,28 @@ OUTPUT_DIR_ENV = "BOOKSTORE_OUTPUT_DIR"
 PAGER_ENV = "BOOKSTORE_PAGER"
 DESCRIPTION = "Bookstore API"
 HELP_SPEC = (
-    "{\"commands\":[{\"arguments\":[],\"docsUrl\":\"https://example.com/cli/books/list"
-    "\",\"examples\":[\"bookstore books list --genre fiction\"],\"flags\":[{\"help\":\""
-    "required\",\"name\":\"genre\",\"required\":true,\"type\":\"string\"},{\"name\":\"s"
-    "ort\",\"required\":false,\"type\":\"string\"},{\"help\":\"stop after this many ite"
-    "ms\",\"name\":\"limit\",\"required\":false,\"type\":\"integer\"},{\"help\":\"keep "
-    "following pages until the last one\",\"name\":\"all\",\"required\":false,\"type\":"
-    "\"boolean\"},{\"help\":\"resume from this cursor\",\"name\":\"cursor\",\"required"
-    "\":false,\"type\":\"string\"}],\"invocation\":\"books list\",\"operation\":\"list_"
-    "books\",\"output\":\"ListBooksResponse\",\"seeAlso\":[\"books get\"]},{\"arguments"
-    "\":[],\"examples\":[\"bookstore books create --body '{\\\"title\\\":\\\"Dune\\\"}'"
-    "\"],\"flags\":[{\"help\":\"request body, as an inline JSON document\",\"name\":\"b"
-    "ody\",\"required\":false,\"type\":\"string\"},{\"help\":\"read the request body fr"
-    "om a file, or - for stdin\",\"name\":\"body-file\",\"required\":false,\"type\":\"s"
-    "tring\"}],\"invocation\":\"books create\",\"operation\":\"create_book\",\"output\""
-    ":\"CreatedMessage\",\"seeAlso\":[]},{\"arguments\":[\"book_id\"],\"examples\":[\"b"
-    "ookstore books get 1\"],\"flags\":[{\"enum\":[\"hardcover\",\"paperback\"],\"name"
-    "\":\"fmt\",\"required\":false,\"type\":\"string\"}],\"invocation\":\"books get\","
-    "\"operation\":\"get_book\",\"output\":\"BookOrError\",\"seeAlso\":[]},{\"arguments"
-    "\":[\"book_id\"],\"examples\":[\"bookstore books update 1 --title Dune\"],\"flags"
-    "\":[{\"name\":\"genre\",\"required\":false,\"type\":\"string\"},{\"name\":\"in-sto"
-    "ck\",\"required\":false,\"type\":\"string\"},{\"name\":\"published\",\"required\":"
-    "false,\"type\":\"string\"},{\"name\":\"sort\",\"required\":false,\"type\":\"string"
-    "\"},{\"help\":\"request body, as an inline JSON document\",\"name\":\"body\",\"req"
-    "uired\":false,\"type\":\"string\"},{\"help\":\"read the request body from a file, "
-    "or - for stdin\",\"name\":\"body-file\",\"required\":false,\"type\":\"string\"}],"
-    "\"invocation\":\"books update\",\"operation\":\"update_book\",\"output\":\"Created"
-    "Message\",\"seeAlso\":[]}],\"program\":\"bookstore\"}"
+    '{"commands":[{"arguments":[],"docsUrl":"https://example.com/cli/books/list","examp'
+    'les":["bookstore books list --genre fiction"],"flags":[{"help":"required","name":"'
+    'genre","required":true,"type":"string"},{"name":"sort","required":false,"type":"st'
+    'ring"},{"help":"stop after this many items","name":"limit","required":false,"type"'
+    ':"integer"},{"help":"keep following pages until the last one","name":"all","requir'
+    'ed":false,"type":"boolean"},{"help":"resume from this cursor","name":"cursor","req'
+    'uired":false,"type":"string"}],"invocation":"books list","operation":"list_books",'
+    '"output":"ListBooksResponse","seeAlso":["books get"]},{"arguments":[],"examples":['
+    '"bookstore books create --body \'{\\"title\\":\\"Dune\\"}\'"],"flags":[{"help":"re'
+    'quest body, as an inline JSON document","name":"body","required":false,"type":"str'
+    'ing"},{"help":"read the request body from a file, or - for stdin","name":"body-fil'
+    'e","required":false,"type":"string"}],"invocation":"books create","operation":"cre'
+    'ate_book","output":"CreatedMessage","seeAlso":[]},{"arguments":["book_id"],"exampl'
+    'es":["bookstore books get 1"],"flags":[{"enum":["hardcover","paperback"],"name":"f'
+    'mt","required":false,"type":"string"}],"invocation":"books get","operation":"get_b'
+    'ook","output":"BookOrError","seeAlso":[]},{"arguments":["book_id"],"examples":["bo'
+    'okstore books update 1 --title Dune"],"flags":[{"name":"genre","required":false,"t'
+    'ype":"string"},{"name":"in-stock","required":false,"type":"string"},{"name":"publi'
+    'shed","required":false,"type":"string"},{"name":"sort","required":false,"type":"st'
+    'ring"},{"help":"request body, as an inline JSON document","name":"body","required"'
+    ':false,"type":"string"},{"help":"read the request body from a file, or - for stdin'
+    '","name":"body-file","required":false,"type":"string"}],"invocation":"books update'
+    '","operation":"update_book","output":"CreatedMessage","seeAlso":[]}],"program":"bo'
+    'okstore"}'
 )

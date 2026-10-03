@@ -2973,7 +2973,11 @@ mod tests {
         let success = success_responses_of(&bodyless, &graph)?;
         assert_eq!(success.statuses, vec![204]);
         assert!(success.body_model.is_none());
-        assert!(success.body_statuses.is_empty());
+        assert!(
+            success.body_statuses.is_empty(),
+            "{:?}",
+            success.body_statuses
+        );
         assert!(!success.has_bodyless_alternative());
         Ok(())
     }
@@ -3145,7 +3149,8 @@ mod tests {
                     && scheme.location == ApiKeyLocation::Query
         ));
         op.security_overrides_global = true;
-        assert!(operation_auth_alternatives(&graph, &op)?.is_empty());
+        let leftover = operation_auth_alternatives(&graph, &op)?;
+        assert!(leftover.is_empty(), "{leftover:?}");
         Ok(())
     }
 

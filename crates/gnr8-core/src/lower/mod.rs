@@ -2683,7 +2683,10 @@ mod tests {
     fn lowering_succeeds_even_when_diagnostics_are_non_empty() {
         let graph = sample_graph();
         // The sample carries a diagnostic; lowering must still succeed (diagnostics are advisory).
-        assert!(!graph.diagnostics.is_empty());
+        assert!(
+            !graph.diagnostics.is_empty(),
+            "expected a non-empty `diagnostics`"
+        );
         assert!(to_openapi(&graph, "goalservice", "/goal", &security_config()).is_ok());
     }
 

@@ -29,7 +29,6 @@ from .config import (
     VERSION,
 )
 
-
 OUTPUT_FORMAT = ""
 FIELDS = ""
 OUTPUT_PATH = ""
@@ -128,7 +127,6 @@ def print_error(
     return code
 
 
-
 def use_color() -> bool:
     if OUTPUT_FORMAT and OUTPUT_FORMAT != "human":
         return False
@@ -199,9 +197,7 @@ def progress_fetched(count: int) -> None:
 
 def capture_response(ctx: Any) -> None:
     headers = getattr(ctx, "response_headers", None) or {}
-    request_id = headers.get("X-Request-ID") or headers.get(
-        "X-Request-Id", ""
-    )
+    request_id = headers.get("X-Request-ID") or headers.get("X-Request-Id", "")
     LAST_ANSWER.clear()
     LAST_ANSWER.update(
         {
@@ -307,9 +303,7 @@ def list_items(value: Any) -> tuple[Optional[list[Any]], str, dict[str, Any]]:
         best_key = ""
         best: Optional[list[Any]] = None
         for key, item in value.items():
-            if isinstance(item, list) and (
-                best is None or len(item) > len(best)
-            ):
+            if isinstance(item, list) and (best is None or len(item) > len(best)):
                 best_key = key
                 best = item
         if best is None:
@@ -421,11 +415,7 @@ def _short_id(raw: bytes) -> str:
 
 
 def _prune_output(directory: Path) -> None:
-    files = [
-        path
-        for path in directory.glob("*.json")
-        if path.name != "latest.json"
-    ]
+    files = [path for path in directory.glob("*.json") if path.name != "latest.json"]
     files.sort(key=lambda path: path.stat().st_mtime)
     total = sum(path.stat().st_size for path in files)
     while files and (len(files) > 100 or total > 100 * 1024 * 1024):
@@ -490,9 +480,7 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
             "bytes": len(raw),
         },
         "kind": kind,
-        "savedAt": datetime.now(timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        ),
+        "savedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if items is not None:
         payload["items"] = items

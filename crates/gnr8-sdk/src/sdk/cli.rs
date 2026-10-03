@@ -266,7 +266,7 @@ mod tests {
     fn absent_new_fields_deserialize_to_defaults() {
         let back: SdkCli = serde_json::from_str(r#"{"program":"bookstore"}"#).expect("deserialize");
         assert!(back.emit_main);
-        assert!(back.owned_commands.is_empty());
+        assert!(back.owned_commands.is_empty(), "{:?}", back.owned_commands);
     }
 
     #[test]

@@ -970,7 +970,11 @@ mod tests {
             global: true,
         });
         resolve_security_diagnostics(&mut resolved);
-        assert!(resolved.diagnostics.is_empty());
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "{:?}",
+            resolved.diagnostics
+        );
 
         let mut operation_scoped = graph_with_authorization_diagnostic();
         operation_scoped.operations[0].security = vec!["ActorHeader".to_string()];
@@ -982,7 +986,11 @@ mod tests {
             global: false,
         });
         resolve_security_diagnostics(&mut operation_scoped);
-        assert!(operation_scoped.diagnostics.is_empty());
+        assert!(
+            operation_scoped.diagnostics.is_empty(),
+            "{:?}",
+            operation_scoped.diagnostics
+        );
     }
 
     fn cx() -> Cx {

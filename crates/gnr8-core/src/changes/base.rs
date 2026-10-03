@@ -269,7 +269,10 @@ mod tests {
                 .expect("load committed graph");
         assert_eq!(loaded.reference, "HEAD");
         assert_eq!(loaded.commit.len(), 40);
-        assert!(!loaded.graph.operations.is_empty());
+        assert!(
+            !loaded.graph.operations.is_empty(),
+            "expected a non-empty `operations`"
+        );
         std::fs::remove_dir_all(fixture).unwrap();
     }
 
@@ -278,7 +281,10 @@ mod tests {
         let fixture = real_git_fixture();
         let project = fixture.join("examples/bookstore");
         let loaded = super::load_base_graph(&project, "HEAD").expect("load nested graph");
-        assert!(!loaded.graph.operations.is_empty());
+        assert!(
+            !loaded.graph.operations.is_empty(),
+            "expected a non-empty `operations`"
+        );
         std::fs::remove_dir_all(fixture).unwrap();
     }
 

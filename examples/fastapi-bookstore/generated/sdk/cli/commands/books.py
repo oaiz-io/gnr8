@@ -176,8 +176,8 @@ def register(subparsers: Any) -> None:
             "nerated identifier is returned."
         ),
         epilog=(
-            "Examples:\n  bookstore books create --body '{\"title\":\"Dune\"}'\n\nOutpu"
-            "t\n  CreatedMessage"
+            'Examples:\n  bookstore books create --body \'{"title":"Dune"}\'\n\nOutput'
+            "\n  CreatedMessage"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

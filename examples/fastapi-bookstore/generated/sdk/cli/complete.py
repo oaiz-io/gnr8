@@ -13,7 +13,6 @@ from typing import Any
 
 from .config import HELP_SPEC, PROGRAM
 
-
 LIVE_COMPLETES: list[dict[str, Any]] = [
     {
         "path": ["books", "get"],
@@ -31,20 +30,20 @@ LIVE_COMPLETES: list[dict[str, Any]] = [
 
 
 BASH_COMPLETION = (
-    "# bash completion for bookstore\n_bookstore() {\n  local out line\n  out=\"$(books"
-    "tore __complete \"${COMP_WORDS[@]:1}\" 2>/dev/null)\" || return\n  COMPREPLY=()\n "
-    " while IFS= read -r line; do\n    [[ -z \"$line\" || \"$line\" == :* ]] && continu"
-    "e\n    COMPREPLY+=(\"${line%%$'\\t'*}\")\n  done <<< \"$out\"\n}\ncomplete -o nosp"
-    "ace -F _bookstore bookstore\n"
+    '# bash completion for bookstore\n_bookstore() {\n  local out line\n  out="$(bookst'
+    'ore __complete "${COMP_WORDS[@]:1}" 2>/dev/null)" || return\n  COMPREPLY=()\n  whi'
+    'le IFS= read -r line; do\n    [[ -z "$line" || "$line" == :* ]] && continue\n    C'
+    'OMPREPLY+=("${line%%$\'\\t\'*}")\n  done <<< "$out"\n}\ncomplete -o nospace -F _bo'
+    "okstore bookstore\n"
 )
 
 
 ZSH_COMPLETION = (
     "#compdef bookstore\n_bookstore() {\n  local -a completions\n  local out line\n  ou"
-    "t=\"$(bookstore __complete \"${words[@]:1}\" 2>/dev/null)\" || return\n  while IFS"
-    "= read -r line; do\n    [[ -z \"$line\" || \"$line\" == :* ]] && continue\n    com"
-    "pletions+=(\"${line%%$'\\t'*}\")\n  done <<< \"$out\"\n  _describe 'command' compl"
-    "etions\n}\n_bookstore \"$@\"\n"
+    't="$(bookstore __complete "${words[@]:1}" 2>/dev/null)" || return\n  while IFS= re'
+    'ad -r line; do\n    [[ -z "$line" || "$line" == :* ]] && continue\n    completions'
+    "+=(\"${line%%$'\\t'*}\")\n  done <<< \"$out\"\n  _describe 'command' completions\n"
+    '}\n_bookstore "$@"\n'
 )
 
 
@@ -60,10 +59,9 @@ POWERSHELL_COMPLETION = (
     "$wordToComplete, $commandAst, $cursorPosition)\n  $elems = @($commandAst.CommandEl"
     "ements | Select-Object -Skip 1 | ForEach-Object { $_.ToString() })\n  bookstore __"
     "complete @elems 2>$null | ForEach-Object {\n    if ($_ -notlike ':*') {\n      $na"
-    "me = ($_ -split \"`t\")[0]\n      [System.Management.Automation.CompletionResult]:"
-    ":new($name, $name, 'ParameterValue', $name)\n    }\n  }\n}\n"
+    'me = ($_ -split "`t")[0]\n      [System.Management.Automation.CompletionResult]::n'
+    "ew($name, $name, 'ParameterValue', $name)\n    }\n  }\n}\n"
 )
-
 
 
 def _emit(name: str, help_text: str = "") -> None:

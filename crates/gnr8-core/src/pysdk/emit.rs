@@ -374,20 +374,29 @@ fn needs_alias(field: &Field, ident: &str) -> bool {
 /// `\UHHHHHHHH`. Text a human wrote reaches this function (an operation's prose, a schema example),
 /// and a no-break space, a soft hyphen, a byte-order mark or a decomposed accent are all characters
 /// Rust escapes, so `format!("{value:?}")` emitted Python that would not parse.
+///
+/// The quote character is `ruff format`'s: double, unless the text holds more double quotes than
+/// single ones, in which case single quotes need fewer escapes and the formatter would rewrite it.
 pub(crate) fn py_string_literal(value: &str) -> String {
+    let doubles = value.chars().filter(|ch| *ch == '"').count();
+    let singles = value.chars().filter(|ch| *ch == '\'').count();
+    let quote = if doubles > singles { '\'' } else { '"' };
     let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
+    out.push(quote);
     for ch in value.chars() {
         match ch {
-            '"' => out.push_str("\\\""),
+            '"' | '\'' if ch == quote => {
+                out.push('\\');
+                out.push(ch);
+            }
+            // The other quote character is bare inside this literal, in Python as in `str`'s own
+            // `Debug`; only `char::escape_debug` (which cannot know its quoting context) escapes
+            // the single quote.
+            '"' | '\'' => out.push(ch),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            // `str`'s own `Debug` leaves the single quote bare inside a double-quoted literal, and
-            // so does Python; only `char::escape_debug` (which cannot know its quoting context)
-            // escapes it.
-            '\'' => out.push('\''),
             // A one-character `escape_debug` is a character Rust prints verbatim.
             _ if ch.escape_debug().len() == 1 => out.push(ch),
             _ => {
@@ -403,7 +412,7 @@ pub(crate) fn py_string_literal(value: &str) -> String {
             }
         }
     }
-    out.push('"');
+    out.push(quote);
     out
 }
 

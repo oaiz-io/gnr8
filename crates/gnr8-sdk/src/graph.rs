@@ -1590,7 +1590,11 @@ mod tests {
 
         assert_eq!(responses[1].status, 204);
         assert_eq!(responses[1].body_kind, "empty");
-        assert!(responses[1].content_types.is_empty());
+        assert!(
+            responses[1].content_types.is_empty(),
+            "{:?}",
+            responses[1].content_types
+        );
     }
 
     #[test]
@@ -1637,17 +1641,25 @@ mod tests {
         let graph = ApiGraph::from_facts(sample_facts(), "/root");
         assert_eq!(graph.base_path, "/");
         assert_eq!(graph.title, "API");
-        assert!(graph.security.is_empty());
+        assert!(graph.security.is_empty(), "{:?}", graph.security);
         assert_eq!(graph.runtime, RuntimePolicy::default());
-        assert!(graph.operation_runtime.is_empty());
-        assert!(graph.pagination.is_empty());
+        assert!(
+            graph.operation_runtime.is_empty(),
+            "{:?}",
+            graph.operation_runtime
+        );
+        assert!(graph.pagination.is_empty(), "{:?}", graph.pagination);
         let empty = ApiGraph::default();
         assert_eq!(empty.base_path, "/");
         assert_eq!(empty.title, "API");
-        assert!(empty.security.is_empty());
+        assert!(empty.security.is_empty(), "{:?}", empty.security);
         assert_eq!(empty.runtime, RuntimePolicy::default());
-        assert!(empty.operation_runtime.is_empty());
-        assert!(empty.pagination.is_empty());
+        assert!(
+            empty.operation_runtime.is_empty(),
+            "{:?}",
+            empty.operation_runtime
+        );
+        assert!(empty.pagination.is_empty(), "{:?}", empty.pagination);
     }
 
     #[test]
