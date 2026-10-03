@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -18,16 +19,31 @@ func parseFlags(fs *flag.FlagSet, args []string) (bool, int) {
 			return false, 0
 		}
 	}
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(io.Discard)
 	flags, rest, code := splitFlagArgs(fs, args)
 	if code != 0 {
 		return false, code
+	}
+	for i := 0; i < len(flags); i++ {
+		name := strings.TrimLeft(flags[i], "-")
+		name, value, inline := strings.Cut(name, "=")
+		f := fs.Lookup(name)
+		if f != nil && flagTakesValue(f) && !inline && i+1 < len(flags) {
+			i++
+			value = flags[i]
+		}
+		if name == "json" && value != "false" {
+			outputFormat = "json"
+		}
+		if name == "format" && (value == "json" || value == "jsonl") {
+			outputFormat = value
+		}
 	}
 	if err := fs.Parse(flags); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return false, 0
 		}
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(2, "%v", err)
 		return false, 2
 	}
 	flagArgs = rest
@@ -102,7 +118,7 @@ func splitSelector(token string) (string, string, bool) {
 func pickSelectedID(raw []byte, isList bool, key, selector, matchField, idField string) (string, int) {
 	items, _, _ := splitList(raw, isList, key)
 	if items == nil {
-		fmt.Fprintf(os.Stderr, "error: the selector's list answer is not a list\n")
+		errorMessage(1, "the selector's list answer is not a list")
 		return "", 1
 	}
 	latest := selector == "latest"
@@ -136,7 +152,7 @@ func pickSelectedID(raw []byte, isList bool, key, selector, matchField, idField 
 	if latest && found {
 		return best, 0
 	}
-	fmt.Fprintf(os.Stderr, "error: no match for @%s\n", selector)
+	errorMessage(2, "no match for @%s", selector)
 	return "", 3
 }
 

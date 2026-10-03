@@ -2253,7 +2253,8 @@ fn cli_spec_graph() -> gnr8_engine::graph::ApiGraph {
                 "params": [{
                     "name": "cursor", "location": "query", "required": false, "schema": string,
                     "provenance": provenance
-                }],
+                }, {"name": "page_size", "location": "query", "required": false,
+                    "schema": {"type": "primitive", "of": {"prim":"int", "bits":64, "signed":true}}, "provenance": provenance}],
                 "request_body": null, "request_body_required": false,
                 "responses": [{ "status": 200, "body": { "ref_id": "BookPage" } }],
                 "provenance": provenance
@@ -2294,7 +2295,7 @@ fn cli_spec_graph() -> gnr8_engine::graph::ApiGraph {
         "pagination": [{
             "operation_id": "listBooks", "mode": "cursor", "items_field": "books",
             "cursor_param": "cursor", "next_cursor_field": "next_cursor",
-            "termination": "no_next_cursor"
+            "termination": "no_next_cursor", "page_size_param":"page_size"
         }],
         "diagnostics": [],
         "base_path": "/",
@@ -2371,6 +2372,10 @@ check(not SEEN, f"a rename error must not send a request: {SEEN}")
 code, _out, err = run(["books", "get", "b1", "--json", "--base-url", BASE], (200, "{not json"))
 check(code == 1, f"an undecodable success must exit 1, not retry-later: {code} {err!r}")
 
+for args in [["--json", "typo"], ["books", "get", "--json"], ["books", "get", "b1", "--unknown", "--json"]]:
+    code, out, err = run(args)
+    check(code == 2 and not out and json.loads(err)["error"]["exitCode"] == 2, f"usage is not structured: {code} {out} {err}")
+
 missing = json.dumps({"message": "no such book", "slug": "book-not-found"})
 code, _out, err = run(["books", "get", "b1", "--json", "--base-url", BASE], (404, missing))
 check(code == 3 and '"slug":"book-not-found"' in err, f"--json error slug: {code} {err!r}")
@@ -2398,6 +2403,83 @@ check('{"title":"A long' in out, f"rows must follow the view's order:\n{out}")
 args = ["books", "get", "b1", "--format", "jsonl", "--base-url", BASE]
 code, out, err = run(args, (200, BOOK))
 check(code == 0 and len(out.splitlines()) == 1, f"an object is one jsonl line: {out!r}")
+
+code, out, err = run(["books", "list", "--archived", "--json", "--base-url", BASE], (200, json.dumps({"books": [], "next_cursor": ""})))
+check(code == 0 and SEEN[-1].startswith("/archived-books"), f"switch did not call alternate: {SEEN} {err}")
+
+code, out, err = run(["--json", "help"])
+check(code == 0 and json.loads(out)["commands"], f"leading global flag failed: {code} {err}")
+code, out, err = run(["--json", "books", "list-books"])
+check(code == 2 and json.loads(err)["error"]["exitCode"] == 2, "rename error is not structured")
+
+start = len(SEEN)
+code, out, err = run(["books", "list", "--limit", "0", "--json", "--base-url", BASE])
+check(code == 2 and len(SEEN) == start, f"invalid limit sent a request: {code} {err}")
+
+page1 = json.dumps({"books":[{"id":"1", "title":"one"}, {"id":"2", "title":"two"}], "next_cursor":"2", "total":4})
+page2 = json.dumps({"books":[{"id":"3", "title":"three"}], "next_cursor":"3", "total":4})
+ANSWERS.extend([(200, page1), (200, page2)])
+code, out, err = run(["books", "list", "--archived", "--limit", "3", "--json", "--base-url", BASE])
+merged = json.loads(out)
+check(code == 0 and len(merged["books"]) == 3 and merged["next_cursor"] == "3" and merged["total"] == 4 and merged["hasMore"], f"merged pagination: {code} {out} {err}")
+check("page_size=3" in SEEN[-2] and "page_size=1" in SEEN[-1] and "cursor=2" in SEEN[-1], f"remaining size not used: {SEEN[-2:]}")
+check(all(path.startswith("/archived-books") for path in SEEN[-2:]), "switch pagination used primary")
+
+terminal = json.dumps({"books":[{"id":"1","title":"one"}], "next_cursor":"", "total":1})
+code, out, err = run(["books", "list", "--limit", "1", "--json", "--base-url", BASE], (200, terminal))
+check(code == 0 and not json.loads(out)["hasMore"], f"terminal limit invented more items: {out} {err}")
+code, out, err = run(["books", "list", "--limit", "1", "--json", "--base-url", BASE], (200, page1))
+check(code == 0 and "next_cursor" not in json.loads(out), f"partial-page cursor skips omitted items: {out} {err}")
+
+large_integer = json.dumps({"books":[{"id":9007199254740993,"title":"omit"}],"next_cursor":"c2"})
+output.LAST_ANSWER["body"] = large_integer.encode()
+output.ITEMS_KEY = "books"
+output.FIELDS = "id"
+stream = io.StringIO()
+with redirect_stdout(stream):
+    output.print_json({})
+projected = json.loads(stream.getvalue())
+check(projected == {"books":[{"id":9007199254740993}],"next_cursor":"c2"}, f"projection changed page: {projected}")
+
+# Separate runs preserve their envelopes even when the response is unchanged.
+args = ["books", "get", "b1", "--format", "ai-friendly", "--base-url", BASE]
+code, out, err = run(args, (200, BOOK))
+check(code == 0, err)
+first = set(Path(os.environ["BOOKSTORE_OUTPUT_DIR"]).glob("books-get-*.json"))
+code, out, err = run(args, (200, BOOK))
+second = set(Path(os.environ["BOOKSTORE_OUTPUT_DIR"]).glob("books-get-*.json"))
+check(code == 0 and len(second - first) == 1, "identical response overwrote its envelope")
+
+large = json.dumps({"id":"b1", "title":"界" * 5000, "author":"A", "tags":[]})
+code, out, err = run([*args, "--fields", "title"], (200, large))
+check(code == 0 and len(out.encode("utf-8")) <= 4000, "one oversized row broke the byte budget")
+check("jq" in out, "oversized row displaced the recipes")
+
+long_cursor = json.dumps({"books": [], "next_cursor": "c" * 5000})
+code, out, err = run(["books", "list", "--format", "ai-friendly", "--base-url", BASE], (200, long_cursor))
+check(code == 0 and len(out.encode()) <= 4000 and "getpath" in out, "long cursor broke preview budget")
+
+folder = Path(tempfile.mkdtemp())
+target = folder / "directory"
+target.mkdir()
+try:
+    output._atomic_write(target, b"secret")
+    check(False, "rename onto directory succeeded")
+except OSError:
+    pass
+check(not list(folder.glob(".tmp-*")), "failed rename leaked a temporary file")
+
+for value in ["a;b", "a|b", "a&b", "a>b", "a<b", "a*b", "a?b", "a(b)", "a'b", "$(echo wrong)", ""]:
+    import subprocess
+    result = subprocess.run("printf '%s' " + output._shell_quote(value), shell=True, capture_output=True)
+    check(result.returncode == 0 and result.stdout.decode() == value, f"unsafe shell quoting: {value!r}")
+
+binary = bytes([0, 255, 66])
+output.LAST_ANSWER["body"] = binary
+value, raw = output.decode_result(binary)
+path, error = output.write_envelope(binary, value, raw)
+envelope = json.loads(Path(path).read_text())
+check(envelope["kind"] == "file" and Path(envelope["file"]["path"]).read_bytes() == binary, "binary envelope lost the download")
 
 real_print = output.print_result
 
@@ -2438,6 +2520,10 @@ aged(big, 101 * 1024 * 1024, 0)
 output._prune_output(folder, (big,))
 check(big.exists(), "an envelope over the byte cap must not prune itself")
 check(not (folder / "old.json").exists(), "older files go while over the byte cap")
+output.write_envelope(None, None, b"")
+from envelope_schema import validate_saved
+validate_saved(Path(output.__file__).with_name("bookstore-cli-result-v1.json"), os.environ["BOOKSTORE_OUTPUT_DIR"])
+
 print("ok")
 "#;
 
@@ -2458,7 +2544,11 @@ fn generated_cli_python_command_spec_keeps_the_output_contract() {
         .topic(
             CliTopic::new("books")
                 .concept("Browse and manage the catalogue")
-                .command(CliCommand::operation("listBooks", "list").example("bookstore books list"))
+                .command(
+                    CliCommand::operation("listBooks", "list")
+                        .switch_flag("archived", "listArchivedBooks")
+                        .example("bookstore books list"),
+                )
                 .command(
                     CliCommand::operation("getBook", "get")
                         .positional("id")
@@ -2469,11 +2559,19 @@ fn generated_cli_python_command_spec_keeps_the_output_contract() {
         .view(CliView::schema("Book").preview(["title", "id"]));
     let dir = unique_temp_dir("cli-spec");
     let mut out = Artifacts::new();
+    let mut graph = cli_spec_graph();
+    let mut alternate = graph.operations[0].clone();
+    alternate.id = "listArchivedBooks".to_string();
+    alternate.path = "/archived-books".to_string();
+    graph.operations.push(alternate);
+    let mut policy = graph.pagination[0].clone();
+    policy.operation_id = "listArchivedBooks".to_string();
+    graph.pagination.push(policy);
     PySdk::new()
         .module(format!("example.com/{PACKAGE}"))
         .to(PACKAGE)
         .cli(cli)
-        .generate(&cli_spec_graph(), &mut out, &Cx::new(&dir), None)
+        .generate(&graph, &mut out, &Cx::new(&dir), None)
         .expect("PySdk with a spec CLI must generate");
     for file in out.files() {
         let path = dir.join(&file.path);
@@ -2485,6 +2583,11 @@ fn generated_cli_python_command_spec_keeps_the_output_contract() {
     write_pydantic_stub(&dir);
     let driver = dir.join("cli_spec_driver.py");
     std::fs::write(&driver, CLI_SPEC_DRIVER).expect("write CLI spec driver");
+    std::fs::write(
+        dir.join("envelope_schema.py"),
+        include_str!("support/envelope_schema.py"),
+    )
+    .expect("write schema validator");
     let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
     assert!(result.is_ok(), "the spec CLI output contract: {result:?}");
 

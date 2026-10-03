@@ -2481,11 +2481,11 @@ fn the_reserved_flags_document_themselves() {
         assert!(go.contains(expected), "Go help missing {expected}:\n{go}");
     }
     assert!(
-        go.contains("error: --page-size is now --limit"),
+        go.contains("--page-size is now --limit"),
         "retired --page-size must name --limit:\n{go}"
     );
     assert!(
-        go.contains("\"hasMore\": hasMore"),
+        go.contains("merged[\"hasMore\"]"),
         "merged pages keep the page shape:\n{go}"
     );
     assert!(

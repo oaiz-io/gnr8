@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 
 	"example.com/bookstore/sdk"
 )
@@ -85,15 +84,15 @@ func cmdListBooks(args []string) int {
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"books"})
 	}
-	if outputFormat == "ai-friendly" {
+	seen := visited(fs)
+	if len(flagArgs) > 0 {
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
+		return 2
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
 		if code := PreflightOutput(); code != 0 {
 			return code
 		}
-	}
-	seen := visited(fs)
-	if len(flagArgs) > 0 {
-		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
-		return 2
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
@@ -190,19 +189,19 @@ func cmdCreateBook(args []string) int {
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
-	if outputFormat == "ai-friendly" {
-		if code := PreflightOutput(); code != 0 {
-			return code
-		}
-	}
 	seen := visited(fs)
 	if len(flagArgs) > 0 {
-		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
 		return 2
 	}
 	if seen["body"] && seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "error: --body and --body-file are mutually exclusive\n")
+		errorMessage(2, "--body and --body-file are mutually exclusive")
 		return 2
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
@@ -330,23 +329,23 @@ func cmdDeleteBook(args []string) int {
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"code", "message"})
 	}
-	if outputFormat == "ai-friendly" {
-		if code := PreflightOutput(); code != 0 {
-			return code
-		}
-	}
 	if len(flagArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "error: missing argument <id>")
+		errorMessage(2, "missing argument <id>")
 		return 2
 	}
 	*id = flagArgs[0]
 	flagArgs = flagArgs[1:]
 	if len(flagArgs) > 0 {
-		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
 		return 2
 	}
 	if code := Confirm("moderate", *id); code != 0 {
 		return code
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
@@ -434,20 +433,20 @@ func cmdGetBook(args []string) int {
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
-	if outputFormat == "ai-friendly" {
-		if code := PreflightOutput(); code != 0 {
-			return code
-		}
-	}
 	if len(flagArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "error: missing argument <id>")
+		errorMessage(2, "missing argument <id>")
 		return 2
 	}
 	*id = flagArgs[0]
 	flagArgs = flagArgs[1:]
 	if len(flagArgs) > 0 {
-		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
 		return 2
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
@@ -560,25 +559,25 @@ func cmdUpdateBook(args []string) int {
 	if fieldsSpec == "help" {
 		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
 	}
-	if outputFormat == "ai-friendly" {
-		if code := PreflightOutput(); code != 0 {
-			return code
-		}
-	}
 	seen := visited(fs)
 	if len(flagArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "error: missing argument <id>")
+		errorMessage(2, "missing argument <id>")
 		return 2
 	}
 	*id = flagArgs[0]
 	flagArgs = flagArgs[1:]
 	if len(flagArgs) > 0 {
-		fmt.Fprintf(os.Stderr, "error: unexpected argument %q\n", flagArgs[0])
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
 		return 2
 	}
 	if seen["body"] && seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "error: --body and --body-file are mutually exclusive\n")
+		errorMessage(2, "--body and --body-file are mutually exclusive")
 		return 2
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})

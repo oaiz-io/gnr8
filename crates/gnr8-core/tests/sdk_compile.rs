@@ -2036,7 +2036,8 @@ fn cli_spec_graph() -> gnr8_engine::graph::ApiGraph {
                 "params": [{
                     "name": "cursor", "location": "query", "required": false, "schema": string,
                     "provenance": provenance
-                }],
+                }, {"name": "page_size", "location": "query", "required": false,
+                    "schema": {"type": "primitive", "of": {"prim":"int", "bits":64, "signed":true}}, "provenance": provenance}],
                 "request_body": null, "request_body_required": false,
                 "responses": [{ "status": 200, "body": { "ref_id": "BookPage" } }],
                 "provenance": provenance
@@ -2081,7 +2082,7 @@ fn cli_spec_graph() -> gnr8_engine::graph::ApiGraph {
         "pagination": [{
             "operation_id": "listBooks", "mode": "cursor", "items_field": "books",
             "cursor_param": "cursor", "next_cursor_field": "next_cursor",
-            "termination": "no_next_cursor"
+            "termination": "no_next_cursor", "page_size_param":"page_size"
         }],
         "diagnostics": [],
         "base_path": "/",
@@ -2152,6 +2153,14 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+    "strings"
+    "os/exec"
+    "bytes"
+    "encoding/json"
+    "example.com/bookstore/sdk"
+    "net/http"
+    "net/http/httptest"
+    "strconv"
 )
 
 func TestRunStartsFromCleanState(t *testing.T) {
@@ -2227,6 +2236,209 @@ func TestPruneOutputNeverDeletesTheFileJustWritten(t *testing.T) {
 		t.Fatalf("older files must be pruned while the directory is over the byte cap")
 	}
 }
+
+func TestEnvelopeKeepsIdenticalResponsesFromSeparateRuns(t *testing.T) {
+    t.Setenv(outputDirEnv, t.TempDir())
+    resetInvocation(Options{Version: "test"})
+    commandPath = "books get"
+    raw := []byte(`{"id":"same"}`)
+    first, err := writeEnvelope(map[string]any{"id":"same"}, raw)
+    if err != nil { t.Fatal(err) }
+    firstBytes, err := os.ReadFile(first)
+    if err != nil { t.Fatal(err) }
+    second, err := writeEnvelope(map[string]any{"id":"same"}, raw)
+    if err != nil { t.Fatal(err) }
+    if first == second { t.Fatal("separate runs overwrote one envelope") }
+    after, err := os.ReadFile(first)
+    if err != nil || string(after) != string(firstBytes) { t.Fatal("old envelope changed", err) }
+    info, err := os.Stat(second)
+    if err != nil || info.Mode().Perm() != 0o600 { t.Fatal("envelope must be 0600", err) }
+}
+
+func TestAtomicRenameFailureCleansTemporaryFile(t *testing.T) {
+    dir := t.TempDir()
+    target := filepath.Join(dir, "occupied")
+    if err := os.Mkdir(target, 0o700); err != nil { t.Fatal(err) }
+    if err := atomicWrite(target, []byte("secret")); err == nil { t.Fatal("rename onto directory succeeded") }
+    files, err := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+    if err != nil || len(files) != 0 { t.Fatal("failed write leaked temporary files", files, err) }
+}
+
+func TestPreviewBudgetEvenForOneOversizedRow(t *testing.T) {
+    t.Setenv(outputDirEnv, t.TempDir())
+    resetInvocation(Options{})
+    commandPath = "books get"
+    fieldsSpec = "title"
+    original := os.Stdout
+    f, err := os.CreateTemp(t.TempDir(), "stdout")
+    if err != nil { t.Fatal(err) }
+    os.Stdout = f
+    defer func() { os.Stdout = original; f.Close() }()
+    raw := []byte(`{"title":"` + strings.Repeat("界", 5000) + `"}`)
+    lastAnswer.body = raw
+    if code := printAIFriendly(map[string]any{}); code != 0 { t.Fatal(code) }
+    content, err := os.ReadFile(f.Name())
+    if err != nil || len(content) > 4000 { t.Fatal("preview exceeds byte budget", len(content), err) }
+    if !strings.Contains(string(content), "jq") { t.Fatal("preview lost recipe") }
+}
+
+func TestLongCursorStillFitsBudget(t *testing.T) {
+    t.Setenv(outputDirEnv, t.TempDir())
+    resetInvocation(Options{})
+    commandPath = "books list"
+    itemsKey = "books"
+    nextCursorField = "next_cursor"
+    original := os.Stdout
+    f, _ := os.CreateTemp(t.TempDir(), "stdout")
+    os.Stdout = f
+    lastAnswer.body = []byte(`{"books":[],"next_cursor":"` + strings.Repeat("c", 5000) + `"}`)
+    code := printAIFriendly(map[string]any{})
+    os.Stdout = original
+    f.Close()
+    raw, err := os.ReadFile(f.Name())
+    if code != 0 || err != nil || len(raw) > 4000 || !strings.Contains(string(raw), "getpath") { t.Fatal(code, err, len(raw), string(raw)) }
+    t.Setenv(outputDirEnv, strings.Repeat("x", 3000))
+    if code := PreflightOutput(); code != 2 { t.Fatal("oversized recipe path accepted", code) }
+}
+
+func TestRecipeArgumentsRoundTripThroughShell(t *testing.T) {
+    for _, value := range []string{"a;b", "a|b", "a&b", "a>b", "a<b", "a*b", "a?b", "a(b)", "a'b", "a\nb", "$(echo wrong)", ""} {
+        got, err := exec.Command("sh", "-c", "printf '%s' " + shellQuote(value)).Output()
+        if err != nil || string(got) != value { t.Fatalf("unsafe quoting %q: %q %v", value, got, err) }
+    }
+}
+
+func TestBinaryJSONOutputIsByteExact(t *testing.T) {
+    resetInvocation(Options{})
+    original := os.Stdout
+    f, err := os.CreateTemp(t.TempDir(), "binary")
+    if err != nil { t.Fatal(err) }
+    os.Stdout = f
+    defer func() { os.Stdout = original; f.Close() }()
+    raw := []byte{0, 0xff, 0x42}
+    lastAnswer.body = raw
+    if code := printJSON(raw); code != 0 { t.Fatal(code) }
+    got, err := os.ReadFile(f.Name())
+    if err != nil || !bytes.Equal(got, raw) { t.Fatal("binary bytes changed", got, err) }
+}
+
+func TestHTTPExitClassesAreStructured(t *testing.T) {
+    for status, want := range map[int]int{400:5, 401:4, 403:4, 404:3, 408:6, 409:5, 410:3, 412:5, 422:5, 429:6, 500:1, 502:6, 503:6, 504:6} {
+        original := os.Stderr
+        f, err := os.CreateTemp(t.TempDir(), "stderr")
+        if err != nil { t.Fatal(err) }
+        os.Stderr = f
+        resetInvocation(Options{})
+        outputFormat = "json"
+        code := handleErr(&sdk.APIError{StatusCode:status, Slug:"test", Message:"test"})
+        os.Stderr = original
+        f.Close()
+        raw, err := os.ReadFile(f.Name())
+        if err != nil { t.Fatal(err) }
+        var got struct { Error struct { ExitCode int `json:"exitCode"`; Status int `json:"status"` } `json:"error"` }
+        if json.Unmarshal(raw, &got) != nil || code != want || got.Error.ExitCode != want || got.Error.Status != status {
+            t.Fatalf("status %d: code=%d diagnostic=%s", status, code, raw)
+        }
+    }
+}
+
+func TestPagedSwitchLimitsAndCursors(t *testing.T) {
+    var sizes []string
+    ignoreSize := false
+    server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path != "/archived-books" { t.Error("switch used primary operation", r.URL.Path) }
+        sizes = append(sizes, r.URL.Query().Get("page_size"))
+        start, _ := strconv.Atoi(r.URL.Query().Get("cursor"))
+        count, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+        if count == 0 || count > 2 || ignoreSize { count = 2 }
+        end := start + count
+        if end > 4 { end = 4 }
+        items := []map[string]any{}
+        for i := start; i < end; i++ { items = append(items, map[string]any{"id":strconv.Itoa(i), "title":"book"}) }
+        next := ""
+        if end < 4 { next = strconv.Itoa(end) }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]any{"books":items, "next_cursor":next, "total":4})
+    }))
+    defer server.Close()
+    for _, limit := range []string{"3", "4", "1", "0", "all"} {
+        original := os.Stdout
+        f, err := os.CreateTemp(t.TempDir(), "stdout")
+        if err != nil { t.Fatal(err) }
+        os.Stdout = f
+        args := []string{"books", "list", "--archived", "--json", "--base-url", server.URL}
+        if limit == "all" { args = append(args, "--all") } else { args = append(args, "--limit", limit) }
+        before := len(sizes)
+        code := Run(args, Options{})
+        os.Stdout = original
+        f.Close()
+        if limit == "0" {
+            if code != 2 || len(sizes) != before { t.Fatal("invalid limit sent a request", code, sizes) }
+            continue
+        }
+        raw, _ := os.ReadFile(f.Name())
+        var page struct { Books []json.RawMessage; Next string `json:"next_cursor"`; HasMore bool `json:"hasMore"`; Total int }
+        if code != 0 || json.Unmarshal(raw, &page) != nil { t.Fatalf("bad page: %d %s", code, raw) }
+        want := 4
+        if limit != "all" { want, _ = strconv.Atoi(limit) }
+        if len(page.Books) != want || page.Total != 4 || page.HasMore != (want < 4) { t.Fatalf("incorrect pagination metadata: %s", raw) }
+        if want < 4 && page.Next != strconv.Itoa(want) { t.Fatalf("wrong boundary cursor: %s", raw) }
+        if limit == "3" && strings.Join(sizes[before:], ",") != "3,1" { t.Fatal("did not request remaining amount", sizes) }
+    }
+    ignoreSize = true
+    original := os.Stdout
+    f, _ := os.CreateTemp(t.TempDir(), "partial")
+    os.Stdout = f
+    code := Run([]string{"books", "list", "--archived", "--json", "--limit", "1", "--base-url", server.URL}, Options{})
+    os.Stdout = original
+    f.Close()
+    raw, _ := os.ReadFile(f.Name())
+    var partial map[string]json.RawMessage
+    if code != 0 || json.Unmarshal(raw, &partial) != nil { t.Fatal(code, string(raw)) }
+    if _, ok := partial["next_cursor"]; ok { t.Fatal("cursor would skip omitted items", string(raw)) }
+}
+
+func TestProjectionPreservesLargeIntegersAndPageMetadata(t *testing.T) {
+    resetInvocation(Options{})
+    fieldsSpec = "id"
+    itemsKey = "books"
+    raw := []byte(`{"books":[{"id":9007199254740993,"title":"omit"}],"next_cursor":"c2"}`)
+    got := projectRaw(raw)
+    var page map[string]json.RawMessage
+    if json.Unmarshal(got, &page) != nil || string(page["books"]) != `[{"id":9007199254740993}]` || string(page["next_cursor"]) != `"c2"` {
+        t.Fatal("projection changed integer precision or metadata", string(got))
+    }
+    if got := string(projectRaw([]byte(`{"id":9007199254740993,"title":"omit"}`))); got != `{"id":9007199254740993}` { t.Fatal("jsonl item projection changed", got) }
+}
+
+func TestAllEnvelopeKindsCanBeSaved(t *testing.T) {
+    resetInvocation(Options{})
+    t.Setenv(outputDirEnv, t.TempDir())
+    commandPath = "books get"
+    itemsKey = "books"
+    for _, input := range []struct { result any; raw []byte }{
+        {map[string]any{"id":"x"}, []byte(`{"id":"x"}`)},
+        {nil, nil},
+        {map[string]any{}, []byte(`{"books":[{"id":"x"}],"next_cursor":""}`)},
+        {[]byte{0,0xff,0x42}, []byte{0,0xff,0x42}},
+    } {
+        path, err := writeEnvelope(input.result, input.raw)
+        if err != nil { t.Fatal(err) }
+        payload, err := os.ReadFile(path)
+        if err != nil || !json.Valid(payload) { t.Fatal(err, string(payload)) }
+    }
+    checked := exec.Command("python3", "../../../../envelope_schema.py", "../../bookstore-cli-result-v1.json", outputDirPath())
+    if got, err := checked.CombinedOutput(); err != nil { t.Fatal("schema rejected emitted envelope", string(got), err) }
+}
+
+func TestSuccessfulRequestStillSucceedsWhenEnvelopeSaveFails(t *testing.T) {
+    resetInvocation(Options{})
+    blocker := filepath.Join(t.TempDir(), "file")
+    if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil { t.Fatal(err) }
+    t.Setenv(outputDirEnv, filepath.Join(blocker, "output"))
+    commandPath = "books delete"
+    if code := printAIFriendly(nil); code != 0 { t.Fatalf("failed save changed successful mutation to exit %d", code) }
+}
 "#;
 
 /// A CLI built from a declared command spec compiles, vets, and behaves: a retired invocation exits
@@ -2243,10 +2455,40 @@ fn generated_cli_go_command_spec_builds_vets_and_behaves() {
         eprintln!("skipping generated Go CLI spec: go toolchain unavailable");
         return;
     }
-    let dir = materialize_go_cli_with("cli-spec", &cli_spec_graph(), cli_spec());
+    let mut graph = cli_spec_graph();
+    let mut edition = graph.operations[1].clone();
+    edition.id = "getEdition".to_string();
+    edition.path = "/books/{id}/edition".to_string();
+    edition.params[0].schema = gnr8_engine::graph::Type::Primitive(gnr8_engine::graph::Prim::Int {
+        bits: 64,
+        signed: true,
+    });
+    graph.operations.push(edition);
+    let mut alternate = graph.operations[0].clone();
+    alternate.id = "listArchivedBooks".to_string();
+    alternate.path = "/archived-books".to_string();
+    graph.operations.push(alternate);
+    let mut policy = graph.pagination[0].clone();
+    policy.operation_id = "listArchivedBooks".to_string();
+    graph.pagination.push(policy);
+    let mut cli = cli_spec();
+    cli.topics[0].commands[0] = cli.topics[0].commands[0]
+        .clone()
+        .switch_flag("archived", "listArchivedBooks");
+    cli.topics[0].commands.push(
+        gnr8_engine::sdk::prelude::CliCommand::operation("getEdition", "edition")
+            .positional("id")
+            .example("bookstore books edition 42"),
+    );
+    let dir = materialize_go_cli_with("cli-spec", &graph, cli);
     run_go(&["vet", "./..."], &dir).expect("go vet over a spec CLI must be clean");
     run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
         .expect("go build ./cmd/bookstore must succeed for a spec CLI");
+    std::fs::write(
+        dir.join("envelope_schema.py"),
+        include_str!("support/envelope_schema.py"),
+    )
+    .expect("write schema validator");
     std::fs::write(
         dir.join("cmd/bookstore/internal/cli/spec_runtime_test.go"),
         GO_SPEC_RUNTIME_TEST,
@@ -2285,6 +2527,101 @@ fn generated_cli_go_command_spec_builds_vets_and_behaves() {
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
         "a rename error must not send a request"
+    );
+
+    let (port, server) = serve_once("200 OK", r#"{"id":"42","title":"edition"}"#.to_string());
+    let integer_base = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "books",
+            "edition",
+            "42",
+            "--json",
+            "--base-url",
+            &integer_base,
+        ],
+        &envs,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(server.join().unwrap().starts_with("GET /books/42/edition"));
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "edition", "invalid", "--json", "--base-url", &base],
+        &envs,
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stderr).unwrap()["error"]["exitCode"],
+        2
+    );
+    let (port, server) = serve_once("200 OK", r#"{"books":[],"next_cursor":""}"#.to_string());
+    let switched_base = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "books",
+            "list",
+            "--archived",
+            "--json",
+            "--base-url",
+            &switched_base,
+        ],
+        &envs,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(server.join().unwrap().starts_with("GET /archived-books"));
+    let (code, help, stderr) = run_cli(&dir, "bookstore", &["help", "--json"], &envs);
+    assert_eq!(code, 0, "{stderr}");
+    let help: serde_json::Value = serde_json::from_str(&help).expect("help must be JSON");
+    let list = help["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["operation"] == "listBooks")
+        .unwrap();
+    for name in [
+        "archived", "json", "format", "fields", "yes", "no-input", "base-url",
+    ] {
+        assert!(
+            list["flags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|flag| flag["name"] == name),
+            "missing {name} in {list}"
+        );
+    }
+
+    for args in [
+        vec!["--json", "typo"],
+        vec!["books", "get", "--json"],
+        vec!["books", "get", "b1", "--unknown", "--json"],
+    ] {
+        let (code, stdout, stderr) = run_cli(&dir, "bookstore", &args, &envs);
+        assert_eq!(code, 2, "{stderr}");
+        assert!(stdout.is_empty());
+        let error: serde_json::Value =
+            serde_json::from_str(&stderr).expect("usage error must be one JSON object");
+        assert_eq!(error["error"]["exitCode"], 2);
+    }
+    let blocker = dir.join("not-a-directory");
+    std::fs::write(&blocker, "x").unwrap();
+    let blocked_output = blocker.join("output");
+    let blocked_env = [("BOOKSTORE_OUTPUT_DIR", blocked_output.to_str().unwrap())];
+    let (code, _, _) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "list", "--base-url", &base],
+        &blocked_env,
+    );
+    assert_eq!(code, 2);
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "preflight must prevent the request"
     );
 
     // A missing positional is a usage error naming the argument.
@@ -2389,5 +2726,19 @@ fn generated_cli_go_command_spec_builds_vets_and_behaves() {
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(stdout.contains("Dune"), "{stdout}");
 
+    let validated = Command::new("python3")
+        .arg(format!(
+            "{}/tests/support/envelope_schema.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .arg(dir.join("cmd/bookstore/bookstore-cli-result-v1.json"))
+        .arg(&out_dir)
+        .output()
+        .expect("validate Go envelopes");
+    assert!(
+        validated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

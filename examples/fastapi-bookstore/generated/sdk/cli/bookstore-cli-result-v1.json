@@ -1,0 +1,189 @@
+{
+  "$id": "https://gnr8.dev/schemas/cli-result-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "object"
+        }
+      },
+      "required": [
+        "data"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "list"
+        }
+      },
+      "required": [
+        "items",
+        "page"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "empty"
+        }
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "file"
+        }
+      },
+      "required": [
+        "file"
+      ]
+    }
+  ],
+  "properties": {
+    "command": {
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "data": {},
+    "file": {
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contentType": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "bytes",
+        "contentType",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "items": {
+      "type": "array"
+    },
+    "kind": {
+      "enum": [
+        "object",
+        "list",
+        "empty",
+        "file"
+      ]
+    },
+    "meta": {
+      "type": "object"
+    },
+    "page": {
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "itemsKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "type": "object"
+    },
+    "request": {
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "url"
+      ],
+      "type": "object"
+    },
+    "response": {
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contentType": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "status": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status",
+        "requestId",
+        "contentType",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    "savedAt": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "schema": {
+      "const": "https://gnr8.dev/schemas/cli-result-v1.json"
+    },
+    "tool": {
+      "properties": {
+        "name": {
+          "const": "bookstore"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema",
+    "version",
+    "tool",
+    "command",
+    "request",
+    "response",
+    "kind",
+    "savedAt"
+  ],
+  "title": "bookstore CLI result v1",
+  "type": "object"
+}

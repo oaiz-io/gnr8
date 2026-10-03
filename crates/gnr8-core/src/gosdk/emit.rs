@@ -1748,7 +1748,7 @@ fn emit_operation(
     Ok(())
 }
 
-struct GoPaginationInfo {
+pub(super) struct GoPaginationInfo {
     page_type: String,
     item_type: String,
     items_field: String,
@@ -1900,7 +1900,7 @@ fn emit_pagination_helpers(
     Ok(())
 }
 
-fn emit_go_pagination_advance(
+pub(super) fn emit_go_pagination_advance(
     body: &mut String,
     op: &Operation,
     policy: &PaginationPolicy,
@@ -1999,7 +1999,7 @@ fn emit_go_pagination_advance(
     Ok(())
 }
 
-fn emit_go_pagination_initialization(
+pub(super) fn emit_go_pagination_initialization(
     body: &mut String,
     op: &Operation,
     policy: &PaginationPolicy,
@@ -2074,7 +2074,7 @@ fn go_pagination_args(op: &Operation, graph: &ApiGraph) -> Result<PaginationArgs
     Ok(PaginationArgs { args, call_args })
 }
 
-fn go_pagination_info(
+pub(super) fn go_pagination_info(
     graph: &ApiGraph,
     op: &Operation,
     policy: &PaginationPolicy,

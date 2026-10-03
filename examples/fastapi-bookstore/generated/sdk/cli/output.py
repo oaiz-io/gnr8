@@ -10,6 +10,8 @@ import hashlib
 import io
 import json
 import os
+import secrets
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -282,12 +284,16 @@ def project_value(value: Any, fields: list[str]) -> Any:
     if isinstance(value, list):
         return [project_value(item, fields) for item in value]
     if isinstance(value, dict):
+        if ITEMS_KEY and ITEMS_KEY in value:
+            return {**value, ITEMS_KEY: project_value(value[ITEMS_KEY], fields)}
         return {key: value[key] for key in fields if key in value}
     return value
 
 
 def decode_result(result: Any) -> tuple[Any, bytes]:
     raw = result_bytes(result)
+    if isinstance(result, (bytes, bytearray)):
+        return None, raw
     if not raw:
         return None, raw
     try:
@@ -329,6 +335,17 @@ def print_json(result: Any) -> None:
     raw = result_bytes(result)
     if not raw:
         return
+    if isinstance(result, (bytes, bytearray)):
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is not None:
+            buffer.write(raw)
+        else:
+            sys.stdout.write(raw.decode())
+        return
+    fields = field_list()
+    if fields:
+        projected = project_value(json.loads(raw), fields)
+        raw = json.dumps(projected, separators=(",", ":")).encode()
     if sys.stdout.isatty():
         try:
             parsed = json.loads(raw)
@@ -377,6 +394,13 @@ def output_dir_path() -> Path:
 def preflight_output() -> int:
     directory = output_dir_path()
     root = directory.parent
+    name = COMMAND_PATH.replace(" ", "-") or "result"
+    sample = str(directory / f"{name}-000000.json")
+    if len((PROGRAM + COMMAND_PATH + _shell_quote(sample) * 4).encode("utf-8")) > 2400:
+        return print_error(
+            "output path is too long for ai-friendly output; "
+            "use --json or a shorter output directory", code=2
+        )
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         gitignore = root / ".gitignore"
@@ -401,16 +425,14 @@ def preflight_output() -> int:
 def _atomic_write(path: Path, body: bytes) -> None:
     fd, name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
     try:
-        os.write(fd, body)
-        os.fsync(fd)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, 0o600)
+        os.replace(name, path)
     finally:
-        os.close(fd)
-    os.chmod(name, 0o600)
-    os.replace(name, path)
-
-
-def _short_id(raw: bytes) -> str:
-    return hashlib.sha256(raw).hexdigest()[:6]
+        Path(name).unlink(missing_ok=True)
 
 
 def _prune_output(directory: Path, keep: tuple[Path, ...] = ()) -> None:
@@ -445,6 +467,7 @@ def _prune_output(directory: Path, keep: tuple[Path, ...] = ()) -> None:
 def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
     directory = output_dir_path()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ident = secrets.token_hex(3)
     kind = "object"
     items = None
     meta = None
@@ -452,10 +475,10 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
     file_meta = None
     bin_path: Optional[Path] = None
     page: dict[str, Any] = {}
-    if isinstance(result, (bytes, bytearray)) and not LAST_ANSWER.get("body"):
+    if isinstance(result, (bytes, bytearray)):
         kind = "file"
         name = COMMAND_PATH.replace(" ", "-") or "download"
-        bin_path = directory / f"{name}-{_short_id(bytes(result))}.bin"
+        bin_path = directory / f"{name}-{ident}.bin"
         _atomic_write(bin_path, bytes(result))
         file_meta = {
             "path": str(bin_path),
@@ -477,7 +500,6 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
         else:
             data = value
     stem = COMMAND_PATH.replace(" ", "-") or "result"
-    ident = _short_id(raw or b"empty")
     path = directory / f"{stem}-{ident}.json"
     payload: dict[str, Any] = {
         "schema": "https://gnr8.dev/schemas/cli-result-v1.json",
@@ -501,7 +523,7 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
         payload["items"] = items
     if meta:
         payload["meta"] = meta
-    if data is not None:
+    if kind == "object":
         payload["data"] = data
     if page:
         payload["page"] = page
@@ -509,17 +531,16 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
         payload["file"] = file_meta
     encoded = json.dumps(payload, indent=2).encode() + b"\n"
     _atomic_write(path, encoded)
-    _atomic_write(directory / "latest.json", encoded)
+    try:
+        _atomic_write(directory / "latest.json", encoded)
+    except OSError:
+        pass  # The uniquely named envelope has already been saved.
     _prune_output(directory, (path,) if bin_path is None else (path, bin_path))
     return str(path), ""
 
 
 def _shell_quote(value: str) -> str:
-    if not value:
-        return "''"
-    if all(ch not in value for ch in " \t\n'\"\\$`"):
-        return value
-    return "'" + value.replace("'", "'\\''") + "'"
+    return shlex.quote(value)
 
 
 def _preview_value(value: Any) -> Any:
@@ -562,7 +583,7 @@ def print_ai_friendly(result: Any) -> None:
         print(f"warning: the full result was not saved: {save_err}", file=sys.stderr)
     listed, key, _meta = list_items(value)
     next_page = ""
-    if isinstance(result, (bytes, bytearray)) and not LAST_ANSWER.get("body"):
+    if isinstance(result, (bytes, bytearray)):
         outcome = f"saved {len(result)} bytes"
         rows: list[str] = []
     elif not raw:
@@ -582,7 +603,17 @@ def print_ai_friendly(result: Any) -> None:
     else:
         outcome = "ok"
         rows = [_view_row(value)]
-    full = f"not saved ({save_err})" if save_err else saved
+    if next_page and len(next_page.encode("utf-8")) > 1000:
+        if saved and not save_err:
+            query = json.dumps(["meta", NEXT_CURSOR_FIELD], separators=(",", ":"))
+            script = "getpath(" + query + ")"
+            next_page = (
+                f"Next page: {PROGRAM} {COMMAND_PATH} --cursor "
+                f'"$(jq -r {_shell_quote(script)} {_shell_quote(saved)})"'
+            )
+        else:
+            next_page = "Next cursor exceeds the preview budget; use --json to read it."
+    full = f"not saved ({save_err[:300]})" if save_err else saved
     line1 = f"{PROGRAM} {COMMAND_PATH}: {outcome}. Full JSON: {full}"
     chunks = [line1]
     if not QUIET:
@@ -605,15 +636,13 @@ def print_ai_friendly(result: Any) -> None:
                 "Query the saved result instead of re-running (do not cat it):\n"
                 + "\n".join(queries)
             )
-        reserve = sum(len(part) + 1 for part in tail)
-        size = len(line1) + 1
+        reserve = sum(len(part.encode("utf-8")) + 1 for part in tail)
+        size = len(line1.encode("utf-8")) + 1
         shown = 0
-        for index, row in enumerate(rows):
-            extra = len(row) + 1
-            more = 0
-            if index < len(rows) - 1:
-                more = len(_showing_line(len(rows), len(rows))) + 1
-            if size + extra + reserve + more > budget and shown > 0:
+        for row in rows:
+            extra = len(row.encode("utf-8")) + 1
+            more = len(_showing_line(len(rows), len(rows))) + 1
+            if size + extra + reserve + more > budget:
                 break
             chunks.append(row)
             shown += 1
@@ -631,6 +660,9 @@ def write_output_file(result: Any) -> None:
 
 
 def print_result(result: Any) -> None:
+    if OUTPUT_PATH == "-":
+        print_json(result)
+        return
     if OUTPUT_PATH and OUTPUT_PATH != "-":
         write_output_file(result)
     if OUTPUT_FORMAT == "json":
@@ -672,6 +704,5 @@ def confirm(severity: str, resource: str) -> int:
     )
     answer = sys.stdin.readline().strip()
     if answer not in ("y", "yes", "Y", "YES"):
-        print("error: confirmation failed", file=sys.stderr)
-        return 2
+        return print_error("confirmation failed", code=2)
     return 0

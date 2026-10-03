@@ -589,18 +589,37 @@ def _list_books(args: argparse.Namespace) -> Any:
         kwargs["sort"] = args.sort
     if args.cursor is not None:
         kwargs["cursor"] = args.cursor
+    if args.limit is not None and args.limit <= 0:
+        output.print_error("--limit must be positive", code=2)
+        raise SystemExit(2)
     if args.all or args.limit is not None:
         items: list[Any] = []
-        for item in client.iter_list_books(**kwargs):
-            items.append(item)
+        merged: dict[str, Any] = {}
+        has_more = False
+        while True:
+            page = client.list_books(**kwargs)
+            merged, _raw = output.decode_result(page)
+            if not isinstance(merged, dict):
+                raise ValueError("expected a page object")
+            page_items = merged.get("books") or []
+            next_cursor = merged.get("next_cursor")
+            has_more = bool(next_cursor)
+            take = len(page_items)
+            if args.limit is not None and take > args.limit - len(items):
+                take = args.limit - len(items)
+                has_more = True
+                merged.pop("next_cursor", None)
+            items.extend(page_items[:take])
             if args.limit is not None and len(items) >= args.limit:
                 break
+            if not next_cursor:
+                break
+            kwargs["cursor"] = next_cursor
+        merged["books"] = items
+        merged["hasMore"] = has_more
         output.LAST_ANSWER["body"] = None
         output.progress_fetched(len(items))
-        return {
-            "books": items,
-            "hasMore": args.limit is not None and len(items) >= args.limit,
-        }
+        return merged
     return client.list_books(**kwargs)
 
 

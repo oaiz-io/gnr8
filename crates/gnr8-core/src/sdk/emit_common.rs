@@ -409,25 +409,27 @@ fn command_flag_specs(
     let mut flags = Vec::new();
     let paging = paging_param_names(graph, op);
     for param in &op.params {
-        if param.location == "path"
-            || is_positional_param(cli, op, &param.name)
-            || paging.contains(param.name.as_str())
-        {
+        if is_positional_param(cli, op, &param.name) || paging.contains(param.name.as_str()) {
             continue;
         }
         flags.push(param_flag_spec(graph, param));
     }
     for field in body_field_flags(cli, op, graph)? {
+        let (type_name, members) = json_flag_type(graph, &field.schema);
         flags.push(flag_spec(
             &field.flag,
             false,
             field.description.as_deref().unwrap_or(""),
-            "string",
-            &[],
+            type_name,
+            &members,
             None,
         ));
     }
-    if !paging.is_empty() {
+    if graph
+        .pagination
+        .iter()
+        .any(|policy| policy.operation_id == op.id)
+    {
         flags.push(flag_spec("limit", false, LIMIT_HELP, "integer", &[], None));
         flags.push(flag_spec("all", false, ALL_HELP, "boolean", &[], None));
         if graph
@@ -437,6 +439,48 @@ fn command_flag_specs(
         {
             flags.push(flag_spec("cursor", false, CURSOR_HELP, "string", &[], None));
         }
+    }
+    if let Some(switch) = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.switch_flag.as_ref())
+    {
+        flags.push(flag_spec(
+            &switch.flag,
+            false,
+            "call the alternate operation",
+            "boolean",
+            &[],
+            None,
+        ));
+    }
+    flags.push(flag_spec(
+        "base-url",
+        cli.base_url.is_none(),
+        BASE_URL_HELP,
+        "string",
+        &[],
+        cli.base_url.as_deref(),
+    ));
+    for (name, help, kind) in [
+        ("json", JSON_HELP, "boolean"),
+        ("format", FORMAT_HELP, "string"),
+        ("fields", FIELDS_HELP, "string"),
+        ("output", OUTPUT_HELP, "string"),
+        ("quiet", QUIET_HELP, "boolean"),
+        ("debug", DEBUG_HELP, "boolean"),
+        ("yes", YES_HELP, "boolean"),
+        ("no-input", NO_INPUT_HELP, "boolean"),
+        ("color", COLOR_HELP, "string"),
+        ("no-pager", NO_PAGER_HELP, "boolean"),
+    ] {
+        let members: Vec<String> = match name {
+            "format" => ["human", "ai-friendly", "json", "jsonl"]
+                .map(str::to_string)
+                .to_vec(),
+            "color" => ["auto", "always", "never"].map(str::to_string).to_vec(),
+            _ => Vec::new(),
+        };
+        flags.push(flag_spec(name, false, help, kind, &members, None));
     }
     let bodies = request_body_models_of(op, graph)?;
     let fixed_body = cli
@@ -589,7 +633,7 @@ pub(crate) fn helper_env_var(program: &str) -> String {
 /// available to them is changing their API's wire contract.
 const ALWAYS_RESERVED_FLAGS: &[&str] = &[
     "help", "base-url", "format", "json", "fields", "output", "quiet", "debug", "yes", "no-input",
-    "color", "no-pager", "o", "q", "y",
+    "color", "no-pager", "o", "q", "y", "h",
 ];
 
 /// What each reserved flag does, in the words both emitters print.
@@ -1278,6 +1322,21 @@ pub(crate) fn check_cli_names(
         let group = command_topic(cli, op);
         let sub = command_sub_noun(cli, op);
         let name = command_verb(cli, op);
+        for token in group.iter().chain(sub.iter()).chain(std::iter::once(&name)) {
+            if token.is_empty()
+                || token.starts_with('-')
+                || !token
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' has unusable command token {token:?}",
+                        op.id
+                    ),
+                });
+            }
+        }
         if let Some(previous) =
             commands.insert((group.clone(), sub.clone(), name.clone()), op.id.as_str())
         {
@@ -1318,6 +1377,19 @@ pub(crate) fn check_cli_names(
                     "CLI {program:?} command '{name}' (operation '{}') collides with group '{name}' (operation '{grouped}'); rename one with RenameOperation",
                     op.id
                 ),
+            });
+        }
+    }
+
+    for op in ops.iter().copied() {
+        let path = command_invocation(cli, op);
+        if let Some(other) = ops
+            .iter()
+            .copied()
+            .find(|other| command_invocation(cli, other).starts_with(&format!("{path} ")))
+        {
+            return Err(CoreError::SdkGen {
+                message: format!("CLI {program:?} command {path:?} (operation '{}') collides with the sub-noun in {:?} (operation '{}')", op.id, command_invocation(cli, other), other.id),
             });
         }
     }
@@ -1390,6 +1462,49 @@ pub(crate) fn check_cli_names(
                 }
             }
         }
+        if let Some(switch) = cli
+            .spec_command(&op.id)
+            .and_then(|command| command.switch_flag.as_ref())
+        {
+            let valid = !switch.flag.is_empty()
+                && !switch.flag.starts_with('-')
+                && switch
+                    .flag
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
+            if !valid {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' switch flag {:?} is not a usable flag name",
+                        op.id, switch.flag
+                    ),
+                });
+            }
+            if reserved.contains(&switch.flag) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' switch flag '--{}' collides with the reserved global '--{}'",
+                        op.id, switch.flag, switch.flag
+                    ),
+                });
+            }
+            if let Some(previous) = bound.get(&switch.flag) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' switch flag '--{}' collides with {previous}",
+                        op.id, switch.flag
+                    ),
+                });
+            }
+            if body_fields.iter().any(|field| field.flag == switch.flag) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' switch flag '--{}' collides with a body field",
+                        op.id, switch.flag
+                    ),
+                });
+            }
+        }
         for field in &body_fields {
             let origin = FlagOrigin {
                 param: &field.json_name,
@@ -1455,36 +1570,23 @@ fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<
                         command.operation
                     ),
                 })?;
+            let mut seen_positionals = BTreeSet::new();
             for name in &command.positionals {
-                if !op.params.iter().any(|param| param.name == *name) {
+                if !seen_positionals.insert(name)
+                    || !op
+                        .params
+                        .iter()
+                        .any(|param| param.name == *name && param.location == "path")
+                {
                     return Err(CoreError::SdkGen {
                         message: format!(
-                            "CLI {program:?} command '{}' positional '{name}' is not a parameter of operation '{}'",
+                            "CLI {program:?} command '{}' positional '{name}' must name a unique path parameter of operation '{}'",
                             command.verb, op.id
                         ),
                     });
                 }
             }
-            if let Some(switch) = &command.switch_flag {
-                if !op_ids.contains(switch.operation.as_str()) {
-                    return Err(CoreError::SdkGen {
-                        message: format!(
-                            "CLI {program:?} command '{}' switch flag wraps unknown operation '{}'",
-                            command.verb, switch.operation
-                        ),
-                    });
-                }
-            }
-            if let Some(selector) = &command.selector {
-                if !op_ids.contains(selector.list_operation.as_str()) {
-                    return Err(CoreError::SdkGen {
-                        message: format!(
-                            "CLI {program:?} command '{}' selector lists unknown operation '{}'",
-                            command.verb, selector.list_operation
-                        ),
-                    });
-                }
-            }
+            check_cli_compositions(program, command, op, ops, graph)?;
             if command.examples.is_empty() {
                 return Err(CoreError::SdkGen {
                     message: format!(
@@ -1517,6 +1619,110 @@ fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<
         }
     }
     Ok(())
+}
+
+fn check_cli_compositions(
+    program: &str,
+    command: &gnr8::sdk::CliCommand,
+    op: &Operation,
+    ops: &[&Operation],
+    graph: &ApiGraph,
+) -> Result<(), CoreError> {
+    if let Some(switch) = &command.switch_flag {
+        let Some(other) = ops
+            .iter()
+            .copied()
+            .find(|candidate| candidate.id == switch.operation)
+        else {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} command '{}' switch flag wraps unknown operation '{}'",
+                    command.verb, switch.operation
+                ),
+            });
+        };
+        if !switch_inputs_match(op, other, graph) {
+            return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} command '{}' switch operation '{}' has a different input or pagination contract from '{}'; one command cannot safely collect both operations' arguments",
+                            command.verb, other.id, op.id
+                        ),
+                    });
+        }
+    }
+    if let Some(selector) = &command.selector {
+        let Some(list_op) = ops
+            .iter()
+            .copied()
+            .find(|candidate| candidate.id == selector.list_operation)
+        else {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} command '{}' selector lists unknown operation '{}'",
+                    command.verb, selector.list_operation
+                ),
+            });
+        };
+        if list_op.params.iter().any(|param| param.location == "path") {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} command '{}' selector list '{}' takes path parameters",
+                    command.verb, selector.list_operation
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn switch_inputs_match(primary: &Operation, other: &Operation, graph: &ApiGraph) -> bool {
+    let params_match = primary.params.len() == other.params.len()
+        && primary
+            .params
+            .iter()
+            .zip(&other.params)
+            .all(|(left, right)| {
+                left.name == right.name
+                    && left.location == right.location
+                    && left.required == right.required
+                    && left.schema == right.schema
+                    && left.constraints == right.constraints
+                    && left.item_constraints == right.item_constraints
+                    && left.default == right.default
+                    && left.style == right.style
+                    && left.explode == right.explode
+                    && left.allow_reserved == right.allow_reserved
+            });
+    let bodies_match = primary.request_body == other.request_body
+        && primary.request_body_required == other.request_body_required
+        && primary.request_body_content_type == other.request_body_content_type
+        && primary.request_body_variants == other.request_body_variants;
+    let security_matches = operation_security_alternatives(graph, primary)
+        == operation_security_alternatives(graph, other);
+    let primary_paging = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == primary.id);
+    let other_paging = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == other.id);
+    let paging_matches = match (primary_paging, other_paging) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.mode == right.mode
+                && left.items_field == right.items_field
+                && left.cursor_param == right.cursor_param
+                && left.next_cursor_field == right.next_cursor_field
+                && left.page_param == right.page_param
+                && left.page_size_param == right.page_size_param
+                && left.offset_param == right.offset_param
+                && left.limit_param == right.limit_param
+                && left.termination == right.termination
+        }
+        _ => false,
+    };
+    params_match && bodies_match && security_matches && paging_matches
 }
 
 /// Reject two groups whose names collapse to one file.
@@ -2418,6 +2624,44 @@ pub(crate) fn operation_prose(
             })
             .unwrap_or_default(),
     }
+}
+
+/// The native, versioned JSON Schema shipped beside each generated CLI.
+pub(crate) fn cli_envelope_schema(program: &str) -> Result<String, CoreError> {
+    let object = |properties: serde_json::Value, required: &[&str]| serde_json::json!({"type": "object", "properties": properties, "required": required});
+    let string = serde_json::json!({"type": "string"});
+    let count = serde_json::json!({"type": "integer", "minimum": 0});
+    let schema = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://gnr8.dev/schemas/cli-result-v1.json",
+        "title": format!("{program} CLI result v1"),
+        "type": "object",
+        "required": ["schema", "version", "tool", "command", "request", "response", "kind", "savedAt"],
+        "properties": {
+            "schema": {"const": "https://gnr8.dev/schemas/cli-result-v1.json"},
+            "version": {"const": 1},
+            "tool": object(serde_json::json!({"name": {"const": program}, "version": string}), &["name", "version"]),
+            "command": object(serde_json::json!({"path": string}), &["path"]),
+            "request": object(serde_json::json!({"method": string, "url": string}), &["method", "url"]),
+            "response": object(serde_json::json!({"status": count, "requestId": string, "contentType": string, "bytes": count}), &["status", "requestId", "contentType", "bytes"]),
+            "kind": {"enum": ["object", "list", "empty", "file"]},
+            "savedAt": {"type": "string", "format": "date-time"},
+            "data": {}, "items": {"type": "array"}, "meta": {"type": "object"},
+            "page": object(serde_json::json!({"count": count, "itemsKey": string}), &["count"]),
+            "file": object(serde_json::json!({"path": string, "bytes": count, "contentType": string, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}), &["path", "bytes", "contentType", "sha256"])
+        },
+        "oneOf": [
+            {"properties": {"kind": {"const": "object"}}, "required": ["data"]},
+            {"properties": {"kind": {"const": "list"}}, "required": ["items", "page"]},
+            {"properties": {"kind": {"const": "empty"}}},
+            {"properties": {"kind": {"const": "file"}}, "required": ["file"]}
+        ]
+    });
+    serde_json::to_string_pretty(&schema)
+        .map(|text| format!("{text}\n"))
+        .map_err(|error| CoreError::SdkGen {
+            message: format!("failed to encode CLI envelope schema: {error}"),
+        })
 }
 
 #[cfg(test)]
@@ -3368,5 +3612,57 @@ mod tests {
             "{message}"
         );
         Ok(())
+    }
+    #[test]
+    fn switch_flags_reject_reserved_names_and_parameter_collisions() {
+        use gnr8::sdk::{CliCommand, CliTopic};
+        let graph = ApiGraph {
+            operations: vec![
+                cli_op("getBook", None, vec![cli_param("state")]),
+                cli_op("getArchivedBook", None, vec![cli_param("state")]),
+            ],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        for name in super::ALWAYS_RESERVED_FLAGS
+            .iter()
+            .copied()
+            .chain(["state", "-invalid"])
+        {
+            let cli = SdkCli::new("bookstore").topic(
+                CliTopic::new("books").command(
+                    CliCommand::operation("getBook", "get")
+                        .switch_flag(name, "getArchivedBook")
+                        .example("bookstore books get"),
+                ),
+            );
+            assert!(
+                check_cli_names(&ops, &graph, &cli).is_err(),
+                "accepted switch flag {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn switches_reject_different_input_contracts() {
+        use gnr8::sdk::{CliCommand, CliTopic};
+        let graph = ApiGraph {
+            operations: vec![
+                cli_op("getBook", None, vec![]),
+                cli_op("getArchivedBook", None, vec![cli_param("state")]),
+            ],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let cli = SdkCli::new("bookstore").topic(
+            CliTopic::new("books").command(
+                CliCommand::operation("getBook", "get")
+                    .switch_flag("archived", "getArchivedBook")
+                    .example("bookstore books get"),
+            ),
+        );
+        let error = check_cli_names(&ops, &graph, &cli)
+            .expect_err("mismatched operation inputs must be rejected");
+        assert!(error.to_string().contains("different input"), "{error}");
     }
 }

@@ -93,6 +93,10 @@ func printError(slug, message string, hints []string, requestID string, status, 
 	return code
 }
 
+func machineOutput() bool { return outputFormat == "json" || outputFormat == "jsonl" }
+func errorMessage(code int, format string, args ...any) {
+	printError("", fmt.Sprintf(format, args...), nil, "", 0, code)
+}
 func handleErr(err error) int {
 	var helper *helperError
 	if errors.As(err, &helper) {
@@ -103,6 +107,15 @@ func handleErr(err error) int {
 		command := commandByID[authErr.OperationID]
 		if command == "" {
 			command = authErr.OperationID
+		}
+		if machineOutput() {
+			var hints []string
+			for _, alternative := range alternativesByID[authErr.OperationID] {
+				for _, id := range alternative {
+					hints = append(hints, "set "+credentialEnv[id])
+				}
+			}
+			return printError("", fmt.Sprintf("no credentials configured for `%s`", command), hints, "", 0, 4)
 		}
 		fmt.Fprintf(os.Stderr, "error: no credentials configured for `%s`\n", command)
 		fmt.Fprintln(os.Stderr, "  set one of:")

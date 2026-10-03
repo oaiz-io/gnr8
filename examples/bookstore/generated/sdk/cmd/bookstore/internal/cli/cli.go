@@ -85,7 +85,7 @@ func setFormat(value string) int {
 		outputFormat = value
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "error: --format must be one of human, ai-friendly, json, jsonl (got %q)\n", value)
+		errorMessage(2, "--format must be one of human, ai-friendly, json, jsonl (got %q)", value)
 		return 2
 	}
 }
@@ -96,7 +96,7 @@ func setColor(value string) int {
 		colorMode = value
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "error: --color must be one of auto, always, never (got %q)\n", value)
+		errorMessage(2, "--color must be one of auto, always, never (got %q)", value)
 		return 2
 	}
 }
@@ -137,7 +137,7 @@ func peelValue(rest []string, names ...string) (string, []string, int) {
 		}
 		if arg == "--"+name || arg == "-"+name {
 			if len(rest) < 2 {
-				fmt.Fprintf(os.Stderr, "error: --%s needs a value\n", name)
+				errorMessage(2, "--%s needs a value", name)
 				return "", nil, 2
 			}
 			return rest[1], rest[2:], 0
@@ -367,9 +367,13 @@ func editDistance(from, to string) int {
 func dispatchBooks(args []string) int {
 	group := cliGroups[0]
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "error: missing command under %s\n", group.name)
-		fmt.Fprintln(os.Stderr)
-		printGroupUsage(os.Stderr, group)
+		errorMessage(2, "missing command under %s", group.name)
+		if !machineOutput() {
+			fmt.Fprintln(os.Stderr)
+		}
+		if !machineOutput() {
+			printGroupUsage(os.Stderr, group)
+		}
 		return 2
 	}
 	switch args[0] {
@@ -387,12 +391,16 @@ func dispatchBooks(args []string) int {
 	case "update":
 		return cmdUpdateBook(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown command %q under %s\n", args[0], group.name)
-		if hint := suggestCommand(args[0], group.commands); hint != "" {
+		errorMessage(2, "unknown command %q under %s", args[0], group.name)
+		if hint := suggestCommand(args[0], group.commands); !machineOutput() && hint != "" {
 			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s %s`?\n", program, group.name, hint)
 		}
-		fmt.Fprintln(os.Stderr)
-		printGroupUsage(os.Stderr, group)
+		if !machineOutput() {
+			fmt.Fprintln(os.Stderr)
+		}
+		if !machineOutput() {
+			printGroupUsage(os.Stderr, group)
+		}
 		return 2
 	}
 }
@@ -416,7 +424,7 @@ func checkRename(args []string) int {
 			}
 		}
 		if match {
-			fmt.Fprintf(os.Stderr, "error: %s is now %s %s\n", strings.Join(rename.from, " "), program, rename.to)
+			errorMessage(2, "%s is now %s %s", strings.Join(rename.from, " "), program, rename.to)
 			return 2
 		}
 	}
@@ -437,7 +445,9 @@ func Run(args []string, opts Options) int {
 		return code
 	}
 	if len(args) == 0 {
-		printRootUsage(os.Stderr)
+		if !machineOutput() {
+			printRootUsage(os.Stderr)
+		}
 		return 2
 	}
 	switch args[0] {
@@ -456,12 +466,16 @@ func Run(args []string, opts Options) int {
 	case "books":
 		return dispatchBooks(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown command %q\n", args[0])
-		if hint := suggestTopLevel(args[0]); hint != "" {
+		errorMessage(2, "unknown command %q", args[0])
+		if hint := suggestTopLevel(args[0]); !machineOutput() && hint != "" {
 			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s`?\n", program, hint)
 		}
-		fmt.Fprintln(os.Stderr)
-		printRootUsage(os.Stderr)
+		if !machineOutput() {
+			fmt.Fprintln(os.Stderr)
+		}
+		if !machineOutput() {
+			printRootUsage(os.Stderr)
+		}
 		return 2
 	}
 }

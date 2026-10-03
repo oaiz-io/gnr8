@@ -12,7 +12,10 @@ use std::fmt::Write as _;
 use gnr8::facts::LiteralValue;
 use gnr8::sdk::{OwnedCommand, SdkCli};
 
-use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type, WellKnown};
+use crate::graph::{
+    ApiGraph, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Param, Prim,
+    Type, WellKnown,
+};
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
@@ -23,15 +26,16 @@ use crate::sdk::emit_common::{
     is_positional_param, no_input_env_var, operation_auth_alternatives, operation_prose,
     output_dir_env_var, pager_env_var, parameter_flag_help, positional_names, positional_usage,
     quoted_string_literal, reject_duplicate_command_files, reject_sse_operations,
-    request_body_models_of, response_field_names, success_responses_of, CliResultShape,
-    OperationAuthScheme, RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP,
-    COLOR_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP, LIMIT_HELP,
-    NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
+    request_body_models_of, response_field_names, CliResultShape, OperationAuthScheme,
+    RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP,
+    DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP,
+    OUTPUT_HELP, QUIET_HELP, YES_HELP,
 };
 use crate::CoreError;
 
 use super::emit::{
-    exported, go_request_body_variant_names, go_type, lower_camel, operation_method_name,
+    emit_go_pagination_advance, emit_go_pagination_initialization, exported, go_pagination_info,
+    go_request_body_variant_names, go_type, lower_camel, operation_method_name,
     ordered_path_params,
 };
 
@@ -155,6 +159,14 @@ fn check_owned_command_names(cli: &SdkCli, ops: &[&Operation]) -> Result<(), Cor
         }
     }
     for command in &cli.owned_commands {
+        if ["help", "completion", "__complete"].contains(&command.name.as_str()) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned command {:?} collides with the reserved command {:?}",
+                    cli.program, command.name, command.name
+                ),
+            });
+        }
         if groups.contains(&command.name) {
             return Err(CoreError::SdkGen {
                 message: format!(
@@ -253,11 +265,9 @@ pub(crate) fn emit_cli(
     files.push(part("complete", &|body, imports| {
         emit_complete_helpers(body, &ops, cli, imports)
     })?);
-    if !ops.is_empty() || !cli.owned_commands.is_empty() {
-        files.push(part("errors", &|body, imports| {
-            emit_handle_err(body, &ops, graph, package, imports)
-        })?);
-    }
+    files.push(part("errors", &|body, imports| {
+        emit_handle_err(body, &ops, graph, package, imports)
+    })?);
     if has_request_body(&ops, graph)? {
         files.push(part("body", &|body, imports| {
             emit_body_helpers(body, imports)
@@ -907,6 +917,7 @@ fn emit_shared_helpers(
     }
     imports.add("errors");
     imports.add("flag");
+    imports.add("io");
     imports.add("fmt");
     imports.add("os");
     imports.add("strings");
@@ -927,16 +938,34 @@ fn emit_shared_helpers(
     writeln!(out, "return false, 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "fs.SetOutput(os.Stderr)").map_err(sink)?;
+    writeln!(out, "fs.SetOutput(io.Discard)").map_err(sink)?;
     writeln!(out, "flags, rest, code := splitFlagArgs(fs, args)").map_err(sink)?;
     writeln!(out, "if code != 0 {{").map_err(sink)?;
     writeln!(out, "return false, code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "for i := 0; i < len(flags); i++ {{").map_err(sink)?;
+    writeln!(out, "name := strings.TrimLeft(flags[i], \"-\")").map_err(sink)?;
+    writeln!(out, "name, value, inline := strings.Cut(name, \"=\")").map_err(sink)?;
+    writeln!(out, "f := fs.Lookup(name)").map_err(sink)?;
+    writeln!(
+        out,
+        "if f != nil && flagTakesValue(f) && !inline && i+1 < len(flags) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "i++; value = flags[i]").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if name == \"json\" && value != \"false\" {{ outputFormat = \"json\" }}"
+    )
+    .map_err(sink)?;
+    writeln!(out, "if name == \"format\" && (value == \"json\" || value == \"jsonl\") {{ outputFormat = value }}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if err := fs.Parse(flags); err != nil {{").map_err(sink)?;
     writeln!(out, "if errors.Is(err, flag.ErrHelp) {{").map_err(sink)?;
     writeln!(out, "return false, 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "fmt.Fprintf(os.Stderr, \"error: %v\\n\", err)").map_err(sink)?;
+    writeln!(out, "errorMessage(2, \"%v\", err)").map_err(sink)?;
     writeln!(out, "return false, 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "flagArgs = rest").map_err(sink)?;
@@ -959,11 +988,7 @@ fn emit_shared_helpers(
     }
     if any_missing_flag(ops, graph, cli) {
         writeln!(out, "func missingFlag(name string) int {{").map_err(sink)?;
-        writeln!(
-            out,
-            "fmt.Fprintf(os.Stderr, \"error: missing required flag --%s\\n\", name)"
-        )
-        .map_err(sink)?;
+        writeln!(out, "errorMessage(2, \"missing required flag --%s\", name)").map_err(sink)?;
         writeln!(out, "return 2").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
@@ -981,7 +1006,7 @@ fn emit_shared_helpers(
         writeln!(out, "}}").map_err(sink)?;
         writeln!(
             out,
-            "fmt.Fprintf(os.Stderr, \"error: invalid value %q for --%s\\n\", value, name)"
+            "errorMessage(2, \"invalid value %q for --%s\", value, name)"
         )
         .map_err(sink)?;
         writeln!(out, "return 2").map_err(sink)?;
@@ -1157,6 +1182,7 @@ fn emit_print_helpers(out: &mut String, package: &str, imports: &mut ImportSet) 
     imports.sdk = true;
     imports.add("bytes");
     imports.add("context");
+    imports.add("crypto/rand");
     imports.add("crypto/sha256");
     imports.add("encoding/hex");
     imports.add("encoding/json");
@@ -1321,13 +1347,16 @@ func writeHuman(text string) int {{
 		}}
 	}}
 	if _, err := os.Stdout.WriteString(text); err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}}
 	return 0
 }}
 
 func printResult(result any) int {{
+	if outputPath == "-" {{
+		return printJSON(result)
+	}}
 	if outputPath != "" && outputPath != "-" {{
 		if code := writeOutputFile(result); code != 0 {{
 			return code
@@ -1351,26 +1380,36 @@ func printResult(result any) int {{
 func printJSON(result any) int {{
 	raw, err := resultBytes(result)
 	if err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}}
 	if len(raw) == 0 {{
 		return 0
 	}}
+	if _, binary := result.([]byte); binary {{
+		_, err := os.Stdout.Write(raw)
+		if err != nil {{ return printError("", err.Error(), nil, "", 0, 1) }}
+		return 0
+	}}
+	raw = projectRaw(raw)
 	if stdoutIsTTY() && json.Valid(raw) {{
 		var buf bytes.Buffer
 		if err := json.Indent(&buf, raw, "", "  "); err == nil {{
 			buf.WriteByte('\n')
 			_, err = os.Stdout.Write(buf.Bytes())
 			if err != nil {{
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				errorMessage(1, "%v", err)
 				return 1
 			}}
 			return 0
 		}}
 	}}
+	if json.Valid(raw) {{
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, raw); err == nil {{ raw = compact.Bytes() }}
+	}}
 	if _, err := os.Stdout.Write(raw); err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}}
 	if raw[len(raw)-1] != '\n' {{
@@ -1382,7 +1421,7 @@ func printJSON(result any) int {{
 func printJSONL(result any) int {{
 	_, raw, err := decodeResult(result)
 	if err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}}
 	items, _, _ := listItems(raw)
@@ -1395,7 +1434,7 @@ func printJSONL(result any) int {{
 	for _, item := range items {{
 		projected := projectRaw(item)
 		if _, err := os.Stdout.Write(projected); err != nil {{
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			errorMessage(1, "%v", err)
 			return 1
 		}}
 		if len(projected) == 0 || projected[len(projected)-1] != '\n' {{
@@ -1408,7 +1447,7 @@ func printJSONL(result any) int {{
 func printHuman(result any) int {{
 	raw, err := resultBytes(result)
 	if err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}}
 	if len(raw) == 0 {{
@@ -1432,7 +1471,7 @@ func printHuman(result any) int {{
 func printAIFriendly(result any) int {{
 	value, raw, err := decodeResult(result)
 	if err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}}
 	saved, saveErr := writeEnvelope(result, raw)
@@ -1440,9 +1479,19 @@ func printAIFriendly(result any) int {{
 		fmt.Fprintf(os.Stderr, "warning: the full result was not saved: %v\n", saveErr)
 	}}
 	outcome, rows, nextPage := aiSummary(result, value, raw)
+	if len(nextPage) > 1000 {{
+		if saved != "" && saveErr == nil {{
+			query, _ := json.Marshal([]string{{"meta", nextCursorField}})
+			script := "getpath(" + string(query) + ")"
+			nextPage = program + " " + commandPath + " --cursor \"$(jq -r " + shellQuote(script) + " " + shellQuote(saved) + ")\""
+			nextPage = "Next page: " + nextPage
+		}} else {{ nextPage = "Next cursor exceeds the preview budget; use --json to read it." }}
+	}}
 	line1 := program + " " + commandPath + ": " + outcome + ". Full JSON: "
 	if saveErr != nil {{
-		line1 += "not saved (" + saveErr.Error() + ")"
+		message := saveErr.Error()
+		if len(message) > 300 {{ message = message[:300] }}
+		line1 += "not saved (" + message + ")"
 	}} else {{
 		line1 += saved
 	}}
@@ -1462,13 +1511,11 @@ func printAIFriendly(result any) int {{
 			tail.WriteString(aiRecipes(saved, raw))
 		}}
 		shown := 0
-		for i, row := range rows {{
+		for _, row := range rows {{
 			next := row + "\n"
 			reserve := tail.Len()
-			if i < len(rows)-1 {{
-				reserve += len(showingLine(len(rows), len(rows)))
-			}}
-			if buf.Len()+len(next)+reserve > budget && shown > 0 {{
+			reserve += len(showingLine(len(rows), len(rows)))
+			if buf.Len()+len(next)+reserve > budget {{
 				break
 			}}
 			buf.WriteString(next)
@@ -1480,7 +1527,7 @@ func printAIFriendly(result any) int {{
 		buf.WriteString(tail.String())
 	}}
 	if _, err := os.Stdout.Write(buf.Bytes()); err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}}
 	return 0
@@ -1585,10 +1632,16 @@ func projectRaw(raw json.RawMessage) []byte {{
 		return raw
 	}}
 	var value any
-	if json.Unmarshal(raw, &value) != nil {{
-		return raw
-	}}
-	projected := projectValue(value, fields)
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil {{ return raw }}
+	var projected any
+	if obj, ok := value.(map[string]any); ok && itemsKey != "" {{
+		if items, exists := obj[itemsKey]; exists {{
+			obj[itemsKey] = projectValue(items, fields)
+			projected = obj
+		}} else {{ projected = projectValue(value, fields) }}
+	}} else {{ projected = projectValue(value, fields) }}
 	encoded, err := json.Marshal(projected)
 	if err != nil {{
 		return raw
@@ -1734,7 +1787,14 @@ func shellQuote(value string) string {{
 	if value == "" {{
 		return "''"
 	}}
-	if !strings.ContainsAny(value, " \t\n'\"\\\\$`") {{
+	safe := true
+	for _, ch := range value {{
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune("_./:-", ch)) {{
+			safe = false
+			break
+		}}
+	}}
+	if safe {{
 		return value
 	}}
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
@@ -1743,11 +1803,11 @@ func shellQuote(value string) string {{
 func writeOutputFile(result any) int {{
 	raw, err := resultBytes(result)
 	if err != nil {{
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}}
 	if err := os.WriteFile(outputPath, raw, 0o600); err != nil {{
-		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", outputPath, err)
+		errorMessage(1, "cannot write %s: %v", outputPath, err)
 		return 1
 	}}
 	return 0
@@ -1762,25 +1822,32 @@ func outputDirPath() string {{
 
 func PreflightOutput() int {{
 	dir := outputDirPath()
+	previewName := strings.ReplaceAll(commandPath, " ", "-")
+	if previewName == "" {{ previewName = "result" }}
+	sample := filepath.Join(dir, previewName + "-000000.json")
+	if len(program + commandPath + strings.Repeat(shellQuote(sample), 4)) > 2400 {{
+		errorMessage(2, "output path is too long for ai-friendly output; use --json or a shorter output directory")
+		return 2
+	}}
 	root := filepath.Dir(dir)
 	if err := os.MkdirAll(root, 0o700); err != nil {{
-		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
 		return 2
 	}}
 	gitignore := filepath.Join(root, ".gitignore")
 	if _, err := os.Stat(gitignore); err != nil {{
 		if err := os.WriteFile(gitignore, []byte("*\n"), 0o600); err != nil {{
-			fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+			errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
 			return 2
 		}}
 	}}
 	if err := os.MkdirAll(dir, 0o700); err != nil {{
-		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
 		return 2
 	}}
 	tmp, err := os.CreateTemp(dir, ".preflight-*")
 	if err != nil {{
-		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
 		return 2
 	}}
 	name := tmp.Name()
@@ -1792,6 +1859,10 @@ func PreflightOutput() int {{
 func writeEnvelope(result any, raw []byte) (string, error) {{
 	dir := outputDirPath()
 	if err := os.MkdirAll(dir, 0o700); err != nil {{
+		return "", err
+	}}
+	id, err := randomID()
+	if err != nil {{
 		return "", err
 	}}
 	kind := "object"
@@ -1808,7 +1879,7 @@ func writeEnvelope(result any, raw []byte) (string, error) {{
 		if name == "" {{
 			name = "download"
 		}}
-		binPath = filepath.Join(dir, name+"-"+shortID(typed)+".bin")
+		binPath = filepath.Join(dir, name+"-"+id+".bin")
 		if err := atomicWrite(binPath, typed); err != nil {{
 			return "", err
 		}}
@@ -1844,10 +1915,6 @@ func writeEnvelope(result any, raw []byte) (string, error) {{
 	stem := strings.ReplaceAll(commandPath, " ", "-")
 	if stem == "" {{
 		stem = "result"
-	}}
-	id := shortID(raw)
-	if id == "" {{
-		id = shortID([]byte(strconv.FormatInt(time.Now().UnixNano(), 10)))
 	}}
 	path := filepath.Join(dir, stem+"-"+id+".json")
 	payload := map[string]any{{
@@ -1889,16 +1956,17 @@ func writeEnvelope(result any, raw []byte) (string, error) {{
 		return "", err
 	}}
 	latest := filepath.Join(dir, "latest.json")
-	if err := atomicWrite(latest, encoded); err != nil {{
-		return path, nil
-	}}
+	_ = atomicWrite(latest, encoded)
 	pruneOutput(dir, path, binPath)
 	return path, nil
 }}
 
-func shortID(raw []byte) string {{
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:3])
+func randomID() (string, error) {{
+	var raw [3]byte
+	if _, err := rand.Read(raw[:]); err != nil {{
+		return "", err
+	}}
+	return hex.EncodeToString(raw[:]), nil
 }}
 
 func atomicWrite(path string, body []byte) error {{
@@ -1908,6 +1976,7 @@ func atomicWrite(path string, body []byte) error {{
 		return err
 	}}
 	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
 	if _, err := tmp.Write(body); err != nil {{
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
@@ -1996,14 +2065,14 @@ func Confirm(severity, resource string) int {{
 		return 0
 	}}
 	if noInput || !stdinIsTTY() || !stderrIsTTY() {{
-		fmt.Fprintf(os.Stderr, "error: %s requires confirmation; pass --yes\n", commandPath)
+		errorMessage(2, "%s requires confirmation; pass --yes", commandPath)
 		return 2
 	}}
 	if severity == "severe" {{
 		fmt.Fprintf(os.Stderr, "Type %s to confirm: ", resource)
 		var answer string
 		if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil || answer != resource {{
-			fmt.Fprintln(os.Stderr, "error: confirmation failed")
+			errorMessage(2, "confirmation failed")
 			return 2
 		}}
 		return 0
@@ -2011,11 +2080,11 @@ func Confirm(severity, resource string) int {{
 	fmt.Fprintf(os.Stderr, "Proceed with %s %s? [y/N] ", commandPath, resource)
 	var answer string
 	if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil {{
-		fmt.Fprintln(os.Stderr, "error: confirmation failed")
+		errorMessage(2, "confirmation failed")
 		return 2
 	}}
 	if answer != "y" && answer != "yes" && answer != "Y" && answer != "YES" {{
-		fmt.Fprintln(os.Stderr, "error: confirmation failed")
+		errorMessage(2, "confirmation failed")
 		return 2
 	}}
 	return 0
@@ -2129,7 +2198,7 @@ fn emit_overlay_helpers(out: &mut String, imports: &mut ImportSet) -> Result<(),
     writeln!(out, "if items == nil {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: the selector's list answer is not a list\\n\")"
+        "errorMessage(1, \"the selector's list answer is not a list\")"
     )
     .map_err(sink)?;
     writeln!(out, "return \"\", 1").map_err(sink)?;
@@ -2173,11 +2242,7 @@ fn emit_overlay_helpers(out: &mut String, imports: &mut ImportSet) -> Result<(),
     writeln!(out, "if latest && found {{").map_err(sink)?;
     writeln!(out, "return best, 0").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(
-        out,
-        "fmt.Fprintf(os.Stderr, \"error: no match for @%s\\n\", selector)"
-    )
-    .map_err(sink)?;
+    writeln!(out, "errorMessage(2, \"no match for @%s\", selector)").map_err(sink)?;
     writeln!(out, "return \"\", 3").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -2320,10 +2385,7 @@ fn emit_handler(
         writeln!(
             out,
             "fmt.Fprintln(fs.Output(), {})",
-            quoted_string_literal(&format!(
-                "\n{}",
-                prose.description.join("\n").replace('%', "%%")
-            ))
+            quoted_string_literal(&format!("\n{}", prose.description.join("\n")))
         )
         .map_err(sink)?;
     }
@@ -2397,7 +2459,14 @@ fn emit_handler(
             continue;
         };
         let ident = flag_ident(param);
-        writeln!(out, "{ident} := new(string)").map_err(sink)?;
+        let kind = flag_kind(graph, &param.schema)?;
+        let storage = match kind {
+            FlagKind::Int => "int64",
+            FlagKind::Float32 | FlagKind::Float64 => "float64",
+            FlagKind::Bool => "bool",
+            _ => "string",
+        };
+        writeln!(out, "{ident} := new({storage})").map_err(sink)?;
     }
     if let Some(switch) = switch_flag {
         writeln!(
@@ -2535,11 +2604,7 @@ fn emit_handler(
             "if arg == \"--page-size\" || strings.HasPrefix(arg, \"--page-size=\") {{"
         )
         .map_err(sink)?;
-        writeln!(
-            out,
-            "fmt.Fprintf(os.Stderr, \"error: --page-size is now --limit\\n\")"
-        )
-        .map_err(sink)?;
+        writeln!(out, "errorMessage(2, \"--page-size is now --limit\")").map_err(sink)?;
         writeln!(out, "return 2").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
@@ -2611,13 +2676,14 @@ fn emit_handler(
         .join(", ");
     writeln!(out, "return PrintFieldsHelp([]string{{{names}}})").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "if outputFormat == \"ai-friendly\" {{").map_err(sink)?;
-    writeln!(out, "if code := PreflightOutput(); code != 0 {{").map_err(sink)?;
-    writeln!(out, "return code").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
     if handler_needs_seen(cli, graph, op, &paging, &bodies, paged)? || !body_fields.is_empty() {
         writeln!(out, "seen := visited(fs)").map_err(sink)?;
+    }
+    if paged {
+        writeln!(out, "if seen[\"limit\"] && *limit <= 0 {{").map_err(sink)?;
+        writeln!(out, "errorMessage(2, \"--limit must be positive\")").map_err(sink)?;
+        writeln!(out, "return 2").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
     }
     if cli.base_url.is_none() {
         writeln!(out, "if *baseURL == \"\" {{").map_err(sink)?;
@@ -2634,20 +2700,35 @@ fn emit_handler(
             writeln!(out, "if len(flagArgs) == 0 {{").map_err(sink)?;
             writeln!(
                 out,
-                "fmt.Fprintln(os.Stderr, {})",
-                quoted_string_literal(&format!("error: missing argument <{name}>"))
+                "errorMessage(2, {})",
+                quoted_string_literal(&format!("missing argument <{name}>"))
             )
             .map_err(sink)?;
             writeln!(out, "return 2").map_err(sink)?;
             writeln!(out, "}}").map_err(sink)?;
-            writeln!(out, "*{ident} = flagArgs[0]").map_err(sink)?;
+            let parser = match flag_kind(graph, &param.schema)? {
+                FlagKind::Int => Some("strconv.ParseInt(flagArgs[0], 10, 64)"),
+                FlagKind::Float32 | FlagKind::Float64 => {
+                    Some("strconv.ParseFloat(flagArgs[0], 64)")
+                }
+                FlagKind::Bool => Some("strconv.ParseBool(flagArgs[0])"),
+                _ => None,
+            };
+            if let Some(parser) = parser {
+                imports.add("strconv");
+                writeln!(out, "{ident}Parsed, {ident}Err := {parser}").map_err(sink)?;
+                writeln!(out, "if {ident}Err != nil {{ return printError(\"\", {ident}Err.Error(), nil, \"\", 0, 2) }}").map_err(sink)?;
+                writeln!(out, "*{ident} = {ident}Parsed").map_err(sink)?;
+            } else {
+                writeln!(out, "*{ident} = flagArgs[0]").map_err(sink)?;
+            }
             writeln!(out, "flagArgs = flagArgs[1:]").map_err(sink)?;
         }
     }
     writeln!(out, "if len(flagArgs) > 0 {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: unexpected argument %q\\n\", flagArgs[0])"
+        "errorMessage(2, \"unexpected argument %q\", flagArgs[0])"
     )
     .map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -2673,7 +2754,7 @@ fn emit_handler(
         writeln!(out, "if seen[\"body\"] && seen[\"body-file\"] {{").map_err(sink)?;
         writeln!(
             out,
-            "fmt.Fprintf(os.Stderr, \"error: --body and --body-file are mutually exclusive\\n\")"
+            "errorMessage(2, \"--body and --body-file are mutually exclusive\")"
         )
         .map_err(sink)?;
         writeln!(out, "return 2").map_err(sink)?;
@@ -2682,7 +2763,7 @@ fn emit_handler(
             writeln!(out, "if !seen[\"body\"] && !seen[\"body-file\"] {{").map_err(sink)?;
             writeln!(
                 out,
-                "fmt.Fprintf(os.Stderr, \"error: --body or --body-file is required\\n\")"
+                "errorMessage(2, \"--body or --body-file is required\")"
             )
             .map_err(sink)?;
             writeln!(out, "return 2").map_err(sink)?;
@@ -2713,6 +2794,16 @@ fn emit_handler(
         writeln!(out, "return code").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
     }
+
+    writeln!(
+        out,
+        "if outputFormat == \"ai-friendly\" && outputPath != \"-\" {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "if code := PreflightOutput(); code != 0 {{").map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
 
     imports.add("context");
     writeln!(out, "ctx := context.Background()").map_err(sink)?;
@@ -2854,7 +2945,24 @@ fn emit_handler(
             })?;
         let other_method = operation_method_name(other);
         writeln!(out, "if *switchFlag {{").map_err(sink)?;
-        writeln!(out, "result, err := client.{other_method}({call})").map_err(sink)?;
+        let mut alternate_args = call_args.clone();
+        if !request_params.is_empty() {
+            let at = 1 + path_params.len();
+            alternate_args[at] = format!("{package}.{other_method}Params(params)");
+        }
+        let alternate_call = alternate_args.join(", ");
+        let (alternate_list, alternate_key) = go_result_shape(graph, other);
+        writeln!(out, "resultIsList = {alternate_list}").map_err(sink)?;
+        writeln!(out, "itemsKey = {alternate_key}").map_err(sink)?;
+        if paged {
+            writeln!(out, "params := {package}.{other_method}Params(params)").map_err(sink)?;
+            emit_paged_call(out, graph, other, package, &call, imports)?;
+        }
+        writeln!(
+            out,
+            "result, err := client.{other_method}({alternate_call})"
+        )
+        .map_err(sink)?;
         writeln!(out, "if err != nil {{").map_err(sink)?;
         writeln!(out, "return handleErr(err)").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
@@ -2863,44 +2971,7 @@ fn emit_handler(
     }
 
     if paged {
-        let item_ty = qualify_go_type(&pagination_item_type(graph, op)?, package);
-        writeln!(out, "if *all || seen[\"limit\"] {{").map_err(sink)?;
-        writeln!(out, "var items []{item_ty}").map_err(sink)?;
-        writeln!(
-            out,
-            "if err := client.Iterate{method}({call}, func(item {item_ty}) bool {{"
-        )
-        .map_err(sink)?;
-        writeln!(out, "items = append(items, item)").map_err(sink)?;
-        writeln!(out, "if seen[\"limit\"] && int64(len(items)) >= *limit {{").map_err(sink)?;
-        writeln!(out, "return false").map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
-        writeln!(out, "return true").map_err(sink)?;
-        writeln!(out, "}}); err != nil {{").map_err(sink)?;
-        writeln!(out, "return handleErr(err)").map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
-        writeln!(
-            out,
-            "hasMore := seen[\"limit\"] && int64(len(items)) >= *limit"
-        )
-        .map_err(sink)?;
-        writeln!(out, "lastAnswer.body = nil").map_err(sink)?;
-        writeln!(out, "if stderrIsTTY() {{").map_err(sink)?;
-        writeln!(
-            out,
-            "fmt.Fprintf(os.Stderr, \"fetched %d items…\\n\", len(items))"
-        )
-        .map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
-        let items_key =
-            pagination_policy(graph, op).map_or("items", |policy| policy.items_field.as_str());
-        writeln!(
-            out,
-            "return printResult(map[string]any{{{}: items, \"hasMore\": hasMore}})",
-            quoted_string_literal(items_key)
-        )
-        .map_err(sink)?;
-        writeln!(out, "}}").map_err(sink)?;
+        emit_paged_call(out, graph, op, package, &call, imports)?;
     }
 
     writeln!(out, "result, err := client.{method}({call})").map_err(sink)?;
@@ -2910,6 +2981,88 @@ fn emit_handler(
     writeln!(out, "return printResult(result)").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
+/// Walk declared pages; retain the last page's metadata and never offer a cursor past omitted items.
+fn emit_paged_call(
+    out: &mut String,
+    graph: &ApiGraph,
+    op: &Operation,
+    package: &str,
+    call: &str,
+    imports: &mut ImportSet,
+) -> Result<(), CoreError> {
+    let Some(policy) = pagination_policy(graph, op) else {
+        return Ok(());
+    };
+    let method = operation_method_name(op);
+    let info = go_pagination_info(graph, op, policy)?;
+    let key = quoted_string_literal(&policy.items_field);
+    imports.add("encoding/json");
+    writeln!(out, "if *all || seen[\"limit\"] {{").map_err(sink)?;
+    writeln!(out, "items := make([]json.RawMessage, 0)").map_err(sink)?;
+    writeln!(out, "var merged map[string]json.RawMessage").map_err(sink)?;
+    writeln!(out, "hasMore := false").map_err(sink)?;
+    emit_go_pagination_initialization(out, op, policy)?;
+    writeln!(out, "for {{").map_err(sink)?;
+    if policy.page_size_param.is_some() {
+        writeln!(out, "remaining := *limit - int64(len(items))").map_err(sink)?;
+        emit_paging_size(out, graph, op, package, imports, "remaining")?;
+    }
+    writeln!(out, "page, err := client.{method}({call})").map_err(sink)?;
+    writeln!(out, "if err != nil {{ return handleErr(err) }}").map_err(sink)?;
+    writeln!(out, "_ = page").map_err(sink)?;
+    writeln!(out, "merged = make(map[string]json.RawMessage)").map_err(sink)?;
+    writeln!(out, "if err := json.Unmarshal(lastAnswer.body, &merged); err != nil {{ return handleErr(err) }}").map_err(sink)?;
+    writeln!(
+        out,
+        "if merged == nil {{ errorMessage(1, \"expected a page object\"); return 1 }}"
+    )
+    .map_err(sink)?;
+    writeln!(out, "var pageItems []json.RawMessage").map_err(sink)?;
+    writeln!(out, "if raw := merged[{key}]; len(raw) > 0 {{ if err := json.Unmarshal(raw, &pageItems); err != nil {{ return handleErr(err) }} }}").map_err(sink)?;
+    if policy.mode == PaginationMode::Cursor {
+        let cursor = quoted_string_literal(policy.next_cursor_field.as_deref().unwrap_or_default());
+        writeln!(out, "var resumeCursor string").map_err(sink)?;
+        writeln!(out, "if raw := merged[{cursor}]; len(raw) > 0 {{ if err := json.Unmarshal(raw, &resumeCursor); err != nil {{ return handleErr(err) }} }}").map_err(sink)?;
+        writeln!(out, "hasMore = resumeCursor != \"\"").map_err(sink)?;
+    } else {
+        writeln!(out, "hasMore = len(pageItems) > 0").map_err(sink)?;
+    }
+    writeln!(out, "take := len(pageItems)").map_err(sink)?;
+    writeln!(
+        out,
+        "if seen[\"limit\"] && int64(take) > *limit-int64(len(items)) {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "take = int(*limit-int64(len(items)))").map_err(sink)?;
+    writeln!(out, "hasMore = true").map_err(sink)?;
+    if let Some(field) = &policy.next_cursor_field {
+        writeln!(out, "delete(merged, {})", quoted_string_literal(field)).map_err(sink)?;
+    }
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "items = append(items, pageItems[:take]...)").map_err(sink)?;
+    if policy.termination == PaginationTermination::EmptyItems {
+        writeln!(out, "if len(pageItems) == 0 {{ hasMore = false; break }}").map_err(sink)?;
+    }
+    writeln!(
+        out,
+        "if seen[\"limit\"] && int64(len(items)) >= *limit {{ break }}"
+    )
+    .map_err(sink)?;
+    emit_go_pagination_advance(out, op, policy, &info, "break", "pageItems")?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(out, "merged[{key}], _ = json.Marshal(items)").map_err(sink)?;
+    writeln!(out, "merged[\"hasMore\"], _ = json.Marshal(hasMore)").map_err(sink)?;
+    writeln!(out, "lastAnswer.body = nil").map_err(sink)?;
+    writeln!(
+        out,
+        "if stderrIsTTY() {{ fmt.Fprintf(os.Stderr, \"fetched %d items…\\n\", len(items)) }}"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return printResult(merged)").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     Ok(())
 }
 
@@ -3210,7 +3363,7 @@ fn emit_required_and_choice_checks(
             .map_err(sink)?;
             writeln!(
                 out,
-                "fmt.Fprintf(os.Stderr, \"error: invalid value %q for --%s\\n\", *{ident}, {})",
+                "errorMessage(2, \"invalid value %q for --%s\", *{ident}, {})",
                 quoted_string_literal(&flag)
             )
             .map_err(sink)?;
@@ -3289,6 +3442,21 @@ fn emit_paging_seed(
         }
         writeln!(out, "}}").map_err(sink)?;
     }
+    emit_paging_size(out, graph, op, package, imports, "*limit")?;
+    Ok(())
+}
+
+fn emit_paging_size(
+    out: &mut String,
+    graph: &ApiGraph,
+    op: &Operation,
+    package: &str,
+    imports: &mut ImportSet,
+    amount: &str,
+) -> Result<(), CoreError> {
+    let Some(policy) = pagination_policy(graph, op) else {
+        return Ok(());
+    };
     if let Some(name) = policy.page_size_param.as_deref() {
         let field = exported(name);
         let param = op.params.iter().find(|param| param.name == name);
@@ -3300,12 +3468,12 @@ fn emit_paging_seed(
             None => "int64".to_string(),
         };
         let value = match go_ty.as_str() {
-            "int64" => "*limit".to_string(),
+            "int64" => amount.to_string(),
             "string" => {
                 imports.add("strconv");
-                "strconv.FormatInt(*limit, 10)".to_string()
+                format!("strconv.FormatInt({amount}, 10)")
             }
-            other => format!("{other}(*limit)"),
+            other => format!("{other}({amount})"),
         };
         writeln!(out, "if seen[\"limit\"] {{").map_err(sink)?;
         if pointer {
@@ -3390,7 +3558,7 @@ fn emit_params_assign(
             .map_err(sink)?;
             writeln!(
                 out,
-                "fmt.Fprintf(os.Stderr, \"error: invalid value %q for --%s\\n\", *{ident}, {})",
+                "errorMessage(2, \"invalid value %q for --%s\", *{ident}, {})",
                 quoted_string_literal(&flag)
             )
             .map_err(sink)?;
@@ -3610,7 +3778,7 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: --format must be one of human, ai-friendly, json, jsonl (got %q)\\n\", value)"
+        "errorMessage(2, \"--format must be one of human, ai-friendly, json, jsonl (got %q)\", value)"
     )
     .map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -3625,7 +3793,7 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: --color must be one of auto, always, never (got %q)\\n\", value)"
+        "errorMessage(2, \"--color must be one of auto, always, never (got %q)\", value)"
     )
     .map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -3676,11 +3844,7 @@ fn emit_runtime(out: &mut String) -> Result<(), CoreError> {
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if arg == \"--\"+name || arg == \"-\"+name {{").map_err(sink)?;
     writeln!(out, "if len(rest) < 2 {{").map_err(sink)?;
-    writeln!(
-        out,
-        "fmt.Fprintf(os.Stderr, \"error: --%s needs a value\\n\", name)"
-    )
-    .map_err(sink)?;
+    writeln!(out, "errorMessage(2, \"--%s needs a value\", name)").map_err(sink)?;
     writeln!(out, "return \"\", nil, 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "return rest[1], rest[2:], 0").map_err(sink)?;
@@ -3847,7 +4011,7 @@ fn emit_main(
     writeln!(out, "return code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
-    writeln!(out, "printRootUsage(os.Stderr)").map_err(sink)?;
+    writeln!(out, "if !machineOutput() {{ printRootUsage(os.Stderr) }}").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "switch args[0] {{").map_err(sink)?;
@@ -3881,22 +4045,22 @@ fn emit_main(
         writeln!(out, "return dispatch{}(args[1:])", exported(group)).map_err(sink)?;
     }
     writeln!(out, "default:").map_err(sink)?;
-    writeln!(
-        out,
-        "fmt.Fprintf(os.Stderr, \"error: unknown command %q\\n\", args[0])"
-    )
-    .map_err(sink)?;
+    writeln!(out, "errorMessage(2, \"unknown command %q\", args[0])").map_err(sink)?;
     if has_root || has_groups {
-        writeln!(out, "if hint := suggestTopLevel(args[0]); hint != \"\" {{").map_err(sink)?;
+        writeln!(
+            out,
+            "if hint := suggestTopLevel(args[0]); !machineOutput() && hint != \"\" {{"
+        )
+        .map_err(sink)?;
         writeln!(
             out,
             "fmt.Fprintf(os.Stderr, \"\\nDid you mean `%s %s`?\\n\", program, hint)"
         )
         .map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
-        writeln!(out, "fmt.Fprintln(os.Stderr)").map_err(sink)?;
+        writeln!(out, "if !machineOutput() {{ fmt.Fprintln(os.Stderr) }}").map_err(sink)?;
     }
-    writeln!(out, "printRootUsage(os.Stderr)").map_err(sink)?;
+    writeln!(out, "if !machineOutput() {{ printRootUsage(os.Stderr) }}").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
@@ -4357,11 +4521,15 @@ fn emit_group_dispatch(
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: missing command under %s\\n\", group.name)"
+        "errorMessage(2, \"missing command under %s\", group.name)"
     )
     .map_err(sink)?;
-    writeln!(out, "fmt.Fprintln(os.Stderr)").map_err(sink)?;
-    writeln!(out, "printGroupUsage(os.Stderr, group)").map_err(sink)?;
+    writeln!(out, "if !machineOutput() {{ fmt.Fprintln(os.Stderr) }}").map_err(sink)?;
+    writeln!(
+        out,
+        "if !machineOutput() {{ printGroupUsage(os.Stderr, group) }}"
+    )
+    .map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "switch args[0] {{").map_err(sink)?;
@@ -4390,12 +4558,12 @@ fn emit_group_dispatch(
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: unknown command %q under %s\\n\", args[0], group.name)"
+        "errorMessage(2, \"unknown command %q under %s\", args[0], group.name)"
     )
     .map_err(sink)?;
     writeln!(
         out,
-        "if hint := suggestCommand(args[0], group.commands); hint != \"\" {{"
+        "if hint := suggestCommand(args[0], group.commands); !machineOutput() && hint != \"\" {{"
     )
     .map_err(sink)?;
     writeln!(
@@ -4404,8 +4572,12 @@ fn emit_group_dispatch(
     )
     .map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "fmt.Fprintln(os.Stderr)").map_err(sink)?;
-    writeln!(out, "printGroupUsage(os.Stderr, group)").map_err(sink)?;
+    writeln!(out, "if !machineOutput() {{ fmt.Fprintln(os.Stderr) }}").map_err(sink)?;
+    writeln!(
+        out,
+        "if !machineOutput() {{ printGroupUsage(os.Stderr, group) }}"
+    )
+    .map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
@@ -4433,7 +4605,7 @@ fn emit_sub_noun_dispatch(
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: missing command under %s %s\\n\", {}, {})",
+        "errorMessage(2, \"missing command under %s %s\", {}, {})",
         quoted_string_literal(group),
         quoted_string_literal(sub)
     )
@@ -4463,7 +4635,7 @@ fn emit_sub_noun_dispatch(
     writeln!(out, "default:").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: unknown command %q under %s %s\\n\", args[0], {}, {})",
+        "errorMessage(2, \"unknown command %q under %s %s\", args[0], {}, {})",
         quoted_string_literal(group),
         quoted_string_literal(sub)
     )
@@ -4513,7 +4685,7 @@ fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> 
     writeln!(out, "if match {{").map_err(sink)?;
     writeln!(
         out,
-        "fmt.Fprintf(os.Stderr, \"error: %s is now %s %s\\n\", strings.Join(rename.from, \" \"), program, rename.to)"
+        "errorMessage(2, \"%s is now %s %s\", strings.Join(rename.from, \" \"), program, rename.to)"
     )
     .map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -4638,6 +4810,18 @@ fn emit_handle_err(
     writeln!(out, "return code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    writeln!(out, "func machineOutput() bool {{ return outputFormat == \"json\" || outputFormat == \"jsonl\" }}").map_err(sink)?;
+    writeln!(
+        out,
+        "func errorMessage(code int, format string, args ...any) {{"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "printError(\"\", fmt.Sprintf(format, args...), nil, \"\", 0, code)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "func handleErr(err error) int {{").map_err(sink)?;
     if has_security(graph) && !ops.is_empty() {
         writeln!(out, "var helper *helperError").map_err(sink)?;
@@ -4653,6 +4837,11 @@ fn emit_handle_err(
         writeln!(out, "command := commandByID[authErr.OperationID]").map_err(sink)?;
         writeln!(out, "if command == \"\" {{").map_err(sink)?;
         writeln!(out, "command = authErr.OperationID").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+        writeln!(out, "if machineOutput() {{").map_err(sink)?;
+        writeln!(out, "var hints []string").map_err(sink)?;
+        writeln!(out, "for _, alternative := range alternativesByID[authErr.OperationID] {{ for _, id := range alternative {{ hints = append(hints, \"set \"+credentialEnv[id]) }} }}").map_err(sink)?;
+        writeln!(out, "return printError(\"\", fmt.Sprintf(\"no credentials configured for `%s`\", command), hints, \"\", 0, 4)").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
         writeln!(
             out,
@@ -4881,61 +5070,9 @@ fn qualify_go_type(ty: &str, package: &str) -> String {
     }
 }
 
-fn pagination_item_type(graph: &ApiGraph, op: &Operation) -> Result<String, CoreError> {
-    let policy = pagination_policy(graph, op).ok_or_else(|| CoreError::SdkGen {
-        message: format!(
-            "CLI pagination for operation '{}' is missing a PaginationPolicy",
-            op.id
-        ),
-    })?;
-    let success = success_responses_of(op, graph)?;
-    let page_type = success.body_model.ok_or_else(|| CoreError::SdkGen {
-        message: format!(
-            "pagination policy for operation '{}' requires a JSON success response model",
-            op.id
-        ),
-    })?;
-    let schema = graph
-        .schemas
-        .iter()
-        .find(|schema| schema.name == page_type)
-        .ok_or_else(|| CoreError::SdkGen {
-            message: format!(
-                "pagination policy for operation '{}' references missing response model '{page_type}'",
-                op.id
-            ),
-        })?;
-    let Type::Object(fields) = &schema.body else {
-        return Err(CoreError::SdkGen {
-            message: format!(
-                "pagination policy for operation '{}' requires object response model '{page_type}'",
-                op.id
-            ),
-        });
-    };
-    let items = fields
-        .iter()
-        .find(|field| field.json_name == policy.items_field)
-        .ok_or_else(|| CoreError::SdkGen {
-            message: format!(
-                "pagination policy for operation '{}' references missing response items field '{}'",
-                op.id, policy.items_field
-            ),
-        })?;
-    let Type::Array(item_schema) = &items.schema else {
-        return Err(CoreError::SdkGen {
-            message: format!(
-                "pagination policy for operation '{}' response items field '{}' is not an array",
-                op.id, policy.items_field
-            ),
-        });
-    };
-    go_type(item_schema, false, graph)
-}
-
 #[expect(
     clippy::too_many_lines,
-    reason = "completion scripts and __complete share one generated table"
+    reason = "one completion runtime serves all command contexts"
 )]
 fn emit_complete_helpers(
     out: &mut String,

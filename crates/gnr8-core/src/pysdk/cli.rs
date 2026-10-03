@@ -11,7 +11,9 @@ use std::fmt::Write as _;
 use gnr8::facts::LiteralValue;
 use gnr8::sdk::SdkCli;
 
-use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type};
+use crate::graph::{
+    ApiGraph, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Param, Prim, Type,
+};
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
@@ -221,6 +223,10 @@ pub(crate) fn emit_cli(
     let modules = command_modules(&ops, cli)?;
 
     let mut files = vec![
+        SdkFile {
+            name: cli_file(&format!("{}-cli-result-v1.json", cli.program)),
+            contents: crate::sdk::emit_common::cli_envelope_schema(&cli.program)?,
+        },
         SdkFile {
             name: cli_file("__init__.py"),
             contents: emit_package_init(graph, &cli.program, package)?,
@@ -464,6 +470,8 @@ fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<Str
     writeln!(out, "import io").map_err(sink)?;
     writeln!(out, "import json").map_err(sink)?;
     writeln!(out, "import os").map_err(sink)?;
+    writeln!(out, "import secrets").map_err(sink)?;
+    writeln!(out, "import shlex").map_err(sink)?;
     writeln!(out, "import subprocess").map_err(sink)?;
     writeln!(out, "import sys").map_err(sink)?;
     writeln!(out, "import tempfile").map_err(sink)?;
@@ -1262,12 +1270,16 @@ def project_value(value: Any, fields: list[str]) -> Any:
     if isinstance(value, list):
         return [project_value(item, fields) for item in value]
     if isinstance(value, dict):
+        if ITEMS_KEY and ITEMS_KEY in value:
+            return {**value, ITEMS_KEY: project_value(value[ITEMS_KEY], fields)}
         return {key: value[key] for key in fields if key in value}
     return value
 
 
 def decode_result(result: Any) -> tuple[Any, bytes]:
     raw = result_bytes(result)
+    if isinstance(result, (bytes, bytearray)):
+        return None, raw
     if not raw:
         return None, raw
     try:
@@ -1309,6 +1321,17 @@ def print_json(result: Any) -> None:
     raw = result_bytes(result)
     if not raw:
         return
+    if isinstance(result, (bytes, bytearray)):
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is not None:
+            buffer.write(raw)
+        else:
+            sys.stdout.write(raw.decode())
+        return
+    fields = field_list()
+    if fields:
+        projected = project_value(json.loads(raw), fields)
+        raw = json.dumps(projected, separators=(",", ":")).encode()
     if sys.stdout.isatty():
         try:
             parsed = json.loads(raw)
@@ -1357,6 +1380,13 @@ def output_dir_path() -> Path:
 def preflight_output() -> int:
     directory = output_dir_path()
     root = directory.parent
+    name = COMMAND_PATH.replace(" ", "-") or "result"
+    sample = str(directory / f"{name}-000000.json")
+    if len((PROGRAM + COMMAND_PATH + _shell_quote(sample) * 4).encode("utf-8")) > 2400:
+        return print_error(
+            "output path is too long for ai-friendly output; "
+            "use --json or a shorter output directory", code=2
+        )
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         gitignore = root / ".gitignore"
@@ -1381,16 +1411,14 @@ def preflight_output() -> int:
 def _atomic_write(path: Path, body: bytes) -> None:
     fd, name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
     try:
-        os.write(fd, body)
-        os.fsync(fd)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, 0o600)
+        os.replace(name, path)
     finally:
-        os.close(fd)
-    os.chmod(name, 0o600)
-    os.replace(name, path)
-
-
-def _short_id(raw: bytes) -> str:
-    return hashlib.sha256(raw).hexdigest()[:6]
+        Path(name).unlink(missing_ok=True)
 
 
 def _prune_output(directory: Path, keep: tuple[Path, ...] = ()) -> None:
@@ -1425,6 +1453,7 @@ def _prune_output(directory: Path, keep: tuple[Path, ...] = ()) -> None:
 def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
     directory = output_dir_path()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ident = secrets.token_hex(3)
     kind = "object"
     items = None
     meta = None
@@ -1432,10 +1461,10 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
     file_meta = None
     bin_path: Optional[Path] = None
     page: dict[str, Any] = {}
-    if isinstance(result, (bytes, bytearray)) and not LAST_ANSWER.get("body"):
+    if isinstance(result, (bytes, bytearray)):
         kind = "file"
         name = COMMAND_PATH.replace(" ", "-") or "download"
-        bin_path = directory / f"{name}-{_short_id(bytes(result))}.bin"
+        bin_path = directory / f"{name}-{ident}.bin"
         _atomic_write(bin_path, bytes(result))
         file_meta = {
             "path": str(bin_path),
@@ -1457,7 +1486,6 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
         else:
             data = value
     stem = COMMAND_PATH.replace(" ", "-") or "result"
-    ident = _short_id(raw or b"empty")
     path = directory / f"{stem}-{ident}.json"
     payload: dict[str, Any] = {
         "schema": "https://gnr8.dev/schemas/cli-result-v1.json",
@@ -1481,7 +1509,7 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
         payload["items"] = items
     if meta:
         payload["meta"] = meta
-    if data is not None:
+    if kind == "object":
         payload["data"] = data
     if page:
         payload["page"] = page
@@ -1489,17 +1517,16 @@ def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
         payload["file"] = file_meta
     encoded = json.dumps(payload, indent=2).encode() + b"\n"
     _atomic_write(path, encoded)
-    _atomic_write(directory / "latest.json", encoded)
+    try:
+        _atomic_write(directory / "latest.json", encoded)
+    except OSError:
+        pass  # The uniquely named envelope has already been saved.
     _prune_output(directory, (path,) if bin_path is None else (path, bin_path))
     return str(path), ""
 
 
 def _shell_quote(value: str) -> str:
-    if not value:
-        return "''"
-    if all(ch not in value for ch in " \t\n'\"\\$`"):
-        return value
-    return "'" + value.replace("'", "'\\''") + "'"
+    return shlex.quote(value)
 
 
 def _preview_value(value: Any) -> Any:
@@ -1542,7 +1569,7 @@ def print_ai_friendly(result: Any) -> None:
         print(f"warning: the full result was not saved: {save_err}", file=sys.stderr)
     listed, key, _meta = list_items(value)
     next_page = ""
-    if isinstance(result, (bytes, bytearray)) and not LAST_ANSWER.get("body"):
+    if isinstance(result, (bytes, bytearray)):
         outcome = f"saved {len(result)} bytes"
         rows: list[str] = []
     elif not raw:
@@ -1562,7 +1589,17 @@ def print_ai_friendly(result: Any) -> None:
     else:
         outcome = "ok"
         rows = [_view_row(value)]
-    full = f"not saved ({save_err})" if save_err else saved
+    if next_page and len(next_page.encode("utf-8")) > 1000:
+        if saved and not save_err:
+            query = json.dumps(["meta", NEXT_CURSOR_FIELD], separators=(",", ":"))
+            script = "getpath(" + query + ")"
+            next_page = (
+                f"Next page: {PROGRAM} {COMMAND_PATH} --cursor "
+                f'"$(jq -r {_shell_quote(script)} {_shell_quote(saved)})"'
+            )
+        else:
+            next_page = "Next cursor exceeds the preview budget; use --json to read it."
+    full = f"not saved ({save_err[:300]})" if save_err else saved
     line1 = f"{PROGRAM} {COMMAND_PATH}: {outcome}. Full JSON: {full}"
     chunks = [line1]
     if not QUIET:
@@ -1585,15 +1622,13 @@ def print_ai_friendly(result: Any) -> None:
                 "Query the saved result instead of re-running (do not cat it):\n"
                 + "\n".join(queries)
             )
-        reserve = sum(len(part) + 1 for part in tail)
-        size = len(line1) + 1
+        reserve = sum(len(part.encode("utf-8")) + 1 for part in tail)
+        size = len(line1.encode("utf-8")) + 1
         shown = 0
-        for index, row in enumerate(rows):
-            extra = len(row) + 1
-            more = 0
-            if index < len(rows) - 1:
-                more = len(_showing_line(len(rows), len(rows))) + 1
-            if size + extra + reserve + more > budget and shown > 0:
+        for row in rows:
+            extra = len(row.encode("utf-8")) + 1
+            more = len(_showing_line(len(rows), len(rows))) + 1
+            if size + extra + reserve + more > budget:
                 break
             chunks.append(row)
             shown += 1
@@ -1611,6 +1646,9 @@ def write_output_file(result: Any) -> None:
 
 
 def print_result(result: Any) -> None:
+    if OUTPUT_PATH == "-":
+        print_json(result)
+        return
     if OUTPUT_PATH and OUTPUT_PATH != "-":
         write_output_file(result)
     if OUTPUT_FORMAT == "json":
@@ -1652,8 +1690,7 @@ def confirm(severity: str, resource: str) -> int:
     )
     answer = sys.stdin.readline().strip()
     if answer not in ("y", "yes", "Y", "YES"):
-        print("error: confirmation failed", file=sys.stderr)
-        return 2
+        return print_error("confirmation failed", code=2)
     return 0
 "#
     .to_string()
@@ -1691,6 +1728,36 @@ fn emit_handler(
     let spec = cli.spec_command(&op.id);
     let severity = spec.map(|command| command.severity).unwrap_or_default();
     writeln!(out, "def _{method}(args: argparse.Namespace) -> Any:").map_err(sink)?;
+    if let Some(switch) = spec.and_then(|command| command.switch_flag.as_ref()) {
+        let other = graph
+            .operations
+            .iter()
+            .find(|candidate| candidate.id == switch.operation)
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!("unknown switch operation '{}'", switch.operation),
+            })?;
+        let other_method = operation_method_name(other);
+        writeln!(out, "    selected_method = {}", py_string_literal(&method)).map_err(sink)?;
+        writeln!(out, "    if args.switch_flag:").map_err(sink)?;
+        writeln!(
+            out,
+            "        selected_method = {}",
+            py_string_literal(&other_method)
+        )
+        .map_err(sink)?;
+        let (is_list, key) = match cli_result_shape(graph, other) {
+            CliResultShape::List => ("True", String::new()),
+            CliResultShape::Page(key) => ("False", key),
+            CliResultShape::Object => ("False", String::new()),
+        };
+        writeln!(out, "        output.RESULT_IS_LIST = {is_list}").map_err(sink)?;
+        writeln!(
+            out,
+            "        output.ITEMS_KEY = {}",
+            py_string_literal(&key)
+        )
+        .map_err(sink)?;
+    }
     if !matches!(severity, gnr8::sdk::CliSeverity::Mild) {
         let resource = positional_names(cli, op)
             .first()
@@ -1785,51 +1852,180 @@ fn emit_handler(
             )
             .map_err(sink)?;
         }
-        if let Some(name) = policy.page_size_param.as_deref() {
-            let ident = idents
-                .get(name)
-                .map_or_else(|| name.to_string(), Clone::clone);
-            writeln!(out, "    if args.limit is not None:").map_err(sink)?;
-            writeln!(
-                out,
-                "        kwargs[{}] = args.limit",
-                py_string_literal(&ident)
-            )
-            .map_err(sink)?;
-        }
     }
     if let Some(body) = bodies.first() {
         emit_body_kwargs(out, graph, cli, op, body, model_style)?;
     }
-    if pagination_policy(graph, op).is_some() {
-        writeln!(out, "    if args.all or args.limit is not None:").map_err(sink)?;
-        writeln!(out, "        items: list[Any] = []").map_err(sink)?;
-        writeln!(out, "        for item in client.iter_{method}(**kwargs):").map_err(sink)?;
-        writeln!(out, "            items.append(item)").map_err(sink)?;
-        writeln!(
-            out,
-            "            if args.limit is not None and len(items) >= args.limit:"
-        )
-        .map_err(sink)?;
-        writeln!(out, "                break").map_err(sink)?;
-        writeln!(out, "        output.LAST_ANSWER[\"body\"] = None").map_err(sink)?;
-        writeln!(out, "        output.progress_fetched(len(items))").map_err(sink)?;
-        let items_key =
-            pagination_policy(graph, op).map_or("items", |policy| policy.items_field.as_str());
-        writeln!(out, "        return {{").map_err(sink)?;
-        writeln!(out, "            {}: items,", py_string_literal(items_key)).map_err(sink)?;
-        writeln!(
-            out,
-            "            \"hasMore\": args.limit is not None and len(items) >= args.limit,"
-        )
-        .map_err(sink)?;
-        writeln!(out, "        }}").map_err(sink)?;
-        writeln!(out, "    return client.{method}(**kwargs)").map_err(sink)?;
+    emit_paged_call(
+        out,
+        graph,
+        op,
+        &idents,
+        spec.and_then(|command| command.switch_flag.as_ref())
+            .is_some(),
+    )?;
+
+    if spec
+        .and_then(|command| command.switch_flag.as_ref())
+        .is_some()
+    {
+        writeln!(out, "    return getattr(client, selected_method)(**kwargs)").map_err(sink)?;
     } else {
         writeln!(out, "    return client.{method}(**kwargs)").map_err(sink)?;
     }
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one page walk preserves metadata and boundary cursors"
+)]
+fn emit_paged_call(
+    out: &mut String,
+    graph: &ApiGraph,
+    op: &Operation,
+    idents: &BTreeMap<String, String>,
+    switched: bool,
+) -> Result<(), CoreError> {
+    let Some(policy) = pagination_policy(graph, op) else {
+        return Ok(());
+    };
+    let method = operation_method_name(op);
+    let key = py_string_literal(&policy.items_field);
+    let ident = |name: &str| py_string_literal(idents.get(name).map_or(name, String::as_str));
+    writeln!(out, "    if args.limit is not None and args.limit <= 0:").map_err(sink)?;
+    writeln!(
+        out,
+        "        output.print_error(\"--limit must be positive\", code=2)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        raise SystemExit(2)").map_err(sink)?;
+    writeln!(out, "    if args.all or args.limit is not None:").map_err(sink)?;
+    writeln!(out, "        items: list[Any] = []").map_err(sink)?;
+    writeln!(out, "        merged: dict[str, Any] = {{}}").map_err(sink)?;
+    writeln!(out, "        has_more = False").map_err(sink)?;
+    match policy.mode {
+        PaginationMode::Page => {
+            if let Some(name) = &policy.page_param {
+                writeln!(out, "        kwargs.setdefault({}, 1)", ident(name)).map_err(sink)?;
+            }
+        }
+        PaginationMode::Offset => {
+            if let Some(name) = &policy.offset_param {
+                writeln!(out, "        kwargs.setdefault({}, 0)", ident(name)).map_err(sink)?;
+            }
+        }
+        PaginationMode::Cursor => {}
+    }
+    writeln!(out, "        while True:").map_err(sink)?;
+    if let Some(name) = &policy.page_size_param {
+        let schema = op
+            .params
+            .iter()
+            .find(|param| param.name == *name)
+            .map(|param| &param.schema);
+        let numeric = match schema {
+            Some(Type::Primitive(Prim::Int { .. } | Prim::Float { .. })) => true,
+            Some(Type::Named(id)) => graph
+                .schemas
+                .iter()
+                .find(|schema| schema.id == *id)
+                .is_some_and(|schema| {
+                    matches!(
+                        schema.body,
+                        Type::Primitive(Prim::Int { .. } | Prim::Float { .. })
+                    )
+                }),
+            _ => false,
+        };
+        let amount = if numeric {
+            "args.limit - len(items)"
+        } else {
+            "str(args.limit - len(items))"
+        };
+        writeln!(out, "            if args.limit is not None:").map_err(sink)?;
+        writeln!(out, "                kwargs[{}] = {amount}", ident(name)).map_err(sink)?;
+    }
+    let call = if switched {
+        "getattr(client, selected_method)".to_string()
+    } else {
+        format!("client.{method}")
+    };
+    writeln!(out, "            page = {call}(**kwargs)").map_err(sink)?;
+    writeln!(out, "            merged, _raw = output.decode_result(page)").map_err(sink)?;
+    writeln!(out, "            if not isinstance(merged, dict):").map_err(sink)?;
+    writeln!(
+        out,
+        "                raise ValueError(\"expected a page object\")"
+    )
+    .map_err(sink)?;
+    writeln!(out, "            page_items = merged.get({key}) or []").map_err(sink)?;
+    if policy.mode == PaginationMode::Cursor {
+        let cursor = py_string_literal(policy.next_cursor_field.as_deref().unwrap_or_default());
+        writeln!(out, "            next_cursor = merged.get({cursor})").map_err(sink)?;
+        writeln!(out, "            has_more = bool(next_cursor)").map_err(sink)?;
+    } else {
+        writeln!(out, "            has_more = bool(page_items)").map_err(sink)?;
+    }
+    writeln!(out, "            take = len(page_items)").map_err(sink)?;
+    writeln!(
+        out,
+        "            if args.limit is not None and take > args.limit - len(items):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "                take = args.limit - len(items)").map_err(sink)?;
+    writeln!(out, "                has_more = True").map_err(sink)?;
+    if let Some(field) = &policy.next_cursor_field {
+        writeln!(
+            out,
+            "                merged.pop({}, None)",
+            py_string_literal(field)
+        )
+        .map_err(sink)?;
+    }
+    writeln!(out, "            items.extend(page_items[:take])").map_err(sink)?;
+    if policy.termination == PaginationTermination::EmptyItems {
+        writeln!(out, "            if not page_items:").map_err(sink)?;
+        writeln!(out, "                has_more = False").map_err(sink)?;
+        writeln!(out, "                break").map_err(sink)?;
+    }
+    writeln!(
+        out,
+        "            if args.limit is not None and len(items) >= args.limit:"
+    )
+    .map_err(sink)?;
+    writeln!(out, "                break").map_err(sink)?;
+    match policy.mode {
+        PaginationMode::Cursor => {
+            writeln!(out, "            if not next_cursor:").map_err(sink)?;
+            writeln!(out, "                break").map_err(sink)?;
+            if let Some(name) = &policy.cursor_param {
+                writeln!(out, "            kwargs[{}] = next_cursor", ident(name)).map_err(sink)?;
+            }
+        }
+        PaginationMode::Page => {
+            if let Some(name) = &policy.page_param {
+                writeln!(out, "            kwargs[{}] += 1", ident(name)).map_err(sink)?;
+            }
+        }
+        PaginationMode::Offset => {
+            if let Some(name) = &policy.offset_param {
+                writeln!(
+                    out,
+                    "            kwargs[{}] += len(page_items)",
+                    ident(name)
+                )
+                .map_err(sink)?;
+            }
+        }
+    }
+    writeln!(out, "        merged[{key}] = items").map_err(sink)?;
+    writeln!(out, "        merged[\"hasMore\"] = has_more").map_err(sink)?;
+    writeln!(out, "        output.LAST_ANSWER[\"body\"] = None").map_err(sink)?;
+    writeln!(out, "        output.progress_fetched(len(items))").map_err(sink)?;
+    writeln!(out, "        return merged").map_err(sink)?;
     Ok(())
 }
 
@@ -1936,8 +2132,16 @@ fn emit_parser_module(modules: &[CommandModule<'_>], cli: &SdkCli) -> Result<Str
     }
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    writeln!(out, "class OutputParser(argparse.ArgumentParser):").map_err(sink)?;
+    writeln!(out, "    def error(self, message: str) -> None:").map_err(sink)?;
+    writeln!(out, "        from . import output").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "        output.print_error(message, code=2)").map_err(sink)?;
+    writeln!(out, "        raise SystemExit(2)").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "def build_parser() -> argparse.ArgumentParser:").map_err(sink)?;
-    writeln!(out, "    parser = argparse.ArgumentParser(").map_err(sink)?;
+    writeln!(out, "    parser = OutputParser(").map_err(sink)?;
     writeln!(out, "        prog=PROGRAM,").map_err(sink)?;
     writeln!(out, "        description=DESCRIPTION,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
@@ -2975,7 +3179,9 @@ fn emit_main_module(
     writeln!(out).map_err(sink)?;
     writeln!(out, "from __future__ import annotations").map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    writeln!(out, "import json").map_err(sink)?;
     writeln!(out, "import sys").map_err(sink)?;
+    writeln!(out, "import urllib.error").map_err(sink)?;
     writeln!(out, "from typing import Optional").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     let mut imports = vec![
@@ -3021,11 +3227,7 @@ fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> 
         writeln!(out).map_err(sink)?;
         return Ok(());
     }
-    writeln!(
-        out,
-        "    tokens = [arg for arg in argv if not arg.startswith(\"-\")]"
-    )
-    .map_err(sink)?;
+    writeln!(out, "    tokens = argv").map_err(sink)?;
     writeln!(out, "    renames = [").map_err(sink)?;
     for error in &cli.rename_errors {
         let from = error
@@ -3034,20 +3236,23 @@ fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> 
             .map(|token| py_string_literal(token))
             .collect::<Vec<_>>()
             .join(", ");
-        writeln!(out, "        (({from}), {}),", py_string_literal(&error.to)).map_err(sink)?;
+        writeln!(
+            out,
+            "        (({from},), {}),",
+            py_string_literal(&error.to)
+        )
+        .map_err(sink)?;
     }
     writeln!(out, "    ]").map_err(sink)?;
     writeln!(out, "    for retired, replacement in renames:").map_err(sink)?;
     writeln!(out, "        if tokens[: len(retired)] == list(retired):").map_err(sink)?;
-    writeln!(out, "            print(").map_err(sink)?;
+    writeln!(out, "            return output.print_error(").map_err(sink)?;
     writeln!(
         out,
-        "                f\"error: {{' '.join(retired)}} is now {{PROGRAM}} {{replacement}}\","
+        "                f\"{{' '.join(retired)}} is now {{PROGRAM}} {{replacement}}\", code=2"
     )
     .map_err(sink)?;
-    writeln!(out, "                file=sys.stderr,").map_err(sink)?;
     writeln!(out, "            )").map_err(sink)?;
-    writeln!(out, "            return 2").map_err(sink)?;
     writeln!(out, "    return 0").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -3060,7 +3265,7 @@ fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> 
 )]
 fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(), CoreError> {
     writeln!(out, "def _print_help(argv: list[str]) -> int:").map_err(sink)?;
-    writeln!(out, "    json_out = False").map_err(sink)?;
+    writeln!(out, "    json_out = output.OUTPUT_FORMAT == \"json\"").map_err(sink)?;
     writeln!(out, "    rest: list[str] = []").map_err(sink)?;
     writeln!(out, "    for arg in argv:").map_err(sink)?;
     writeln!(out, "        if arg == \"--json\":").map_err(sink)?;
@@ -3103,6 +3308,69 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out).map_err(sink)?;
     writeln!(out, "def _main(argv: Optional[list[str]]) -> int:").map_err(sink)?;
     writeln!(out, "    argv = sys.argv[1:] if argv is None else argv").map_err(sink)?;
+    writeln!(out, "    output.resolve_format(False, None)").map_err(sink)?;
+    writeln!(out, "    value_flags = {{\"--format\", \"--fields\", \"--output\", \"-o\", \"--base-url\", \"--color\"}}").map_err(sink)?;
+    writeln!(
+        out,
+        "    for command in json.loads(HELP_SPEC)[\"commands\"]:"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        for flag in command[\"flags\"]:").map_err(sink)?;
+    writeln!(out, "            if flag[\"type\"] != \"boolean\":").map_err(sink)?;
+    writeln!(
+        out,
+        "                value_flags.add(\"--\" + flag[\"name\"])"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    json_flag = False").map_err(sink)?;
+    writeln!(out, "    index = 0").map_err(sink)?;
+    writeln!(out, "    while index < len(argv):").map_err(sink)?;
+    writeln!(out, "        token = argv[index]").map_err(sink)?;
+    writeln!(out, "        if token == \"--\":").map_err(sink)?;
+    writeln!(out, "            break").map_err(sink)?;
+    writeln!(out, "        if token == \"--json\":").map_err(sink)?;
+    writeln!(out, "            json_flag = True").map_err(sink)?;
+    writeln!(out, "        if token.startswith(\"--format=\"):").map_err(sink)?;
+    writeln!(
+        out,
+        "            output.resolve_format(False, token.split(\"=\", 1)[1])"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "        if token in value_flags and index + 1 < len(argv):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "            index += 1").map_err(sink)?;
+    writeln!(out, "            if token == \"--format\":").map_err(sink)?;
+    writeln!(
+        out,
+        "                output.resolve_format(False, argv[index])"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        index += 1").map_err(sink)?;
+    writeln!(out, "    if json_flag:").map_err(sink)?;
+    writeln!(out, "        output.OUTPUT_FORMAT = \"json\"").map_err(sink)?;
+    out.push_str(
+        r#"    global_names = {
+        "--json", "--format", "--fields", "--output", "-o", "--quiet", "-q",
+        "--debug", "--yes", "--no-input", "--color", "--no-pager", "--base-url",
+    }
+    prefix: list[str] = []
+    start = 0
+    while start < len(argv):
+        token = argv[start]
+        name = token.split("=", 1)[0]
+        if name not in global_names:
+            break
+        prefix.append(token)
+        start += 1
+        if "=" not in token and name in value_flags and start < len(argv):
+            prefix.append(argv[start])
+            start += 1
+    argv = [*argv[start:], *prefix]
+"#,
+    );
     writeln!(out, "    code = _check_rename(argv)").map_err(sink)?;
     writeln!(out, "    if code:").map_err(sink)?;
     writeln!(out, "        return code").map_err(sink)?;
@@ -3121,14 +3389,27 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
         "        return output.print_fields_help(getattr(args, \"_fields\", ()))"
     )
     .map_err(sink)?;
-    writeln!(out, "    if output.OUTPUT_FORMAT == \"ai-friendly\":").map_err(sink)?;
+    writeln!(
+        out,
+        "    if output.OUTPUT_FORMAT == \"ai-friendly\" and output.OUTPUT_PATH != \"-\":"
+    )
+    .map_err(sink)?;
     writeln!(out, "        code = output.preflight_output()").map_err(sink)?;
     writeln!(out, "        if code:").map_err(sink)?;
     writeln!(out, "            return code").map_err(sink)?;
     writeln!(out, "    handler = getattr(args, \"_handler\", None)").map_err(sink)?;
     writeln!(out, "    if handler is None:").map_err(sink)?;
-    writeln!(out, "        parser.print_help(sys.stderr)").map_err(sink)?;
-    writeln!(out, "        return 2").map_err(sink)?;
+    writeln!(
+        out,
+        "        if output.OUTPUT_FORMAT not in (\"json\", \"jsonl\"):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "            parser.print_help(sys.stderr)").map_err(sink)?;
+    writeln!(
+        out,
+        "        return output.print_error(\"a command is required\", code=2)"
+    )
+    .map_err(sink)?;
     writeln!(out, "    try:").map_err(sink)?;
     writeln!(out, "        result = handler(args)").map_err(sink)?;
     writeln!(out, "    except ApiError as exc:").map_err(sink)?;
@@ -3162,6 +3443,25 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "        )").map_err(sink)?;
     if has_security(graph) {
         writeln!(out, "    except AuthConfigurationError as exc:").map_err(sink)?;
+        writeln!(
+            out,
+            "        if output.OUTPUT_FORMAT in (\"json\", \"jsonl\"):"
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "            command = COMMAND_BY_ID.get(exc.operation_id, exc.operation_id)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "            hints = [\"set \" + CREDENTIAL_ENV[id] for group in exc.alternatives for id in group]").map_err(sink)?;
+        writeln!(out, "            return output.print_error(").map_err(sink)?;
+        writeln!(
+            out,
+            "                f\"no credentials configured for `{{command}}`\", hints, code=4"
+        )
+        .map_err(sink)?;
+        writeln!(out, "            )").map_err(sink)?;
+
         writeln!(
             out,
             "        command = COMMAND_BY_ID.get(exc.operation_id, exc.operation_id)"
@@ -3216,8 +3516,14 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     // `urllib.error.URLError` — a refused connection, an unresolvable host, a timeout — is an
     // `OSError`, and so is every read the CLI itself performs. A generated program that prints a
     // Python traceback because a server is down is not a command-line program.
-    writeln!(out, "    except OSError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:"
+    )
+    .map_err(sink)?;
     writeln!(out, "        return output.print_error(str(exc), code=6)").map_err(sink)?;
+    writeln!(out, "    except OSError as exc:").map_err(sink)?;
+    writeln!(out, "        return output.print_error(str(exc), code=1)").map_err(sink)?;
     // A success body that does not decode arrived after the server acted: exit 1, never the retry
     // class, or a caller re-runs a mutation that already happened.
     writeln!(out, "    except ValueError as exc:").map_err(sink)?;

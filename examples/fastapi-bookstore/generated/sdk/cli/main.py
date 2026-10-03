@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import urllib.error
 from typing import Optional
 
 from ..errors import ApiError
@@ -18,22 +20,20 @@ from .parser import build_parser
 
 
 def _check_rename(argv: list[str]) -> int:
-    tokens = [arg for arg in argv if not arg.startswith("-")]
+    tokens = argv
     renames = [
-        (("books", "list-books"), "books list"),
+        (("books", "list-books",), "books list"),
     ]
     for retired, replacement in renames:
         if tokens[: len(retired)] == list(retired):
-            print(
-                f"error: {' '.join(retired)} is now {PROGRAM} {replacement}",
-                file=sys.stderr,
+            return output.print_error(
+                f"{' '.join(retired)} is now {PROGRAM} {replacement}", code=2
             )
-            return 2
     return 0
 
 
 def _print_help(argv: list[str]) -> int:
-    json_out = False
+    json_out = output.OUTPUT_FORMAT == "json"
     rest: list[str] = []
     for arg in argv:
         if arg == "--json":
@@ -66,6 +66,46 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 def _main(argv: Optional[list[str]]) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    output.resolve_format(False, None)
+    value_flags = {"--format", "--fields", "--output", "-o", "--base-url", "--color"}
+    for command in json.loads(HELP_SPEC)["commands"]:
+        for flag in command["flags"]:
+            if flag["type"] != "boolean":
+                value_flags.add("--" + flag["name"])
+    json_flag = False
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            break
+        if token == "--json":
+            json_flag = True
+        if token.startswith("--format="):
+            output.resolve_format(False, token.split("=", 1)[1])
+        if token in value_flags and index + 1 < len(argv):
+            index += 1
+            if token == "--format":
+                output.resolve_format(False, argv[index])
+        index += 1
+    if json_flag:
+        output.OUTPUT_FORMAT = "json"
+    global_names = {
+        "--json", "--format", "--fields", "--output", "-o", "--quiet", "-q",
+        "--debug", "--yes", "--no-input", "--color", "--no-pager", "--base-url",
+    }
+    prefix: list[str] = []
+    start = 0
+    while start < len(argv):
+        token = argv[start]
+        name = token.split("=", 1)[0]
+        if name not in global_names:
+            break
+        prefix.append(token)
+        start += 1
+        if "=" not in token and name in value_flags and start < len(argv):
+            prefix.append(argv[start])
+            start += 1
+    argv = [*argv[start:], *prefix]
     code = _check_rename(argv)
     if code:
         return code
@@ -80,14 +120,15 @@ def _main(argv: Optional[list[str]]) -> int:
     output.apply_globals(args)
     if getattr(args, "fields", None) == "help":
         return output.print_fields_help(getattr(args, "_fields", ()))
-    if output.OUTPUT_FORMAT == "ai-friendly":
+    if output.OUTPUT_FORMAT == "ai-friendly" and output.OUTPUT_PATH != "-":
         code = output.preflight_output()
         if code:
             return code
     handler = getattr(args, "_handler", None)
     if handler is None:
-        parser.print_help(sys.stderr)
-        return 2
+        if output.OUTPUT_FORMAT not in ("json", "jsonl"):
+            parser.print_help(sys.stderr)
+        return output.print_error("a command is required", code=2)
     try:
         result = handler(args)
     except ApiError as exc:
@@ -103,8 +144,10 @@ def _main(argv: Optional[list[str]]) -> int:
         )
     except InputError as exc:
         return output.print_error(exc.reason, code=2)
-    except OSError as exc:
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
         return output.print_error(str(exc), code=6)
+    except OSError as exc:
+        return output.print_error(str(exc), code=1)
     except ValueError as exc:
         return output.print_error(f"the response could not be read: {exc}", code=1)
     try:

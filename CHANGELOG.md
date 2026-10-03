@@ -20,8 +20,8 @@ must move the minor version.
 - **Generated CLI output format flags.** `--format human|ai-friendly|json|jsonl`, `--json` as the
   JSON shorthand, and `{PROG}_FORMAT`. A TTY defaults to `human`; anything else defaults to
   `ai-friendly`. `--fields`, `-o/--output`, `-q/--quiet`, `--debug`, `-y/--yes` and `--no-input`
-  are reserved globals. Exit codes 0–6 name the caller's next action; only a failed connection or a
-  timeout is 6 ("retry later"), so a success body that does not decode or a failed `-o` write is 1.
+  are reserved globals. Exit codes 0–6 name the caller's next action; transient HTTP statuses, a failed connection or a
+  timeout are 6 ("retry later"), so a success body that does not decode or a failed `-o` write is 1.
   Python returns 130 on Ctrl-C. Errors print `error:` plus optional hints and a request id; under
   `--json` they are one object on stderr carrying the server's `slug`.
 - **ai-friendly result envelopes.** Off-TTY default output is a bounded summary whose first line
@@ -51,6 +51,20 @@ must move the minor version.
   line on paginated walks. `completion bash|zsh|fish|powershell` prints a script; hidden
   `__complete` answers static candidates from the spec plus live identifiers (one list call, 1s
   timeout).
+
+### Fixed
+
+- CLI shell recipes quote paths and cursors as single arguments, including shell metacharacters.
+- Repeated identical results keep separate envelopes. Failed atomic writes remove their temporary
+  files, and binary downloads preserve their bytes and file envelopes.
+- Switch flags dispatch in both languages, validate collisions and operation inputs before emission,
+  and use the alternate operation's Go parameter type and result shape. Paginated switches honor
+  limits, retain server metadata, request the remaining size, and preserve only boundary cursors.
+- Each generated CLI ships its versioned result JSON Schema, checked against persisted envelopes.
+- Machine help includes path, body, switch, and global flag types. JSON usage and authentication
+  errors use the structured error renderer, and one large preview row cannot exceed the byte budget.
+- `--fields` projects JSON items while preserving page metadata and large integer values; `-o -`
+  prints the complete response without an envelope.
 
 ### Changed
 

@@ -295,7 +295,10 @@ passed.
 Paging parameters named by a `PaginationPolicy` are not ordinary flags. They are replaced by
 `--limit N` / `--all` / `--cursor`. Passing `--page-size` is a rename error naming `--limit`.
 `--limit` and `--all` walk pages and print one object in the page's own shape
-(`{itemsKey: […every item…], "hasMore": false}`) instead of a bare array. `--json` on a single page
+with the last page's metadata and a truthful `hasMore`, instead of a bare array. Each request
+asks for the remaining item limit when a page-size parameter is declared. A resume cursor is
+retained only when the limit stops at a page boundary; a partial page omits it to avoid skipping
+items. Limits must be positive. `--json` on a single page
 is still the server's bytes; merged pages clear that capture so the constructed object is what
 prints.
 
@@ -318,7 +321,7 @@ name already in use, and `argparse` raises `ArgumentError` while building the pa
 
 Reserved flags are computed per command from what that command actually binds: `help`, `base-url`,
 `format`, `json`, `fields`, `output`, `quiet`, `debug`, `yes`, `no-input`, `color`, and `no-pager`
-always, plus `o`, `q` and `y` — the short spellings of `output`, `quiet` and `yes`, which Go's `flag`
+always, plus `h`, `o`, `q` and `y` — the short spellings of `output`, `quiet` and `yes`, which Go's `flag`
 treats as the same name as `--o`, `--q` and `--y`; `body`/`body-file` where the operation has a request body; `limit`/`all`/`cursor`/`page-size`
 where a `PaginationPolicy` names it; and `no-<flag>` for each boolean parameter. `--version` is bound
 on the root parser, which is not a command. A parameter named `json`, `format`, or `color` is
@@ -461,13 +464,16 @@ defaults to `human`; anything else defaults to `ai-friendly`.
 | `jsonl` | one compact item per line | none |
 
 `--fields` projects items (or the object) in every format; `--fields help` lists the success
-schema's wire names and exits 0. `-o/--output` writes the full result to a file. `-q/--quiet`
+schema's wire names and exits 0. `-o/--output` writes the full result to a file; `-o -` prints the full body on stdout without an envelope. `-q/--quiet`
 prints only the outcome line in ai-friendly mode, and nothing on success in human mode. `--debug`
 (or `{PROG}_DEBUG`) writes a request trace to stderr. `-y/--yes` and `--no-input` (or
 `{PROG}_NO_INPUT`) are the two-TTY confirmation rules: a prompt runs only when stdin and stderr
 are both TTYs.
 
-The envelope is `gnr8-cli-result` version 1. `{PROG}_OUTPUT_DIR` overrides the directory. A
+The envelope is `gnr8-cli-result` version 1. Its JSON Schema is emitted as
+`cmd/<program>/<program>-cli-result-v1.json` for Go and
+`cli/<program>-cli-result-v1.json` for Python. Each invocation keeps a separate file,
+even when the response is identical. `{PROG}_OUTPUT_DIR` overrides the directory. A
 preflight runs before the request when the format is `ai-friendly`; a save that fails after a
 successful request still exits 0, says `not saved (…)` on the first line, and prints a `warning:` on
 stderr. Envelopes are written to a temporary file and renamed into place, mode 0600, and so are
@@ -499,9 +505,9 @@ server's `slug` when it sent one. Exit codes name the caller's next action:
 | 6 | retry later: a failed connection or a timeout, HTTP 408/429/502/503/504 |
 | 130 | interrupted: Python catches Ctrl-C and returns 130; a Go program is ended by SIGINT, which the shell reports as 130 |
 
-Only code 6 means the request may not have reached the server. Everything after an answer arrived —
-a body that does not decode, an `-o` file that cannot be written — is 1, so a caller never re-runs a
-mutation that already happened.
+Code 6 identifies transient connection or server failures; it does not prove a mutation was not
+processed. Local failures after a successful answer —
+a body that does not decode or an `-o` file that cannot be written — return 1.
 
 `--color auto|always|never` colors human output (the `error:` prefix today). `NO_COLOR` and
 `TERM=dumb` turn it off in `auto`; color is never the only signal. Human lines longer than

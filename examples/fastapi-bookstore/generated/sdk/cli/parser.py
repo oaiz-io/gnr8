@@ -8,8 +8,16 @@ from .commands import books
 from .config import DESCRIPTION, PROGRAM, VERSION
 
 
+class OutputParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        from . import output
+
+        output.print_error(message, code=2)
+        raise SystemExit(2)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = OutputParser(
         prog=PROGRAM,
         description=DESCRIPTION,
     )

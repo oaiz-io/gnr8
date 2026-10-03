@@ -4,6 +4,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -162,13 +163,16 @@ func writeHuman(text string) int {
 		}
 	}
 	if _, err := os.Stdout.WriteString(text); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}
 	return 0
 }
 
 func printResult(result any) int {
+	if outputPath == "-" {
+		return printJSON(result)
+	}
 	if outputPath != "" && outputPath != "-" {
 		if code := writeOutputFile(result); code != 0 {
 			return code
@@ -192,26 +196,40 @@ func printResult(result any) int {
 func printJSON(result any) int {
 	raw, err := resultBytes(result)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}
 	if len(raw) == 0 {
 		return 0
 	}
+	if _, binary := result.([]byte); binary {
+		_, err := os.Stdout.Write(raw)
+		if err != nil {
+			return printError("", err.Error(), nil, "", 0, 1)
+		}
+		return 0
+	}
+	raw = projectRaw(raw)
 	if stdoutIsTTY() && json.Valid(raw) {
 		var buf bytes.Buffer
 		if err := json.Indent(&buf, raw, "", "  "); err == nil {
 			buf.WriteByte('\n')
 			_, err = os.Stdout.Write(buf.Bytes())
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				errorMessage(1, "%v", err)
 				return 1
 			}
 			return 0
 		}
 	}
+	if json.Valid(raw) {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, raw); err == nil {
+			raw = compact.Bytes()
+		}
+	}
 	if _, err := os.Stdout.Write(raw); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}
 	if raw[len(raw)-1] != '\n' {
@@ -223,7 +241,7 @@ func printJSON(result any) int {
 func printJSONL(result any) int {
 	_, raw, err := decodeResult(result)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}
 	items, _, _ := listItems(raw)
@@ -236,7 +254,7 @@ func printJSONL(result any) int {
 	for _, item := range items {
 		projected := projectRaw(item)
 		if _, err := os.Stdout.Write(projected); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			errorMessage(1, "%v", err)
 			return 1
 		}
 		if len(projected) == 0 || projected[len(projected)-1] != '\n' {
@@ -249,7 +267,7 @@ func printJSONL(result any) int {
 func printHuman(result any) int {
 	raw, err := resultBytes(result)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}
 	if len(raw) == 0 {
@@ -273,7 +291,7 @@ func printHuman(result any) int {
 func printAIFriendly(result any) int {
 	value, raw, err := decodeResult(result)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}
 	saved, saveErr := writeEnvelope(result, raw)
@@ -281,9 +299,23 @@ func printAIFriendly(result any) int {
 		fmt.Fprintf(os.Stderr, "warning: the full result was not saved: %v\n", saveErr)
 	}
 	outcome, rows, nextPage := aiSummary(result, value, raw)
+	if len(nextPage) > 1000 {
+		if saved != "" && saveErr == nil {
+			query, _ := json.Marshal([]string{"meta", nextCursorField})
+			script := "getpath(" + string(query) + ")"
+			nextPage = program + " " + commandPath + " --cursor \"$(jq -r " + shellQuote(script) + " " + shellQuote(saved) + ")\""
+			nextPage = "Next page: " + nextPage
+		} else {
+			nextPage = "Next cursor exceeds the preview budget; use --json to read it."
+		}
+	}
 	line1 := program + " " + commandPath + ": " + outcome + ". Full JSON: "
 	if saveErr != nil {
-		line1 += "not saved (" + saveErr.Error() + ")"
+		message := saveErr.Error()
+		if len(message) > 300 {
+			message = message[:300]
+		}
+		line1 += "not saved (" + message + ")"
 	} else {
 		line1 += saved
 	}
@@ -303,13 +335,11 @@ func printAIFriendly(result any) int {
 			tail.WriteString(aiRecipes(saved, raw))
 		}
 		shown := 0
-		for i, row := range rows {
+		for _, row := range rows {
 			next := row + "\n"
 			reserve := tail.Len()
-			if i < len(rows)-1 {
-				reserve += len(showingLine(len(rows), len(rows)))
-			}
-			if buf.Len()+len(next)+reserve > budget && shown > 0 {
+			reserve += len(showingLine(len(rows), len(rows)))
+			if buf.Len()+len(next)+reserve > budget {
 				break
 			}
 			buf.WriteString(next)
@@ -321,7 +351,7 @@ func printAIFriendly(result any) int {
 		buf.WriteString(tail.String())
 	}
 	if _, err := os.Stdout.Write(buf.Bytes()); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}
 	return 0
@@ -426,10 +456,22 @@ func projectRaw(raw json.RawMessage) []byte {
 		return raw
 	}
 	var value any
-	if json.Unmarshal(raw, &value) != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil {
 		return raw
 	}
-	projected := projectValue(value, fields)
+	var projected any
+	if obj, ok := value.(map[string]any); ok && itemsKey != "" {
+		if items, exists := obj[itemsKey]; exists {
+			obj[itemsKey] = projectValue(items, fields)
+			projected = obj
+		} else {
+			projected = projectValue(value, fields)
+		}
+	} else {
+		projected = projectValue(value, fields)
+	}
 	encoded, err := json.Marshal(projected)
 	if err != nil {
 		return raw
@@ -575,7 +617,14 @@ func shellQuote(value string) string {
 	if value == "" {
 		return "''"
 	}
-	if !strings.ContainsAny(value, " \t\n'\"\\\\$`") {
+	safe := true
+	for _, ch := range value {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune("_./:-", ch)) {
+			safe = false
+			break
+		}
+	}
+	if safe {
 		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
@@ -584,11 +633,11 @@ func shellQuote(value string) string {
 func writeOutputFile(result any) int {
 	raw, err := resultBytes(result)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		errorMessage(1, "%v", err)
 		return 1
 	}
 	if err := os.WriteFile(outputPath, raw, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", outputPath, err)
+		errorMessage(1, "cannot write %s: %v", outputPath, err)
 		return 1
 	}
 	return 0
@@ -603,25 +652,34 @@ func outputDirPath() string {
 
 func PreflightOutput() int {
 	dir := outputDirPath()
+	previewName := strings.ReplaceAll(commandPath, " ", "-")
+	if previewName == "" {
+		previewName = "result"
+	}
+	sample := filepath.Join(dir, previewName+"-000000.json")
+	if len(program+commandPath+strings.Repeat(shellQuote(sample), 4)) > 2400 {
+		errorMessage(2, "output path is too long for ai-friendly output; use --json or a shorter output directory")
+		return 2
+	}
 	root := filepath.Dir(dir)
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
 		return 2
 	}
 	gitignore := filepath.Join(root, ".gitignore")
 	if _, err := os.Stat(gitignore); err != nil {
 		if err := os.WriteFile(gitignore, []byte("*\n"), 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+			errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
 			return 2
 		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
 		return 2
 	}
 	tmp, err := os.CreateTemp(dir, ".preflight-*")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.\n", dir, err, outputDirEnv)
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
 		return 2
 	}
 	name := tmp.Name()
@@ -633,6 +691,10 @@ func PreflightOutput() int {
 func writeEnvelope(result any, raw []byte) (string, error) {
 	dir := outputDirPath()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	id, err := randomID()
+	if err != nil {
 		return "", err
 	}
 	kind := "object"
@@ -649,7 +711,7 @@ func writeEnvelope(result any, raw []byte) (string, error) {
 		if name == "" {
 			name = "download"
 		}
-		binPath = filepath.Join(dir, name+"-"+shortID(typed)+".bin")
+		binPath = filepath.Join(dir, name+"-"+id+".bin")
 		if err := atomicWrite(binPath, typed); err != nil {
 			return "", err
 		}
@@ -685,10 +747,6 @@ func writeEnvelope(result any, raw []byte) (string, error) {
 	stem := strings.ReplaceAll(commandPath, " ", "-")
 	if stem == "" {
 		stem = "result"
-	}
-	id := shortID(raw)
-	if id == "" {
-		id = shortID([]byte(strconv.FormatInt(time.Now().UnixNano(), 10)))
 	}
 	path := filepath.Join(dir, stem+"-"+id+".json")
 	payload := map[string]any{
@@ -730,16 +788,17 @@ func writeEnvelope(result any, raw []byte) (string, error) {
 		return "", err
 	}
 	latest := filepath.Join(dir, "latest.json")
-	if err := atomicWrite(latest, encoded); err != nil {
-		return path, nil
-	}
+	_ = atomicWrite(latest, encoded)
 	pruneOutput(dir, path, binPath)
 	return path, nil
 }
 
-func shortID(raw []byte) string {
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:3])
+func randomID() (string, error) {
+	var raw [3]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
 }
 
 func atomicWrite(path string, body []byte) error {
@@ -749,6 +808,7 @@ func atomicWrite(path string, body []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
 	if _, err := tmp.Write(body); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
@@ -837,14 +897,14 @@ func Confirm(severity, resource string) int {
 		return 0
 	}
 	if noInput || !stdinIsTTY() || !stderrIsTTY() {
-		fmt.Fprintf(os.Stderr, "error: %s requires confirmation; pass --yes\n", commandPath)
+		errorMessage(2, "%s requires confirmation; pass --yes", commandPath)
 		return 2
 	}
 	if severity == "severe" {
 		fmt.Fprintf(os.Stderr, "Type %s to confirm: ", resource)
 		var answer string
 		if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil || answer != resource {
-			fmt.Fprintln(os.Stderr, "error: confirmation failed")
+			errorMessage(2, "confirmation failed")
 			return 2
 		}
 		return 0
@@ -852,11 +912,11 @@ func Confirm(severity, resource string) int {
 	fmt.Fprintf(os.Stderr, "Proceed with %s %s? [y/N] ", commandPath, resource)
 	var answer string
 	if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil {
-		fmt.Fprintln(os.Stderr, "error: confirmation failed")
+		errorMessage(2, "confirmation failed")
 		return 2
 	}
 	if answer != "y" && answer != "yes" && answer != "Y" && answer != "YES" {
-		fmt.Fprintln(os.Stderr, "error: confirmation failed")
+		errorMessage(2, "confirmation failed")
 		return 2
 	}
 	return 0
