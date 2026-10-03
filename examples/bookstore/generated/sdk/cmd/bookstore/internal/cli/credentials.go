@@ -128,5 +128,16 @@ func buildClient(baseURL string, schemeIDs []string) (*sdk.Client, error) {
 			opts = append(opts, sdk.WithAPIKeyHeader(schemeID, secret))
 		}
 	}
+	opts = append(opts, clientOptions()...)
 	return sdk.NewClient(baseURL, opts...), nil
+}
+
+func clientOptions() []sdk.Option {
+	var opts []sdk.Option
+	if ua := userAgent(); ua != "" {
+		opts = append(opts, sdk.WithHeader("User-Agent", ua))
+	}
+	opts = append(opts, sdk.WithRequestHook(captureRequest))
+	opts = append(opts, sdk.WithResponseHook(captureResponse))
+	return opts
 }

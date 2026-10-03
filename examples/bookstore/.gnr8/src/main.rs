@@ -38,8 +38,52 @@ fn main() -> std::process::ExitCode {
                 GoSdk::new()
                     .module("example.com/bookstore/sdk")
                     .to("generated/sdk")
-                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8080")),
+                    .cli(bookstore_cli("http://127.0.0.1:8080")),
             )
             .post(Header::generated()),
     )
+}
+
+fn bookstore_cli(base_url: &str) -> SdkCli {
+    SdkCli::new("bookstore")
+        .base_url(base_url)
+        .topic(
+            CliTopic::new("books")
+                .concept("Browse and manage the catalogue")
+                .command(
+                    CliCommand::operation("listBooks", "list")
+                        .example("bookstore books list")
+                        .see_also(["books get"])
+                        .docs_url("https://example.com/cli/books/list"),
+                )
+                .command(
+                    CliCommand::operation("getBook", "get")
+                        .positional("id")
+                        .selector(CliSelector::new("listBooks", "id", "id"))
+                        .example("bookstore books get 1"),
+                )
+                .command(
+                    CliCommand::operation("createBook", "create")
+                        .body_fields()
+                        .example("bookstore books create --title Dune --author Herbert --genre fiction"),
+                )
+                .command(
+                    CliCommand::operation("updateBook", "update")
+                        .positional("id")
+                        .body_fields()
+                        .example("bookstore books update 1 --title Dune"),
+                )
+                .command(
+                    CliCommand::operation("deleteBook", "delete")
+                        .positional("id")
+                        .severity(CliSeverity::Moderate)
+                        .example("bookstore books delete 1 --yes"),
+                ),
+        )
+        .rename_error(CliRenameError::new(["books", "list-books"], "books list"))
+        .view(
+            CliView::schema("Book")
+                .preview(["id", "title", "author"])
+                .table(["id", "title", "author", "genre", "price"]),
+        )
 }

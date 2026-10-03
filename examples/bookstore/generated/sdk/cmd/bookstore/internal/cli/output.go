@@ -2,26 +2,922 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"example.com/bookstore/sdk"
 )
 
-func printResult(result any) int {
-	switch value := result.(type) {
-	case []byte:
-		if _, err := os.Stdout.Write(value); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", program, err)
-			return 1
+type capturedAnswer struct {
+	body        []byte
+	status      int
+	requestID   string
+	contentType string
+	method      string
+	url         string
+	started     time.Time
+	elapsed     time.Duration
+}
+
+var lastAnswer capturedAnswer
+
+func captureRequest(_ context.Context, _ sdk.RequestContext, _ *http.Request) error {
+	lastAnswer = capturedAnswer{started: time.Now()}
+	return nil
+}
+
+func captureResponse(_ context.Context, ctx sdk.RequestContext, resp *http.Response) error {
+	lastAnswer.method = ctx.Method
+	lastAnswer.url = ctx.URL
+	if !lastAnswer.started.IsZero() {
+		lastAnswer.elapsed = time.Since(lastAnswer.started)
+	}
+	if resp == nil {
+		return nil
+	}
+	lastAnswer.status = resp.StatusCode
+	lastAnswer.requestID = resp.Header.Get("X-Request-ID")
+	if lastAnswer.requestID == "" {
+		lastAnswer.requestID = resp.Header.Get("X-Request-Id")
+	}
+	lastAnswer.contentType = resp.Header.Get("Content-Type")
+	if resp.Body != nil {
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return err
 		}
-		return 0
+		lastAnswer.body = body
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	if debugEnabled {
+		fmt.Fprintf(os.Stderr, "debug: %s %s -> %d", lastAnswer.method, lastAnswer.url, lastAnswer.status)
+		if lastAnswer.requestID != "" {
+			fmt.Fprintf(os.Stderr, " request-id=%s", lastAnswer.requestID)
+		}
+		if lastAnswer.elapsed > 0 {
+			fmt.Fprintf(os.Stderr, " %s", lastAnswer.elapsed)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+	return nil
+}
+
+func fileIsTTY(file *os.File) bool {
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func stdoutIsTTY() bool { return fileIsTTY(os.Stdout) }
+func stderrIsTTY() bool { return fileIsTTY(os.Stderr) }
+func stdinIsTTY() bool  { return fileIsTTY(os.Stdin) }
+
+func useColor() bool {
+	if outputFormat != "" && outputFormat != "human" {
+		return false
+	}
+	switch colorMode {
+	case "always":
+		return true
+	case "never":
+		return false
 	default:
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(value); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", program, err)
-			return 1
+		if os.Getenv("NO_COLOR") != "" {
+			return false
+		}
+		if os.Getenv("TERM") == "dumb" {
+			return false
+		}
+		return stdoutIsTTY()
+	}
+}
+
+func colorize(code, text string) string {
+	if !useColor() {
+		return text
+	}
+	return "\x1b[" + code + "m" + text + "\x1b[0m"
+}
+
+func termWidth() int {
+	if v := os.Getenv("COLUMNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 20 {
+			return n
+		}
+	}
+	return 80
+}
+
+func fitWidth(text string) string {
+	width := termWidth()
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(text, "\n") {
+		line = strings.TrimRight(line, "\n")
+		runes := []rune(line)
+		if len(runes) > width {
+			if width > 1 {
+				line = string(runes[:width-1]) + "…"
+			} else {
+				line = "…"
+			}
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func writeHuman(text string) int {
+	text = fitWidth(strings.TrimRight(text, "\n") + "\n")
+	if !noPager && stdoutIsTTY() && strings.Count(text, "\n") >= 24 {
+		pager := os.Getenv(pagerEnv)
+		if pager == "" {
+			pager = os.Getenv("PAGER")
+		}
+		if pager == "" {
+			pager = "less -FIRX"
+		}
+		cmd := exec.Command("sh", "-c", pager)
+		cmd.Stdin = strings.NewReader(text)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			return 0
+		}
+	}
+	if _, err := os.Stdout.WriteString(text); err != nil {
+		errorMessage(1, "%v", err)
+		return 1
+	}
+	return 0
+}
+
+func printResult(result any) int {
+	if outputPath == "-" {
+		return printJSON(result)
+	}
+	if outputPath != "" && outputPath != "-" {
+		if code := writeOutputFile(result); code != 0 {
+			return code
+		}
+	}
+	switch outputFormat {
+	case "json":
+		return printJSON(result)
+	case "jsonl":
+		return printJSONL(result)
+	case "ai-friendly":
+		return printAIFriendly(result)
+	default:
+		if quiet {
+			return 0
+		}
+		return printHuman(result)
+	}
+}
+
+func printJSON(result any) int {
+	raw, err := resultBytes(result)
+	if err != nil {
+		errorMessage(1, "%v", err)
+		return 1
+	}
+	if len(raw) == 0 {
+		return 0
+	}
+	if _, binary := result.([]byte); binary {
+		_, err := os.Stdout.Write(raw)
+		if err != nil {
+			return printError("", err.Error(), nil, "", 0, 1)
 		}
 		return 0
 	}
+	raw = projectRaw(raw)
+	if stdoutIsTTY() && json.Valid(raw) {
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, raw, "", "  "); err == nil {
+			buf.WriteByte('\n')
+			_, err = os.Stdout.Write(buf.Bytes())
+			if err != nil {
+				errorMessage(1, "%v", err)
+				return 1
+			}
+			return 0
+		}
+	}
+	if json.Valid(raw) {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, raw); err == nil {
+			raw = compact.Bytes()
+		}
+	}
+	if _, err := os.Stdout.Write(raw); err != nil {
+		errorMessage(1, "%v", err)
+		return 1
+	}
+	if raw[len(raw)-1] != '\n' {
+		_, _ = os.Stdout.Write([]byte("\n"))
+	}
+	return 0
+}
+
+func printJSONL(result any) int {
+	_, raw, err := decodeResult(result)
+	if err != nil {
+		errorMessage(1, "%v", err)
+		return 1
+	}
+	items, _, _ := listItems(raw)
+	if items == nil {
+		items = []json.RawMessage{raw}
+		if len(raw) == 0 {
+			return 0
+		}
+	}
+	for _, item := range items {
+		projected := projectRaw(item)
+		if _, err := os.Stdout.Write(projected); err != nil {
+			errorMessage(1, "%v", err)
+			return 1
+		}
+		if len(projected) == 0 || projected[len(projected)-1] != '\n' {
+			_, _ = os.Stdout.Write([]byte("\n"))
+		}
+	}
+	return 0
+}
+
+func printHuman(result any) int {
+	raw, err := resultBytes(result)
+	if err != nil {
+		errorMessage(1, "%v", err)
+		return 1
+	}
+	if len(raw) == 0 {
+		return 0
+	}
+	if json.Valid(raw) {
+		projected := projectRaw(raw)
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, projected, "", "  "); err == nil {
+			buf.WriteByte('\n')
+			return writeHuman(buf.String())
+		}
+	}
+	text := string(raw)
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return writeHuman(text)
+}
+
+func printAIFriendly(result any) int {
+	value, raw, err := decodeResult(result)
+	if err != nil {
+		errorMessage(1, "%v", err)
+		return 1
+	}
+	saved, saveErr := writeEnvelope(result, raw)
+	if saveErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: the full result was not saved: %v\n", saveErr)
+	}
+	outcome, rows, nextPage := aiSummary(result, value, raw)
+	if len(nextPage) > 1000 {
+		if saved != "" && saveErr == nil {
+			query, _ := json.Marshal([]string{"meta", nextCursorField})
+			script := "getpath(" + string(query) + ")"
+			nextPage = program + " " + commandPath + " --cursor \"$(jq -r " + shellQuote(script) + " " + shellQuote(saved) + ")\""
+			nextPage = "Next page: " + nextPage
+		} else {
+			nextPage = "Next cursor exceeds the preview budget; use --json to read it."
+		}
+	}
+	line1 := program + " " + commandPath + ": " + outcome + ". Full JSON: "
+	if saveErr != nil {
+		message := saveErr.Error()
+		if len(message) > 300 {
+			message = message[:300]
+		}
+		line1 += "not saved (" + message + ")"
+	} else {
+		line1 += saved
+	}
+	var buf bytes.Buffer
+	buf.WriteString(line1)
+	buf.WriteByte('\n')
+	if !quiet {
+		// The next-page line and the jq recipes are what a caller needs next, so they are
+		// reserved first and the rows take what is left of the budget.
+		const budget = 4000
+		var tail strings.Builder
+		if nextPage != "" {
+			tail.WriteString(nextPage)
+			tail.WriteByte('\n')
+		}
+		if saved != "" && saveErr == nil {
+			tail.WriteString(aiRecipes(saved, raw))
+		}
+		shown := 0
+		for _, row := range rows {
+			next := row + "\n"
+			reserve := tail.Len()
+			reserve += len(showingLine(len(rows), len(rows)))
+			if buf.Len()+len(next)+reserve > budget {
+				break
+			}
+			buf.WriteString(next)
+			shown++
+		}
+		if shown < len(rows) {
+			buf.WriteString(showingLine(shown, len(rows)))
+		}
+		buf.WriteString(tail.String())
+	}
+	if _, err := os.Stdout.Write(buf.Bytes()); err != nil {
+		errorMessage(1, "%v", err)
+		return 1
+	}
+	return 0
+}
+
+func showingLine(shown, total int) string {
+	return fmt.Sprintf("Showing %d of %d; the rest is in the file.\n", shown, total)
+}
+
+func resultBytes(result any) ([]byte, error) {
+	if len(lastAnswer.body) > 0 {
+		return lastAnswer.body, nil
+	}
+	switch value := result.(type) {
+	case nil:
+		return nil, nil
+	case []byte:
+		return value, nil
+	default:
+		return json.Marshal(value)
+	}
+}
+
+func decodeResult(result any) (any, []byte, error) {
+	raw, err := resultBytes(result)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(raw) == 0 {
+		return nil, raw, nil
+	}
+	if !json.Valid(raw) {
+		return nil, raw, nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, raw, err
+	}
+	return value, raw, nil
+}
+
+func listItems(raw []byte) ([]json.RawMessage, string, json.RawMessage) {
+	return splitList(raw, resultIsList, itemsKey)
+}
+
+// splitList reads a result as a list only when the graph says it is one: a success body whose
+// schema is an array, or a page whose PaginationPolicy names its items field. Every other
+// object is one resource, however many arrays it holds.
+func splitList(raw []byte, isList bool, key string) ([]json.RawMessage, string, json.RawMessage) {
+	if isList {
+		var array []json.RawMessage
+		if json.Unmarshal(raw, &array) != nil {
+			return nil, "", nil
+		}
+		if array == nil {
+			array = []json.RawMessage{}
+		}
+		return array, "", nil
+	}
+	if key == "" {
+		return nil, "", nil
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return nil, "", nil
+	}
+	var items []json.RawMessage
+	if itemsRaw, ok := obj[key]; ok && json.Unmarshal(itemsRaw, &items) != nil {
+		return nil, "", nil
+	}
+	if items == nil {
+		items = []json.RawMessage{}
+	}
+	meta := map[string]json.RawMessage{}
+	for name, item := range obj {
+		if name != key {
+			meta[name] = item
+		}
+	}
+	metaRaw, _ := json.Marshal(meta)
+	return items, key, metaRaw
+}
+
+func fieldList() []string {
+	if fieldsSpec == "" || fieldsSpec == "help" {
+		return nil
+	}
+	parts := strings.Split(fieldsSpec, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func projectRaw(raw json.RawMessage) []byte {
+	fields := fieldList()
+	if len(fields) == 0 || !json.Valid(raw) {
+		return raw
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil {
+		return raw
+	}
+	var projected any
+	if obj, ok := value.(map[string]any); ok && itemsKey != "" {
+		if items, exists := obj[itemsKey]; exists {
+			obj[itemsKey] = projectValue(items, fields)
+			projected = obj
+		} else {
+			projected = projectValue(value, fields)
+		}
+	} else {
+		projected = projectValue(value, fields)
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
+func projectValue(value any, fields []string) any {
+	switch typed := value.(type) {
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, projectValue(item, fields))
+		}
+		return out
+	case map[string]any:
+		out := map[string]any{}
+		for _, field := range fields {
+			if item, ok := typed[field]; ok {
+				out[field] = item
+			}
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+// viewRow prints the declared view fields in their declared order, byte-exact, cutting only a
+// long string; without a view it prints the first six scalar fields by name.
+func viewRow(raw json.RawMessage) string {
+	projected := projectRaw(raw)
+	var obj map[string]json.RawMessage
+	if fieldList() != nil || json.Unmarshal(projected, &obj) != nil {
+		return string(projected)
+	}
+	keys := previewFields
+	if len(keys) == 0 {
+		keys = make([]string, 0, len(obj))
+		for key, item := range obj {
+			var value any
+			if json.Unmarshal(item, &value) == nil && isScalar(value) {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		if len(keys) > 6 {
+			keys = keys[:6]
+		}
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for _, key := range keys {
+		item, ok := obj[key]
+		if !ok {
+			continue
+		}
+		if b.Len() > 1 {
+			b.WriteByte(',')
+		}
+		name, _ := json.Marshal(key)
+		b.Write(name)
+		b.WriteByte(':')
+		b.Write(previewValue(item))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// previewValue cuts a string longer than 80 characters; every other value prints as sent.
+func previewValue(item json.RawMessage) []byte {
+	var text string
+	if json.Unmarshal(item, &text) != nil {
+		return item
+	}
+	runes := []rune(text)
+	if len(runes) <= 80 {
+		return item
+	}
+	encoded, err := json.Marshal(string(runes[:79]) + "…")
+	if err != nil {
+		return item
+	}
+	return encoded
+}
+
+func isScalar(value any) bool {
+	switch value.(type) {
+	case nil, bool, float64, json.Number, string:
+		return true
+	default:
+		return false
+	}
+}
+
+func aiSummary(result any, value any, raw []byte) (string, []string, string) {
+	if data, ok := result.([]byte); ok {
+		return fmt.Sprintf("saved %d bytes", len(data)), nil, ""
+	}
+	if len(raw) == 0 || value == nil {
+		return "empty", nil, ""
+	}
+	items, key, _ := listItems(raw)
+	if items != nil {
+		noun := "items"
+		if key != "" {
+			noun = key
+		}
+		rows := make([]string, 0, len(items))
+		for _, item := range items {
+			rows = append(rows, viewRow(item))
+		}
+		outcome := fmt.Sprintf("%d %s", len(items), noun)
+		next := ""
+		// nextCursorField is set only on a command that binds --cursor, from its
+		// PaginationPolicy, so the line never names a flag the command lacks.
+		if obj, ok := value.(map[string]any); ok && nextCursorField != "" {
+			if cursor, ok := obj[nextCursorField].(string); ok && cursor != "" {
+				next = "Next page: " + program + " " + commandPath + " --cursor " + shellQuote(cursor) + "    Every page: " + program + " " + commandPath + " --all"
+			}
+		}
+		return outcome, rows, next
+	}
+	return "ok", []string{viewRow(raw)}, ""
+}
+
+func aiRecipes(path string, raw []byte) string {
+	quoted := shellQuote(path)
+	items, _, _ := listItems(raw)
+	var b strings.Builder
+	b.WriteString("Query the saved result instead of re-running (do not cat it):\n")
+	if items != nil {
+		b.WriteString("  jq '.items[]' " + quoted + "\n")
+		b.WriteString("  jq '.items | length' " + quoted + "\n")
+	} else {
+		b.WriteString("  jq 'keys' " + quoted + "\n")
+		b.WriteString("  jq '.' " + quoted + "\n")
+	}
+	return b.String()
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	safe := true
+	for _, ch := range value {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || strings.ContainsRune("_./:-", ch)) {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func writeOutputFile(result any) int {
+	raw, err := resultBytes(result)
+	if err != nil {
+		errorMessage(1, "%v", err)
+		return 1
+	}
+	if err := os.WriteFile(outputPath, raw, 0o600); err != nil {
+		errorMessage(1, "cannot write %s: %v", outputPath, err)
+		return 1
+	}
+	return 0
+}
+
+func outputDirPath() string {
+	if env := os.Getenv(outputDirEnv); env != "" {
+		return env
+	}
+	return filepath.Join("."+program, "output")
+}
+
+func PreflightOutput() int {
+	dir := outputDirPath()
+	previewName := strings.ReplaceAll(commandPath, " ", "-")
+	if previewName == "" {
+		previewName = "result"
+	}
+	sample := filepath.Join(dir, previewName+"-000000.json")
+	if len(program+commandPath+strings.Repeat(shellQuote(sample), 4)) > 2400 {
+		errorMessage(2, "output path is too long for ai-friendly output; use --json or a shorter output directory")
+		return 2
+	}
+	root := filepath.Dir(dir)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
+		return 2
+	}
+	gitignore := filepath.Join(root, ".gitignore")
+	if _, err := os.Stat(gitignore); err != nil {
+		if err := os.WriteFile(gitignore, []byte("*\n"), 0o600); err != nil {
+			errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
+			return 2
+		}
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
+		return 2
+	}
+	tmp, err := os.CreateTemp(dir, ".preflight-*")
+	if err != nil {
+		errorMessage(2, "cannot write %s: %v. Set %s to a writable directory, or pass --json to print the full result.", dir, err, outputDirEnv)
+		return 2
+	}
+	name := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(name)
+	return 0
+}
+
+func writeEnvelope(result any, raw []byte) (string, error) {
+	dir := outputDirPath()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	id, err := randomID()
+	if err != nil {
+		return "", err
+	}
+	kind := "object"
+	var items json.RawMessage
+	var meta json.RawMessage
+	var data json.RawMessage
+	var fileMeta map[string]any
+	var binPath string
+	page := map[string]any{}
+	switch typed := result.(type) {
+	case []byte:
+		kind = "file"
+		name := strings.ReplaceAll(commandPath, " ", "-")
+		if name == "" {
+			name = "download"
+		}
+		binPath = filepath.Join(dir, name+"-"+id+".bin")
+		if err := atomicWrite(binPath, typed); err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(typed)
+		fileMeta = map[string]any{
+			"path":        binPath,
+			"bytes":       len(typed),
+			"contentType": lastAnswer.contentType,
+			"sha256":      hex.EncodeToString(sum[:]),
+		}
+	default:
+		if len(raw) == 0 {
+			kind = "empty"
+		} else {
+			list, key, listMeta := listItems(raw)
+			if list != nil {
+				kind = "list"
+				encoded, err := json.Marshal(list)
+				if err != nil {
+					return "", err
+				}
+				items = encoded
+				meta = listMeta
+				page["count"] = len(list)
+				if key != "" {
+					page["itemsKey"] = key
+				}
+			} else {
+				data = append(json.RawMessage(nil), raw...)
+			}
+		}
+	}
+	stem := strings.ReplaceAll(commandPath, " ", "-")
+	if stem == "" {
+		stem = "result"
+	}
+	path := filepath.Join(dir, stem+"-"+id+".json")
+	payload := map[string]any{
+		"schema":  "https://gnr8.dev/schemas/cli-result-v1.json",
+		"version": 1,
+		"tool":    map[string]string{"name": program, "version": active.Version},
+		"command": map[string]any{"path": commandPath},
+		"request": map[string]any{"method": lastAnswer.method, "url": lastAnswer.url},
+		"response": map[string]any{
+			"status":      lastAnswer.status,
+			"requestId":   lastAnswer.requestID,
+			"contentType": lastAnswer.contentType,
+			"bytes":       len(raw),
+		},
+		"kind":    kind,
+		"savedAt": time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(items) > 0 {
+		payload["items"] = items
+	}
+	if len(meta) > 0 && string(meta) != "{}" && string(meta) != "null" {
+		payload["meta"] = meta
+	}
+	if len(data) > 0 {
+		payload["data"] = data
+	}
+	if len(page) > 0 {
+		payload["page"] = page
+	}
+	if fileMeta != nil {
+		payload["file"] = fileMeta
+	}
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	encoded = append(encoded, '\n')
+	if err := atomicWrite(path, encoded); err != nil {
+		return "", err
+	}
+	latest := filepath.Join(dir, "latest.json")
+	_ = atomicWrite(latest, encoded)
+	pruneOutput(dir, path, binPath)
+	return path, nil
+}
+
+func randomID() (string, error) {
+	var raw [3]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func atomicWrite(path string, body []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// pruneOutput keeps the output directory at 100 files and 100 MB, envelopes and downloads
+// alike, deleting the oldest first. latest.json and the files this run just wrote are never
+// deleted, so a single result over the byte cap still survives with the path stdout names.
+func pruneOutput(dir string, keep ...string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	kept := map[string]bool{"latest.json": true}
+	for _, path := range keep {
+		if path != "" {
+			kept[filepath.Base(path)] = true
+		}
+	}
+	type item struct {
+		name string
+		mod  time.Time
+		size int64
+	}
+	var files []item
+	var total int64
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || name == "latest.json" || strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, ".bin") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, item{name: name, mod: info.ModTime(), size: info.Size()})
+		total += info.Size()
+	}
+	sort.SliceStable(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	count := len(files)
+	for _, file := range files {
+		if count <= 100 && total <= 100*1024*1024 {
+			return
+		}
+		if kept[file.name] {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, file.name)) == nil {
+			count--
+			total -= file.size
+		}
+	}
+}
+
+func PrintFieldsHelp(names []string) int {
+	if len(names) == 0 {
+		fmt.Fprintln(os.Stdout, "no declared response fields")
+		return 0
+	}
+	for _, name := range names {
+		fmt.Fprintln(os.Stdout, name)
+	}
+	return 0
+}
+
+func Confirm(severity, resource string) int {
+	if severity == "" || severity == "mild" {
+		return 0
+	}
+	if yesFlag {
+		return 0
+	}
+	if noInput || !stdinIsTTY() || !stderrIsTTY() {
+		errorMessage(2, "%s requires confirmation; pass --yes", commandPath)
+		return 2
+	}
+	if severity == "severe" {
+		fmt.Fprintf(os.Stderr, "Type %s to confirm: ", resource)
+		var answer string
+		if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil || answer != resource {
+			errorMessage(2, "confirmation failed")
+			return 2
+		}
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "Proceed with %s %s? [y/N] ", commandPath, resource)
+	var answer string
+	if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil {
+		errorMessage(2, "confirmation failed")
+		return 2
+	}
+	if answer != "y" && answer != "yes" && answer != "Y" && answer != "YES" {
+		errorMessage(2, "confirmation failed")
+		return 2
+	}
+	return 0
 }

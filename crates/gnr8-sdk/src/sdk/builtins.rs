@@ -1595,6 +1595,22 @@ pub struct DocumentOperation {
     pub request_examples: Vec<MediaExample>,
     pub response_docs: Vec<ResponseDocsPolicy>,
     pub error_responses: Vec<DocumentedJsonErrorResponse>,
+    /// Parameter prose for parameters that have none from their source.
+    ///
+    /// Same rule as operation `summary`/`description`: the binding field's own doc comment for
+    /// source-extracted parameters, the spec's `description` for `OpenApi`-imported ones, or this
+    /// list for a parameter that has neither. A collision is a hard error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameter_docs: Vec<ParameterDoc>,
+}
+
+/// Prose for one request parameter, keyed by the parameter's wire name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ParameterDoc {
+    /// Wire name of the parameter (`branchId`, `cursor`).
+    pub name: String,
+    /// Human prose about the parameter. Prose only: it never states structure.
+    pub description: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1617,6 +1633,7 @@ impl DocumentOperation {
             request_examples: Vec::new(),
             response_docs: Vec::new(),
             error_responses: Vec::new(),
+            parameter_docs: Vec::new(),
         }
     }
 
@@ -1631,6 +1648,19 @@ impl DocumentOperation {
     #[must_use]
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Document one parameter that has no prose from its source.
+    ///
+    /// `name` is the parameter's wire name. A second call for the same name, a name the operation
+    /// does not carry, or a parameter that already has a description is a configuration error.
+    #[must_use]
+    pub fn parameter(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
+        self.parameter_docs.push(ParameterDoc {
+            name: name.into(),
+            description: description.into(),
+        });
         self
     }
 

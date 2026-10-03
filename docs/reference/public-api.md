@@ -113,7 +113,8 @@ See [OpenAPI generation](../openapi/generation.md).
 | `GoSdk` | Go client/model/docs/package/contract-test target; `.cli("bookstore")` emits a `cmd/<program>/` project |
 | `PySdk` | Python client/model/docs/package/contract-test target; `.cli("bookstore")` emits a `cli/` subpackage |
 | `TsSdk` | TypeScript client/model/docs/package/contract-test target |
-| `SdkCli` | generated-CLI program name, command scope, and default host (`PySdk::cli` / `GoSdk::cli`); unrelated to gnr8's own command surface |
+| `SdkCli` | generated-CLI program name, command scope, default host, and Go library seam (`hand_owned_main`, `owned_command`); unrelated to gnr8's own command surface |
+| `OwnedCommand` | one hand-owned root command the generated Go dispatcher names |
 | `SdkFileLayout` | compact/split files, directories, and templates |
 | `OperationFileSplit` | compact/per-tag/per-endpoint operation layout enum |
 | `SdkDocs` | none/reference generated docs policy |

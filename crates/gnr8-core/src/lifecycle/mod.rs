@@ -3714,7 +3714,7 @@ mod tests {
                 let outcome = apply_writes(&root, &plan, &mut manifest, false).unwrap();
 
                 assert_eq!(outcome.written, vec!["client.ts"]);
-                assert!(outcome.skipped.is_empty());
+                assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
                 assert_eq!(std::fs::read(root.join("client.ts")).unwrap(), b"version-c");
                 let _ = std::fs::remove_dir_all(root);
             }
@@ -3742,7 +3742,7 @@ mod tests {
             apply_writes(&root, &super::WritePlan::default(), &mut manifest, false).unwrap();
 
         assert_eq!(outcome.deleted, vec!["client.ts"]);
-        assert!(outcome.skipped.is_empty());
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
         assert!(!root.join("client.ts").exists());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3775,7 +3775,7 @@ mod tests {
         let outcome = apply_writes(&root, &plan, &mut manifest, false).unwrap();
 
         assert_eq!(outcome.written, vec!["a.ts", "b.ts"]);
-        assert!(outcome.skipped.is_empty());
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
         assert_eq!(std::fs::read(root.join("a.ts")).unwrap(), b"version-c");
         assert_eq!(std::fs::read(root.join("b.ts")).unwrap(), b"version-c");
         let _ = std::fs::remove_dir_all(root);
@@ -4012,7 +4012,7 @@ mod tests {
 
         assert_eq!(std::fs::read(output).unwrap(), b"user");
         assert_eq!(outcome.skipped, vec!["sdk/client.go"]);
-        assert!(outcome.written.is_empty());
+        assert!(outcome.written.is_empty(), "{:?}", outcome.written);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4041,7 +4041,7 @@ mod tests {
 
         assert_eq!(std::fs::read(output).unwrap(), b"user");
         assert_eq!(outcome.skipped, vec!["old.go"]);
-        assert!(outcome.deleted.is_empty());
+        assert!(outcome.deleted.is_empty(), "{:?}", outcome.deleted);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4222,7 +4222,7 @@ mod tests {
                 .unwrap();
 
         assert!(root.join("sdk/nested/old.go").exists());
-        assert!(outcome.deleted.is_empty());
+        assert!(outcome.deleted.is_empty(), "{:?}", outcome.deleted);
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -258,7 +258,13 @@ pub(crate) fn generate_cli(
     formatter: &mut gofmt::Formatter,
 ) -> Result<Vec<SdkFile>, crate::CoreError> {
     let raw = cli::emit_cli(graph, module, package, cli)?;
-    formatter.format(raw)
+    let mut files = formatter.format(raw)?;
+    files.push(SdkFile {
+        name: format!("cmd/{}/{}-cli-result-v1.json", cli.program, cli.program),
+        contents: crate::sdk::emit_common::cli_envelope_schema(&cli.program)?,
+    });
+    files.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(files)
 }
 
 fn raw_go_file(name: impl Into<String>, raw: impl Into<String>) -> SdkFile {

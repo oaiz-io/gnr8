@@ -2,18 +2,111 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 
 	"example.com/bookstore/sdk"
 )
 
+func exitCodeForStatus(status int) int {
+	switch status {
+	case 404, 410:
+		return 3
+	case 401, 403:
+		return 4
+	case 400, 409, 412, 422:
+		return 5
+	case 408, 429, 502, 503, 504:
+		return 6
+	default:
+		return 1
+	}
+}
+
+func kindForExit(code int) string {
+	switch code {
+	case 2:
+		return "usage"
+	case 3:
+		return "not_found"
+	case 4:
+		return "auth"
+	case 5:
+		return "refused"
+	case 6:
+		return "retry"
+	default:
+		return "error"
+	}
+}
+
+type jsonError struct {
+	Error jsonErrorBody `json:"error"`
+}
+type jsonErrorBody struct {
+	ExitCode  int      `json:"exitCode"`
+	Kind      string   `json:"kind"`
+	Status    int      `json:"status,omitempty"`
+	Slug      string   `json:"slug,omitempty"`
+	Message   string   `json:"message"`
+	Hints     []string `json:"hints,omitempty"`
+	RequestID string   `json:"requestId,omitempty"`
+}
+
+func printError(slug, message string, hints []string, requestID string, status, code int) int {
+	if outputFormat == "json" || outputFormat == "jsonl" {
+		payload := jsonError{
+			Error: jsonErrorBody{
+				ExitCode:  code,
+				Kind:      kindForExit(code),
+				Status:    status,
+				Slug:      slug,
+				Message:   message,
+				Hints:     hints,
+				RequestID: requestID,
+			},
+		}
+		line, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s\n", message)
+			return code
+		}
+		fmt.Fprintf(os.Stderr, "%s\n", line)
+		return code
+	}
+	escapeLine := strings.NewReplacer("\r", "\\r", "\n", "\\n", "\t", "\\t")
+	limit := 6
+	if requestID != "" {
+		limit--
+	}
+	fmt.Fprintf(os.Stderr, "%s %s\n", colorize("31", "error:"), escapeLine.Replace(message))
+	n := 1
+	for _, hint := range hints {
+		if n >= limit {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "  hint: %s\n", escapeLine.Replace(hint))
+		n++
+	}
+	if requestID != "" && n < 6 {
+		fmt.Fprintf(os.Stderr, "  request id: %s\n", escapeLine.Replace(requestID))
+	}
+	return code
+}
+
+func machineOutput() bool { return outputFormat == "json" || outputFormat == "jsonl" }
+func errorMessage(code int, format string, args ...any) {
+	printError("", fmt.Sprintf(format, args...), nil, "", 0, code)
+}
 func handleErr(err error) int {
 	var helper *helperError
 	if errors.As(err, &helper) {
-		fmt.Fprintf(os.Stderr, "%s: credential helper failed (%s)\n", program, helper.reason)
-		return 1
+		return printError("", fmt.Sprintf("credential helper failed (%s)", helper.reason), nil, "", 0, 1)
 	}
 	var authErr *sdk.AuthConfigurationError
 	if errors.As(err, &authErr) {
@@ -21,7 +114,16 @@ func handleErr(err error) int {
 		if command == "" {
 			command = authErr.OperationID
 		}
-		fmt.Fprintf(os.Stderr, "%s: no credentials configured for `%s`\n", program, command)
+		if machineOutput() {
+			var hints []string
+			for _, alternative := range alternativesByID[authErr.OperationID] {
+				for _, id := range alternative {
+					hints = append(hints, "set "+credentialEnv[id])
+				}
+			}
+			return printError("", fmt.Sprintf("no credentials configured for `%s`", command), hints, "", 0, 4)
+		}
+		fmt.Fprintf(os.Stderr, "error: no credentials configured for `%s`\n", command)
 		fmt.Fprintln(os.Stderr, "  set one of:")
 		seen := map[string]bool{}
 		for _, alternative := range alternativesByID[authErr.OperationID] {
@@ -35,18 +137,27 @@ func handleErr(err error) int {
 			}
 		}
 		fmt.Fprintf(os.Stderr, "  or set %s to a command that prints the secret\n", helperEnv)
-		return 1
+		return 4
 	}
 	var input *inputError
 	if errors.As(err, &input) {
-		fmt.Fprintf(os.Stderr, "%s: %s\n", program, input.reason)
-		return 2
+		return printError("", input.reason, nil, "", 0, 2)
 	}
 	var apiErr *sdk.APIError
 	if errors.As(err, &apiErr) {
-		fmt.Fprintf(os.Stderr, "%s: %d %s (%s)\n", program, apiErr.StatusCode, apiErr.Message, apiErr.Slug)
-		return 1
+		code := exitCodeForStatus(apiErr.StatusCode)
+		message := fmt.Sprintf("%s (%d %s)", apiErr.Message, apiErr.StatusCode, apiErr.Slug)
+		if apiErr.Message == "" && apiErr.Slug == "" {
+			message = fmt.Sprintf("the API returned %d with a non-JSON body", apiErr.StatusCode)
+			if code == 6 {
+				message += "; retry later"
+			}
+		}
+		return printError(apiErr.Slug, message, apiErr.Hints, apiErr.RequestID, apiErr.StatusCode, code)
 	}
-	fmt.Fprintf(os.Stderr, "%s: %v\n", program, err)
-	return 1
+	var transport *url.Error
+	if errors.As(err, &transport) || errors.Is(err, context.DeadlineExceeded) {
+		return printError("", err.Error(), nil, "", 0, 6)
+	}
+	return printError("", err.Error(), nil, "", 0, 1)
 }

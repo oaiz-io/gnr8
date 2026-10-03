@@ -132,6 +132,8 @@ type Analyzer struct {
 	modulePrefix  string
 	ginVersion    string
 	collisions    []handlerCollision
+	// fieldDocs maps a struct field name's position to that field's own doc comment.
+	fieldDocs map[token.Pos]string
 }
 
 type handlerCollision struct {
@@ -296,7 +298,54 @@ func NewAnalyzer(res *load.Result, module string, diags *diag.Accumulator) *Anal
 		modulePrefix:  module,
 		ginVersion:    loadedPackageModuleVersion(res, routes.GinPkgPath),
 		collisions:    collisions,
+		fieldDocs:     buildFieldDocIndex(res),
 	}
+}
+
+// buildFieldDocIndex records every struct field's own doc comment by the position of
+// each name it declares, which is the position go/types reports for that field.
+//
+// The text is kept opaque: it is prose about the field, read the way `go doc` reads it
+// (AGENTS.md rule 0.1 category 2), and nothing here looks inside it.
+func buildFieldDocIndex(res *load.Result) map[token.Pos]string {
+	out := map[token.Pos]string{}
+	if res == nil {
+		return out
+	}
+	for _, pkg := range res.Packages {
+		for _, file := range pkg.Syntax {
+			ast.Inspect(file, func(node ast.Node) bool {
+				structure, ok := node.(*ast.StructType)
+				if !ok || structure.Fields == nil {
+					return true
+				}
+				for _, field := range structure.Fields.List {
+					if field.Doc == nil {
+						continue
+					}
+					text := strings.TrimSpace(field.Doc.Text())
+					if text == "" {
+						continue
+					}
+					for _, name := range field.Names {
+						out[name.Pos()] = text
+					}
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// fieldDescription is a bound field's doc comment as parameter prose, with Go's
+// leading "FieldName " convention removed the way handler prose removes it.
+func (a *Analyzer) fieldDescription(field *gotypes.Var) string {
+	text, ok := a.fieldDocs[field.Pos()]
+	if !ok {
+		return ""
+	}
+	return docs.StripSymbolName(text, field.Name())
 }
 
 // loadedPackageModuleVersion returns the one selected module version that owns a
@@ -7818,6 +7867,9 @@ func (a *Analyzer) parametersFromBoundType(
 			} else {
 				param.Default = literalForParameter(defaultText, schema)
 			}
+		}
+		if location != "form" {
+			param.Description = a.fieldDescription(field)
 		}
 		if reason := applyParameterSerialization(&param, tag, options); reason != "" && diags != nil {
 			diags.RequestParameterUnresolved(

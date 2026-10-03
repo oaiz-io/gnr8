@@ -7,6 +7,17 @@ import (
 	"example.com/bookstore/sdk/cmd/bookstore/internal/cli"
 )
 
+// Stamp these with -ldflags -X.
+var (
+	version = "0.1.0"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
-	os.Exit(cli.Run(os.Args[1:]))
+	os.Exit(cli.Run(os.Args[1:], cli.Options{
+		Version: version,
+		Commit:  commit,
+		Date:    date,
+	}))
 }

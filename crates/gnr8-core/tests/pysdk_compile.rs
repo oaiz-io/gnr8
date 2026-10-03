@@ -2014,6 +2014,7 @@ def main():
         sys.stdout = buf
         code = cli.main(
             [
+                "--json",
                 "get-book",
                 "--book-id",
                 "1",
@@ -2095,11 +2096,11 @@ def run(argv):
 
 # Port 1 is bound by nothing: urllib raises URLError, which is an OSError.
 code, stderr = run(["get-book", "--book-id", "1", "--base-url", "http://127.0.0.1:1"])
-assert code == 1, (code, stderr)
+assert code == 6, (code, stderr)
 assert "Traceback" not in stderr, stderr
 lines = [line for line in stderr.splitlines() if line.strip()]
 assert len(lines) == 1, stderr
-assert lines[0].startswith("bookstore: "), stderr
+assert lines[0].startswith("error: "), stderr
 
 code, stderr = run(["create-book", "--body", "{oops", "--base-url", "http://127.0.0.1:1"])
 assert code == 2, (code, stderr)
@@ -2173,7 +2174,7 @@ fn generated_cli_dispatches_get_book_against_stdlib_http_server() {
     let result = run_python(&[driver_str], &dir);
     assert!(
         result.is_ok(),
-        "cli.main([get-book, --book-id, 1]) must round-trip JSON: {result:?}"
+        "cli.main([--json, get-book, --book-id, 1]) must round-trip JSON: {result:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -2221,6 +2222,394 @@ fn generated_cli_helper_failure_is_exit_1_without_traceback() {
         result.is_ok(),
         "BOOKSTORE_CREDENTIAL_HELPER=/bin/false must be exit 1, one stderr line, no Traceback: {result:?}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same shapes the Go spec test reaches: a cursor-paginated list, a lookup by positional id,
+/// and a resource that holds an array without being a list.
+fn cli_spec_graph() -> gnr8_engine::graph::ApiGraph {
+    let provenance = serde_json::json!({ "file": "app.py", "start_line": 1, "end_line": 1 });
+    let string = serde_json::json!({ "type": "primitive", "of": { "prim": "string" } });
+    let field = |name: &str, schema: serde_json::Value| {
+        serde_json::json!({
+            "json_name": name,
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": true,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": schema,
+            "description": null,
+            "example": null
+        })
+    };
+    let graph = serde_json::json!({
+        "module": "app",
+        "operations": [
+            {
+                "id": "listBooks", "method": "GET", "path": "/books", "handler": "listBooks",
+                "params": [{
+                    "name": "cursor", "location": "query", "required": false, "schema": string,
+                    "provenance": provenance
+                }, {"name": "page_size", "location": "query", "required": false,
+                    "schema": {"type": "primitive", "of": {"prim":"int", "bits":64, "signed":true}}, "provenance": provenance}],
+                "request_body": null, "request_body_required": false,
+                "responses": [{ "status": 200, "body": { "ref_id": "BookPage" } }],
+                "provenance": provenance
+            },
+            {
+                "id": "getBook", "method": "GET", "path": "/books/{id}", "handler": "getBook",
+                "params": [{
+                    "name": "id", "location": "path", "required": true, "schema": string,
+                    "provenance": provenance
+                }],
+                "request_body": null, "request_body_required": false,
+                "responses": [{ "status": 200, "body": { "ref_id": "Book" } }],
+                "provenance": provenance
+            }
+        ],
+        "schemas": [
+            {
+                "id": "Book", "name": "Book",
+                "body": { "type": "object", "of": [
+                    field("author", string.clone()),
+                    field("id", string.clone()),
+                    field("tags", serde_json::json!({ "type": "array", "of": string })),
+                    field("title", string.clone())
+                ]},
+                "provenance": provenance
+            },
+            {
+                "id": "BookPage", "name": "BookPage",
+                "body": { "type": "object", "of": [
+                    field("books", serde_json::json!({
+                        "type": "array", "of": { "type": "named", "of": "Book" }
+                    })),
+                    field("next_cursor", string.clone())
+                ]},
+                "provenance": provenance
+            }
+        ],
+        "pagination": [{
+            "operation_id": "listBooks", "mode": "cursor", "items_field": "books",
+            "cursor_param": "cursor", "next_cursor_field": "next_cursor",
+            "termination": "no_next_cursor", "page_size_param":"page_size"
+        }],
+        "diagnostics": [],
+        "base_path": "/",
+        "title": "Bookstore API",
+        "security": []
+    });
+    serde_json::from_value(graph).expect("cli spec graph")
+}
+
+/// The spec CLI driver: a stdlib `http.server` answering from a queue and counting requests, and
+/// in-process `cli.main([...])` calls checking each exit-code and output rule.
+const CLI_SPEC_DRIVER: &str = r#"import io
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+from contextlib import redirect_stderr, redirect_stdout
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+from bookstore import cli
+from bookstore.cli import output
+
+ANSWERS = []
+SEEN = []
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        SEEN.append(self.path)
+        status, body = ANSWERS.pop(0)
+        data = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+server = HTTPServer(("127.0.0.1", 0), _Handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+BASE = f"http://127.0.0.1:{server.server_port}"
+os.environ["BOOKSTORE_OUTPUT_DIR"] = tempfile.mkdtemp()
+BOOK = json.dumps({"id": "b1", "title": "Dune", "author": "Herbert", "tags": ["a", "b"]})
+
+
+def run(args, answer=None):
+    if answer is not None:
+        ANSWERS.append(answer)
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        try:
+            code = cli.main(args)
+        except SystemExit as exc:
+            code = exc.code
+    return code, out.getvalue(), err.getvalue()
+
+
+def check(ok, message):
+    if not ok:
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+
+code, _out, err = run(["books", "list-books", "--base-url", BASE])
+check(code == 2 and "is now bookstore books list" in err, f"rename: {code} {err!r}")
+check(not SEEN, f"a rename error must not send a request: {SEEN}")
+
+code, _out, err = run(["books", "get", "b1", "--json", "--base-url", BASE], (200, "{not json"))
+check(code == 1, f"an undecodable success must exit 1, not retry-later: {code} {err!r}")
+
+for args in [["--json", "typo"], ["books", "get", "--json"], ["books", "get", "b1", "--unknown", "--json"]]:
+    code, out, err = run(args)
+    check(code == 2 and not out and json.loads(err)["error"]["exitCode"] == 2, f"usage is not structured: {code} {out} {err}")
+
+missing = json.dumps({"message": "no such book", "slug": "book-not-found"})
+code, _out, err = run(["books", "get", "b1", "--json", "--base-url", BASE], (404, missing))
+check(code == 3 and '"slug":"book-not-found"' in err, f"--json error slug: {code} {err!r}")
+
+args = ["books", "get", "b1", "-o", "/nonexistent-dir/x.json", "--base-url", BASE]
+code, _out, err = run(args, (200, BOOK))
+check(code == 1, f"a failed local write after success must exit 1: {code} {err!r}")
+
+run(["books", "get", "b1", "--yes", "-q", "--json", "--base-url", BASE], (200, BOOK))
+run(["books", "get", "b1", "--json", "--base-url", BASE], (200, BOOK))
+check(not output.YES and not output.QUIET, "a second main() inherited --yes/-q")
+
+title = "A long enough title to fill the budget quickly, number"
+books = [{"id": f"b{i}", "title": f"{title} {i}", "author": "A", "tags": []} for i in range(60)]
+page = json.dumps({"books": books, "next_cursor": "c2"})
+args = ["books", "list", "--format", "ai-friendly", "--base-url", BASE]
+code, out, err = run(args, (200, page))
+check(code == 0, f"ai-friendly list: {code} {err!r}")
+check(len(out.encode("utf-8")) <= 4000, f"over budget: {len(out)}\n{out}")
+check("Showing " in out, out)
+check("Next page: bookstore books list --cursor c2" in out, out)
+check("jq '.items[]'" in out, out)
+check('{"title":"A long' in out, f"rows must follow the view's order:\n{out}")
+
+args = ["books", "get", "b1", "--format", "jsonl", "--base-url", BASE]
+code, out, err = run(args, (200, BOOK))
+check(code == 0 and len(out.splitlines()) == 1, f"an object is one jsonl line: {out!r}")
+
+code, out, err = run(["books", "list", "--archived", "--switch-flag", "user-value", "--json", "--base-url", BASE], (200, json.dumps({"books": [], "next_cursor": ""})))
+check(code == 0 and SEEN[-1].startswith("/archived-books"), f"switch did not call alternate: {SEEN} {err}")
+check("switch_flag=user-value" in SEEN[-1], f"switch lost query binding: {SEEN[-1]}")
+code, out, err = run(["books", "list", "--switch-flag", "user-value", "--json", "--base-url", BASE], (200, json.dumps({"books": [], "next_cursor": ""})))
+check(code == 0 and SEEN[-1].startswith("/books?"), f"query parameter triggered switch: {SEEN} {err}")
+check("switch_flag=user-value" in SEEN[-1], f"query binding lost: {SEEN[-1]}")
+
+code, out, err = run(["--json", "help"])
+check(code == 0 and json.loads(out)["commands"], f"leading global flag failed: {code} {err}")
+code, out, err = run(["--json", "books", "list-books"])
+check(code == 2 and json.loads(err)["error"]["exitCode"] == 2, "rename error is not structured")
+
+start = len(SEEN)
+code, out, err = run(["books", "list", "--limit", "0", "--json", "--base-url", BASE])
+check(code == 2 and len(SEEN) == start, f"invalid limit sent a request: {code} {err}")
+
+page1 = json.dumps({"books":[{"id":"1", "title":"one"}, {"id":"2", "title":"two"}], "next_cursor":"2", "total":4})
+page2 = json.dumps({"books":[{"id":"3", "title":"three"}], "next_cursor":"3", "total":4})
+ANSWERS.extend([(200, page1), (200, page2)])
+code, out, err = run(["books", "list", "--archived", "--limit", "3", "--json", "--base-url", BASE])
+merged = json.loads(out)
+check(code == 0 and len(merged["books"]) == 3 and merged["next_cursor"] == "3" and merged["total"] == 4 and merged["hasMore"], f"merged pagination: {code} {out} {err}")
+check("page_size=3" in SEEN[-2] and "page_size=1" in SEEN[-1] and "cursor=2" in SEEN[-1], f"remaining size not used: {SEEN[-2:]}")
+check(all(path.startswith("/archived-books") for path in SEEN[-2:]), "switch pagination used primary")
+
+terminal = json.dumps({"books":[{"id":"1","title":"one"}], "next_cursor":"", "total":1})
+code, out, err = run(["books", "list", "--limit", "1", "--json", "--base-url", BASE], (200, terminal))
+check(code == 0 and not json.loads(out)["hasMore"], f"terminal limit invented more items: {out} {err}")
+code, out, err = run(["books", "list", "--limit", "1", "--json", "--base-url", BASE], (200, page1))
+check(code == 0 and "next_cursor" not in json.loads(out), f"partial-page cursor skips omitted items: {out} {err}")
+
+large_integer = json.dumps({"books":[{"id":9007199254740993,"title":"omit"}],"next_cursor":"c2"})
+output.LAST_ANSWER["body"] = large_integer.encode()
+output.ITEMS_KEY = "books"
+output.FIELDS = "id"
+stream = io.StringIO()
+with redirect_stdout(stream):
+    output.print_json({})
+projected = json.loads(stream.getvalue())
+check(projected == {"books":[{"id":9007199254740993}],"next_cursor":"c2"}, f"projection changed page: {projected}")
+
+output.OUTPUT_FORMAT = "human"
+stream = io.StringIO()
+with redirect_stderr(stream):
+    code = output.print_error("first\nsecond", ["a\nmore", "b", "c", "d", "e"], "request-123", 422, 5)
+lines = stream.getvalue().splitlines()
+check(code == 5 and len(lines) <= 6 and lines[-1].endswith("request-123"), f"error dropped request id or exceeded six lines: {stream.getvalue()}")
+output.OUTPUT_FORMAT = "json"
+stream = io.StringIO()
+with redirect_stderr(stream):
+    output.print_error("first\nsecond", ["a\nmore", "b", "c", "d", "e"], "request-123", 422, 5)
+payload = json.loads(stream.getvalue())["error"]
+check(payload["message"] == "first\nsecond" and len(payload["hints"]) == 5 and payload["requestId"] == "request-123", "machine error lost full details")
+
+# Separate runs preserve their envelopes even when the response is unchanged.
+args = ["books", "get", "b1", "--format", "ai-friendly", "--base-url", BASE]
+code, out, err = run(args, (200, BOOK))
+check(code == 0, err)
+first = set(Path(os.environ["BOOKSTORE_OUTPUT_DIR"]).glob("books-get-*.json"))
+code, out, err = run(args, (200, BOOK))
+second = set(Path(os.environ["BOOKSTORE_OUTPUT_DIR"]).glob("books-get-*.json"))
+check(code == 0 and len(second - first) == 1, "identical response overwrote its envelope")
+
+large = json.dumps({"id":"b1", "title":"界" * 5000, "author":"A", "tags":[]})
+code, out, err = run([*args, "--fields", "title"], (200, large))
+check(code == 0 and len(out.encode("utf-8")) <= 4000, "one oversized row broke the byte budget")
+check("jq" in out, "oversized row displaced the recipes")
+
+long_cursor = json.dumps({"books": [], "next_cursor": "c" * 5000})
+code, out, err = run(["books", "list", "--format", "ai-friendly", "--base-url", BASE], (200, long_cursor))
+check(code == 0 and len(out.encode()) <= 4000 and "getpath" in out, "long cursor broke preview budget")
+
+folder = Path(tempfile.mkdtemp())
+target = folder / "directory"
+target.mkdir()
+try:
+    output._atomic_write(target, b"secret")
+    check(False, "rename onto directory succeeded")
+except OSError:
+    pass
+check(not list(folder.glob(".tmp-*")), "failed rename leaked a temporary file")
+
+for value in ["a;b", "a|b", "a&b", "a>b", "a<b", "a*b", "a?b", "a(b)", "a'b", "$(echo wrong)", ""]:
+    import subprocess
+    result = subprocess.run("printf '%s' " + output._shell_quote(value), shell=True, capture_output=True)
+    check(result.returncode == 0 and result.stdout.decode() == value, f"unsafe shell quoting: {value!r}")
+
+binary = bytes([0, 255, 66])
+output.LAST_ANSWER["body"] = binary
+value, raw = output.decode_result(binary)
+path, error = output.write_envelope(binary, value, raw)
+envelope = json.loads(Path(path).read_text())
+check(envelope["kind"] == "file" and Path(envelope["file"]["path"]).read_bytes() == binary, "binary envelope lost the download")
+
+real_print = output.print_result
+
+
+def interrupted(result):
+    raise KeyboardInterrupt
+
+
+output.print_result = interrupted
+code, _out, err = run(["books", "get", "b1", "--json", "--base-url", BASE], (200, BOOK))
+output.print_result = real_print
+check(code == 130 and "Traceback" not in err, f"Ctrl-C must exit 130: {code} {err!r}")
+
+
+def aged(path, size, age):
+    with open(path, "wb") as handle:
+        handle.truncate(size)
+    when = time.time() - age
+    os.utime(path, (when, when))
+
+
+folder = Path(tempfile.mkdtemp())
+for i in range(100):
+    aged(folder / f"books-list-{i:03d}.json", 1, 20000 - i * 60)
+output._prune_output(folder)
+check(len(list(folder.iterdir())) == 100, "100 files is the cap, not over it")
+download = folder / "books-get-abc.bin"
+aged(download, 1, 0)
+output._prune_output(folder, (download,))
+check(len(list(folder.iterdir())) == 100, "a download counts: 101 must prune to 100")
+check(not (folder / "books-list-000.json").exists(), "the oldest file must go first")
+check(download.exists(), "the file just written must survive")
+
+folder = Path(tempfile.mkdtemp())
+aged(folder / "old.json", 10, 3600)
+big = folder / "big.json"
+aged(big, 101 * 1024 * 1024, 0)
+output._prune_output(folder, (big,))
+check(big.exists(), "an envelope over the byte cap must not prune itself")
+check(not (folder / "old.json").exists(), "older files go while over the byte cap")
+output.write_envelope(None, None, b"")
+from envelope_schema import validate_saved
+validate_saved(Path(output.__file__).with_name("bookstore-cli-result-v1.json"), os.environ["BOOKSTORE_OUTPUT_DIR"])
+
+print("ok")
+"#;
+
+/// A Python CLI built from a declared command spec keeps the documented output contract: rename
+/// errors send nothing, only a failed connection is "retry later", `--json` errors carry the slug,
+/// `main` is reentrant, a full ai-friendly page keeps its tail, Ctrl-C is 130, and retention
+/// prunes envelopes and downloads at the boundary without deleting the file just written.
+#[test]
+fn generated_cli_python_command_spec_keeps_the_output_contract() {
+    use gnr8_engine::sdk::prelude::*;
+    use gnr8_engine::sdk::{Artifacts, Cx, TargetExec};
+
+    if !python_available() {
+        eprintln!("skipping pysdk_compile CLI spec: python3 toolchain unavailable");
+        return;
+    }
+    let cli = SdkCli::new("bookstore")
+        .topic(
+            CliTopic::new("books")
+                .concept("Browse and manage the catalogue")
+                .command(
+                    CliCommand::operation("listBooks", "list")
+                        .switch_flag("archived", "listArchivedBooks")
+                        .example("bookstore books list"),
+                )
+                .command(
+                    CliCommand::operation("getBook", "get")
+                        .positional("id")
+                        .example("bookstore books get 1"),
+                ),
+        )
+        .rename_error(CliRenameError::new(["books", "list-books"], "books list"))
+        .view(CliView::schema("Book").preview(["title", "id"]));
+    let dir = unique_temp_dir("cli-spec");
+    let mut out = Artifacts::new();
+    let mut graph = cli_spec_graph();
+    let mut switch_parameter = graph.operations[0].params[0].clone();
+    switch_parameter.name = "switch_flag".to_string();
+    graph.operations[0].params.push(switch_parameter);
+    let mut alternate = graph.operations[0].clone();
+    alternate.id = "listArchivedBooks".to_string();
+    alternate.path = "/archived-books".to_string();
+    graph.operations.push(alternate);
+    let mut policy = graph.pagination[0].clone();
+    policy.operation_id = "listArchivedBooks".to_string();
+    graph.pagination.push(policy);
+    PySdk::new()
+        .module(format!("example.com/{PACKAGE}"))
+        .to(PACKAGE)
+        .cli(cli)
+        .generate(&graph, &mut out, &Cx::new(&dir), None)
+        .expect("PySdk with a spec CLI must generate");
+    for file in out.files() {
+        let path = dir.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &file.text).expect("write artifact");
+    }
+    write_pydantic_stub(&dir);
+    let driver = dir.join("cli_spec_driver.py");
+    std::fs::write(&driver, CLI_SPEC_DRIVER).expect("write CLI spec driver");
+    std::fs::write(
+        dir.join("envelope_schema.py"),
+        include_str!("support/envelope_schema.py"),
+    )
+    .expect("write schema validator");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    assert!(result.is_ok(), "the spec CLI output contract: {result:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

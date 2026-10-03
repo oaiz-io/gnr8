@@ -18,6 +18,7 @@
 //!   inputs            → FastApi::new().inputs(["."])     (the static `app/` package; never executed)
 //!   route prefix      → extracted from APIRouter(prefix="/books")
 //!   title             → SetTitle::new("Bookstore API")
+//!   pagination        → ConfigurePagination::cursor(list_books, cursor, next_cursor, books)
 //!   output.openapi    → OpenApi31::new().to("generated/openapi.yaml")
 //!   output.sdk + module → PySdk::new().module("example.com/bookstore/sdk").to("generated/sdk")
 //!                              .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8000"))
@@ -33,13 +34,56 @@ fn main() -> std::process::ExitCode {
         Pipeline::new()
             .source(FastApi::new().inputs(["."]))
             .transform(SetTitle::new("Bookstore API"))
+            .transform(ConfigurePagination::cursor(
+                OperationSelector::operation("list_books"),
+                "cursor",
+                "next_cursor",
+                "books",
+            ))
             .target(OpenApi31::new().to("generated/openapi.yaml"))
             .target(
                 PySdk::new()
                     .module("example.com/bookstore/sdk")
                     .to("generated/sdk")
-                    .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8000")),
+                    .cli(bookstore_cli()),
             )
             .post(Header::generated()),
     )
+}
+
+fn bookstore_cli() -> SdkCli {
+    SdkCli::new("bookstore")
+        .base_url("http://127.0.0.1:8000")
+        .topic(
+            CliTopic::new("books")
+                .concept("Browse and manage the catalogue")
+                .command(
+                    CliCommand::operation("list_books", "list")
+                        .example("bookstore books list --genre fiction")
+                        .see_also(["books get"])
+                        .docs_url("https://example.com/cli/books/list"),
+                )
+                .command(
+                    CliCommand::operation("get_book", "get")
+                        .positional("book_id")
+                        .selector(CliSelector::new("list_books", "id", "id"))
+                        .example("bookstore books get 1"),
+                )
+                .command(
+                    CliCommand::operation("create_book", "create")
+                        .example("bookstore books create --body '{\"title\":\"Dune\"}'"),
+                )
+                .command(
+                    CliCommand::operation("update_book", "update")
+                        .positional("book_id")
+                        .body_fields()
+                        .example("bookstore books update 1 --title Dune"),
+                ),
+        )
+        .rename_error(CliRenameError::new(["books", "list-books"], "books list"))
+        .view(
+            CliView::schema("Book")
+                .preview(["id", "title", "author"])
+                .table(["id", "title", "author"]),
+        )
 }

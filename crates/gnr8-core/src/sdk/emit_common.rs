@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use gnr8::facts::LiteralValue;
 use gnr8::sdk::SdkCli;
 
 use crate::graph::{ApiGraph, Operation, Param, Prim, Schema, Type};
@@ -123,6 +124,470 @@ pub(crate) fn command_group(op: &Operation) -> Option<String> {
     op.group.as_deref().map(kebab)
 }
 
+/// The verb a generated command is invoked as: the spec's verb, otherwise [`command_name`].
+pub(crate) fn command_verb(cli: &SdkCli, op: &Operation) -> String {
+    cli.spec_command(&op.id)
+        .map_or_else(|| command_name(op), |command| command.verb.clone())
+}
+
+/// The topic a generated command sits under: the spec's topic, otherwise [`command_group`].
+pub(crate) fn command_topic(cli: &SdkCli, op: &Operation) -> Option<String> {
+    cli.spec_topic(&op.id)
+        .map(|topic| topic.name.clone())
+        .or_else(|| command_group(op))
+}
+
+/// The optional sub-noun between topic and verb.
+pub(crate) fn command_sub_noun(cli: &SdkCli, op: &Operation) -> Option<String> {
+    cli.spec_command(&op.id)
+        .and_then(|command| command.sub_noun.clone())
+}
+
+/// The invocation path printed in usage: `topic [sub-noun] verb`.
+pub(crate) fn command_invocation(cli: &SdkCli, op: &Operation) -> String {
+    let verb = command_verb(cli, op);
+    match (command_topic(cli, op), command_sub_noun(cli, op)) {
+        (Some(topic), Some(sub)) => format!("{topic} {sub} {verb}"),
+        (Some(topic), None) => format!("{topic} {verb}"),
+        (None, Some(sub)) => format!("{sub} {verb}"),
+        (None, None) => verb,
+    }
+}
+
+/// Graph parameter names this command takes positionally, in order.
+pub(crate) fn positional_names<'a>(cli: &'a SdkCli, op: &Operation) -> &'a [String] {
+    cli.spec_command(&op.id)
+        .map_or(&[] as &[String], |command| command.positionals.as_slice())
+}
+
+/// Whether `param` is taken as a positional identifier rather than a flag.
+pub(crate) fn is_positional_param(cli: &SdkCli, op: &Operation, param: &str) -> bool {
+    positional_names(cli, op).iter().any(|name| name == param)
+}
+
+/// Usage tokens for positionals: `<id>`.
+pub(crate) fn positional_usage(cli: &SdkCli, op: &Operation) -> String {
+    let tokens: Vec<String> = positional_names(cli, op)
+        .iter()
+        .map(|name| format!("<{name}>"))
+        .collect();
+    tokens.join(" ")
+}
+
+/// Scalar request-body fields that become flags when the spec asks for them.
+#[derive(Debug, Clone)]
+pub(crate) struct BodyFieldFlag {
+    /// JSON object key overlaid onto `--body`.
+    pub json_name: String,
+    /// Flag spelling (kebab-case of the JSON name).
+    pub flag: String,
+    /// Field schema, for flag kind.
+    pub schema: Type,
+    /// Field prose, when the schema states it.
+    pub description: Option<String>,
+}
+
+/// Body-field flags for `op`, or empty when the spec does not ask for them.
+pub(crate) fn body_field_flags(
+    cli: &SdkCli,
+    op: &Operation,
+    graph: &ApiGraph,
+) -> Result<Vec<BodyFieldFlag>, CoreError> {
+    let Some(command) = cli.spec_command(&op.id) else {
+        return Ok(Vec::new());
+    };
+    if !command.body_fields {
+        return Ok(Vec::new());
+    }
+    let bodies = request_body_models_of(op, graph)?;
+    let Some(body) = bodies.first() else {
+        return Err(CoreError::SdkGen {
+            message: format!(
+                "CLI {:?} command '{}' sets body_fields but operation '{}' has no request body",
+                cli.program, command.verb, op.id
+            ),
+        });
+    };
+    scalar_object_fields(graph, &Type::Named(body.schema_id.clone()), 0)
+}
+
+fn scalar_object_fields(
+    graph: &ApiGraph,
+    ty: &Type,
+    depth: usize,
+) -> Result<Vec<BodyFieldFlag>, CoreError> {
+    if depth > 8 {
+        return Ok(Vec::new());
+    }
+    match ty {
+        Type::Named(id) => {
+            let Some(schema) = graph.schemas.iter().find(|schema| &schema.id == id) else {
+                return Ok(Vec::new());
+            };
+            scalar_object_fields(graph, &schema.body, depth + 1)
+        }
+        Type::Object(fields) => {
+            let mut out = Vec::new();
+            for field in fields {
+                if !is_scalar_flag_schema(graph, &field.schema, 0) {
+                    continue;
+                }
+                out.push(BodyFieldFlag {
+                    json_name: field.json_name.clone(),
+                    flag: kebab(&field.json_name),
+                    schema: field.schema.clone(),
+                    description: field.description.clone(),
+                });
+            }
+            Ok(out)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn is_scalar_flag_schema(graph: &ApiGraph, ty: &Type, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match ty {
+        Type::Primitive(_) | Type::WellKnown(_) | Type::Enum(_) => true,
+        Type::Named(id) => graph
+            .schemas
+            .iter()
+            .find(|schema| &schema.id == id)
+            .is_some_and(|schema| is_scalar_flag_schema(graph, &schema.body, depth + 1)),
+        Type::Array(inner) => is_scalar_flag_schema(graph, inner, depth + 1),
+        Type::Object(_) | Type::Map { .. } | Type::Union(_) | Type::Any {} => false,
+    }
+}
+
+/// View declared for this operation's success body, if any.
+pub(crate) fn command_view<'a>(
+    cli: &'a SdkCli,
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Option<&'a gnr8::sdk::CliView> {
+    let name = row_schema_name(graph, op)?;
+    cli.views.iter().find(|view| view.schema == name)
+}
+
+/// The name of the schema one printed row of this command is: the item schema of a list or page,
+/// otherwise the success body's own schema. A view is declared for the thing a row shows.
+fn row_schema_name<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a str> {
+    let schema = success_schema(graph, op)?;
+    let items = match (
+        cli_result_shape(graph, op),
+        resolve_alias(graph, &schema.body, 0),
+    ) {
+        (CliResultShape::Object, _) => return Some(schema.name.as_str()),
+        (CliResultShape::List, Type::Array(inner)) => inner.as_ref(),
+        (CliResultShape::Page(key), Type::Object(fields)) => {
+            let field = fields.iter().find(|field| field.json_name == key)?;
+            let Type::Array(inner) = resolve_alias(graph, &field.schema, 0) else {
+                return None;
+            };
+            inner.as_ref()
+        }
+        _ => return None,
+    };
+    let Type::Named(id) = items else {
+        return None;
+    };
+    graph
+        .schemas
+        .iter()
+        .find(|schema| &schema.id == id)
+        .map(|schema| schema.name.as_str())
+}
+
+/// Runnable examples declared on this command's spec.
+pub(crate) fn command_examples<'a>(cli: &'a SdkCli, op: &Operation) -> &'a [String] {
+    cli.spec_command(&op.id)
+        .map_or(&[] as &[String], |command| command.examples.as_slice())
+}
+
+/// See-also invocations declared on this command's spec.
+pub(crate) fn command_see_also<'a>(cli: &'a SdkCli, op: &Operation) -> &'a [String] {
+    cli.spec_command(&op.id)
+        .map_or(&[] as &[String], |command| command.see_also.as_slice())
+}
+
+/// Docs URL declared on this command's spec.
+pub(crate) fn command_docs_url<'a>(cli: &'a SdkCli, op: &Operation) -> Option<&'a str> {
+    cli.spec_command(&op.id)
+        .and_then(|command| command.docs_url.as_deref())
+}
+
+/// Output note: spec override, else schema name plus view preview fields.
+pub(crate) fn command_output_note(
+    cli: &SdkCli,
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Option<String> {
+    if let Some(note) = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.output.clone())
+    {
+        return Some(note);
+    }
+    let name = success_schema(graph, op)?.name.as_str();
+    if let Some(view) = command_view(cli, graph, op) {
+        if !view.preview.is_empty() {
+            return Some(format!("{}: {}", view.schema, view.preview.join(", ")));
+        }
+        if !view.table.is_empty() {
+            return Some(format!("{}: {}", view.schema, view.table.join(", ")));
+        }
+    }
+    Some(name.to_string())
+}
+
+/// Machine-readable command spec for `help --json`.
+pub(crate) fn help_spec_json(
+    cli: &SdkCli,
+    ops: &[&Operation],
+    graph: &ApiGraph,
+) -> Result<String, CoreError> {
+    let mut commands = Vec::new();
+    for op in ops {
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "invocation".to_string(),
+            serde_json::Value::String(command_invocation(cli, op)),
+        );
+        object.insert(
+            "operation".to_string(),
+            serde_json::Value::String(op.id.clone()),
+        );
+        object.insert(
+            "arguments".to_string(),
+            serde_json::to_value(positional_names(cli, op)).map_err(|error| CoreError::SdkGen {
+                message: format!("failed to encode help spec: {error}"),
+            })?,
+        );
+        object.insert(
+            "examples".to_string(),
+            serde_json::to_value(command_examples(cli, op)).map_err(|error| CoreError::SdkGen {
+                message: format!("failed to encode help spec: {error}"),
+            })?,
+        );
+        object.insert(
+            "seeAlso".to_string(),
+            serde_json::to_value(command_see_also(cli, op)).map_err(|error| CoreError::SdkGen {
+                message: format!("failed to encode help spec: {error}"),
+            })?,
+        );
+        if let Some(url) = command_docs_url(cli, op) {
+            object.insert(
+                "docsUrl".to_string(),
+                serde_json::Value::String(url.to_string()),
+            );
+        }
+        if let Some(note) = command_output_note(cli, graph, op) {
+            object.insert("output".to_string(), serde_json::Value::String(note));
+        }
+        object.insert(
+            "flags".to_string(),
+            serde_json::Value::Array(command_flag_specs(cli, graph, op)?),
+        );
+        commands.push(serde_json::Value::Object(object));
+    }
+    let mut root = serde_json::Map::new();
+    root.insert(
+        "program".to_string(),
+        serde_json::Value::String(cli.program.clone()),
+    );
+    root.insert("commands".to_string(), serde_json::Value::Array(commands));
+    Ok(serde_json::Value::Object(root).to_string())
+}
+
+fn command_flag_specs(
+    cli: &SdkCli,
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Result<Vec<serde_json::Value>, CoreError> {
+    let mut flags = Vec::new();
+    let paging = paging_param_names(graph, op);
+    for param in &op.params {
+        if is_positional_param(cli, op, &param.name) || paging.contains(param.name.as_str()) {
+            continue;
+        }
+        flags.push(param_flag_spec(graph, param));
+    }
+    for field in body_field_flags(cli, op, graph)? {
+        let (type_name, members) = json_flag_type(graph, &field.schema);
+        flags.push(flag_spec(
+            &field.flag,
+            false,
+            field.description.as_deref().unwrap_or(""),
+            type_name,
+            &members,
+            None,
+        ));
+    }
+    if graph
+        .pagination
+        .iter()
+        .any(|policy| policy.operation_id == op.id)
+    {
+        flags.push(flag_spec("limit", false, LIMIT_HELP, "integer", &[], None));
+        flags.push(flag_spec("all", false, ALL_HELP, "boolean", &[], None));
+        if graph
+            .pagination
+            .iter()
+            .any(|policy| policy.operation_id == op.id && policy.cursor_param.is_some())
+        {
+            flags.push(flag_spec("cursor", false, CURSOR_HELP, "string", &[], None));
+        }
+    }
+    if let Some(switch) = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.switch_flag.as_ref())
+    {
+        flags.push(flag_spec(
+            &switch.flag,
+            false,
+            "call the alternate operation",
+            "boolean",
+            &[],
+            None,
+        ));
+    }
+    flags.push(flag_spec(
+        "base-url",
+        cli.base_url.is_none(),
+        BASE_URL_HELP,
+        "string",
+        &[],
+        cli.base_url.as_deref(),
+    ));
+    for (name, help, kind) in [
+        ("json", JSON_HELP, "boolean"),
+        ("format", FORMAT_HELP, "string"),
+        ("fields", FIELDS_HELP, "string"),
+        ("output", OUTPUT_HELP, "string"),
+        ("quiet", QUIET_HELP, "boolean"),
+        ("debug", DEBUG_HELP, "boolean"),
+        ("yes", YES_HELP, "boolean"),
+        ("no-input", NO_INPUT_HELP, "boolean"),
+        ("color", COLOR_HELP, "string"),
+        ("no-pager", NO_PAGER_HELP, "boolean"),
+    ] {
+        let members: Vec<String> = match name {
+            "format" => ["human", "ai-friendly", "json", "jsonl"]
+                .map(str::to_string)
+                .to_vec(),
+            "color" => ["auto", "always", "never"].map(str::to_string).to_vec(),
+            _ => Vec::new(),
+        };
+        flags.push(flag_spec(name, false, help, kind, &members, None));
+    }
+    let bodies = request_body_models_of(op, graph)?;
+    let fixed_body = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.fixed_body.as_deref());
+    if fixed_body.is_none() && !bodies.is_empty() {
+        flags.push(flag_spec("body", false, BODY_HELP, "string", &[], None));
+        flags.push(flag_spec(
+            "body-file",
+            false,
+            BODY_FILE_HELP,
+            "string",
+            &[],
+            None,
+        ));
+    }
+    Ok(flags)
+}
+
+fn param_flag_spec(graph: &ApiGraph, param: &Param) -> serde_json::Value {
+    let (type_name, enum_values) = json_flag_type(graph, &param.schema);
+    let enum_values = if enum_values.is_empty() {
+        param.constraints.enum_values.clone()
+    } else {
+        enum_values
+    };
+    let default = param.default.as_ref().map(literal_text);
+    flag_spec(
+        &flag_name(param),
+        param.required,
+        &parameter_flag_help(param),
+        type_name,
+        &enum_values,
+        default.as_deref(),
+    )
+}
+
+fn json_flag_type(graph: &ApiGraph, ty: &Type) -> (&'static str, Vec<String>) {
+    match ty {
+        Type::Primitive(Prim::Bool) => ("boolean", Vec::new()),
+        Type::Primitive(Prim::Int { .. }) => ("integer", Vec::new()),
+        Type::Primitive(Prim::Float { .. }) => ("number", Vec::new()),
+        Type::Enum(members) => ("string", members.clone()),
+        Type::Array(_) => ("array", Vec::new()),
+        Type::Named(id) => graph
+            .schemas
+            .iter()
+            .find(|schema| &schema.id == id)
+            .map_or(("string", Vec::new()), |schema| {
+                json_flag_type(graph, &schema.body)
+            }),
+        _ => ("string", Vec::new()),
+    }
+}
+
+fn literal_text(value: &LiteralValue) -> String {
+    match value {
+        LiteralValue::String(text) | LiteralValue::Number(text) => text.clone(),
+        LiteralValue::Bool(flag) => flag.to_string(),
+        LiteralValue::Null => "null".to_string(),
+    }
+}
+
+fn flag_spec(
+    name: &str,
+    required: bool,
+    help: &str,
+    type_name: &str,
+    enum_values: &[String],
+    default: Option<&str>,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(name.to_string()),
+    );
+    object.insert("required".to_string(), serde_json::Value::Bool(required));
+    if !help.is_empty() {
+        object.insert(
+            "help".to_string(),
+            serde_json::Value::String(help.to_string()),
+        );
+    }
+    object.insert(
+        "type".to_string(),
+        serde_json::Value::String(type_name.to_string()),
+    );
+    if !enum_values.is_empty() {
+        object.insert(
+            "enum".to_string(),
+            serde_json::Value::Array(
+                enum_values
+                    .iter()
+                    .map(|member| serde_json::Value::String(member.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(default) = default {
+        object.insert(
+            "default".to_string(),
+            serde_json::Value::String(default.to_string()),
+        );
+    }
+    serde_json::Value::Object(object)
+}
+
 /// The CLI flag spelling of a parameter: kebab-case of the wire name.
 ///
 /// The wire name stays `param.name`; only the spelling is re-cased.
@@ -156,12 +621,20 @@ pub(crate) fn helper_env_var(program: &str) -> String {
 /// Global flags every generated command binds, whatever the operation carries.
 ///
 /// `--help` is bound by `argparse` on every parser it builds and by the Go dispatcher's own `-h`
-/// handling; `--base-url` is declared on each command so it can follow the subcommand.
+/// handling; `--base-url` is declared on each command so it can follow the subcommand;
+/// `--format` and `--json` are globals every generated command binds, as are the output-contract
+/// flags (`fields`, `output`, `quiet`, `debug`), the prompt flags (`yes`, `--no-input`), and the
+/// polish flags (`color`, `no-pager`). `o`, `q` and `y` are the short spellings of `output`,
+/// `quiet` and `yes`: Go's `flag` treats `-q` and `--q` as one name, so a parameter flag `q`
+/// would be a second registration and the command would panic before parsing a single argument.
 ///
 /// Everything else is conditional and computed per command by [`reserved_flags_for`] — reserving a
 /// name no command binds costs a user a legitimate parameter for nothing, and the only remedy
 /// available to them is changing their API's wire contract.
-const ALWAYS_RESERVED_FLAGS: &[&str] = &["help", "base-url"];
+const ALWAYS_RESERVED_FLAGS: &[&str] = &[
+    "help", "base-url", "format", "json", "fields", "output", "quiet", "debug", "yes", "no-input",
+    "color", "no-pager", "o", "q", "y", "h",
+];
 
 /// What each reserved flag does, in the words both emitters print.
 ///
@@ -174,13 +647,190 @@ pub(crate) const BODY_HELP: &str = "request body, as an inline JSON document";
 pub(crate) const BODY_FILE_HELP: &str = "read the request body from a file, or - for stdin";
 pub(crate) const LIMIT_HELP: &str = "stop after this many items";
 pub(crate) const ALL_HELP: &str = "keep following pages until the last one";
+pub(crate) const CURSOR_HELP: &str = "resume from this cursor";
+pub(crate) const FORMAT_HELP: &str = "output format: human, ai-friendly, json, or jsonl";
+pub(crate) const JSON_HELP: &str = "print the server body (shorthand for --format json)";
+pub(crate) const FIELDS_HELP: &str = "comma-separated response fields, or help to list them";
+pub(crate) const OUTPUT_HELP: &str = "write the full result to a file, or - for stdout";
+pub(crate) const QUIET_HELP: &str = "print less on success";
+pub(crate) const DEBUG_HELP: &str = "write a request trace to stderr";
+pub(crate) const YES_HELP: &str = "do not ask before a destructive command";
+pub(crate) const NO_INPUT_HELP: &str = "never prompt; refuse commands that would ask";
+pub(crate) const COLOR_HELP: &str = "when to color human output: auto, always, or never";
+pub(crate) const NO_PAGER_HELP: &str = "do not page human output";
+
+/// Environment variable selecting the output format: `{PROG}_FORMAT`.
+pub(crate) fn format_env_var(program: &str) -> String {
+    format!("{}_FORMAT", screaming_snake(program))
+}
+
+/// Environment variable enabling a request trace: `{PROG}_DEBUG`.
+pub(crate) fn debug_env_var(program: &str) -> String {
+    format!("{}_DEBUG", screaming_snake(program))
+}
+
+/// Environment variable forbidding prompts: `{PROG}_NO_INPUT`.
+pub(crate) fn no_input_env_var(program: &str) -> String {
+    format!("{}_NO_INPUT", screaming_snake(program))
+}
+
+/// Environment variable overriding the ai-friendly output directory: `{PROG}_OUTPUT_DIR`.
+pub(crate) fn output_dir_env_var(program: &str) -> String {
+    format!("{}_OUTPUT_DIR", screaming_snake(program))
+}
+
+/// Environment variable selecting the human-output pager: `{PROG}_PAGER`.
+pub(crate) fn pager_env_var(program: &str) -> String {
+    format!("{}_PAGER", screaming_snake(program))
+}
+
+/// JSON object keys of an operation's success body, for `--fields help`.
+///
+/// A named schema or inline object contributes its wire names. An array contributes the item's
+/// keys. Anything else has no fields to list — `--fields help` then says so, rather than inventing
+/// names from the Go or Python type.
+pub(crate) fn response_field_names(graph: &ApiGraph, op: &Operation) -> Vec<String> {
+    let Some(schema) = success_schema(graph, op) else {
+        return Vec::new();
+    };
+    object_json_names(graph, &schema.body, 1)
+}
+
+/// The schema of an operation's one typed JSON success body.
+///
+/// [`SuccessResponses::body_model`] carries the schema's *name* (the SDK model it decodes into),
+/// not its id, so it is resolved by name here.
+fn success_schema<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a Schema> {
+    let model = success_responses_of(op, graph).ok()?.body_model?;
+    graph.schemas.iter().find(|schema| schema.name == model)
+}
+
+/// How a generated CLI reads one operation's success body: as a list of items, or as one value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CliResultShape {
+    /// The body is a JSON array; each element is an item.
+    List,
+    /// The body is an object whose items sit under one key.
+    Page(String),
+    /// The body is one resource, however many arrays it holds.
+    Object,
+}
+
+/// Classify an operation's success body from the graph, at generation time.
+///
+/// An array body is a list. A `PaginationPolicy` names the items field of a page. An object whose
+/// only field is an array has nothing but its items to describe, so it is a page keyed by that
+/// field — a policy, where one exists, names that same field. Every other object is one resource:
+/// the generated program never guesses a list from the shape of a response it received.
+pub(crate) fn cli_result_shape(graph: &ApiGraph, op: &Operation) -> CliResultShape {
+    let Some(schema) = success_schema(graph, op) else {
+        return CliResultShape::Object;
+    };
+    let body = resolve_alias(graph, &schema.body, 0);
+    if matches!(body, Type::Array(_)) {
+        return CliResultShape::List;
+    }
+    if let Some(policy) = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)
+    {
+        return CliResultShape::Page(policy.items_field.clone());
+    }
+    if let Type::Object(fields) = body {
+        if let [only] = fields.as_slice() {
+            if matches!(resolve_alias(graph, &only.schema, 0), Type::Array(_)) {
+                return CliResultShape::Page(only.json_name.clone());
+            }
+        }
+    }
+    CliResultShape::Object
+}
+
+/// Follow named references to the type they stand for, bounded against a cyclic alias.
+fn resolve_alias<'a>(graph: &'a ApiGraph, ty: &'a Type, depth: usize) -> &'a Type {
+    if depth > 8 {
+        return ty;
+    }
+    if let Type::Named(id) = ty {
+        if let Some(schema) = graph.schemas.iter().find(|schema| &schema.id == id) {
+            return resolve_alias(graph, &schema.body, depth + 1);
+        }
+    }
+    ty
+}
+
+/// The response field holding the next cursor, for a command that binds `--cursor`.
+///
+/// Only a cursor `PaginationPolicy` with both a request cursor parameter and a response
+/// next-cursor field produces one, so a "Next page" hint never names a flag the command lacks.
+pub(crate) fn cli_next_cursor_field<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a str> {
+    let policy = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)?;
+    policy.cursor_param.as_ref()?;
+    policy.next_cursor_field.as_deref()
+}
+
+fn object_json_names(graph: &ApiGraph, ty: &Type, depth: usize) -> Vec<String> {
+    if depth > 8 {
+        return Vec::new();
+    }
+    match ty {
+        Type::Named(id) => {
+            let Some(schema) = graph.schemas.iter().find(|schema| &schema.id == id) else {
+                return Vec::new();
+            };
+            object_json_names(graph, &schema.body, depth + 1)
+        }
+        Type::Object(fields) => fields.iter().map(|field| field.json_name.clone()).collect(),
+        Type::Array(inner) => object_json_names(graph, inner, depth + 1),
+        Type::Union(members) => members
+            .iter()
+            .find_map(|member| {
+                let names = object_json_names(graph, member, depth + 1);
+                (!names.is_empty()).then_some(names)
+            })
+            .unwrap_or_default(),
+        Type::Primitive(_)
+        | Type::WellKnown(_)
+        | Type::Map { .. }
+        | Type::Enum(_)
+        | Type::Any {} => Vec::new(),
+    }
+}
+
+/// The usage string for one parameter flag: its own prose, then whether it is required.
+///
+/// A parameter's description is the one graph fact `--help` prints for it. Whitespace collapses
+/// to a single line because both `flag.PrintDefaults` and argparse `help=` render one line per
+/// flag. A required flag still says `required` after the prose, so omitting it is visible before
+/// a failed invocation.
+pub(crate) fn parameter_flag_help(param: &Param) -> String {
+    let mut parts = Vec::new();
+    if let Some(description) = param
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        parts.push(description.split_whitespace().collect::<Vec<_>>().join(" "));
+    }
+    if param.required {
+        parts.push("required".to_string());
+    }
+    parts.join(" ")
+}
 
 /// The global flags one command binds, which its parameter flags may not shadow.
 ///
 /// Conditional because the emitters are: `--body`/`--body-file` exist only where the operation has
-/// a request body, and `--limit`/`--all` only where a `PaginationPolicy` names it. `--version` is
-/// bound on the root parser, which is not a command, so it is not reserved here. `--json` is bound
-/// by neither emitter — output is unconditionally JSON — so it is not reserved either.
+/// a request body, and `--limit`/`--all`/`--cursor` only where a `PaginationPolicy` names it.
+/// `--page-size` is reserved on those same commands as a rename error naming `--limit`. `--version`
+/// is bound on the root parser, which is not a command, so it is not reserved here. `--format`,
+/// `--json`, `--fields`, `--output`, `--quiet`, `--debug`, `--yes` and `--no-input` are globals
+/// every generated command binds.
 fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<String>, CoreError> {
     let mut reserved: BTreeSet<String> = ALWAYS_RESERVED_FLAGS
         .iter()
@@ -197,6 +847,8 @@ fn reserved_flags_for(op: &Operation, graph: &ApiGraph) -> Result<BTreeSet<Strin
     {
         reserved.insert("limit".to_string());
         reserved.insert("all".to_string());
+        reserved.insert("cursor".to_string());
+        reserved.insert("page-size".to_string());
     }
     Ok(reserved)
 }
@@ -655,40 +1307,70 @@ pub(crate) fn check_unique_model_file_names(
 /// top-level command collides with a group name; a flag collides with a global this command binds;
 /// two parameters of one operation kebab to one flag. No auto-rename table — the user fixes the
 /// graph with `RenameOperation` or a source change.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one function enumerates every CLI name collision so the error text stays in one place"
+)]
 pub(crate) fn check_cli_names(
     ops: &[&Operation],
     graph: &ApiGraph,
-    program: &str,
+    cli: &SdkCli,
 ) -> Result<(), CoreError> {
-    let mut commands: BTreeMap<(Option<String>, String), &str> = BTreeMap::new();
+    let program = cli.program.as_str();
+    let mut commands: BTreeMap<(Option<String>, Option<String>, String), &str> = BTreeMap::new();
     for op in ops.iter().copied() {
-        let group = command_group(op);
-        let name = command_name(op);
-        if let Some(previous) = commands.insert((group.clone(), name.clone()), op.id.as_str()) {
-            let command = match group {
-                Some(group) => format!("{group} {name}"),
-                None => name,
-            };
+        let group = command_topic(cli, op);
+        let sub = command_sub_noun(cli, op);
+        let name = command_verb(cli, op);
+        for token in group.iter().chain(sub.iter()).chain(std::iter::once(&name)) {
+            if token.is_empty()
+                || token.starts_with('-')
+                || !token
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' has unusable command token {token:?}",
+                        op.id
+                    ),
+                });
+            }
+        }
+        if let Some(previous) =
+            commands.insert((group.clone(), sub.clone(), name.clone()), op.id.as_str())
+        {
+            let command = command_invocation(cli, op);
             return Err(CoreError::SdkGen {
                 message: format!(
-                    "CLI {program:?} commands collide: operations '{previous}' and '{}' both map to '{command}'; rename one with RenameOperation",
+                    "CLI {program:?} commands collide: operations '{previous}' and '{}' both map to '{command}'; rename one with RenameOperation or a command spec",
                     op.id
                 ),
             });
         }
     }
 
-    let groups: BTreeSet<String> = ops.iter().copied().filter_map(command_group).collect();
+    let groups: BTreeSet<String> = ops
+        .iter()
+        .copied()
+        .filter_map(|op| command_topic(cli, op))
+        .collect();
     for op in ops.iter().copied() {
-        if op.group.is_some() {
+        if command_topic(cli, op).is_some()
+            && cli.spec_command(&op.id).is_none()
+            && op.group.is_some()
+        {
             continue;
         }
-        let name = command_name(op);
+        if command_topic(cli, op).is_some() {
+            continue;
+        }
+        let name = command_verb(cli, op);
         if groups.contains(&name) {
             let grouped = ops
                 .iter()
                 .copied()
-                .find(|other| command_group(other).as_deref() == Some(name.as_str()))
+                .find(|other| command_topic(cli, other).as_deref() == Some(name.as_str()))
                 .map_or(name.as_str(), |other| other.id.as_str());
             return Err(CoreError::SdkGen {
                 message: format!(
@@ -700,15 +1382,49 @@ pub(crate) fn check_cli_names(
     }
 
     for op in ops.iter().copied() {
+        let path = command_invocation(cli, op);
+        if let Some(other) = ops
+            .iter()
+            .copied()
+            .find(|other| command_invocation(cli, other).starts_with(&format!("{path} ")))
+        {
+            return Err(CoreError::SdkGen {
+                message: format!("CLI {program:?} command {path:?} (operation '{}') collides with the sub-noun in {:?} (operation '{}')", op.id, command_invocation(cli, other), other.id),
+            });
+        }
+    }
+
+    for reserved in ["help", "completion", "__complete"] {
+        if groups.contains(reserved) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} group '{reserved}' collides with the reserved command '{reserved}'"
+                ),
+            });
+        }
+        for op in ops.iter().copied() {
+            if command_topic(cli, op).is_none() && command_verb(cli, op) == reserved {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} command '{reserved}' (operation '{}') collides with the reserved command '{reserved}'",
+                        op.id
+                    ),
+                });
+            }
+        }
+    }
+
+    for op in ops.iter().copied() {
         let paging = paging_param_names(graph, op);
         // Every flag name this command binds for a parameter, including the `--no-<flag>` negation
         // both emitters bind for a boolean. Two registrations of one name is not a rendering wart:
         // Go's `flag` panics on a name already in use and argparse raises `ArgumentError` while
         // building the parser, so the emitted program cannot start — not even `--help`.
         let reserved = reserved_flags_for(op, graph)?;
+        let body_fields = body_field_flags(cli, op, graph)?;
         let mut bound: BTreeMap<String, FlagOrigin<'_>> = BTreeMap::new();
         for param in &op.params {
-            if paging.contains(&param.name) {
+            if paging.contains(&param.name) || is_positional_param(cli, op, &param.name) {
                 continue;
             }
             let flag = flag_name(param);
@@ -746,8 +1462,267 @@ pub(crate) fn check_cli_names(
                 }
             }
         }
+        if let Some(switch) = cli
+            .spec_command(&op.id)
+            .and_then(|command| command.switch_flag.as_ref())
+        {
+            let valid = !switch.flag.is_empty()
+                && !switch.flag.starts_with('-')
+                && switch
+                    .flag
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
+            if !valid {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' switch flag {:?} is not a usable flag name",
+                        op.id, switch.flag
+                    ),
+                });
+            }
+            if reserved.contains(&switch.flag) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' switch flag '--{}' collides with the reserved global '--{}'",
+                        op.id, switch.flag, switch.flag
+                    ),
+                });
+            }
+            if let Some(previous) = bound.get(&switch.flag) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' switch flag '--{}' collides with {previous}",
+                        op.id, switch.flag
+                    ),
+                });
+            }
+            if body_fields.iter().any(|field| field.flag == switch.flag) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' switch flag '--{}' collides with a body field",
+                        op.id, switch.flag
+                    ),
+                });
+            }
+        }
+        for field in &body_fields {
+            let origin = FlagOrigin {
+                param: &field.json_name,
+                negation: false,
+            };
+            if reserved.contains(&field.flag) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' body field '{}' maps to flag '--{}', which collides with the reserved global '--{}'",
+                        op.id, field.json_name, field.flag, field.flag
+                    ),
+                });
+            }
+            if let Some(previous) = bound.insert(field.flag.clone(), origin) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} operation '{}' binds flag '--{}' twice: for {previous} and for body field '{}'",
+                        op.id, field.flag, field.json_name
+                    ),
+                });
+            }
+        }
+    }
+    check_cli_spec(ops, graph, cli)?;
+    Ok(())
+}
+
+fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<(), CoreError> {
+    let program = cli.program.as_str();
+    let op_ids: BTreeSet<&str> = ops.iter().map(|op| op.id.as_str()).collect();
+    let mut seen_ops: BTreeSet<&str> = BTreeSet::new();
+    let mut seen_topics: BTreeSet<&str> = BTreeSet::new();
+    for topic in &cli.topics {
+        if !seen_topics.insert(topic.name.as_str()) {
+            return Err(CoreError::SdkGen {
+                message: format!("CLI {program:?} declares topic {:?} twice", topic.name),
+            });
+        }
+        for command in &topic.commands {
+            if !op_ids.contains(command.operation.as_str()) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} command spec wraps unknown operation '{}'",
+                        command.operation
+                    ),
+                });
+            }
+            if !seen_ops.insert(command.operation.as_str()) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} wraps operation '{}' more than once",
+                        command.operation
+                    ),
+                });
+            }
+            let op = ops
+                .iter()
+                .copied()
+                .find(|op| op.id == command.operation)
+                .ok_or_else(|| CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} command spec wraps unknown operation '{}'",
+                        command.operation
+                    ),
+                })?;
+            let mut seen_positionals = BTreeSet::new();
+            for name in &command.positionals {
+                if !seen_positionals.insert(name)
+                    || !op
+                        .params
+                        .iter()
+                        .any(|param| param.name == *name && param.location == "path")
+                {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} command '{}' positional '{name}' must name a unique path parameter of operation '{}'",
+                            command.verb, op.id
+                        ),
+                    });
+                }
+            }
+            check_cli_compositions(program, command, op, ops, graph)?;
+            if command.examples.is_empty() {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} command '{}' must declare at least one example",
+                        command.verb
+                    ),
+                });
+            }
+        }
+    }
+    for error in &cli.rename_errors {
+        if error.from.is_empty() {
+            return Err(CoreError::SdkGen {
+                message: format!("CLI {program:?} rename error has an empty retired path"),
+            });
+        }
+    }
+    for view in &cli.views {
+        let known = graph
+            .schemas
+            .iter()
+            .any(|schema| schema.id == view.schema || schema.name == view.schema);
+        if !known {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} view names unknown schema '{}'",
+                    view.schema
+                ),
+            });
+        }
     }
     Ok(())
+}
+
+fn check_cli_compositions(
+    program: &str,
+    command: &gnr8::sdk::CliCommand,
+    op: &Operation,
+    ops: &[&Operation],
+    graph: &ApiGraph,
+) -> Result<(), CoreError> {
+    if let Some(switch) = &command.switch_flag {
+        let Some(other) = ops
+            .iter()
+            .copied()
+            .find(|candidate| candidate.id == switch.operation)
+        else {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} command '{}' switch flag wraps unknown operation '{}'",
+                    command.verb, switch.operation
+                ),
+            });
+        };
+        if !switch_inputs_match(op, other, graph) {
+            return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} command '{}' switch operation '{}' has a different input or pagination contract from '{}'; one command cannot safely collect both operations' arguments",
+                            command.verb, other.id, op.id
+                        ),
+                    });
+        }
+    }
+    if let Some(selector) = &command.selector {
+        let Some(list_op) = ops
+            .iter()
+            .copied()
+            .find(|candidate| candidate.id == selector.list_operation)
+        else {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} command '{}' selector lists unknown operation '{}'",
+                    command.verb, selector.list_operation
+                ),
+            });
+        };
+        if list_op.params.iter().any(|param| param.location == "path") {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} command '{}' selector list '{}' takes path parameters",
+                    command.verb, selector.list_operation
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn switch_inputs_match(primary: &Operation, other: &Operation, graph: &ApiGraph) -> bool {
+    let params_match = primary.params.len() == other.params.len()
+        && primary
+            .params
+            .iter()
+            .zip(&other.params)
+            .all(|(left, right)| {
+                left.name == right.name
+                    && left.location == right.location
+                    && left.required == right.required
+                    && left.schema == right.schema
+                    && left.constraints == right.constraints
+                    && left.item_constraints == right.item_constraints
+                    && left.default == right.default
+                    && left.style == right.style
+                    && left.explode == right.explode
+                    && left.allow_reserved == right.allow_reserved
+            });
+    let bodies_match = primary.request_body == other.request_body
+        && primary.request_body_required == other.request_body_required
+        && primary.request_body_content_type == other.request_body_content_type
+        && primary.request_body_variants == other.request_body_variants;
+    let security_matches = operation_security_alternatives(graph, primary)
+        == operation_security_alternatives(graph, other);
+    let primary_paging = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == primary.id);
+    let other_paging = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == other.id);
+    let paging_matches = match (primary_paging, other_paging) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.mode == right.mode
+                && left.items_field == right.items_field
+                && left.cursor_param == right.cursor_param
+                && left.next_cursor_field == right.next_cursor_field
+                && left.page_param == right.page_param
+                && left.page_size_param == right.page_size_param
+                && left.offset_param == right.offset_param
+                && left.limit_param == right.limit_param
+                && left.termination == right.termination
+        }
+        _ => false,
+    };
+    params_match && bodies_match && security_matches && paging_matches
 }
 
 /// Reject two groups whose names collapse to one file.
@@ -1651,22 +2626,61 @@ pub(crate) fn operation_prose(
     }
 }
 
+/// The native, versioned JSON Schema shipped beside each generated CLI.
+pub(crate) fn cli_envelope_schema(program: &str) -> Result<String, CoreError> {
+    let object = |properties: serde_json::Value, required: &[&str]| serde_json::json!({"type": "object", "properties": properties, "required": required});
+    let string = serde_json::json!({"type": "string"});
+    let count = serde_json::json!({"type": "integer", "minimum": 0});
+    let schema = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://gnr8.dev/schemas/cli-result-v1.json",
+        "title": format!("{program} CLI result v1"),
+        "type": "object",
+        "required": ["schema", "version", "tool", "command", "request", "response", "kind", "savedAt"],
+        "properties": {
+            "schema": {"const": "https://gnr8.dev/schemas/cli-result-v1.json"},
+            "version": {"const": 1},
+            "tool": object(serde_json::json!({"name": {"const": program}, "version": string}), &["name", "version"]),
+            "command": object(serde_json::json!({"path": string}), &["path"]),
+            "request": object(serde_json::json!({"method": string, "url": string}), &["method", "url"]),
+            "response": object(serde_json::json!({"status": count, "requestId": string, "contentType": string, "bytes": count}), &["status", "requestId", "contentType", "bytes"]),
+            "kind": {"enum": ["object", "list", "empty", "file"]},
+            "savedAt": {"type": "string", "format": "date-time"},
+            "data": {}, "items": {"type": "array"}, "meta": {"type": "object"},
+            "page": object(serde_json::json!({"count": count, "itemsKey": string}), &["count"]),
+            "file": object(serde_json::json!({"path": string, "bytes": count, "contentType": string, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}), &["path", "bytes", "contentType", "sha256"])
+        },
+        "oneOf": [
+            {"properties": {"kind": {"const": "object"}}, "required": ["data"]},
+            {"properties": {"kind": {"const": "list"}}, "required": ["items", "page"]},
+            {"properties": {"kind": {"const": "empty"}}},
+            {"properties": {"kind": {"const": "file"}}, "required": ["file"]}
+        ]
+    });
+    serde_json::to_string_pretty(&schema)
+        .map(|text| format!("{text}\n"))
+        .map_err(|error| CoreError::SdkGen {
+            message: format!("failed to encode CLI envelope schema: {error}"),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::{
         check_cli_names, check_unique_model_file_names, command_group, command_name,
-        credential_env_var, file_stem, flag_name, helper_env_var, http_auth_features,
-        http_auth_features_for, kebab, operation_auth_alternatives, split_words,
-        success_responses_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
-        SuccessResponses,
+        credential_env_var, file_stem, flag_name, format_env_var, helper_env_var,
+        http_auth_features, http_auth_features_for, kebab, operation_auth_alternatives,
+        parameter_flag_help, split_words, success_responses_of, ApiKeyLocation, HttpAuthScheme,
+        OperationAuthScheme, SuccessResponses,
     };
     use crate::graph::{
         ApiGraph, Operation, OperationSecurityPolicy, Param, Response, SecurityRequirementGroup,
         SecurityScheme, SourceSpan, Type,
     };
     use crate::sdk::layout::SdkFileLayout;
+    use gnr8::sdk::SdkCli;
 
     #[test]
     fn schemas_that_share_a_model_file_name_are_rejected_with_both_names() {
@@ -1812,6 +2826,7 @@ mod tests {
             style: None,
             explode: None,
             allow_reserved: false,
+            description: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: cli_span(),
@@ -1836,6 +2851,29 @@ mod tests {
     }
 
     #[test]
+    fn parameter_flag_help_is_the_graph_description_then_required() {
+        let mut param = cli_param("book_id");
+        param.required = true;
+        param.description = Some("The book's identifier.".to_string());
+        assert_eq!(
+            parameter_flag_help(&param),
+            "The book's identifier. required"
+        );
+        param.description = Some("  Narrows   the list.  ".to_string());
+        param.required = false;
+        assert_eq!(parameter_flag_help(&param), "Narrows the list.");
+        param.description = None;
+        param.required = true;
+        assert_eq!(parameter_flag_help(&param), "required");
+    }
+
+    #[test]
+    fn format_env_var_screams_the_program() {
+        assert_eq!(format_env_var("bookstore"), "BOOKSTORE_FORMAT");
+        assert_eq!(format_env_var("oaiz-cli"), "OAIZ_CLI_FORMAT");
+    }
+
+    #[test]
     fn credential_env_vars_scream_the_program_and_scheme() {
         assert_eq!(
             credential_env_var("bookstore", "ApiKeyAuth"),
@@ -1854,7 +2892,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("colliding commands must be rejected"),
         };
@@ -1872,7 +2910,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("command/group collision must be rejected"),
         };
@@ -1890,7 +2928,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("reserved flag collision must be rejected"),
         };
@@ -1901,15 +2939,13 @@ mod tests {
 
     #[test]
     fn a_flag_no_command_binds_is_not_reserved() -> Result<(), crate::CoreError> {
-        // `--json` is bound by neither emitter, and `--limit`/`--all`/`--body`/`--body-file` are
-        // bound only where the operation carries the fact that produces them. Reserving them
-        // unconditionally rejected APIs whose only remedy was to rename a wire parameter.
+        // `--limit`/`--all`/`--body`/`--body-file` are bound only where the operation carries the
+        // fact that produces them. `--json` and `--format` are globals, so they are reserved.
         let graph = ApiGraph {
             operations: vec![cli_op(
                 "listBooks",
                 None,
                 vec![
-                    cli_param("json"),
                     cli_param("limit"),
                     cli_param("all"),
                     cli_param("body"),
@@ -1920,7 +2956,43 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        check_cli_names(&ops, &graph, "bookstore")
+        check_cli_names(&ops, &graph, &SdkCli::new("bookstore"))
+    }
+
+    #[test]
+    fn json_and_format_are_reserved_globals() {
+        for name in ["json", "format", "color", "no-pager"] {
+            let graph = ApiGraph {
+                operations: vec![cli_op("listBooks", None, vec![cli_param(name)])],
+                ..ApiGraph::default()
+            };
+            let ops: Vec<&Operation> = graph.operations.iter().collect();
+            let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
+                Err(error) => error.to_string(),
+                Ok(()) => panic!("--{name} is a reserved global"),
+            };
+            assert!(message.contains(&format!("--{name}")), "{message}");
+        }
+    }
+
+    #[test]
+    fn short_global_spellings_are_reserved() {
+        // `-q`, `-o` and `-y` are registered on every Go command, and Go's `flag` treats `-q` and
+        // `--q` as one name: a parameter flag `q` would panic the command before it parsed an
+        // argument, so it must be a generation error naming the parameter.
+        for name in ["q", "o", "y"] {
+            let graph = ApiGraph {
+                operations: vec![cli_op("searchBooks", None, vec![cli_param(name)])],
+                ..ApiGraph::default()
+            };
+            let ops: Vec<&Operation> = graph.operations.iter().collect();
+            let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
+                Err(error) => error.to_string(),
+                Ok(()) => panic!("-{name} is the short spelling of a reserved global"),
+            };
+            assert!(message.contains("searchBooks"), "{message}");
+            assert!(message.contains(&format!("'--{name}'")), "{message}");
+        }
     }
 
     #[test]
@@ -1942,7 +3014,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("--limit is bound on a paginated command"),
         };
@@ -2022,7 +3094,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("two parameters mapping to one flag must be rejected"),
         };
@@ -2043,7 +3115,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        let message = match check_cli_names(&ops, &graph, "bookstore") {
+        let message = match check_cli_names(&ops, &graph, &SdkCli::new("bookstore")) {
             Err(error) => error.to_string(),
             Ok(()) => panic!("a collision with a boolean negation must be rejected"),
         };
@@ -2067,7 +3139,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        check_cli_names(&ops, &graph, "bookstore")
+        check_cli_names(&ops, &graph, &SdkCli::new("bookstore"))
     }
 
     #[test]
@@ -2080,7 +3152,7 @@ mod tests {
             ..ApiGraph::default()
         };
         let ops: Vec<&Operation> = graph.operations.iter().collect();
-        check_cli_names(&ops, &graph, "bookstore")
+        check_cli_names(&ops, &graph, &SdkCli::new("bookstore"))
     }
 
     #[test]
@@ -2252,7 +3324,11 @@ mod tests {
         let success = success_responses_of(&bodyless, &graph)?;
         assert_eq!(success.statuses, vec![204]);
         assert!(success.body_model.is_none());
-        assert!(success.body_statuses.is_empty());
+        assert!(
+            success.body_statuses.is_empty(),
+            "{:?}",
+            success.body_statuses
+        );
         assert!(!success.has_bodyless_alternative());
         Ok(())
     }
@@ -2424,7 +3500,8 @@ mod tests {
                     && scheme.location == ApiKeyLocation::Query
         ));
         op.security_overrides_global = true;
-        assert!(operation_auth_alternatives(&graph, &op)?.is_empty());
+        let leftover = operation_auth_alternatives(&graph, &op)?;
+        assert!(leftover.is_empty(), "{leftover:?}");
         Ok(())
     }
 
@@ -2535,5 +3612,57 @@ mod tests {
             "{message}"
         );
         Ok(())
+    }
+    #[test]
+    fn switch_flags_reject_reserved_names_and_parameter_collisions() {
+        use gnr8::sdk::{CliCommand, CliTopic};
+        let graph = ApiGraph {
+            operations: vec![
+                cli_op("getBook", None, vec![cli_param("state")]),
+                cli_op("getArchivedBook", None, vec![cli_param("state")]),
+            ],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        for name in super::ALWAYS_RESERVED_FLAGS
+            .iter()
+            .copied()
+            .chain(["state", "-invalid"])
+        {
+            let cli = SdkCli::new("bookstore").topic(
+                CliTopic::new("books").command(
+                    CliCommand::operation("getBook", "get")
+                        .switch_flag(name, "getArchivedBook")
+                        .example("bookstore books get"),
+                ),
+            );
+            assert!(
+                check_cli_names(&ops, &graph, &cli).is_err(),
+                "accepted switch flag {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn switches_reject_different_input_contracts() {
+        use gnr8::sdk::{CliCommand, CliTopic};
+        let graph = ApiGraph {
+            operations: vec![
+                cli_op("getBook", None, vec![]),
+                cli_op("getArchivedBook", None, vec![cli_param("state")]),
+            ],
+            ..ApiGraph::default()
+        };
+        let ops: Vec<&Operation> = graph.operations.iter().collect();
+        let cli = SdkCli::new("bookstore").topic(
+            CliTopic::new("books").command(
+                CliCommand::operation("getBook", "get")
+                    .switch_flag("archived", "getArchivedBook")
+                    .example("bookstore books get"),
+            ),
+        );
+        let error = check_cli_names(&ops, &graph, &cli)
+            .expect_err("mismatched operation inputs must be rejected");
+        assert!(error.to_string().contains("different input"), "{error}");
     }
 }

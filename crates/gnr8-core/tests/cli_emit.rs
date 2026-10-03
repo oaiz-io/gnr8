@@ -118,15 +118,20 @@ fn gofmt_available() -> bool {
 }
 
 fn generate_go_cli(graph: &ApiGraph, program: &str) -> String {
+    generate_go_cli_with(graph, SdkCli::new(program))
+}
+
+fn generate_go_cli_with(graph: &ApiGraph, cli: SdkCli) -> String {
+    let program = cli.program.clone();
     let mut out = Artifacts::new();
     GoSdk::new()
         .module("example.com/bookstore/sdk")
         .to("generated/sdk-go")
         .without_contract_tests()
-        .cli(program)
+        .cli(cli)
         .generate(graph, &mut out, &cx(), None)
         .expect("GoSdk with .cli() must generate");
-    go_cli_source(&out, "generated/sdk-go", program)
+    go_cli_source(&out, "generated/sdk-go", &program)
 }
 
 fn generate_go_cli_result(
@@ -767,8 +772,9 @@ fn helper_parsing_failures_are_typed_before_anything_is_executed() {
     let split_at = text
         .find("shlex.split(helper)")
         .expect("the helper is split");
-    let exec_at = text
+    let exec_at = text[split_at..]
         .find("subprocess.run(")
+        .map(|offset| split_at + offset)
         .expect("the helper is executed");
     assert!(
         split_at < exec_at,
@@ -876,8 +882,14 @@ fn go_parser_declares_subcommands_and_flags() {
     assert!(text.contains("\"body\""), "{text}");
     assert!(text.contains("\"body-file\""), "{text}");
     assert!(text.contains("\"base-url\""), "{text}");
+    assert!(text.contains("const defaultVersion = \"0.1.0\""), "{text}");
     assert!(
-        text.contains("const version = \"bookstore 0.1.0\""),
+        text.contains("func Run(args []string, opts Options) int"),
+        "{text}"
+    );
+    assert!(text.contains("var ("), "{text}");
+    assert!(
+        text.contains("os.Exit(cli.Run(os.Args[1:], cli.Options{"),
         "{text}"
     );
     assert!(
@@ -1710,17 +1722,40 @@ fn one_query_param_graph(name: &str) -> ApiGraph {
 
 #[test]
 fn a_flag_no_command_binds_no_longer_blocks_generation() {
-    // `--json` is bound by neither emitter: output is unconditionally JSON. `--limit`/`--all` are
-    // bound only on a paginated command, `--body`/`--body-file` only where there is a request body,
-    // and `--version` on the root parser, which is not a command. Reserving these unconditionally
-    // cost a legitimate parameter, and the only remedy was changing the API's wire contract.
-    for name in ["json", "limit", "all", "body", "body_file", "version"] {
+    // `--json` and `--format` are reserved globals. `--limit`/`--all`/`--cursor` are bound only on a
+    // paginated command, `--page-size` is a rename error on those same commands, `--body`/`--body-file`
+    // only where there is a request body, and `--version` on the root parser, which is not a command.
+    for name in [
+        "limit",
+        "all",
+        "body",
+        "body_file",
+        "version",
+        "cursor",
+        "page_size",
+    ] {
         let graph = one_query_param_graph(name);
         let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
         let flag = name.replace('_', "-");
         assert!(
             text.contains(&format!("\"--{flag}\",")),
             "--{flag} must be available to a parameter no command shadows:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn json_and_format_are_reserved_command_flags() {
+    for name in [
+        "json", "format", "fields", "output", "quiet", "debug", "yes", "no-input", "color",
+        "no-pager",
+    ] {
+        let graph = one_query_param_graph(name);
+        let error = generate_cli_result(&graph, SdkCli::new("bookstore")).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("--{name}")),
+            "--{name} is a reserved global:\n{message}"
         );
     }
 }
@@ -1847,8 +1882,10 @@ fn a_percent_in_a_default_is_escaped_for_argparse_help() {
     )
     .unwrap();
     let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
+    // Single-quoted because the text holds more double quotes than single ones: the literal is
+    // spelled the way `ruff format` would rewrite it.
     assert!(
-        text.contains(r#"help="default: \"100%%\"","#),
+        text.contains(r#"help='default: "100%%"',"#),
         "a percent in a default must be doubled:\n{text}"
     );
 }
@@ -2400,6 +2437,18 @@ fn the_reserved_flags_document_themselves() {
         );
     }
     assert!(
+        python.contains("error: --page-size is now --limit"),
+        "retired --page-size must name --limit:\n{python}"
+    );
+    assert!(
+        python.contains("\"hasMore\""),
+        "merged pages keep the page shape:\n{python}"
+    );
+    assert!(
+        python.contains("LAST_ANSWER[\"body\"] = None"),
+        "merged pages must not print the last HTTP body:\n{python}"
+    );
+    assert!(
         !python.contains("help=\"\""),
         "an empty help string is worse than none:\n{python}"
     );
@@ -2431,6 +2480,18 @@ fn the_reserved_flags_document_themselves() {
     ] {
         assert!(go.contains(expected), "Go help missing {expected}:\n{go}");
     }
+    assert!(
+        go.contains("--page-size is now --limit"),
+        "retired --page-size must name --limit:\n{go}"
+    );
+    assert!(
+        go.contains("merged[\"hasMore\"]"),
+        "merged pages keep the page shape:\n{go}"
+    );
+    assert!(
+        go.contains("lastAnswer.body = nil"),
+        "merged pages must not print the last HTTP body:\n{go}"
+    );
 }
 
 /// One operation that both carries a request body and is paginated, so every reserved flag binds.
@@ -2563,6 +2624,7 @@ fn the_reserved_group_names_differ_by_layout() {
         "body",
         "cli",
         "commands",
+        "complete",
         "config",
         "credentials",
         "errors",
@@ -2638,8 +2700,8 @@ fn go_a_group_answers_the_questions_asked_at_its_own_level() {
     // `--help`, a bare group, and an unknown command are all answered by the group's own page.
     assert_eq!(text.matches("printGroupUsage(os.Stdout, group)").count(), 2);
     assert_eq!(text.matches("printGroupUsage(os.Stderr, group)").count(), 4);
-    // Only `Run` still prints the root index.
-    assert_eq!(text.matches("printRootUsage(os.Stdout)").count(), 1);
+    // Root `--help` and `help` with no tokens both print the program index.
+    assert_eq!(text.matches("printRootUsage(os.Stdout)").count(), 2);
     assert!(
         text.contains("func printGroupUsage(out *os.File, group cliGroup)"),
         "{text}"
@@ -2859,5 +2921,431 @@ fn a_group_is_described_by_the_name_its_operations_carry() {
     assert!(
         text.contains("\"Event type definitions\","),
         "the source spelling of the group is what carries its prose: {text}"
+    );
+}
+
+#[test]
+fn json_and_format_flags_are_emitted() {
+    let text = generate_cli_with(&bookstore_graph(), SdkCli::new("bookstore"));
+    assert!(text.contains("\"--json\","), "{text}");
+    assert!(text.contains("\"--format\","), "{text}");
+    assert!(text.contains("\"--fields\","), "{text}");
+    assert!(text.contains("\"--output\","), "{text}");
+    assert!(text.contains("\"--quiet\","), "{text}");
+    assert!(text.contains("\"--debug\","), "{text}");
+    assert!(text.contains("\"--yes\","), "{text}");
+    assert!(text.contains("\"--no-input\","), "{text}");
+    assert!(text.contains("FORMAT_ENV"), "{text}");
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli(&bookstore_graph(), "bookstore");
+    assert!(go.contains("\"json\""), "{go}");
+    assert!(go.contains("\"format\""), "{go}");
+    assert!(go.contains("\"fields\""), "{go}");
+    assert!(go.contains("printAIFriendly"), "{go}");
+    assert!(go.contains("PreflightOutput"), "{go}");
+    assert!(go.contains("peelGlobals"), "{go}");
+}
+
+#[test]
+fn parameter_description_reaches_cli_help() {
+    use gnr8_engine::sdk::TransformExec as _;
+    let mut graph = bookstore_graph();
+    DocumentOperation::when(OperationSelector::operation("getBook"))
+        .parameter("book_id", "The book's identifier.")
+        .apply(&mut graph, &cx())
+        .expect("documenting a parameter with no source prose");
+    let text = generate_cli_with(&graph, SdkCli::new("bookstore"));
+    assert!(
+        text.contains("The book's identifier."),
+        "Python --help must print the parameter's prose:\n{text}"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli(&graph, "bookstore");
+    assert!(
+        go.contains("The book's identifier."),
+        "Go --help must print the parameter's prose:\n{go}"
+    );
+}
+
+#[test]
+fn document_operation_parameter_collision_is_an_error() {
+    use gnr8_engine::sdk::TransformExec as _;
+    let mut graph = bookstore_graph();
+    DocumentOperation::when(OperationSelector::operation("getBook"))
+        .parameter("book_id", "first")
+        .apply(&mut graph, &cx())
+        .expect("first write");
+    let err = DocumentOperation::when(OperationSelector::operation("getBook"))
+        .parameter("book_id", "second")
+        .apply(&mut graph, &cx())
+        .expect_err("a second source for one parameter is a hard error");
+    let message = err.to_string();
+    assert!(message.contains("book_id"), "{message}");
+    assert!(
+        message.contains("DocumentOperation::parameter") || message.contains("second source"),
+        "{message}"
+    );
+}
+
+#[test]
+fn document_operation_parameter_unknown_name_is_an_error() {
+    use gnr8_engine::sdk::TransformExec as _;
+    let mut graph = bookstore_graph();
+    let err = DocumentOperation::when(OperationSelector::operation("getBook"))
+        .parameter("no_such_param", "prose")
+        .apply(&mut graph, &cx())
+        .expect_err("a name the operation does not carry is a configuration error");
+    let message = err.to_string();
+    assert!(message.contains("no_such_param"), "{message}");
+}
+
+#[test]
+fn python_cli_rejects_owned_commands_and_hand_owned_main() {
+    let owned = generate_cli_result(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").owned_command("login"),
+    )
+    .unwrap_err();
+    assert!(owned.to_string().contains("Go CLI library seam"), "{owned}");
+    let main = generate_cli_result(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").hand_owned_main(),
+    )
+    .unwrap_err();
+    assert!(main.to_string().contains("Go CLI library seam"), "{main}");
+}
+
+#[test]
+fn go_hand_owned_main_skips_main_go_and_owned_command_is_dispatched() {
+    if skip_go() {
+        return;
+    }
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(
+            SdkCli::new("bookstore")
+                .hand_owned_main()
+                .owned_command(OwnedCommand::new("login").summary("Sign in")),
+        )
+        .generate(&bookstore_graph(), &mut out, &cx(), None)
+        .expect("GoSdk owned-command generation");
+    assert!(
+        out.files()
+            .iter()
+            .all(|file| !file.path.ends_with("/main.go")),
+        "hand-owned main must not emit main.go: {:?}",
+        out.files()
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>()
+    );
+    let text = go_cli_source(&out, "generated/sdk-go", "bookstore");
+    assert!(text.contains("case \"login\":"), "{text}");
+    assert!(text.contains("return runLogin(args[1:], active)"), "{text}");
+    assert!(text.contains("\"Sign in\""), "{text}");
+}
+
+fn spec_cli() -> SdkCli {
+    SdkCli::new("bookstore").topic(
+        CliTopic::new("books")
+            .concept("Browse and manage the catalogue")
+            .command(CliCommand::operation("listBooks", "list").example("bookstore books list"))
+            .command(
+                CliCommand::operation("getBook", "get")
+                    .positional("id")
+                    .selector(CliSelector::new("listBooks", "id", "id"))
+                    .example("bookstore books get 1"),
+            ),
+    )
+}
+
+#[test]
+fn spec_renames_verbs_and_takes_positional_ids() {
+    let graph = grouped_graph("");
+    let py = generate_cli_with(&graph, spec_cli());
+    assert!(py.contains("add_parser(\n        \"list\""), "{py}");
+    assert!(py.contains("add_parser(\n        \"get\""), "{py}");
+    assert!(
+        py.contains("metavar=\"ID\""),
+        "positional id must be an argument, not a flag: {py}"
+    );
+    assert!(
+        !py.contains("\"--id\""),
+        "positional id must not be a flag: {py}"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, spec_cli());
+    assert!(go.contains("case \"list\":"), "{go}");
+    assert!(go.contains("case \"get\":"), "{go}");
+    assert!(go.contains("Usage: %s books get <id> [flags]"), "{go}");
+    assert!(go.contains("splitFlagArgs"), "{go}");
+    assert!(go.contains("splitSelector"), "{go}");
+}
+
+#[test]
+fn spec_rename_error_exits_without_dispatch() {
+    let graph = grouped_graph("");
+    let cli = spec_cli().rename_error(CliRenameError::new(["books", "list-books"], "books list"));
+    let py = generate_cli_with(&graph, cli.clone());
+    assert!(py.contains("list-books"), "{py}");
+    assert!(py.contains("books list"), "{py}");
+    assert!(py.contains("_check_rename"), "{py}");
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, cli);
+    assert!(go.contains("checkRename"), "{go}");
+    assert!(go.contains("list-books"), "{go}");
+    assert!(go.contains("books list"), "{go}");
+}
+
+#[test]
+fn spec_body_fields_and_severity() {
+    let cli = SdkCli::new("bookstore").topic(
+        CliTopic::new("books")
+            .command(
+                CliCommand::operation("createBook", "create")
+                    .body_fields()
+                    .example("bookstore books create --title Dune"),
+            )
+            .command(
+                CliCommand::operation("getBook", "get")
+                    .positional("book_id")
+                    .severity(CliSeverity::Moderate)
+                    .example("bookstore books get 1"),
+            ),
+    );
+    let graph = bookstore_graph();
+    let py = generate_cli_with(&graph, cli.clone());
+    assert!(py.contains("--title"), "{py}");
+    assert!(py.contains("output.confirm("), "{py}");
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, cli);
+    assert!(go.contains("fs.String(\"title\""), "{go}");
+    assert!(go.contains("overlayBody"), "{go}");
+    assert!(go.contains("Confirm(\"moderate\""), "{go}");
+}
+
+#[test]
+fn spec_sub_noun_nests_dispatch() {
+    let cli = SdkCli::new("bookstore").topic(
+        CliTopic::new("books").command(
+            CliCommand::operation("getBook", "get")
+                .sub_noun("copy")
+                .positional("id")
+                .example("bookstore books copy get 1"),
+        ),
+    );
+    let graph = grouped_graph("");
+    if skip_go() {
+        let py = generate_cli_with(&graph, cli);
+        assert!(py.contains("\"copy\""), "{py}");
+        return;
+    }
+    let go = generate_go_cli_with(&graph, cli);
+    assert!(go.contains("case \"copy\":"), "{go}");
+    assert!(go.contains("dispatchBooksCopy"), "{go}");
+}
+
+fn cursor_paged_graph() -> ApiGraph {
+    let mut graph = paginated_body_graph();
+    graph.operations[0].params[0].name = "cursor".to_string();
+    graph.operations[0].params[0].schema =
+        gnr8_engine::graph::Type::Primitive(gnr8_engine::graph::Prim::String);
+    let gnr8_engine::graph::Type::Object(fields) = &mut graph.schemas[1].body else {
+        panic!("Page schema");
+    };
+    let mut next = fields[0].clone();
+    next.json_name = "next_cursor".to_string();
+    next.schema = gnr8_engine::graph::Type::Primitive(gnr8_engine::graph::Prim::String);
+    next.serializer_may_omit = true;
+    next.deserializer_accepts_absent = true;
+    next.deserializer_accepts_null = true;
+    next.serializer_may_emit_null = true;
+    next.validator_requires_presence = false;
+    next.validator_rejects_null = false;
+    next.description = None;
+    next.example = None;
+    fields.push(next);
+    graph.pagination = vec![gnr8_engine::graph::PaginationPolicy {
+        operation_id: "listBooks".to_string(),
+        mode: gnr8_engine::graph::PaginationMode::Cursor,
+        items_field: "items".to_string(),
+        cursor_param: Some("cursor".to_string()),
+        next_cursor_field: Some("next_cursor".to_string()),
+        page_param: None,
+        page_size_param: None,
+        offset_param: None,
+        limit_param: None,
+        termination: gnr8_engine::graph::PaginationTermination::NoNextCursor,
+    }];
+    graph
+}
+
+#[test]
+fn cursor_flag_seeds_the_request_and_documents_itself() {
+    let graph = cursor_paged_graph();
+    let python = generate_cli_with(
+        &graph,
+        SdkCli::new("bookstore").base_url("https://api.test"),
+    );
+    assert!(
+        python.contains("resume from this cursor"),
+        "Python help missing --cursor:\n{python}"
+    );
+    assert!(
+        python.contains("kwargs[\"cursor\"] = args.cursor"),
+        "Python must seed the cursor param:\n{python}"
+    );
+    assert!(
+        python.contains("output.progress_fetched(len(items))"),
+        "Python must print fetch progress:\n{python}"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(
+        &graph,
+        SdkCli::new("bookstore").base_url("https://api.test"),
+    );
+    assert!(
+        go.contains(r#"cursorFlag := fs.String("cursor", "", "resume from this cursor")"#),
+        "Go help missing --cursor:\n{go}"
+    );
+    assert!(
+        go.contains("if seen[\"cursor\"]"),
+        "Go must seed the cursor param:\n{go}"
+    );
+    assert!(
+        go.contains("Ptr(*cursorFlag)"),
+        "Go must assign the cursor flag:\n{go}"
+    );
+    assert!(
+        go.contains("fetched %d items"),
+        "Go must print fetch progress:\n{go}"
+    );
+}
+
+#[test]
+fn spec_command_without_example_is_a_generation_error() {
+    let error = generate_cli_result(
+        &grouped_graph(""),
+        SdkCli::new("bookstore")
+            .topic(CliTopic::new("books").command(CliCommand::operation("listBooks", "list"))),
+    )
+    .expect_err("a spec command without an example must be rejected");
+    assert!(
+        matches!(error, gnr8_engine::CoreError::SdkGen { .. }),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("must declare at least one example"),
+        "{error}"
+    );
+}
+
+#[test]
+fn spec_help_layout_and_help_json() {
+    let graph = grouped_graph("");
+    let py = generate_cli_with(&graph, spec_cli());
+    assert!(py.contains("Examples:"), "missing Examples in Python CLI");
+    assert!(
+        py.contains("HELP_SPEC ="),
+        "missing HELP_SPEC in Python CLI"
+    );
+    assert!(
+        py.contains("seeAlso") || py.contains("flags"),
+        "missing help spec fields in Python CLI"
+    );
+    assert!(
+        py.contains("def _print_help"),
+        "missing _print_help in Python CLI"
+    );
+    assert!(
+        py.contains("argv[0] == \"help\""),
+        "missing help dispatch in Python CLI"
+    );
+    assert!(
+        py.contains("formatter_class=argparse.RawDescriptionHelpFormatter"),
+        "epilog must keep example newlines"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, spec_cli());
+    assert!(go.contains("Examples:"), "missing Examples in Go CLI");
+    assert!(
+        go.contains("const helpSpecJSON"),
+        "missing helpSpecJSON in Go CLI"
+    );
+    assert!(go.contains("Arguments:"), "missing Arguments in Go CLI");
+    assert!(
+        go.contains("case \"help\":"),
+        "missing help dispatch in Go CLI"
+    );
+    assert!(go.contains("func printHelp"), "missing printHelp in Go CLI");
+    assert!(go.contains("seeAlso"), "missing seeAlso in Go help spec");
+}
+
+#[test]
+fn color_pager_and_completion_are_emitted() {
+    let graph = grouped_graph("");
+    let py = generate_cli_with(&graph, spec_cli());
+    assert!(py.contains("\"--color\""), "missing --color in Python CLI");
+    assert!(
+        py.contains("\"--no-pager\""),
+        "missing --no-pager in Python CLI"
+    );
+    assert!(py.contains("def use_color"), "missing use_color");
+    assert!(py.contains("def write_human"), "missing write_human");
+    assert!(
+        py.contains("def progress_fetched"),
+        "missing progress_fetched"
+    );
+    assert!(
+        py.contains("argv[0] == \"completion\""),
+        "missing completion dispatch"
+    );
+    assert!(
+        py.contains("argv[0] == \"__complete\""),
+        "missing __complete dispatch"
+    );
+    assert!(py.contains("BASH_COMPLETION"), "missing bash script");
+    assert!(
+        py.contains("LIVE_COMPLETES"),
+        "missing live completion table"
+    );
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&graph, spec_cli());
+    assert!(go.contains("func useColor()"), "missing useColor");
+    assert!(go.contains("func writeHuman("), "missing writeHuman");
+    assert!(go.contains("noPager"), "missing noPager");
+    assert!(
+        go.contains("case \"completion\":"),
+        "missing completion dispatch"
+    );
+    assert!(
+        go.contains("case \"__complete\":"),
+        "missing __complete dispatch"
+    );
+    assert!(go.contains("func complete("), "missing complete");
+    assert!(
+        go.contains("const bashCompletion"),
+        "missing bashCompletion"
     );
 }

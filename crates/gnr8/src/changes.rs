@@ -548,7 +548,11 @@ mod tests {
 
         let earlier: ChangeReport =
             serde_json::from_value(value).expect("read earlier schema-one fields");
-        assert!(earlier.policy.gate_operations.is_empty());
+        assert!(
+            earlier.policy.gate_operations.is_empty(),
+            "{:?}",
+            earlier.policy.gate_operations
+        );
         assert_eq!(earlier.changes[0].protected, Sides::default());
     }
 

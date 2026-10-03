@@ -91,7 +91,7 @@ class ContractTest(unittest.TestCase):
 
     def test_request_shape_list_books(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"books\":[{\"author\":{\"bio\":\"gnr8\",\"name\":\"gnr8\"},\"format\":\"hardcover\",\"id\":7,\"rating\":7,\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}],\"next_cursor\":\"gnr8\",\"total\":7}")
+        handler.queue(200, {"content-type": "application/json"}, '{"books":[{"author":{"bio":"gnr8","name":"gnr8"},"format":"hardcover","id":7,"rating":7,"tags":["gnr8"],"title":"gnr8"}],"next_cursor":"gnr8","total":7}')
         client = _contract_client(handler)
         result = client.list_books(cursor="gnr8", genre="gnr8", sort="gnr8")
         request = self._single_request(handler)
@@ -100,17 +100,17 @@ class ContractTest(unittest.TestCase):
 
     def test_request_shape_create_book(self) -> None:
         handler = _ContractHandler()
-        handler.queue(201, {"content-type": "application/json"}, "{\"id\":7,\"message\":\"gnr8\"}")
+        handler.queue(201, {"content-type": "application/json"}, '{"id":7,"message":"gnr8"}')
         client = _contract_client(handler)
         result = client.create_book(body=Book(author=Author(bio="gnr8", name="gnr8"), format=BookFormat("hardcover"), id=7, title="gnr8"))
         request = self._single_request(handler)
         self._assert_wire(request, "POST", "/books/", {}, {"content-type": "application/json"})
-        self._assert_body(request, "{\"author\":{\"bio\":\"gnr8\",\"name\":\"gnr8\"},\"format\":\"hardcover\",\"id\":7,\"title\":\"gnr8\"}")
+        self._assert_body(request, '{"author":{"bio":"gnr8","name":"gnr8"},"format":"hardcover","id":7,"title":"gnr8"}')
         self.assertEqual(result.id, 7, "id")
 
     def test_request_shape_get_book(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"author\":{\"bio\":\"gnr8\",\"name\":\"gnr8\"},\"format\":\"hardcover\",\"id\":7,\"rating\":7,\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
+        handler.queue(200, {"content-type": "application/json"}, '{"author":{"bio":"gnr8","name":"gnr8"},"format":"hardcover","id":7,"rating":7,"tags":["gnr8"],"title":"gnr8"}')
         client = _contract_client(handler)
         result = client.get_book(book_id=7, fmt=BookFormat("hardcover"))
         request = self._single_request(handler)
@@ -119,17 +119,17 @@ class ContractTest(unittest.TestCase):
 
     def test_request_shape_update_book(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"id\":7,\"message\":\"gnr8\"}")
+        handler.queue(200, {"content-type": "application/json"}, '{"id":7,"message":"gnr8"}')
         client = _contract_client(handler)
         result = client.update_book(book_id=7, body=BookFilters(genre="gnr8", published=7))
         request = self._single_request(handler)
         self._assert_wire(request, "PUT", "/books/7", {}, {"content-type": "application/json"})
-        self._assert_body(request, "{\"genre\":\"gnr8\",\"published\":7}")
+        self._assert_body(request, '{"genre":"gnr8","published":7}')
         self.assertEqual(result.id, 7, "id")
 
     def test_response_decode_list_books_present(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"books\":[{\"author\":{\"bio\":\"gnr8\",\"name\":\"gnr8\"},\"format\":\"hardcover\",\"id\":7,\"rating\":7,\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}],\"next_cursor\":\"gnr8\",\"total\":7}")
+        handler.queue(200, {"content-type": "application/json"}, '{"books":[{"author":{"bio":"gnr8","name":"gnr8"},"format":"hardcover","id":7,"rating":7,"tags":["gnr8"],"title":"gnr8"}],"next_cursor":"gnr8","total":7}')
         client = _contract_client(handler)
         result = client.list_books(cursor="gnr8", genre="gnr8", sort="gnr8")
         request = self._single_request(handler)
@@ -138,17 +138,17 @@ class ContractTest(unittest.TestCase):
 
     def test_response_decode_create_book_present(self) -> None:
         handler = _ContractHandler()
-        handler.queue(201, {"content-type": "application/json"}, "{\"id\":7,\"message\":\"gnr8\"}")
+        handler.queue(201, {"content-type": "application/json"}, '{"id":7,"message":"gnr8"}')
         client = _contract_client(handler)
         result = client.create_book(body=Book(author=Author(bio="gnr8", name="gnr8"), format=BookFormat("hardcover"), id=7, title="gnr8"))
         request = self._single_request(handler)
         self._assert_wire(request, "POST", "/books/", {}, {"content-type": "application/json"})
-        self._assert_body(request, "{\"author\":{\"bio\":\"gnr8\",\"name\":\"gnr8\"},\"format\":\"hardcover\",\"id\":7,\"title\":\"gnr8\"}")
+        self._assert_body(request, '{"author":{"bio":"gnr8","name":"gnr8"},"format":"hardcover","id":7,"title":"gnr8"}')
         self.assertEqual(result.id, 7, "id")
 
     def test_response_decode_get_book_present(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"author\":{\"bio\":\"gnr8\",\"name\":\"gnr8\"},\"format\":\"hardcover\",\"id\":7,\"rating\":7,\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
+        handler.queue(200, {"content-type": "application/json"}, '{"author":{"bio":"gnr8","name":"gnr8"},"format":"hardcover","id":7,"rating":7,"tags":["gnr8"],"title":"gnr8"}')
         client = _contract_client(handler)
         result = client.get_book(book_id=7, fmt=BookFormat("hardcover"))
         request = self._single_request(handler)
@@ -157,17 +157,17 @@ class ContractTest(unittest.TestCase):
 
     def test_response_decode_update_book_present(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"id\":7,\"message\":\"gnr8\"}")
+        handler.queue(200, {"content-type": "application/json"}, '{"id":7,"message":"gnr8"}')
         client = _contract_client(handler)
         result = client.update_book(book_id=7, body=BookFilters(genre="gnr8", published=7))
         request = self._single_request(handler)
         self._assert_wire(request, "PUT", "/books/7", {}, {"content-type": "application/json"})
-        self._assert_body(request, "{\"genre\":\"gnr8\",\"published\":7}")
+        self._assert_body(request, '{"genre":"gnr8","published":7}')
         self.assertEqual(result.id, 7, "id")
 
     def test_typed_error_list_books_400(self) -> None:
         handler = _ContractHandler()
-        handler.queue(400, {"content-type": "application/json"}, "{\"message\":\"contract test error\",\"slug\":\"contract_test_error\"}")
+        handler.queue(400, {"content-type": "application/json"}, '{"message":"contract test error","slug":"contract_test_error"}')
         client = _contract_client(handler)
         with self.assertRaises(ApiError) as caught:
             client.list_books(cursor="gnr8", genre="gnr8", sort="gnr8")

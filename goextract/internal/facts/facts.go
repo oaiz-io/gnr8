@@ -89,7 +89,10 @@ type ParamFact struct {
 	Style           string        `json:"style,omitempty"`
 	Explode         *bool         `json:"explode,omitempty"`
 	AllowReserved   bool          `json:"allow_reserved,omitempty"`
-	Span            SourceSpan    `json:"span"`
+	// Description is the binding field's own doc comment read as plain prose (AGENTS.md
+	// rule 0.1 category 2). Empty when the parameter has no declaration to document.
+	Description string     `json:"description,omitempty"`
+	Span        SourceSpan `json:"span"`
 }
 
 // ResponseFact describes one response keyed by HTTP status.

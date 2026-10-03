@@ -11,15 +11,23 @@ use std::fmt::Write as _;
 use gnr8::facts::LiteralValue;
 use gnr8::sdk::SdkCli;
 
-use crate::graph::{ApiGraph, Operation, PaginationPolicy, Param, Prim, Type};
+use crate::graph::{
+    ApiGraph, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Param, Prim, Type,
+};
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    check_cli_names, cli_operations, command_group, command_name, credential_env_var, file_stem,
-    flag_name, helper_env_var, http_auth_features_for, operation_auth_alternatives,
-    operation_prose, reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
-    OperationAuthScheme, RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP,
-    LIMIT_HELP,
+    body_field_flags, check_cli_names, cli_next_cursor_field, cli_operations, cli_result_shape,
+    command_docs_url, command_examples, command_invocation, command_output_note, command_see_also,
+    command_sub_noun, command_topic, command_verb, command_view, credential_env_var, debug_env_var,
+    file_stem, flag_name, format_env_var, help_spec_json, helper_env_var, http_auth_features_for,
+    is_positional_param, no_input_env_var, operation_auth_alternatives, operation_prose,
+    output_dir_env_var, pager_env_var, parameter_flag_help, positional_names,
+    reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
+    response_field_names, CliResultShape, OperationAuthScheme, RequestBodyModel, ALL_HELP,
+    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP,
+    FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP, QUIET_HELP,
+    YES_HELP,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -50,12 +58,13 @@ struct CommandModule<'a> {
 /// Partition the program's operations into one module per group, ungrouped first.
 fn command_modules<'a>(
     ops: &[&'a Operation],
-    program: &str,
+    cli: &SdkCli,
 ) -> Result<Vec<CommandModule<'a>>, CoreError> {
+    let program = cli.program.as_str();
     let mut ungrouped: Vec<&Operation> = Vec::new();
     let mut grouped: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
     for op in ops.iter().copied() {
-        match command_group(op) {
+        match command_topic(cli, op) {
             Some(group) => grouped.entry(group).or_default().push(op),
             None => ungrouped.push(op),
         }
@@ -158,6 +167,42 @@ fn emit_string_kwarg(
     Ok(())
 }
 
+/// Write `NAME = <python string>` wrapping with implicit concatenation so the line stays at 88 columns.
+fn emit_string_assign(out: &mut String, name: &str, value: &str) -> Result<(), CoreError> {
+    let literal = py_string_literal(value);
+    let line = format!("{name} = {literal}");
+    if line.len() <= 88 {
+        writeln!(out, "{line}").map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "{name} = (").map_err(sink)?;
+    let inner = "    ";
+    let mut rest = value;
+    while !rest.is_empty() {
+        let min = rest.chars().next().map_or(0, char::len_utf8);
+        let budget = 88usize.saturating_sub(inner.len());
+        let mut take = rest.len().min(budget.max(min));
+        while take > min && !rest.is_char_boundary(take) {
+            take -= 1;
+        }
+        loop {
+            let chunk = rest.get(..take).unwrap_or(rest);
+            let literal = py_string_literal(chunk);
+            if inner.len() + literal.len() <= 88 || take <= min {
+                writeln!(out, "{inner}{literal}").map_err(sink)?;
+                rest = &rest[chunk.len()..];
+                break;
+            }
+            take -= 1;
+            while take > min && !rest.is_char_boundary(take) {
+                take -= 1;
+            }
+        }
+    }
+    writeln!(out, ")").map_err(sink)?;
+    Ok(())
+}
+
 /// Render `<sdk dir>/cli.py` for one program name.
 ///
 /// # Errors
@@ -172,12 +217,16 @@ pub(crate) fn emit_cli(
     cli: &SdkCli,
 ) -> Result<Vec<SdkFile>, CoreError> {
     let ops = cli_operations(graph, cli)?;
-    check_cli_names(&ops, graph, &cli.program)?;
+    check_cli_names(&ops, graph, cli)?;
     reject_sse_operations(&ops, &cli.program)?;
     http_auth_features_for(&ops, graph)?;
-    let modules = command_modules(&ops, &cli.program)?;
+    let modules = command_modules(&ops, cli)?;
 
     let mut files = vec![
+        SdkFile {
+            name: cli_file(&format!("{}-cli-result-v1.json", cli.program)),
+            contents: crate::sdk::emit_common::cli_envelope_schema(&cli.program)?,
+        },
         SdkFile {
             name: cli_file("__init__.py"),
             contents: emit_package_init(graph, &cli.program, package)?,
@@ -197,6 +246,10 @@ pub(crate) fn emit_cli(
         SdkFile {
             name: cli_file("output.py"),
             contents: emit_output_module(graph, model_style)?,
+        },
+        SdkFile {
+            name: cli_file("complete.py"),
+            contents: emit_complete_module(&ops, cli)?,
         },
     ];
     if has_request_body(&ops, graph)? {
@@ -223,7 +276,7 @@ pub(crate) fn emit_cli(
     }
     files.push(SdkFile {
         name: cli_file("main.py"),
-        contents: emit_main_module(&ops, graph)?,
+        contents: emit_main_module(&ops, graph, cli)?,
     });
     Ok(files)
 }
@@ -374,14 +427,16 @@ fn emit_credentials_module(graph: &ApiGraph) -> Result<String, CoreError> {
         writeln!(out, "from typing import Any, Optional").map_err(sink)?;
         writeln!(out).map_err(sink)?;
         let mut imports = vec![
-            "from ..client import Client".to_string(),
+            "from ..client import Client, ClientHooks".to_string(),
             "from .config import CREDENTIAL_ENV, HELPER_ENV, SCHEME_KINDS".to_string(),
+            "from .output import capture_response".to_string(),
         ];
         emit_relative_imports(&mut out, &mut imports)?;
     } else {
         writeln!(out, "from __future__ import annotations").map_err(sink)?;
         writeln!(out).map_err(sink)?;
-        writeln!(out, "from ..client import Client").map_err(sink)?;
+        writeln!(out, "from ..client import Client, ClientHooks").map_err(sink)?;
+        writeln!(out, "from .output import capture_response").map_err(sink)?;
     }
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -398,7 +453,11 @@ fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<Str
     writeln!(
         out,
         "{}",
-        py_docstring("Rendering a result on stdout: JSON for a document, raw bytes for a file.")
+        py_docstring(
+            "Rendering a result on stdout and an error on stderr.\n\n`--format` selects human, \
+             ai-friendly, json, or jsonl; `--json` is the JSON shorthand.\nErrors print `error:` \
+             plus optional hints and a request id, at most six lines.",
+        )
     )
     .map_err(sink)?;
     writeln!(out).map_err(sink)?;
@@ -407,14 +466,34 @@ fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<Str
     if model_style == PyModelStyle::Dataclass && has_object_schema(graph) {
         writeln!(out, "import dataclasses").map_err(sink)?;
     }
+    writeln!(out, "import hashlib").map_err(sink)?;
+    writeln!(out, "import io").map_err(sink)?;
     writeln!(out, "import json").map_err(sink)?;
+    writeln!(out, "import os").map_err(sink)?;
+    writeln!(out, "import secrets").map_err(sink)?;
+    writeln!(out, "import shlex").map_err(sink)?;
+    writeln!(out, "import subprocess").map_err(sink)?;
     writeln!(out, "import sys").map_err(sink)?;
-    writeln!(out, "from typing import Any").map_err(sink)?;
+    writeln!(out, "import tempfile").map_err(sink)?;
+    writeln!(out, "from datetime import datetime, timezone").map_err(sink)?;
+    writeln!(out, "from pathlib import Path").map_err(sink)?;
+    writeln!(out, "from typing import Any, Optional").map_err(sink)?;
     if model_style == PyModelStyle::Pydantic && has_object_schema(graph) {
         writeln!(out).map_err(sink)?;
         writeln!(out, "from pydantic import BaseModel").map_err(sink)?;
     }
     writeln!(out).map_err(sink)?;
+    writeln!(out, "from .config import (").map_err(sink)?;
+    writeln!(out, "    DEBUG_ENV,").map_err(sink)?;
+    writeln!(out, "    FORMAT_ENV,").map_err(sink)?;
+    writeln!(out, "    NO_INPUT_ENV,").map_err(sink)?;
+    writeln!(out, "    OUTPUT_DIR_ENV,").map_err(sink)?;
+    writeln!(out, "    PAGER_ENV,").map_err(sink)?;
+    writeln!(out, "    PROGRAM,").map_err(sink)?;
+    writeln!(out, "    VERSION,").map_err(sink)?;
+    writeln!(out, ")").map_err(sink)?;
+    // One blank line, not two: the import block is followed by a module-level assignment, and
+    // ruff's isort only wants two before a `def` or `class`.
     writeln!(out).map_err(sink)?;
     emit_print_helpers(&mut out, graph, model_style)?;
     Ok(finish(out))
@@ -602,10 +681,41 @@ fn emit_constants(
     .map_err(sink)?;
     writeln!(
         out,
+        "FORMAT_ENV = {}",
+        py_string_literal(&format_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "DEBUG_ENV = {}",
+        py_string_literal(&debug_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "NO_INPUT_ENV = {}",
+        py_string_literal(&no_input_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "OUTPUT_DIR_ENV = {}",
+        py_string_literal(&output_dir_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "PAGER_ENV = {}",
+        py_string_literal(&pager_env_var(&cli.program))
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
         "DESCRIPTION = {}",
         py_string_literal(&program_description(graph))
     )
     .map_err(sink)?;
+    emit_string_assign(out, "HELP_SPEC", &help_spec_json(cli, ops, graph)?)?;
     if has_security(graph) {
         writeln!(
             out,
@@ -641,7 +751,7 @@ fn emit_constants(
                 out,
                 "    {}: {},",
                 py_string_literal(&op.id),
-                py_string_literal(&command_name(op))
+                py_string_literal(&command_invocation(cli, op))
             )
             .map_err(sink)?;
         }
@@ -767,7 +877,14 @@ fn emit_body_helpers_always(out: &mut String) -> Result<(), CoreError> {
 fn emit_client_builder(out: &mut String, graph: &ApiGraph) -> Result<(), CoreError> {
     if !has_security(graph) {
         writeln!(out, "def build_client(base_url: str) -> Client:").map_err(sink)?;
-        writeln!(out, "    return Client(base_url)").map_err(sink)?;
+        writeln!(out, "    return Client(").map_err(sink)?;
+        writeln!(out, "        base_url,").map_err(sink)?;
+        writeln!(
+            out,
+            "        hooks=ClientHooks(response=[capture_response]),"
+        )
+        .map_err(sink)?;
+        writeln!(out, "    )").map_err(sink)?;
         writeln!(out).map_err(sink)?;
         writeln!(out).map_err(sink)?;
         return Ok(());
@@ -832,17 +949,43 @@ fn emit_client_builder(out: &mut String, graph: &ApiGraph) -> Result<(), CoreErr
         writeln!(out, "    if basic_auth is not None:").map_err(sink)?;
         writeln!(out, "        kwargs[\"basic_auth\"] = basic_auth").map_err(sink)?;
     }
+    writeln!(
+        out,
+        "    kwargs[\"hooks\"] = ClientHooks(response=[capture_response])"
+    )
+    .map_err(sink)?;
     writeln!(out, "    return Client(base_url, **kwargs)").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "format selection, error layout, and print_result are one stdout/stderr surface"
+)]
 fn emit_print_helpers(
     out: &mut String,
     graph: &ApiGraph,
     model_style: PyModelStyle,
 ) -> Result<(), CoreError> {
+    writeln!(out, "OUTPUT_FORMAT = \"\"").map_err(sink)?;
+    writeln!(out, "FIELDS = \"\"").map_err(sink)?;
+    writeln!(out, "OUTPUT_PATH = \"\"").map_err(sink)?;
+    writeln!(out, "QUIET = False").map_err(sink)?;
+    writeln!(out, "DEBUG = False").map_err(sink)?;
+    writeln!(out, "YES = False").map_err(sink)?;
+    writeln!(out, "NO_INPUT = False").map_err(sink)?;
+    writeln!(out, "COMMAND_PATH = \"\"").map_err(sink)?;
+    writeln!(out, "COLOR_MODE = \"auto\"").map_err(sink)?;
+    writeln!(out, "NO_PAGER = False").map_err(sink)?;
+    writeln!(out, "PREVIEW: tuple[str, ...] = ()").map_err(sink)?;
+    writeln!(out, "RESULT_IS_LIST = False").map_err(sink)?;
+    writeln!(out, "ITEMS_KEY = \"\"").map_err(sink)?;
+    writeln!(out, "NEXT_CURSOR_FIELD = \"\"").map_err(sink)?;
+    writeln!(out, "LAST_ANSWER: dict[str, Any] = {{}}").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "def _jsonable(value: Any) -> Any:").map_err(sink)?;
     if model_style == PyModelStyle::Pydantic && has_object_schema(graph) {
         writeln!(out, "    if isinstance(value, BaseModel):").map_err(sink)?;
@@ -867,36 +1010,732 @@ fn emit_print_helpers(
     writeln!(out, "    return value").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
-    writeln!(out, "def print_result(result: Any) -> None:").map_err(sink)?;
-    writeln!(out, "    if isinstance(result, (bytes, bytearray)):").map_err(sink)?;
-    writeln!(out, "        sys.stdout.buffer.write(result)").map_err(sink)?;
+    writeln!(
+        out,
+        "def resolve_format(json_flag: bool, format_flag: Optional[str]) -> None:"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    global OUTPUT_FORMAT").map_err(sink)?;
+    writeln!(out, "    if json_flag:").map_err(sink)?;
+    writeln!(out, "        OUTPUT_FORMAT = \"json\"").map_err(sink)?;
+    writeln!(out, "        return").map_err(sink)?;
+    writeln!(out, "    if format_flag:").map_err(sink)?;
+    writeln!(out, "        OUTPUT_FORMAT = format_flag").map_err(sink)?;
+    writeln!(out, "        return").map_err(sink)?;
+    writeln!(out, "    env = os.getenv(FORMAT_ENV, \"\")").map_err(sink)?;
+    writeln!(
+        out,
+        "    if env in (\"human\", \"ai-friendly\", \"json\", \"jsonl\"):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        OUTPUT_FORMAT = env").map_err(sink)?;
     writeln!(out, "        return").map_err(sink)?;
     writeln!(
         out,
-        "    json.dump(_jsonable(result), sys.stdout, indent=2)"
+        "    OUTPUT_FORMAT = \"human\" if sys.stdout.isatty() else \"ai-friendly\""
     )
     .map_err(sink)?;
-    writeln!(out, "    sys.stdout.write(\"\\n\")").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    writeln!(out, "def exit_code_for_status(status: int) -> int:").map_err(sink)?;
+    writeln!(out, "    if status in (404, 410):").map_err(sink)?;
+    writeln!(out, "        return 3").map_err(sink)?;
+    writeln!(out, "    if status in (401, 403):").map_err(sink)?;
+    writeln!(out, "        return 4").map_err(sink)?;
+    writeln!(out, "    if status in (400, 409, 412, 422):").map_err(sink)?;
+    writeln!(out, "        return 5").map_err(sink)?;
+    writeln!(out, "    if status in (408, 429, 502, 503, 504):").map_err(sink)?;
+    writeln!(out, "        return 6").map_err(sink)?;
+    writeln!(out, "    return 1").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "def kind_for_exit(code: int) -> str:").map_err(sink)?;
+    writeln!(out, "    if code == 2:").map_err(sink)?;
+    writeln!(out, "        return \"usage\"").map_err(sink)?;
+    writeln!(out, "    if code == 3:").map_err(sink)?;
+    writeln!(out, "        return \"not_found\"").map_err(sink)?;
+    writeln!(out, "    if code == 4:").map_err(sink)?;
+    writeln!(out, "        return \"auth\"").map_err(sink)?;
+    writeln!(out, "    if code == 5:").map_err(sink)?;
+    writeln!(out, "        return \"refused\"").map_err(sink)?;
+    writeln!(out, "    if code == 6:").map_err(sink)?;
+    writeln!(out, "        return \"retry\"").map_err(sink)?;
+    writeln!(out, "    return \"error\"").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "def print_error(").map_err(sink)?;
+    writeln!(out, "    message: str,").map_err(sink)?;
+    writeln!(out, "    hints: Optional[list[str]] = None,").map_err(sink)?;
+    writeln!(out, "    request_id: str = \"\",").map_err(sink)?;
+    writeln!(out, "    status: int = 0,").map_err(sink)?;
+    writeln!(out, "    code: int = 1,").map_err(sink)?;
+    writeln!(out, "    slug: str = \"\",").map_err(sink)?;
+    writeln!(out, ") -> int:").map_err(sink)?;
+    writeln!(out, "    hints = hints or []").map_err(sink)?;
+    writeln!(out, "    if OUTPUT_FORMAT in (\"json\", \"jsonl\"):").map_err(sink)?;
+    writeln!(out, "        body: dict[str, Any] = {{").map_err(sink)?;
+    writeln!(out, "            \"exitCode\": code,").map_err(sink)?;
+    writeln!(out, "            \"kind\": kind_for_exit(code),").map_err(sink)?;
+    writeln!(out, "            \"message\": message,").map_err(sink)?;
+    writeln!(out, "        }}").map_err(sink)?;
+    writeln!(out, "        if status:").map_err(sink)?;
+    writeln!(out, "            body[\"status\"] = status").map_err(sink)?;
+    writeln!(out, "        if slug:").map_err(sink)?;
+    writeln!(out, "            body[\"slug\"] = slug").map_err(sink)?;
+    writeln!(out, "        if hints:").map_err(sink)?;
+    writeln!(out, "            body[\"hints\"] = hints").map_err(sink)?;
+    writeln!(out, "        if request_id:").map_err(sink)?;
+    writeln!(out, "            body[\"requestId\"] = request_id").map_err(sink)?;
+    writeln!(
+        out,
+        "        print(json.dumps({{\"error\": body}}, separators=(\",\", \":\")), file=sys.stderr)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        return code").map_err(sink)?;
+    out.push_str(
+        r#"    escape_line = str.maketrans({"\r": r"\r", "\n": r"\n", "\t": r"\t"})
+    limit = 5 if request_id else 6
+"#,
+    );
+    writeln!(out, "    message = message.translate(escape_line)").map_err(sink)?;
+    writeln!(
+        out,
+        "    print(f\"{{colorize('31', 'error:')}} {{message}}\", file=sys.stderr)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    n = 1").map_err(sink)?;
+    writeln!(out, "    for hint in hints:").map_err(sink)?;
+    writeln!(out, "        if n >= limit:").map_err(sink)?;
+    writeln!(out, "            break").map_err(sink)?;
+    writeln!(
+        out,
+        "        print(f\"  hint: {{hint.translate(escape_line)}}\", file=sys.stderr)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        n += 1").map_err(sink)?;
+    writeln!(out, "    if request_id and n < 6:").map_err(sink)?;
+    writeln!(
+        out,
+        "        print(f\"  request id: {{request_id.translate(escape_line)}}\", file=sys.stderr)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    return code").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    // The runtime text opens with its own blank line, which makes the two PEP 8 wants before a `def`.
+    out.push_str(&python_output_runtime());
     Ok(())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the generated output runtime is one stdout/envelope/prompt surface"
+)]
+fn python_output_runtime() -> String {
+    r#"
+def use_color() -> bool:
+    if OUTPUT_FORMAT and OUTPUT_FORMAT != "human":
+        return False
+    if COLOR_MODE == "always":
+        return True
+    if COLOR_MODE == "never":
+        return False
+    if os.getenv("NO_COLOR"):
+        return False
+    if os.getenv("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def colorize(code: str, text: str) -> str:
+    if not use_color():
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def term_width() -> int:
+    raw = os.getenv("COLUMNS", "")
+    if raw:
+        try:
+            width = int(raw)
+        except ValueError:
+            width = 0
+        if width >= 20:
+            return width
+    return 80
+
+
+def fit_width(text: str) -> str:
+    width = term_width()
+    lines = []
+    for line in text.splitlines():
+        if len(line) > width:
+            if width > 1:
+                line = line[: width - 1] + "…"
+            else:
+                line = "…"
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def write_human(text: str) -> None:
+    text = fit_width(text.rstrip("\n") + "\n")
+    if not NO_PAGER and sys.stdout.isatty() and text.count("\n") >= 24:
+        pager = os.getenv(PAGER_ENV) or os.getenv("PAGER") or "less -FIRX"
+        try:
+            subprocess.run(
+                ["sh", "-c", pager],
+                input=text.encode(),
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                check=True,
+            )
+            return
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    sys.stdout.write(text)
+
+
+def progress_fetched(count: int) -> None:
+    if sys.stderr.isatty():
+        print(f"fetched {count} items…", file=sys.stderr)
+
+
+def capture_response(ctx: Any) -> None:
+    headers = getattr(ctx, "response_headers", None) or {}
+    request_id = headers.get("X-Request-ID") or headers.get("X-Request-Id", "")
+    LAST_ANSWER.clear()
+    LAST_ANSWER.update(
+        {
+            "body": getattr(ctx, "response_body", b"") or b"",
+            "status": getattr(ctx, "status", 0) or 0,
+            "request_id": request_id,
+            "content_type": headers.get("Content-Type", ""),
+            "method": getattr(ctx, "method", ""),
+            "url": getattr(ctx, "url", ""),
+        }
+    )
+    if DEBUG:
+        line = (
+            f"debug: {LAST_ANSWER['method']} {LAST_ANSWER['url']}"
+            f" -> {LAST_ANSWER['status']}"
+        )
+        if request_id:
+            line += f" request-id={request_id}"
+        print(line, file=sys.stderr)
+
+
+def apply_globals(args: Any) -> None:
+    # Every global is assigned, not only set: main may run more than once in one
+    # process, and an invocation must not inherit the previous one's --yes.
+    global OUTPUT_FORMAT, FIELDS, OUTPUT_PATH, QUIET, DEBUG, YES
+    global NO_INPUT, COMMAND_PATH, COLOR_MODE, NO_PAGER
+    global PREVIEW, RESULT_IS_LIST, ITEMS_KEY, NEXT_CURSOR_FIELD
+    resolve_format(
+        bool(getattr(args, "json", False)),
+        getattr(args, "format", None),
+    )
+    FIELDS = getattr(args, "fields", None) or ""
+    OUTPUT_PATH = getattr(args, "output", None) or ""
+    QUIET = bool(getattr(args, "quiet", False))
+    DEBUG = bool(getattr(args, "debug", False)) or bool(os.getenv(DEBUG_ENV))
+    YES = bool(getattr(args, "yes", False))
+    NO_INPUT = bool(getattr(args, "no_input", False)) or bool(os.getenv(NO_INPUT_ENV))
+    COLOR_MODE = getattr(args, "color", None) or "auto"
+    NO_PAGER = bool(getattr(args, "no_pager", False))
+    COMMAND_PATH = getattr(args, "_command", "") or ""
+    PREVIEW = tuple(getattr(args, "_preview", ()) or ())
+    RESULT_IS_LIST = bool(getattr(args, "_is_list", False))
+    ITEMS_KEY = getattr(args, "_items_key", "") or ""
+    NEXT_CURSOR_FIELD = getattr(args, "_next_cursor", "") or ""
+    LAST_ANSWER.clear()
+
+
+def print_fields_help(names: tuple[str, ...]) -> int:
+    if not names:
+        print("no declared response fields")
+        return 0
+    for name in names:
+        print(name)
+    return 0
+
+
+def result_bytes(result: Any) -> bytes:
+    body = LAST_ANSWER.get("body")
+    if isinstance(body, (bytes, bytearray)) and body:
+        return bytes(body)
+    if result is None:
+        return b""
+    if isinstance(result, (bytes, bytearray)):
+        return bytes(result)
+    return json.dumps(_jsonable(result)).encode()
+
+
+def field_list() -> list[str]:
+    if not FIELDS or FIELDS == "help":
+        return []
+    return [part.strip() for part in FIELDS.split(",") if part.strip()]
+
+
+def project_value(value: Any, fields: list[str]) -> Any:
+    if isinstance(value, list):
+        return [project_value(item, fields) for item in value]
+    if isinstance(value, dict):
+        if ITEMS_KEY and ITEMS_KEY in value:
+            return {**value, ITEMS_KEY: project_value(value[ITEMS_KEY], fields)}
+        return {key: value[key] for key in fields if key in value}
+    return value
+
+
+def decode_result(result: Any) -> tuple[Any, bytes]:
+    raw = result_bytes(result)
+    if isinstance(result, (bytes, bytearray)):
+        return None, raw
+    if not raw:
+        return None, raw
+    try:
+        return json.loads(raw), raw
+    except json.JSONDecodeError:
+        return None, raw
+
+
+def list_items(value: Any) -> tuple[Optional[list[Any]], str, dict[str, Any]]:
+    # The command's result shape is a graph fact fixed at generation time: an array
+    # body, or a page whose items sit under ITEMS_KEY. Any other object is one resource.
+    if RESULT_IS_LIST:
+        return (value if isinstance(value, list) else None), "", {}
+    if not ITEMS_KEY or not isinstance(value, dict):
+        return None, "", {}
+    items = value.get(ITEMS_KEY)
+    if items is None:
+        items = []
+    if not isinstance(items, list):
+        return None, "", {}
+    meta = {name: item for name, item in value.items() if name != ITEMS_KEY}
+    return items, ITEMS_KEY, meta
+
+
+def _write_stdout(raw: bytes) -> None:
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(raw)
+        if raw and not raw.endswith(b"\n"):
+            buffer.write(b"\n")
+        return
+    text = raw.decode()
+    sys.stdout.write(text)
+    if text and not text.endswith("\n"):
+        sys.stdout.write("\n")
+
+
+def print_json(result: Any) -> None:
+    raw = result_bytes(result)
+    if not raw:
+        return
+    if isinstance(result, (bytes, bytearray)):
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is not None:
+            buffer.write(raw)
+        else:
+            sys.stdout.write(raw.decode())
+        return
+    fields = field_list()
+    if fields:
+        projected = project_value(json.loads(raw), fields)
+        raw = json.dumps(projected, separators=(",", ":")).encode()
+    if sys.stdout.isatty():
+        try:
+            parsed = json.loads(raw)
+            json.dump(parsed, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+            return
+        except json.JSONDecodeError:
+            pass
+    _write_stdout(raw)
+
+
+def print_jsonl(result: Any) -> None:
+    value, _raw = decode_result(result)
+    items, _key, _meta = list_items(value)
+    if items is None:
+        items = [value] if value is not None else []
+    fields = field_list()
+    for item in items:
+        projected = project_value(item, fields) if fields else item
+        json.dump(projected, sys.stdout, separators=(",", ":"))
+        sys.stdout.write("\n")
+
+
+def print_human(result: Any) -> None:
+    value, raw = decode_result(result)
+    if not raw:
+        return
+    fields = field_list()
+    payload: Any = project_value(value, fields) if fields else value
+    if payload is None:
+        write_human(raw.decode())
+        return
+    buf = io.StringIO()
+    json.dump(payload, buf, indent=2)
+    buf.write("\n")
+    write_human(buf.getvalue())
+
+
+def output_dir_path() -> Path:
+    env = os.getenv(OUTPUT_DIR_ENV, "")
+    if env:
+        return Path(env)
+    return Path(f".{PROGRAM}") / "output"
+
+
+def preflight_output() -> int:
+    directory = output_dir_path()
+    root = directory.parent
+    name = COMMAND_PATH.replace(" ", "-") or "result"
+    sample = str(directory / f"{name}-000000.json")
+    if len((PROGRAM + COMMAND_PATH + _shell_quote(sample) * 4).encode("utf-8")) > 2400:
+        return print_error(
+            "output path is too long for ai-friendly output; "
+            "use --json or a shorter output directory",
+            code=2,
+        )
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        gitignore = root / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_bytes(b"*\n")
+            gitignore.chmod(0o600)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=".preflight-", dir=directory)
+        os.close(fd)
+        os.remove(name)
+    except OSError as exc:
+        print(
+            f"error: cannot write {directory}: {exc}. Set {OUTPUT_DIR_ENV} "
+            "to a writable directory, or pass --json to print the full "
+            "result.",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
+def _atomic_write(path: Path, body: bytes) -> None:
+    fd, name = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, 0o600)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _prune_output(directory: Path, keep: tuple[Path, ...] = ()) -> None:
+    # Envelopes and downloads alike, oldest first, down to 100 files and 100 MB.
+    # latest.json and the files this run wrote are never deleted, so one result over
+    # the byte cap survives with the path stdout names.
+    kept = {"latest.json", *(path.name for path in keep)}
+    files = [
+        (path.stat(), path)
+        for path in directory.iterdir()
+        if path.suffix in (".json", ".bin")
+        and not path.name.startswith(".")
+        and path.name != "latest.json"
+        and path.is_file()
+    ]
+    files.sort(key=lambda entry: entry[0].st_mtime)
+    count = len(files)
+    total = sum(stat.st_size for stat, _path in files)
+    for stat, path in files:
+        if count <= 100 and total <= 100 * 1024 * 1024:
+            return
+        if path.name in kept:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        count -= 1
+        total -= stat.st_size
+
+
+def write_envelope(result: Any, value: Any, raw: bytes) -> tuple[str, str]:
+    directory = output_dir_path()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ident = secrets.token_hex(3)
+    kind = "object"
+    items = None
+    meta = None
+    data = None
+    file_meta = None
+    bin_path: Optional[Path] = None
+    page: dict[str, Any] = {}
+    if isinstance(result, (bytes, bytearray)):
+        kind = "file"
+        name = COMMAND_PATH.replace(" ", "-") or "download"
+        bin_path = directory / f"{name}-{ident}.bin"
+        _atomic_write(bin_path, bytes(result))
+        file_meta = {
+            "path": str(bin_path),
+            "bytes": len(result),
+            "contentType": LAST_ANSWER.get("content_type", ""),
+            "sha256": hashlib.sha256(bytes(result)).hexdigest(),
+        }
+    elif not raw:
+        kind = "empty"
+    else:
+        listed, key, listed_meta = list_items(value)
+        if listed is not None:
+            kind = "list"
+            items = listed
+            meta = listed_meta
+            page["count"] = len(listed)
+            if key:
+                page["itemsKey"] = key
+        else:
+            data = value
+    stem = COMMAND_PATH.replace(" ", "-") or "result"
+    path = directory / f"{stem}-{ident}.json"
+    payload: dict[str, Any] = {
+        "schema": "https://gnr8.dev/schemas/cli-result-v1.json",
+        "version": 1,
+        "tool": {"name": PROGRAM, "version": VERSION},
+        "command": {"path": COMMAND_PATH},
+        "request": {
+            "method": LAST_ANSWER.get("method", ""),
+            "url": LAST_ANSWER.get("url", ""),
+        },
+        "response": {
+            "status": LAST_ANSWER.get("status", 0),
+            "requestId": LAST_ANSWER.get("request_id", ""),
+            "contentType": LAST_ANSWER.get("content_type", ""),
+            "bytes": len(raw),
+        },
+        "kind": kind,
+        "savedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if items is not None:
+        payload["items"] = items
+    if meta:
+        payload["meta"] = meta
+    if kind == "object":
+        payload["data"] = data
+    if page:
+        payload["page"] = page
+    if file_meta is not None:
+        payload["file"] = file_meta
+    encoded = json.dumps(payload, indent=2).encode() + b"\n"
+    _atomic_write(path, encoded)
+    try:
+        _atomic_write(directory / "latest.json", encoded)
+    except OSError:
+        pass  # The uniquely named envelope has already been saved.
+    _prune_output(directory, (path,) if bin_path is None else (path, bin_path))
+    return str(path), ""
+
+
+def _shell_quote(value: str) -> str:
+    return shlex.quote(value)
+
+
+def _preview_value(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > 80:
+        return value[:79] + "…"
+    return value
+
+
+def _view_row(item: Any) -> str:
+    # The declared view fields in their declared order, cutting only a long string;
+    # without a view, the first six scalar fields by name.
+    fields = field_list()
+    if fields or not isinstance(item, dict):
+        shown = project_value(item, fields) if fields else item
+        return json.dumps(shown, separators=(",", ":"), ensure_ascii=False)
+    keys = list(PREVIEW)
+    if not keys:
+        keys = sorted(
+            key
+            for key, val in item.items()
+            if val is None or isinstance(val, (str, int, float, bool))
+        )[:6]
+    row = {key: _preview_value(item[key]) for key in keys if key in item}
+    return json.dumps(row, separators=(",", ":"), ensure_ascii=False)
+
+
+def _showing_line(shown: int, total: int) -> str:
+    return f"Showing {shown} of {total}; the rest is in the file."
+
+
+def print_ai_friendly(result: Any) -> None:
+    value, raw = decode_result(result)
+    saved = ""
+    save_err = ""
+    try:
+        saved, save_err = write_envelope(result, value, raw)
+    except OSError as exc:
+        save_err = str(exc)
+    if save_err:
+        print(f"warning: the full result was not saved: {save_err}", file=sys.stderr)
+    listed, key, _meta = list_items(value)
+    next_page = ""
+    if isinstance(result, (bytes, bytearray)):
+        outcome = f"saved {len(result)} bytes"
+        rows: list[str] = []
+    elif not raw:
+        outcome = "empty"
+        rows = []
+    elif listed is not None:
+        outcome = f"{len(listed)} {key or 'items'}"
+        rows = [_view_row(item) for item in listed]
+        # NEXT_CURSOR_FIELD is set only on a command that binds --cursor, from its
+        # PaginationPolicy, so the hint never names a flag the command lacks.
+        cursor = value.get(NEXT_CURSOR_FIELD) if NEXT_CURSOR_FIELD else None
+        if isinstance(cursor, str) and cursor:
+            next_page = (
+                f"Next page: {PROGRAM} {COMMAND_PATH} --cursor {_shell_quote(cursor)}"
+                f"    Every page: {PROGRAM} {COMMAND_PATH} --all"
+            )
+    else:
+        outcome = "ok"
+        rows = [_view_row(value)]
+    if next_page and len(next_page.encode("utf-8")) > 1000:
+        if saved and not save_err:
+            query = json.dumps(["meta", NEXT_CURSOR_FIELD], separators=(",", ":"))
+            script = "getpath(" + query + ")"
+            next_page = (
+                f"Next page: {PROGRAM} {COMMAND_PATH} --cursor "
+                f'"$(jq -r {_shell_quote(script)} {_shell_quote(saved)})"'
+            )
+        else:
+            next_page = "Next cursor exceeds the preview budget; use --json to read it."
+    full = f"not saved ({save_err[:300]})" if save_err else saved
+    line1 = f"{PROGRAM} {COMMAND_PATH}: {outcome}. Full JSON: {full}"
+    chunks = [line1]
+    if not QUIET:
+        # The next-page line and the jq recipes are what a caller needs next, so
+        # they are reserved first and the rows take what is left of the budget.
+        budget = 4000
+        tail: list[str] = []
+        if next_page:
+            tail.append(next_page)
+        if saved and not save_err:
+            quoted = _shell_quote(saved)
+            if listed is not None:
+                queries = [
+                    f"  jq '.items[]' {quoted}",
+                    f"  jq '.items | length' {quoted}",
+                ]
+            else:
+                queries = [f"  jq 'keys' {quoted}", f"  jq '.' {quoted}"]
+            tail.append(
+                "Query the saved result instead of re-running (do not cat it):\n"
+                + "\n".join(queries)
+            )
+        reserve = sum(len(part.encode("utf-8")) + 1 for part in tail)
+        size = len(line1.encode("utf-8")) + 1
+        shown = 0
+        for row in rows:
+            extra = len(row.encode("utf-8")) + 1
+            more = len(_showing_line(len(rows), len(rows))) + 1
+            if size + extra + reserve + more > budget:
+                break
+            chunks.append(row)
+            shown += 1
+            size += extra
+        if shown < len(rows):
+            chunks.append(_showing_line(shown, len(rows)))
+        chunks.extend(tail)
+    sys.stdout.write("\n".join(chunks) + "\n")
+
+
+def write_output_file(result: Any) -> None:
+    raw = result_bytes(result)
+    Path(OUTPUT_PATH).write_bytes(raw)
+    Path(OUTPUT_PATH).chmod(0o600)
+
+
+def print_result(result: Any) -> None:
+    if OUTPUT_PATH == "-":
+        print_json(result)
+        return
+    if OUTPUT_PATH and OUTPUT_PATH != "-":
+        write_output_file(result)
+    if OUTPUT_FORMAT == "json":
+        print_json(result)
+        return
+    if OUTPUT_FORMAT == "jsonl":
+        print_jsonl(result)
+        return
+    if OUTPUT_FORMAT == "ai-friendly":
+        print_ai_friendly(result)
+        return
+    if QUIET:
+        return
+    print_human(result)
+
+
+def confirm(severity: str, resource: str) -> int:
+    if severity in ("", "mild"):
+        return 0
+    if YES:
+        return 0
+    if NO_INPUT or not sys.stdin.isatty() or not sys.stderr.isatty():
+        print(
+            f"error: {COMMAND_PATH} requires confirmation; pass --yes",
+            file=sys.stderr,
+        )
+        return 2
+    if severity == "severe":
+        print(f"Type {resource} to confirm: ", end="", file=sys.stderr)
+        answer = sys.stdin.readline().strip()
+        if answer != resource:
+            print("error: confirmation failed", file=sys.stderr)
+            return 2
+        return 0
+    print(
+        f"Proceed with {COMMAND_PATH} {resource}? [y/N] ",
+        end="",
+        file=sys.stderr,
+    )
+    answer = sys.stdin.readline().strip()
+    if answer not in ("y", "yes", "Y", "YES"):
+        return print_error("confirmation failed", code=2)
+    return 0
+"#
+    .to_string()
+}
+
+fn switch_arg_name(idents: &std::collections::BTreeMap<String, String>) -> String {
+    let mut name = "_switch_flag".to_string();
+    while idents.values().any(|ident| ident == &name) {
+        name.insert(0, '_');
+    }
+    name
 }
 
 fn emit_handlers(
     out: &mut String,
     ops: &[&Operation],
     graph: &ApiGraph,
+    cli: &SdkCli,
     model_style: PyModelStyle,
 ) -> Result<(), CoreError> {
     for op in ops {
-        emit_handler(out, graph, op, model_style)?;
+        emit_handler(out, graph, cli, op, model_style)?;
     }
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "each generated command is one linear parse → client-call sequence"
+)]
 fn emit_handler(
     out: &mut String,
     graph: &ApiGraph,
+    cli: &SdkCli,
     op: &Operation,
     model_style: PyModelStyle,
 ) -> Result<(), CoreError> {
@@ -905,7 +1744,79 @@ fn emit_handler(
     let paging = paging_param_names(graph, op);
     let bodies = request_body_models_of(op, graph)?;
     let scheme_ids = operation_scheme_ids(graph, op)?;
+    let spec = cli.spec_command(&op.id);
+    let severity = spec.map(|command| command.severity).unwrap_or_default();
     writeln!(out, "def _{method}(args: argparse.Namespace) -> Any:").map_err(sink)?;
+    if let Some(switch) = spec.and_then(|command| command.switch_flag.as_ref()) {
+        let other = graph
+            .operations
+            .iter()
+            .find(|candidate| candidate.id == switch.operation)
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!("unknown switch operation '{}'", switch.operation),
+            })?;
+        let other_method = operation_method_name(other);
+        writeln!(out, "    selected_method = {}", py_string_literal(&method)).map_err(sink)?;
+        writeln!(out, "    if args.{}:", switch_arg_name(&idents)).map_err(sink)?;
+        writeln!(
+            out,
+            "        selected_method = {}",
+            py_string_literal(&other_method)
+        )
+        .map_err(sink)?;
+        let (is_list, key) = match cli_result_shape(graph, other) {
+            CliResultShape::List => ("True", String::new()),
+            CliResultShape::Page(key) => ("False", key),
+            CliResultShape::Object => ("False", String::new()),
+        };
+        writeln!(out, "        output.RESULT_IS_LIST = {is_list}").map_err(sink)?;
+        writeln!(
+            out,
+            "        output.ITEMS_KEY = {}",
+            py_string_literal(&key)
+        )
+        .map_err(sink)?;
+    }
+    if !matches!(severity, gnr8::sdk::CliSeverity::Mild) {
+        let resource = positional_names(cli, op)
+            .first()
+            .and_then(|name| idents.get(name).cloned());
+        let token = match severity {
+            gnr8::sdk::CliSeverity::Severe => "severe",
+            _ => "moderate",
+        };
+        if let Some(dest) = resource {
+            writeln!(
+                out,
+                "    code = output.confirm({}, getattr(args, {}, \"\"))",
+                py_string_literal(token),
+                py_string_literal(&dest)
+            )
+            .map_err(sink)?;
+        } else {
+            writeln!(
+                out,
+                "    code = output.confirm({}, getattr(args, \"_command\", \"\"))",
+                py_string_literal(token)
+            )
+            .map_err(sink)?;
+        }
+        writeln!(out, "    if code:").map_err(sink)?;
+        writeln!(out, "        raise SystemExit(code)").map_err(sink)?;
+    }
+    if pagination_policy(graph, op).is_some() {
+        writeln!(
+            out,
+            "    if getattr(args, \"retired_page_size\", None) is not None:"
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "        print(\"error: --page-size is now --limit\", file=sys.stderr)"
+        )
+        .map_err(sink)?;
+        writeln!(out, "        raise SystemExit(2)").map_err(sink)?;
+    }
     if has_security(graph) {
         let ids = scheme_ids
             .iter()
@@ -947,22 +1858,37 @@ fn emit_handler(
             .map_err(sink)?;
         }
     }
-    if let Some(body) = bodies.first() {
-        emit_body_kwargs(out, body, model_style)?;
+    if let Some(policy) = pagination_policy(graph, op) {
+        if let Some(name) = policy.cursor_param.as_deref() {
+            let ident = idents
+                .get(name)
+                .map_or_else(|| name.to_string(), Clone::clone);
+            writeln!(out, "    if args.cursor is not None:").map_err(sink)?;
+            writeln!(
+                out,
+                "        kwargs[{}] = args.cursor",
+                py_string_literal(&ident)
+            )
+            .map_err(sink)?;
+        }
     }
-    if pagination_policy(graph, op).is_some() {
-        writeln!(out, "    if args.all or args.limit is not None:").map_err(sink)?;
-        writeln!(out, "        items: list[Any] = []").map_err(sink)?;
-        writeln!(out, "        for item in client.iter_{method}(**kwargs):").map_err(sink)?;
-        writeln!(out, "            items.append(item)").map_err(sink)?;
-        writeln!(
-            out,
-            "            if args.limit is not None and len(items) >= args.limit:"
-        )
-        .map_err(sink)?;
-        writeln!(out, "                break").map_err(sink)?;
-        writeln!(out, "        return items").map_err(sink)?;
-        writeln!(out, "    return client.{method}(**kwargs)").map_err(sink)?;
+    if let Some(body) = bodies.first() {
+        emit_body_kwargs(out, graph, cli, op, body, model_style)?;
+    }
+    emit_paged_call(
+        out,
+        graph,
+        op,
+        &idents,
+        spec.and_then(|command| command.switch_flag.as_ref())
+            .is_some(),
+    )?;
+
+    if spec
+        .and_then(|command| command.switch_flag.as_ref())
+        .is_some()
+    {
+        writeln!(out, "    return getattr(client, selected_method)(**kwargs)").map_err(sink)?;
     } else {
         writeln!(out, "    return client.{method}(**kwargs)").map_err(sink)?;
     }
@@ -971,12 +1897,196 @@ fn emit_handler(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one page walk preserves metadata and boundary cursors"
+)]
+fn emit_paged_call(
+    out: &mut String,
+    graph: &ApiGraph,
+    op: &Operation,
+    idents: &BTreeMap<String, String>,
+    switched: bool,
+) -> Result<(), CoreError> {
+    let Some(policy) = pagination_policy(graph, op) else {
+        return Ok(());
+    };
+    let method = operation_method_name(op);
+    let key = py_string_literal(&policy.items_field);
+    let ident = |name: &str| py_string_literal(idents.get(name).map_or(name, String::as_str));
+    writeln!(out, "    if args.limit is not None and args.limit <= 0:").map_err(sink)?;
+    writeln!(
+        out,
+        "        output.print_error(\"--limit must be positive\", code=2)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        raise SystemExit(2)").map_err(sink)?;
+    writeln!(out, "    if args.all or args.limit is not None:").map_err(sink)?;
+    writeln!(out, "        items: list[Any] = []").map_err(sink)?;
+    writeln!(out, "        merged: dict[str, Any] = {{}}").map_err(sink)?;
+    writeln!(out, "        has_more = False").map_err(sink)?;
+    match policy.mode {
+        PaginationMode::Page => {
+            if let Some(name) = &policy.page_param {
+                writeln!(out, "        kwargs.setdefault({}, 1)", ident(name)).map_err(sink)?;
+            }
+        }
+        PaginationMode::Offset => {
+            if let Some(name) = &policy.offset_param {
+                writeln!(out, "        kwargs.setdefault({}, 0)", ident(name)).map_err(sink)?;
+            }
+        }
+        PaginationMode::Cursor => {}
+    }
+    writeln!(out, "        while True:").map_err(sink)?;
+    if let Some(name) = &policy.page_size_param {
+        let schema = op
+            .params
+            .iter()
+            .find(|param| param.name == *name)
+            .map(|param| &param.schema);
+        let numeric = match schema {
+            Some(Type::Primitive(Prim::Int { .. } | Prim::Float { .. })) => true,
+            Some(Type::Named(id)) => graph
+                .schemas
+                .iter()
+                .find(|schema| schema.id == *id)
+                .is_some_and(|schema| {
+                    matches!(
+                        schema.body,
+                        Type::Primitive(Prim::Int { .. } | Prim::Float { .. })
+                    )
+                }),
+            _ => false,
+        };
+        let amount = if numeric {
+            "args.limit - len(items)"
+        } else {
+            "str(args.limit - len(items))"
+        };
+        writeln!(out, "            if args.limit is not None:").map_err(sink)?;
+        writeln!(out, "                kwargs[{}] = {amount}", ident(name)).map_err(sink)?;
+    }
+    let call = if switched {
+        "getattr(client, selected_method)".to_string()
+    } else {
+        format!("client.{method}")
+    };
+    writeln!(out, "            page = {call}(**kwargs)").map_err(sink)?;
+    writeln!(out, "            merged, _raw = output.decode_result(page)").map_err(sink)?;
+    writeln!(out, "            if not isinstance(merged, dict):").map_err(sink)?;
+    writeln!(
+        out,
+        "                raise ValueError(\"expected a page object\")"
+    )
+    .map_err(sink)?;
+    writeln!(out, "            page_items = merged.get({key}) or []").map_err(sink)?;
+    if policy.mode == PaginationMode::Cursor {
+        let cursor = py_string_literal(policy.next_cursor_field.as_deref().unwrap_or_default());
+        writeln!(out, "            next_cursor = merged.get({cursor})").map_err(sink)?;
+        writeln!(out, "            has_more = bool(next_cursor)").map_err(sink)?;
+    } else {
+        writeln!(out, "            has_more = bool(page_items)").map_err(sink)?;
+    }
+    writeln!(out, "            take = len(page_items)").map_err(sink)?;
+    writeln!(
+        out,
+        "            if args.limit is not None and take > args.limit - len(items):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "                take = args.limit - len(items)").map_err(sink)?;
+    writeln!(out, "                has_more = True").map_err(sink)?;
+    if let Some(field) = &policy.next_cursor_field {
+        writeln!(
+            out,
+            "                merged.pop({}, None)",
+            py_string_literal(field)
+        )
+        .map_err(sink)?;
+    }
+    writeln!(out, "            items.extend(page_items[:take])").map_err(sink)?;
+    if policy.termination == PaginationTermination::EmptyItems {
+        writeln!(out, "            if not page_items:").map_err(sink)?;
+        writeln!(out, "                has_more = False").map_err(sink)?;
+        writeln!(out, "                break").map_err(sink)?;
+    }
+    writeln!(
+        out,
+        "            if args.limit is not None and len(items) >= args.limit:"
+    )
+    .map_err(sink)?;
+    writeln!(out, "                break").map_err(sink)?;
+    match policy.mode {
+        PaginationMode::Cursor => {
+            writeln!(out, "            if not next_cursor:").map_err(sink)?;
+            writeln!(out, "                break").map_err(sink)?;
+            if let Some(name) = &policy.cursor_param {
+                writeln!(out, "            kwargs[{}] = next_cursor", ident(name)).map_err(sink)?;
+            }
+        }
+        PaginationMode::Page => {
+            if let Some(name) = &policy.page_param {
+                writeln!(out, "            kwargs[{}] += 1", ident(name)).map_err(sink)?;
+            }
+        }
+        PaginationMode::Offset => {
+            if let Some(name) = &policy.offset_param {
+                writeln!(
+                    out,
+                    "            kwargs[{}] += len(page_items)",
+                    ident(name)
+                )
+                .map_err(sink)?;
+            }
+        }
+    }
+    writeln!(out, "        merged[{key}] = items").map_err(sink)?;
+    writeln!(out, "        merged[\"hasMore\"] = has_more").map_err(sink)?;
+    writeln!(out, "        output.LAST_ANSWER[\"body\"] = None").map_err(sink)?;
+    writeln!(out, "        output.progress_fetched(len(items))").map_err(sink)?;
+    writeln!(out, "        return merged").map_err(sink)?;
+    Ok(())
+}
+
 fn emit_body_kwargs(
     out: &mut String,
+    graph: &ApiGraph,
+    cli: &SdkCli,
+    op: &Operation,
     body: &RequestBodyModel,
     model_style: PyModelStyle,
 ) -> Result<(), CoreError> {
-    writeln!(out, "    payload = load_body(args)").map_err(sink)?;
+    if let Some(fixed) = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.fixed_body.as_deref())
+    {
+        writeln!(
+            out,
+            "    payload = json.loads({})",
+            py_string_literal(fixed)
+        )
+        .map_err(sink)?;
+    } else {
+        writeln!(out, "    payload = load_body(args)").map_err(sink)?;
+    }
+    for field in body_field_flags(cli, op, graph)? {
+        let dest = format!("body_{}", field.flag.replace('-', "_"));
+        writeln!(
+            out,
+            "    if getattr(args, {}, None) is not None:",
+            py_string_literal(&dest)
+        )
+        .map_err(sink)?;
+        writeln!(out, "        if payload is None:").map_err(sink)?;
+        writeln!(out, "            payload = {{}}").map_err(sink)?;
+        writeln!(
+            out,
+            "        payload[{}] = getattr(args, {})",
+            py_string_literal(&field.json_name),
+            py_string_literal(&dest)
+        )
+        .map_err(sink)?;
+    }
     writeln!(out, "    if payload is not None:").map_err(sink)?;
     match model_style {
         PyModelStyle::Pydantic => {
@@ -1041,8 +2151,16 @@ fn emit_parser_module(modules: &[CommandModule<'_>], cli: &SdkCli) -> Result<Str
     }
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    writeln!(out, "class OutputParser(argparse.ArgumentParser):").map_err(sink)?;
+    writeln!(out, "    def error(self, message: str) -> None:").map_err(sink)?;
+    writeln!(out, "        from . import output").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "        output.print_error(message, code=2)").map_err(sink)?;
+    writeln!(out, "        raise SystemExit(2)").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
     writeln!(out, "def build_parser() -> argparse.ArgumentParser:").map_err(sink)?;
-    writeln!(out, "    parser = argparse.ArgumentParser(").map_err(sink)?;
+    writeln!(out, "    parser = OutputParser(").map_err(sink)?;
     writeln!(out, "        prog=PROGRAM,").map_err(sink)?;
     writeln!(out, "        description=DESCRIPTION,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
@@ -1051,6 +2169,7 @@ fn emit_parser_module(modules: &[CommandModule<'_>], cli: &SdkCli) -> Result<Str
     writeln!(out, "        action=\"version\",").map_err(sink)?;
     writeln!(out, "        version=VERSION,").map_err(sink)?;
     writeln!(out, "    )").map_err(sink)?;
+    emit_format_flags(&mut out, "parser", true)?;
     if modules.is_empty() {
         writeln!(out, "    return parser").map_err(sink)?;
         return Ok(finish(out));
@@ -1087,9 +2206,34 @@ fn emit_command_module(
     writeln!(out, "from __future__ import annotations").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "import argparse").map_err(sink)?;
+    if module.ops.iter().any(|op| {
+        cli.spec_command(&op.id)
+            .and_then(|command| command.fixed_body.as_ref())
+            .is_some()
+    }) {
+        writeln!(out, "import json").map_err(sink)?;
+    }
+    if module
+        .ops
+        .iter()
+        .any(|op| pagination_policy(graph, op).is_some())
+    {
+        writeln!(out, "import sys").map_err(sink)?;
+    }
     writeln!(out, "from typing import Any").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     let mut imports = vec!["from ..credentials import build_client".to_string()];
+    if module.ops.iter().any(|op| {
+        pagination_policy(graph, op).is_some()
+            || !matches!(
+                cli.spec_command(&op.id)
+                    .map(|command| command.severity)
+                    .unwrap_or_default(),
+                gnr8::sdk::CliSeverity::Mild
+            )
+    }) {
+        imports.push("from .. import output".to_string());
+    }
     if has_request_body(&module.ops, graph)? {
         imports.push("from ..body import load_body".to_string());
     }
@@ -1110,7 +2254,7 @@ fn emit_command_module(
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     emit_group_register(&mut out, module, graph, cli)?;
-    emit_handlers(&mut out, &module.ops, graph, model_style)?;
+    emit_handlers(&mut out, &module.ops, graph, cli, model_style)?;
     Ok(finish(out))
 }
 
@@ -1140,9 +2284,7 @@ fn emit_group_register(
             }
         }
         Some(group) => {
-            // A group states what it is for in exactly one place (`GroupDocsPolicy`); argparse
-            // shows it in the program's own `--help` and again at the top of the group's page.
-            let summary = group_summary(graph, &module.ops);
+            let summary = topic_summary(cli, graph, &module.ops);
             if summary.is_empty() {
                 writeln!(
                     out,
@@ -1162,14 +2304,53 @@ fn emit_group_register(
             writeln!(out, "        dest=\"_subcommand\",").map_err(sink)?;
             writeln!(out, "        required=True,").map_err(sink)?;
             writeln!(out, "    )").map_err(sink)?;
+            let mut nested: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
             for op in &module.ops {
-                emit_command_parser(out, graph, cli, op, "commands")?;
+                match command_sub_noun(cli, op) {
+                    Some(sub) => nested.entry(sub).or_default().push(*op),
+                    None => emit_command_parser(out, graph, cli, op, "commands")?,
+                }
+            }
+            for (sub, ops) in nested {
+                writeln!(
+                    out,
+                    "    {}_parser = commands.add_parser(",
+                    safe_ident(&sub)
+                )
+                .map_err(sink)?;
+                writeln!(out, "        {},", py_string_literal(&sub)).map_err(sink)?;
+                writeln!(out, "    )").map_err(sink)?;
+                writeln!(
+                    out,
+                    "    {}_commands = {}_parser.add_subparsers(",
+                    safe_ident(&sub),
+                    safe_ident(&sub)
+                )
+                .map_err(sink)?;
+                writeln!(out, "        dest=\"_subnoun\",").map_err(sink)?;
+                writeln!(out, "        required=True,").map_err(sink)?;
+                writeln!(out, "    )").map_err(sink)?;
+                let parent = format!("{}_commands", safe_ident(&sub));
+                for op in ops {
+                    emit_command_parser(out, graph, cli, op, &parent)?;
+                }
             }
         }
     }
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())
+}
+
+fn topic_summary<'a>(cli: &'a SdkCli, graph: &'a ApiGraph, ops: &[&Operation]) -> &'a str {
+    if let Some(name) = ops.first().and_then(|op| command_topic(cli, op)) {
+        if let Some(topic) = cli.topics.iter().find(|topic| topic.name == name) {
+            if let Some(concept) = &topic.concept {
+                return concept;
+            }
+        }
+    }
+    group_summary(graph, ops)
 }
 
 /// The one line a group states about itself, or nothing.
@@ -1188,6 +2369,10 @@ fn group_summary<'a>(graph: &'a ApiGraph, ops: &[&Operation]) -> &'a str {
         .map_or("", |doc| doc.summary.as_str())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one command parser binds flags, positionals, and body fields in declaration order"
+)]
 fn emit_command_parser(
     out: &mut String,
     graph: &ApiGraph,
@@ -1195,7 +2380,7 @@ fn emit_command_parser(
     op: &Operation,
     parent: &str,
 ) -> Result<(), CoreError> {
-    let command = command_name(op);
+    let command = command_verb(cli, op);
     let method = operation_method_name(op);
     let ident = format!("cmd_{method}");
     let prose = operation_prose(op, &[], "");
@@ -1210,6 +2395,15 @@ fn emit_command_parser(
             None => prose.description.join("\n"),
         };
         emit_string_kwarg(out, 8, "description", &description)?;
+    }
+    let epilog = python_help_epilog(cli, graph, op);
+    if !epilog.is_empty() {
+        emit_string_kwarg(out, 8, "epilog", &argparse_help_text(&epilog))?;
+        writeln!(
+            out,
+            "        formatter_class=argparse.RawDescriptionHelpFormatter,"
+        )
+        .map_err(sink)?;
     }
     writeln!(out, "    )").map_err(sink)?;
     writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
@@ -1232,10 +2426,29 @@ fn emit_command_parser(
         writeln!(out, "        required=True,").map_err(sink)?;
     }
     writeln!(out, "    )").map_err(sink)?;
+    emit_format_flags(out, &ident, false)?;
     let idents = resolve_op_args_for(op, graph)?;
     let paging = paging_param_names(graph, op);
+    for name in positional_names(cli, op) {
+        let Some(param) = op.params.iter().find(|param| param.name == *name) else {
+            continue;
+        };
+        let Some(dest) = idents.get(&param.name) else {
+            continue;
+        };
+        writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
+        writeln!(out, "        {},", py_string_literal(dest)).map_err(sink)?;
+        writeln!(
+            out,
+            "        metavar={},",
+            py_string_literal(&name.to_uppercase())
+        )
+        .map_err(sink)?;
+        emit_flag_help(out, param)?;
+        writeln!(out, "    )").map_err(sink)?;
+    }
     for param in &op.params {
-        if paging.contains(param.name.as_str()) {
+        if paging.contains(param.name.as_str()) || is_positional_param(cli, op, &param.name) {
             continue;
         }
         let Some(dest) = idents.get(&param.name) else {
@@ -1244,8 +2457,11 @@ fn emit_command_parser(
         emit_flag(out, graph, param, dest, &ident)?;
     }
     let bodies = request_body_models_of(op, graph)?;
-    if !bodies.is_empty() {
-        let required = bodies.iter().any(|body| body.required);
+    let spec = cli.spec_command(&op.id);
+    let fixed_body = spec.and_then(|command| command.fixed_body.as_deref());
+    if fixed_body.is_none() && !bodies.is_empty() {
+        let required = bodies.iter().any(|body| body.required)
+            && spec.is_none_or(|command| !command.body_fields);
         writeln!(
             out,
             "    {ident}_body = {ident}.add_mutually_exclusive_group(required={})",
@@ -1263,6 +2479,42 @@ fn emit_command_parser(
         emit_string_kwarg(out, 8, "help", &argparse_help_text(BODY_FILE_HELP))?;
         writeln!(out, "    )").map_err(sink)?;
     }
+    for field in body_field_flags(cli, op, graph)? {
+        writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
+        writeln!(
+            out,
+            "        {},",
+            py_string_literal(&format!("--{}", field.flag))
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "        dest={},",
+            py_string_literal(&format!("body_{}", field.flag.replace('-', "_")))
+        )
+        .map_err(sink)?;
+        if let Some(help) = &field.description {
+            emit_string_kwarg(out, 8, "help", &argparse_help_text(help))?;
+        }
+        writeln!(out, "    )").map_err(sink)?;
+    }
+    if let Some(switch) = spec.and_then(|command| command.switch_flag.as_ref()) {
+        writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
+        writeln!(
+            out,
+            "        {},",
+            py_string_literal(&format!("--{}", switch.flag))
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "        dest={},",
+            py_string_literal(&switch_arg_name(&idents))
+        )
+        .map_err(sink)?;
+        writeln!(out, "        action=\"store_true\",").map_err(sink)?;
+        writeln!(out, "    )").map_err(sink)?;
+    }
     if pagination_policy(graph, op).is_some() {
         writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
         writeln!(out, "        \"--limit\",").map_err(sink)?;
@@ -1276,9 +2528,88 @@ fn emit_command_parser(
         writeln!(out, "        action=\"store_true\",").map_err(sink)?;
         emit_string_kwarg(out, 8, "help", &argparse_help_text(ALL_HELP))?;
         writeln!(out, "    )").map_err(sink)?;
+        if pagination_policy(graph, op)
+            .and_then(|policy| policy.cursor_param.as_ref())
+            .is_some()
+        {
+            writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
+            writeln!(out, "        \"--cursor\",").map_err(sink)?;
+            writeln!(out, "        dest=\"cursor\",").map_err(sink)?;
+            emit_string_kwarg(out, 8, "help", &argparse_help_text(CURSOR_HELP))?;
+            writeln!(out, "    )").map_err(sink)?;
+        }
+        writeln!(out, "    {ident}.add_argument(").map_err(sink)?;
+        writeln!(out, "        \"--page-size\",").map_err(sink)?;
+        writeln!(out, "        dest=\"retired_page_size\",").map_err(sink)?;
+        writeln!(out, "        help=argparse.SUPPRESS,").map_err(sink)?;
+        writeln!(out, "    )").map_err(sink)?;
     }
-    writeln!(out, "    {ident}.set_defaults(_handler=_{method})").map_err(sink)?;
+    writeln!(out, "    {ident}.set_defaults(").map_err(sink)?;
+    writeln!(out, "        _handler=_{method},").map_err(sink)?;
+    let invocation = command_invocation(cli, op);
+    writeln!(out, "        _command={},", py_string_literal(&invocation)).map_err(sink)?;
+    let fields = response_field_names(graph, op);
+    if fields.is_empty() {
+        writeln!(out, "        _fields=(),").map_err(sink)?;
+    } else {
+        writeln!(out, "        _fields=(").map_err(sink)?;
+        for name in &fields {
+            writeln!(out, "            {},", py_string_literal(name)).map_err(sink)?;
+        }
+        writeln!(out, "        ),").map_err(sink)?;
+    }
+    // The facts the output runtime reads about this one command, fixed at generation time: the
+    // declared preview fields, how to read its result as a list, and the cursor field a "Next page"
+    // hint may name.
+    match command_view(cli, graph, op) {
+        Some(view) if !view.preview.is_empty() => {
+            writeln!(out, "        _preview=(").map_err(sink)?;
+            for name in &view.preview {
+                writeln!(out, "            {},", py_string_literal(name)).map_err(sink)?;
+            }
+            writeln!(out, "        ),").map_err(sink)?;
+        }
+        _ => writeln!(out, "        _preview=(),").map_err(sink)?,
+    }
+    let (is_list, items_key) = match cli_result_shape(graph, op) {
+        CliResultShape::List => ("True", String::new()),
+        CliResultShape::Page(key) => ("False", key),
+        CliResultShape::Object => ("False", String::new()),
+    };
+    writeln!(out, "        _is_list={is_list},").map_err(sink)?;
+    writeln!(out, "        _items_key={},", py_string_literal(&items_key)).map_err(sink)?;
+    writeln!(
+        out,
+        "        _next_cursor={},",
+        py_string_literal(cli_next_cursor_field(graph, op).unwrap_or_default())
+    )
+    .map_err(sink)?;
+    writeln!(out, "    )").map_err(sink)?;
     Ok(())
+}
+
+fn python_help_epilog(cli: &SdkCli, graph: &ApiGraph, op: &Operation) -> String {
+    let mut sections = Vec::new();
+    let examples = command_examples(cli, op);
+    if !examples.is_empty() {
+        let mut block = String::from("Examples:");
+        for example in examples {
+            block.push_str("\n  ");
+            block.push_str(example);
+        }
+        sections.push(block);
+    }
+    if let Some(note) = command_output_note(cli, graph, op) {
+        sections.push(format!("Output\n  {note}"));
+    }
+    let see_also = command_see_also(cli, op);
+    if !see_also.is_empty() {
+        sections.push(format!("See also  {}", see_also.join(", ")));
+    }
+    if let Some(url) = command_docs_url(cli, op) {
+        sections.push(format!("Docs      {url}"));
+    }
+    sections.join("\n\n")
 }
 
 /// Escape prose for argparse's `help=`, which is a format string and not a literal.
@@ -1306,7 +2637,7 @@ fn emit_flag(
         writeln!(out, "        dest={},", py_string_literal(dest)).map_err(sink)?;
         writeln!(out, "        action=\"store_true\",").map_err(sink)?;
         writeln!(out, "        default=None,").map_err(sink)?;
-        emit_default_help(out, param)?;
+        emit_flag_help(out, param)?;
         writeln!(out, "    )").map_err(sink)?;
         writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
         writeln!(
@@ -1327,25 +2658,114 @@ fn emit_flag(
         writeln!(out, "        required=True,").map_err(sink)?;
     }
     emit_flag_type_kwargs(out, graph, &param.schema)?;
-    emit_default_help(out, param)?;
+    emit_flag_help(out, param)?;
     writeln!(out, "    )").map_err(sink)?;
     Ok(())
 }
 
-/// State a parameter's source default in `--help`, and nowhere else.
-///
-/// `OpenAPI` says the Schema Object's `default` "documents the receiver's behavior rather than
-/// inserting the value into the data", and JSON Schema files it under annotations with no directive
-/// to insert it anywhere. So the CLI shows it and does not send it: an omitted flag produces the
-/// same request the SDK's own method produces, and the server applies its own default. Binding it
-/// as `default=` would make an omitted flag indistinguishable from a user who typed the value, and
-/// would pin every CLI caller to today's value if the server's changed.
-fn emit_default_help(out: &mut String, param: &Param) -> Result<(), CoreError> {
-    let Some(default) = &param.default else {
+/// The usage string for one parameter flag: its own prose, then whether it is required,
+/// then a source default. A default is shown and never sent.
+fn emit_flag_help(out: &mut String, param: &Param) -> Result<(), CoreError> {
+    let mut parts = Vec::new();
+    let help = parameter_flag_help(param);
+    if !help.is_empty() {
+        parts.push(help);
+    }
+    if let Some(default) = &param.default {
+        parts.push(format!("default: {}", literal_python(default)));
+    }
+    if parts.is_empty() {
         return Ok(());
-    };
-    let text = argparse_help_text(&format!("default: {}", literal_python(default)));
+    }
+    let text = argparse_help_text(&parts.join(" "));
     writeln!(out, "        help={},", py_string_literal(&text)).map_err(sink)?;
+    Ok(())
+}
+
+fn emit_format_flags(out: &mut String, parser: &str, root: bool) -> Result<(), CoreError> {
+    emit_bool_global(out, parser, root, "--json", "json", JSON_HELP)?;
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"--format\",").map_err(sink)?;
+    writeln!(out, "        dest=\"format\",").map_err(sink)?;
+    writeln!(
+        out,
+        "        choices=(\"human\", \"ai-friendly\", \"json\", \"jsonl\"),"
+    )
+    .map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(FORMAT_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"--fields\",").map_err(sink)?;
+    writeln!(out, "        dest=\"fields\",").map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(FIELDS_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"-o\",").map_err(sink)?;
+    writeln!(out, "        \"--output\",").map_err(sink)?;
+    writeln!(out, "        dest=\"output\",").map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(OUTPUT_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
+    emit_bool_global(out, parser, root, "--quiet", "quiet", QUIET_HELP)?;
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"-q\",").map_err(sink)?;
+    writeln!(out, "        dest=\"quiet\",").map_err(sink)?;
+    writeln!(out, "        action=\"store_true\",").map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(QUIET_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
+    emit_bool_global(out, parser, root, "--debug", "debug", DEBUG_HELP)?;
+    emit_bool_global(out, parser, root, "--yes", "yes", YES_HELP)?;
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"-y\",").map_err(sink)?;
+    writeln!(out, "        dest=\"yes\",").map_err(sink)?;
+    writeln!(out, "        action=\"store_true\",").map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(YES_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
+    emit_bool_global(out, parser, root, "--no-input", "no_input", NO_INPUT_HELP)?;
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        \"--color\",").map_err(sink)?;
+    writeln!(out, "        dest=\"color\",").map_err(sink)?;
+    writeln!(out, "        choices=(\"auto\", \"always\", \"never\"),").map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(COLOR_HELP))?;
+    writeln!(out, "    )").map_err(sink)?;
+    emit_bool_global(out, parser, root, "--no-pager", "no_pager", NO_PAGER_HELP)?;
+    Ok(())
+}
+
+fn emit_bool_global(
+    out: &mut String,
+    parser: &str,
+    root: bool,
+    flag: &str,
+    dest: &str,
+    help: &str,
+) -> Result<(), CoreError> {
+    writeln!(out, "    {parser}.add_argument(").map_err(sink)?;
+    writeln!(out, "        {},", py_string_literal(flag)).map_err(sink)?;
+    writeln!(out, "        dest={},", py_string_literal(dest)).map_err(sink)?;
+    writeln!(out, "        action=\"store_true\",").map_err(sink)?;
+    if !root {
+        writeln!(out, "        default=argparse.SUPPRESS,").map_err(sink)?;
+    }
+    emit_string_kwarg(out, 8, "help", &argparse_help_text(help))?;
+    writeln!(out, "    )").map_err(sink)?;
     Ok(())
 }
 
@@ -1462,39 +2882,355 @@ fn literal_python(value: &LiteralValue) -> String {
     }
 }
 
-/// `cli/main.py` — parse, dispatch, and map every failure to its exit code.
-fn emit_main_module(ops: &[&Operation], graph: &ApiGraph) -> Result<String, CoreError> {
+/// `cli/complete.py` — shell scripts and the hidden `__complete` command.
+#[expect(
+    clippy::too_many_lines,
+    reason = "completion scripts and __complete share one generated table"
+)]
+fn emit_complete_module(ops: &[&Operation], cli: &SdkCli) -> Result<String, CoreError> {
     let mut out = String::new();
     writeln!(
         out,
         "{}",
         py_docstring(
-            "Dispatch and exit codes.\n\n0 on success, 1 for a failed request, 2 for a usage or \
-             input error."
+            "Shell completion.\n\n`completion <shell>` prints a script. `__complete` answers\n\
+             candidates for the current word from the spec, plus live ids."
         )
     )
     .map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "from __future__ import annotations").map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    writeln!(out, "import json").map_err(sink)?;
+    writeln!(out, "import subprocess").map_err(sink)?;
     writeln!(out, "import sys").map_err(sink)?;
+    writeln!(out, "from typing import Any").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from .config import HELP_SPEC, PROGRAM").map_err(sink)?;
+    // One blank line: `LIVE_COMPLETES` is an assignment, not a `def`.
+    writeln!(out).map_err(sink)?;
+    let mut lives = Vec::new();
+    for op in ops {
+        let Some(command) = cli.spec_command(&op.id) else {
+            continue;
+        };
+        if command.positionals.is_empty() {
+            continue;
+        }
+        let list_id = command
+            .selector
+            .as_ref()
+            .map(|sel| sel.list_operation.as_str());
+        let list_id = list_id.or_else(|| {
+            cli.spec_topic(&op.id).and_then(|topic| {
+                topic
+                    .commands
+                    .iter()
+                    .find(|candidate| candidate.verb == "list")
+                    .map(|candidate| candidate.operation.as_str())
+            })
+        });
+        let Some(list_id) = list_id else {
+            continue;
+        };
+        let Some(list_op) = ops
+            .iter()
+            .copied()
+            .find(|candidate| candidate.id == list_id)
+        else {
+            continue;
+        };
+        let path = command_invocation(cli, op);
+        let list = command_invocation(cli, list_op);
+        let id_field = command
+            .selector
+            .as_ref()
+            .map_or("id", |sel| sel.id_field.as_str());
+        lives.push((path, list, id_field.to_string()));
+    }
+    if lives.is_empty() {
+        writeln!(out, "LIVE_COMPLETES: list[dict[str, Any]] = []").map_err(sink)?;
+    } else {
+        writeln!(out, "LIVE_COMPLETES: list[dict[str, Any]] = [").map_err(sink)?;
+        for (path, list, id_field) in &lives {
+            writeln!(out, "    {{").map_err(sink)?;
+            writeln!(
+                out,
+                "        \"path\": [{}],",
+                path.split_whitespace()
+                    .map(py_string_literal)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .map_err(sink)?;
+            writeln!(
+                out,
+                "        \"list\": [{}],",
+                list.split_whitespace()
+                    .map(py_string_literal)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .map_err(sink)?;
+            writeln!(out, "        \"idField\": {},", py_string_literal(id_field)).map_err(sink)?;
+            writeln!(out, "        \"nameField\": \"name\",").map_err(sink)?;
+            writeln!(out, "    }},").map_err(sink)?;
+        }
+        writeln!(out, "]").map_err(sink)?;
+    }
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    let program = &cli.program;
+    emit_string_assign(
+        &mut out,
+        "BASH_COMPLETION",
+        &format!(
+            "# bash completion for {program}\n_{program}() {{\n  local out line\n  out=\"$({program} __complete \"${{COMP_WORDS[@]:1}}\" 2>/dev/null)\" || return\n  COMPREPLY=()\n  while IFS= read -r line; do\n    [[ -z \"$line\" || \"$line\" == :* ]] && continue\n    COMPREPLY+=(\"${{line%%$'\\t'*}}\")\n  done <<< \"$out\"\n}}\ncomplete -o nospace -F _{program} {program}\n"
+        ),
+    )?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_string_assign(
+        &mut out,
+        "ZSH_COMPLETION",
+        &format!(
+            "#compdef {program}\n_{program}() {{\n  local -a completions\n  local out line\n  out=\"$({program} __complete \"${{words[@]:1}}\" 2>/dev/null)\" || return\n  while IFS= read -r line; do\n    [[ -z \"$line\" || \"$line\" == :* ]] && continue\n    completions+=(\"${{line%%$'\\t'*}}\")\n  done <<< \"$out\"\n  _describe 'command' completions\n}}\n_{program} \"$@\"\n"
+        ),
+    )?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_string_assign(
+        &mut out,
+        "FISH_COMPLETION",
+        &format!(
+            "function __{program}_complete\n    {program} __complete (commandline -opc)[2..-1] (commandline -ct) 2>/dev/null\nend\ncomplete -c {program} -f -a '(__{program}_complete)'\n"
+        ),
+    )?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    emit_string_assign(
+        &mut out,
+        "POWERSHELL_COMPLETION",
+        &format!(
+            "Register-ArgumentCompleter -Native -CommandName {program} -ScriptBlock {{\n  param($wordToComplete, $commandAst, $cursorPosition)\n  $elems = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object {{ $_.ToString() }})\n  {program} __complete @elems 2>$null | ForEach-Object {{\n    if ($_ -notlike ':*') {{\n      $name = ($_ -split \"`t\")[0]\n      [System.Management.Automation.CompletionResult]::new($name, $name, 'ParameterValue', $name)\n    }}\n  }}\n}}\n"
+        ),
+    )?;
+    writeln!(out).map_err(sink)?;
+    // The runtime text opens with its own blank line, which makes the two PEP 8 wants before a `def`.
+    out.push_str(&python_complete_runtime());
+    Ok(finish(out))
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "complete() and live lookup share one generated module"
+)]
+fn python_complete_runtime() -> String {
+    r#"
+def _emit(name: str, help_text: str = "") -> None:
+    if help_text:
+        print(f"{name}\t{help_text}")
+        return
+    print(name)
+
+
+def complete(args: list[str]) -> int:
+    prefix = ""
+    if args:
+        prefix = args[-1]
+        args = args[:-1]
+    path = [arg for arg in args if not arg.startswith("-")]
+    spec = json.loads(HELP_SPEC)
+    commands = spec.get("commands") or []
+    globals_ = [
+        ("--json", "print the server body"),
+        ("--format", "output format"),
+        ("--fields", "response fields"),
+        ("--output", "write the full result to a file"),
+        ("--quiet", "print less on success"),
+        ("--debug", "write a request trace"),
+        ("--yes", "do not ask before a destructive command"),
+        ("--no-input", "never prompt"),
+        ("--color", "when to color human output"),
+        ("--no-pager", "do not page human output"),
+        ("--help", "help"),
+        ("--base-url", "host to send requests to"),
+    ]
+    if prefix.startswith("-"):
+        if prefix in ("--format", "--format="):
+            for value in ("human", "ai-friendly", "json", "jsonl"):
+                _emit(value)
+        elif prefix in ("--color", "--color="):
+            for value in ("auto", "always", "never"):
+                _emit(value)
+        else:
+            for name, help_text in globals_:
+                if name.startswith(prefix):
+                    _emit(name, help_text)
+            joined = " ".join(path)
+            for command in commands:
+                if command.get("invocation") != joined:
+                    continue
+                for flag in command.get("flags") or []:
+                    name = "--" + str(flag.get("name") or "")
+                    if name.startswith(prefix):
+                        _emit(name, str(flag.get("help") or ""))
+        print(":4")
+        return 0
+    if not path:
+        for name in ("help", "completion"):
+            if name.startswith(prefix):
+                _emit(name)
+    if path == ["completion"]:
+        for name in ("bash", "zsh", "fish", "powershell"):
+            if name.startswith(prefix):
+                _emit(name)
+        print(":4")
+        return 0
+    seen: set[str] = set()
+    for command in commands:
+        tokens = str(command.get("invocation") or "").split()
+        if len(tokens) <= len(path):
+            continue
+        if tokens[: len(path)] != path:
+            continue
+        next_name = tokens[len(path)]
+        if not next_name.startswith(prefix) or next_name in seen:
+            continue
+        seen.add(next_name)
+        _emit(next_name)
+    joined = " ".join(path)
+    for command in commands:
+        if command.get("invocation") != joined:
+            continue
+        if not command.get("arguments"):
+            continue
+        for live in LIVE_COMPLETES:
+            if " ".join(live["path"]) == joined:
+                complete_live(live, prefix)
+    print(":4")
+    return 0
+
+
+def complete_live(live: dict[str, Any], prefix: str) -> None:
+    argv = [
+        sys.argv[0],
+        *live["list"],
+        "--json",
+        "--fields",
+        live["idField"],
+        "--limit",
+        "50",
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if completed.returncode != 0 or not completed.stdout:
+        return
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return
+    ident_key = live["idField"]
+    name_key = live["nameField"]
+    for item in spec_items(value):
+        ident = item.get(ident_key)
+        if not isinstance(ident, str) or not ident:
+            continue
+        if prefix and not ident.startswith(prefix):
+            continue
+        help_text = item.get(name_key)
+        if not isinstance(help_text, str):
+            help_text = ""
+        _emit(ident, help_text)
+
+
+def spec_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        for key in ("items", "books", "data"):
+            nested = value.get(key)
+            items = spec_items(nested)
+            if items:
+                return items
+    return []
+
+
+def print_completion(args: list[str]) -> int:
+    shell = args[0] if args else ""
+    scripts = {
+        "bash": BASH_COMPLETION,
+        "zsh": ZSH_COMPLETION,
+        "fish": FISH_COMPLETION,
+        "powershell": POWERSHELL_COMPLETION,
+    }
+    text = scripts.get(shell)
+    if text is None:
+        print(
+            f"Usage: {PROGRAM} completion bash|zsh|fish|powershell",
+            file=sys.stderr,
+        )
+        return 2
+    sys.stdout.write(text)
+    return 0
+"#
+    .to_string()
+}
+
+/// `cli/main.py` — parse, dispatch, and map every failure to its exit code.
+fn emit_main_module(
+    ops: &[&Operation],
+    graph: &ApiGraph,
+    cli: &SdkCli,
+) -> Result<String, CoreError> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{}",
+        py_docstring(
+            "Dispatch and exit codes.\n\n0 on success, 2 for usage, 3 not found, 4 auth, 5 refused,\n\
+             6 retry later, 1 for any other failed request."
+        )
+    )
+    .map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "from __future__ import annotations").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "import json").map_err(sink)?;
+    writeln!(out, "import sys").map_err(sink)?;
+    writeln!(out, "import urllib.error").map_err(sink)?;
     writeln!(out, "from typing import Optional").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     let mut imports = vec![
-        "from .output import print_result".to_string(),
+        "from . import output".to_string(),
+        "from .complete import complete, print_completion".to_string(),
         "from .parser import build_parser".to_string(),
     ];
+    // `PROGRAM` is only read by the rename checker's error line, so it is imported only when there
+    // is a retired position to name.
+    let program = if cli.rename_errors.is_empty() {
+        ""
+    } else {
+        ", PROGRAM"
+    };
     if has_security(graph) {
         imports.push("from ..errors import ApiError, AuthConfigurationError".to_string());
         imports.push("from .credentials import HelperError".to_string());
         // The "no credentials configured" diagnostic names the command and every variable that
         // would satisfy it, so the tables are read here rather than in credentials.py.
-        imports.push(
-            "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELPER_ENV, PROGRAM".to_string(),
-        );
+        imports.push(format!(
+            "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELP_SPEC, HELPER_ENV{program}"
+        ));
     } else {
         imports.push("from ..errors import ApiError".to_string());
-        imports.push("from .config import PROGRAM".to_string());
+        imports.push(format!("from .config import HELP_SPEC{program}"));
     }
     if has_request_body(ops, graph)? {
         imports.push("from .body import InputError".to_string());
@@ -1502,47 +3238,275 @@ fn emit_main_module(ops: &[&Operation], graph: &ApiGraph) -> Result<String, Core
     emit_relative_imports(&mut out, &mut imports)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
+    emit_rename_checker(&mut out, cli)?;
     emit_main(&mut out, ops, graph)?;
     Ok(finish(out))
 }
 
-fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(), CoreError> {
-    writeln!(out, "def main(argv: Optional[list[str]] = None) -> int:").map_err(sink)?;
-    writeln!(out, "    parser = build_parser()").map_err(sink)?;
-    writeln!(out, "    args = parser.parse_args(argv)").map_err(sink)?;
-    writeln!(out, "    handler = getattr(args, \"_handler\", None)").map_err(sink)?;
-    writeln!(out, "    if handler is None:").map_err(sink)?;
-    writeln!(out, "        parser.print_help(sys.stderr)").map_err(sink)?;
-    writeln!(out, "        return 2").map_err(sink)?;
-    writeln!(out, "    try:").map_err(sink)?;
-    writeln!(out, "        result = handler(args)").map_err(sink)?;
-    writeln!(out, "        print_result(result)").map_err(sink)?;
-    writeln!(out, "        return 0").map_err(sink)?;
-    writeln!(out, "    except ApiError as exc:").map_err(sink)?;
-    writeln!(out, "        print(").map_err(sink)?;
+fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> {
+    writeln!(out, "def _check_rename(argv: list[str]) -> int:").map_err(sink)?;
+    if cli.rename_errors.is_empty() {
+        writeln!(out, "    return 0").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "    tokens = argv").map_err(sink)?;
+    writeln!(out, "    renames = [").map_err(sink)?;
+    for error in &cli.rename_errors {
+        let from = error
+            .from
+            .iter()
+            .map(|token| py_string_literal(token))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            out,
+            "        (({from},), {}),",
+            py_string_literal(&error.to)
+        )
+        .map_err(sink)?;
+    }
+    writeln!(out, "    ]").map_err(sink)?;
+    writeln!(out, "    for retired, replacement in renames:").map_err(sink)?;
+    writeln!(out, "        if tokens[: len(retired)] == list(retired):").map_err(sink)?;
+    writeln!(out, "            return output.print_error(").map_err(sink)?;
     writeln!(
         out,
-        "            f\"{{PROGRAM}}: {{exc.status_code}} {{exc.message}} ({{exc.slug}})\","
+        "                f\"{{' '.join(retired)}} is now {{PROGRAM}} {{replacement}}\", code=2"
     )
     .map_err(sink)?;
-    writeln!(out, "            file=sys.stderr,").map_err(sink)?;
+    writeln!(out, "            )").map_err(sink)?;
+    writeln!(out, "    return 0").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "dispatch, format/preflight, and every failure class share one main()"
+)]
+fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(), CoreError> {
+    writeln!(out, "def _print_help(argv: list[str]) -> int:").map_err(sink)?;
+    writeln!(out, "    json_out = output.OUTPUT_FORMAT == \"json\"").map_err(sink)?;
+    writeln!(out, "    rest: list[str] = []").map_err(sink)?;
+    writeln!(out, "    for arg in argv:").map_err(sink)?;
+    writeln!(out, "        if arg == \"--json\":").map_err(sink)?;
+    writeln!(out, "            json_out = True").map_err(sink)?;
+    writeln!(out, "            continue").map_err(sink)?;
+    writeln!(out, "        rest.append(arg)").map_err(sink)?;
+    writeln!(out, "    if json_out:").map_err(sink)?;
+    writeln!(out, "        print(HELP_SPEC)").map_err(sink)?;
+    writeln!(out, "        return 0").map_err(sink)?;
+    writeln!(out, "    parser = build_parser()").map_err(sink)?;
+    writeln!(out, "    if not rest:").map_err(sink)?;
+    writeln!(out, "        parser.print_help()").map_err(sink)?;
+    writeln!(out, "        return 0").map_err(sink)?;
+    writeln!(out, "    try:").map_err(sink)?;
+    writeln!(out, "        parser.parse_args([*rest, \"--help\"])").map_err(sink)?;
+    writeln!(out, "    except SystemExit as exc:").map_err(sink)?;
+    writeln!(out, "        if exc.code in (0, None):").map_err(sink)?;
+    writeln!(out, "            return 0").map_err(sink)?;
+    writeln!(
+        out,
+        "        return exc.code if isinstance(exc.code, int) else 1"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    return 0").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    // Ctrl-C is exit 130, the shell's own convention for SIGINT, with one line instead of a
+    // traceback.
+    writeln!(out, "def main(argv: Optional[list[str]] = None) -> int:").map_err(sink)?;
+    writeln!(out, "    try:").map_err(sink)?;
+    writeln!(out, "        return _main(argv)").map_err(sink)?;
+    writeln!(out, "    except KeyboardInterrupt:").map_err(sink)?;
+    writeln!(
+        out,
+        "        print(\"error: interrupted\", file=sys.stderr)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        return 130").map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "def _main(argv: Optional[list[str]]) -> int:").map_err(sink)?;
+    writeln!(out, "    argv = sys.argv[1:] if argv is None else argv").map_err(sink)?;
+    writeln!(out, "    output.resolve_format(False, None)").map_err(sink)?;
+    writeln!(out, "    value_flags = {{\"--format\", \"--fields\", \"--output\", \"-o\", \"--base-url\", \"--color\"}}").map_err(sink)?;
+    writeln!(
+        out,
+        "    for command in json.loads(HELP_SPEC)[\"commands\"]:"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        for flag in command[\"flags\"]:").map_err(sink)?;
+    writeln!(out, "            if flag[\"type\"] != \"boolean\":").map_err(sink)?;
+    writeln!(
+        out,
+        "                value_flags.add(\"--\" + flag[\"name\"])"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    json_flag = False").map_err(sink)?;
+    writeln!(out, "    index = 0").map_err(sink)?;
+    writeln!(out, "    while index < len(argv):").map_err(sink)?;
+    writeln!(out, "        token = argv[index]").map_err(sink)?;
+    writeln!(out, "        if token == \"--\":").map_err(sink)?;
+    writeln!(out, "            break").map_err(sink)?;
+    writeln!(out, "        if token == \"--json\":").map_err(sink)?;
+    writeln!(out, "            json_flag = True").map_err(sink)?;
+    writeln!(out, "        if token.startswith(\"--format=\"):").map_err(sink)?;
+    writeln!(
+        out,
+        "            output.resolve_format(False, token.split(\"=\", 1)[1])"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "        if token in value_flags and index + 1 < len(argv):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "            index += 1").map_err(sink)?;
+    writeln!(out, "            if token == \"--format\":").map_err(sink)?;
+    writeln!(
+        out,
+        "                output.resolve_format(False, argv[index])"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        index += 1").map_err(sink)?;
+    writeln!(out, "    if json_flag:").map_err(sink)?;
+    writeln!(out, "        output.OUTPUT_FORMAT = \"json\"").map_err(sink)?;
+    out.push_str(
+        r#"    global_names = {
+        "--json",
+        "--format",
+        "--fields",
+        "--output",
+        "-o",
+        "--quiet",
+        "-q",
+        "--debug",
+        "--yes",
+        "--no-input",
+        "--color",
+        "--no-pager",
+        "--base-url",
+    }
+    prefix: list[str] = []
+    start = 0
+    while start < len(argv):
+        token = argv[start]
+        name = token.split("=", 1)[0]
+        if name not in global_names:
+            break
+        prefix.append(token)
+        start += 1
+        if "=" not in token and name in value_flags and start < len(argv):
+            prefix.append(argv[start])
+            start += 1
+    argv = [*argv[start:], *prefix]
+"#,
+    );
+    writeln!(out, "    code = _check_rename(argv)").map_err(sink)?;
+    writeln!(out, "    if code:").map_err(sink)?;
+    writeln!(out, "        return code").map_err(sink)?;
+    writeln!(out, "    if argv and argv[0] == \"help\":").map_err(sink)?;
+    writeln!(out, "        return _print_help(argv[1:])").map_err(sink)?;
+    writeln!(out, "    if argv and argv[0] == \"completion\":").map_err(sink)?;
+    writeln!(out, "        return print_completion(argv[1:])").map_err(sink)?;
+    writeln!(out, "    if argv and argv[0] == \"__complete\":").map_err(sink)?;
+    writeln!(out, "        return complete(argv[1:])").map_err(sink)?;
+    writeln!(out, "    parser = build_parser()").map_err(sink)?;
+    writeln!(out, "    args = parser.parse_args(argv)").map_err(sink)?;
+    writeln!(out, "    output.apply_globals(args)").map_err(sink)?;
+    writeln!(out, "    if getattr(args, \"fields\", None) == \"help\":").map_err(sink)?;
+    writeln!(
+        out,
+        "        return output.print_fields_help(getattr(args, \"_fields\", ()))"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "    if output.OUTPUT_FORMAT == \"ai-friendly\" and output.OUTPUT_PATH != \"-\":"
+    )
+    .map_err(sink)?;
+    writeln!(out, "        code = output.preflight_output()").map_err(sink)?;
+    writeln!(out, "        if code:").map_err(sink)?;
+    writeln!(out, "            return code").map_err(sink)?;
+    writeln!(out, "    handler = getattr(args, \"_handler\", None)").map_err(sink)?;
+    writeln!(out, "    if handler is None:").map_err(sink)?;
+    writeln!(
+        out,
+        "        if output.OUTPUT_FORMAT not in (\"json\", \"jsonl\"):"
+    )
+    .map_err(sink)?;
+    writeln!(out, "            parser.print_help(sys.stderr)").map_err(sink)?;
+    writeln!(
+        out,
+        "        return output.print_error(\"a command is required\", code=2)"
+    )
+    .map_err(sink)?;
+    writeln!(out, "    try:").map_err(sink)?;
+    writeln!(out, "        result = handler(args)").map_err(sink)?;
+    writeln!(out, "    except ApiError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "        code = output.exit_code_for_status(exc.status_code)"
+    )
+    .map_err(sink)?;
+    writeln!(
+        out,
+        "        message = f\"{{exc.message}} ({{exc.status_code}} {{exc.slug}})\""
+    )
+    .map_err(sink)?;
+    writeln!(out, "        if not exc.message and not exc.slug:").map_err(sink)?;
+    writeln!(
+        out,
+        "            message = f\"the API returned {{exc.status_code}} with a non-JSON body\""
+    )
+    .map_err(sink)?;
+    // The exit code is the status's class either way; only a status that is already "retry
+    // later" says so in the message.
+    writeln!(out, "            if code == 6:").map_err(sink)?;
+    writeln!(out, "                message += \"; retry later\"").map_err(sink)?;
+    writeln!(out, "        hints = [str(hint) for hint in exc.hints]").map_err(sink)?;
+    writeln!(out, "        return output.print_error(").map_err(sink)?;
+    writeln!(
+        out,
+        "            message, hints, exc.request_id, exc.status_code, code, exc.slug"
+    )
+    .map_err(sink)?;
     writeln!(out, "        )").map_err(sink)?;
-    writeln!(out, "        return 1").map_err(sink)?;
     if has_security(graph) {
         writeln!(out, "    except AuthConfigurationError as exc:").map_err(sink)?;
+        writeln!(
+            out,
+            "        if output.OUTPUT_FORMAT in (\"json\", \"jsonl\"):"
+        )
+        .map_err(sink)?;
+        writeln!(
+            out,
+            "            command = COMMAND_BY_ID.get(exc.operation_id, exc.operation_id)"
+        )
+        .map_err(sink)?;
+        out.push_str("            hints = [\n                \"set \" + CREDENTIAL_ENV[id]\n                for group in exc.alternatives\n                for id in group\n            ]\n");
+        writeln!(out, "            return output.print_error(").map_err(sink)?;
+        writeln!(
+            out,
+            "                f\"no credentials configured for `{{command}}`\", hints, code=4"
+        )
+        .map_err(sink)?;
+        writeln!(out, "            )").map_err(sink)?;
+
         writeln!(
             out,
             "        command = COMMAND_BY_ID.get(exc.operation_id, exc.operation_id)"
         )
         .map_err(sink)?;
-        writeln!(out, "        print(").map_err(sink)?;
         writeln!(
             out,
-            "            f\"{{PROGRAM}}: no credentials configured for `{{command}}`\","
+            "        print(f\"error: no credentials configured for `{{command}}`\", file=sys.stderr)"
         )
         .map_err(sink)?;
-        writeln!(out, "            file=sys.stderr,").map_err(sink)?;
-        writeln!(out, "        )").map_err(sink)?;
         writeln!(out, "        print(\"  set one of:\", file=sys.stderr)").map_err(sink)?;
         writeln!(out, "        names: list[str] = []").map_err(sink)?;
         writeln!(out, "        for alternative in exc.alternatives:").map_err(sink)?;
@@ -1572,37 +3536,44 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
         .map_err(sink)?;
         writeln!(out, "            file=sys.stderr,").map_err(sink)?;
         writeln!(out, "        )").map_err(sink)?;
-        writeln!(out, "        return 1").map_err(sink)?;
+        writeln!(out, "        return 4").map_err(sink)?;
         writeln!(out, "    except HelperError as exc:").map_err(sink)?;
-        writeln!(out, "        print(").map_err(sink)?;
         writeln!(
             out,
-            "            f\"{{PROGRAM}}: credential helper failed ({{exc.reason}})\","
+            "        return output.print_error(f\"credential helper failed ({{exc.reason}})\", code=1)"
         )
         .map_err(sink)?;
-        writeln!(out, "            file=sys.stderr,").map_err(sink)?;
-        writeln!(out, "        )").map_err(sink)?;
-        writeln!(out, "        return 1").map_err(sink)?;
     }
     if has_request_body(ops, graph)? {
         writeln!(out, "    except InputError as exc:").map_err(sink)?;
-        writeln!(
-            out,
-            "        print(f\"{{PROGRAM}}: {{exc.reason}}\", file=sys.stderr)"
-        )
-        .map_err(sink)?;
-        writeln!(out, "        return 2").map_err(sink)?;
+        writeln!(out, "        return output.print_error(exc.reason, code=2)").map_err(sink)?;
     }
     // `urllib.error.URLError` — a refused connection, an unresolvable host, a timeout — is an
     // `OSError`, and so is every read the CLI itself performs. A generated program that prints a
     // Python traceback because a server is down is not a command-line program.
-    writeln!(out, "    except OSError as exc:").map_err(sink)?;
     writeln!(
         out,
-        "        print(f\"{{PROGRAM}}: {{exc}}\", file=sys.stderr)"
+        "    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:"
     )
     .map_err(sink)?;
-    writeln!(out, "        return 1").map_err(sink)?;
+    writeln!(out, "        return output.print_error(str(exc), code=6)").map_err(sink)?;
+    writeln!(out, "    except OSError as exc:").map_err(sink)?;
+    writeln!(out, "        return output.print_error(str(exc), code=1)").map_err(sink)?;
+    // A success body that does not decode arrived after the server acted: exit 1, never the retry
+    // class, or a caller re-runs a mutation that already happened.
+    writeln!(out, "    except ValueError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "        return output.print_error(f\"the response could not be read: {{exc}}\", code=1)"
+    )
+    .map_err(sink)?;
+    // Printing happens after the request succeeded, so a failed local write is not "retry later"
+    // either.
+    writeln!(out, "    try:").map_err(sink)?;
+    writeln!(out, "        output.print_result(result)").map_err(sink)?;
+    writeln!(out, "    except OSError as exc:").map_err(sink)?;
+    writeln!(out, "        return output.print_error(str(exc), code=1)").map_err(sink)?;
+    writeln!(out, "    return 0").map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     Ok(())

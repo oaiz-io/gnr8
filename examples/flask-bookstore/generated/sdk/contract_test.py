@@ -89,7 +89,7 @@ class ContractTest(unittest.TestCase):
 
     def test_request_shape_list_orders(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"availability\":\"in_stock\",\"lines\":[{\"amount\":1.5,\"currency\":\"eur\"}],\"message\":\"gnr8\",\"order_id\":7}")
+        handler.queue(200, {"content-type": "application/json"}, '{"availability":"in_stock","lines":[{"amount":1.5,"currency":"eur"}],"message":"gnr8","order_id":7}')
         client = _contract_client(handler)
         result = client.list_orders(status="gnr8")
         request = self._single_request(handler)
@@ -98,12 +98,12 @@ class ContractTest(unittest.TestCase):
 
     def test_request_shape_create_order(self) -> None:
         handler = _ContractHandler()
-        handler.queue(201, {"content-type": "application/json"}, "{\"availability\":\"in_stock\",\"lines\":[{\"amount\":1.5,\"currency\":\"eur\"}],\"message\":\"gnr8\",\"order_id\":7}")
+        handler.queue(201, {"content-type": "application/json"}, '{"availability":"in_stock","lines":[{"amount":1.5,"currency":"eur"}],"message":"gnr8","order_id":7}')
         client = _contract_client(handler)
         result = client.create_order(body=OrderInput(book_id=7, price=Price(amount=1.5, currency="eur")))
         request = self._single_request(handler)
         self._assert_wire(request, "POST", "/orders/", {}, {"content-type": "application/json"})
-        self._assert_body(request, "{\"book_id\":7,\"price\":{\"amount\":1.5,\"currency\":\"eur\"}}")
+        self._assert_body(request, '{"book_id":7,"price":{"amount":1.5,"currency":"eur"}}')
         self.assertEqual(result.message, "gnr8", "message")
 
     def test_request_shape_create_order_raw(self) -> None:
@@ -117,7 +117,7 @@ class ContractTest(unittest.TestCase):
 
     def test_request_shape_get_order(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"availability\":\"in_stock\",\"lines\":[{\"amount\":1.5,\"currency\":\"eur\"}],\"message\":\"gnr8\",\"order_id\":7}")
+        handler.queue(200, {"content-type": "application/json"}, '{"availability":"in_stock","lines":[{"amount":1.5,"currency":"eur"}],"message":"gnr8","order_id":7}')
         client = _contract_client(handler)
         result = client.get_order(order_id=7)
         request = self._single_request(handler)
@@ -126,7 +126,7 @@ class ContractTest(unittest.TestCase):
 
     def test_response_decode_list_orders_present(self) -> None:
         handler = _ContractHandler()
-        handler.queue(200, {"content-type": "application/json"}, "{\"availability\":\"in_stock\",\"lines\":[{\"amount\":1.5,\"currency\":\"eur\"}],\"message\":\"gnr8\",\"order_id\":7}")
+        handler.queue(200, {"content-type": "application/json"}, '{"availability":"in_stock","lines":[{"amount":1.5,"currency":"eur"}],"message":"gnr8","order_id":7}')
         client = _contract_client(handler)
         result = client.list_orders(status="gnr8")
         request = self._single_request(handler)
@@ -135,17 +135,17 @@ class ContractTest(unittest.TestCase):
 
     def test_response_decode_create_order_present(self) -> None:
         handler = _ContractHandler()
-        handler.queue(201, {"content-type": "application/json"}, "{\"availability\":\"in_stock\",\"lines\":[{\"amount\":1.5,\"currency\":\"eur\"}],\"message\":\"gnr8\",\"order_id\":7}")
+        handler.queue(201, {"content-type": "application/json"}, '{"availability":"in_stock","lines":[{"amount":1.5,"currency":"eur"}],"message":"gnr8","order_id":7}')
         client = _contract_client(handler)
         result = client.create_order(body=OrderInput(book_id=7, price=Price(amount=1.5, currency="eur")))
         request = self._single_request(handler)
         self._assert_wire(request, "POST", "/orders/", {}, {"content-type": "application/json"})
-        self._assert_body(request, "{\"book_id\":7,\"price\":{\"amount\":1.5,\"currency\":\"eur\"}}")
+        self._assert_body(request, '{"book_id":7,"price":{"amount":1.5,"currency":"eur"}}')
         self.assertEqual(result.message, "gnr8", "message")
 
     def test_typed_error_list_orders_400(self) -> None:
         handler = _ContractHandler()
-        handler.queue(400, {"content-type": "application/json"}, "{\"message\":\"contract test error\",\"slug\":\"contract_test_error\"}")
+        handler.queue(400, {"content-type": "application/json"}, '{"message":"contract test error","slug":"contract_test_error"}')
         client = _contract_client(handler)
         with self.assertRaises(ApiError) as caught:
             client.list_orders(status="gnr8")

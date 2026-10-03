@@ -1038,7 +1038,20 @@ impl Importer {
             .and_then(Value::as_bool)
             .unwrap_or(location == "path");
         let (schema, openapi_content) = self.parameter_schema(parameter, operation_id, &name);
-        let openapi_fields = self.parameter_openapi_fields(parameter);
+        let mut openapi_fields = self.parameter_openapi_fields(parameter);
+        // A string `description` is the parameter's prose, which the graph carries as a typed fact;
+        // anything else is kept verbatim as an exact OpenAPI field rather than reinterpreted.
+        let description = match openapi_fields
+            .iter()
+            .position(|(name, value)| name == "description" && value.is_string())
+        {
+            Some(index) => openapi_fields
+                .remove(index)
+                .1
+                .as_str()
+                .map(ToOwned::to_owned),
+            None => None,
+        };
         let default = schema.get("default").and_then(literal_value);
         let imported = self.type_from_schema(schema);
         let (style, explode) =
@@ -1057,6 +1070,7 @@ impl Importer {
                 .get("allowReserved")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            description,
             openapi_content,
             openapi_fields,
             provenance: self.span(),
@@ -4188,7 +4202,11 @@ components:
         )
         .unwrap();
         assert_eq!(graph.operations[0].id, "publicEndpoint");
-        assert!(graph.operations[0].security.is_empty());
+        assert!(
+            graph.operations[0].security.is_empty(),
+            "{:?}",
+            graph.operations[0].security
+        );
         assert!(graph.operations[0].security_overrides_global);
         assert!(graph.diagnostics.is_empty(), "{:?}", graph.diagnostics);
 

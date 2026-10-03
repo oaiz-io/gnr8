@@ -1141,8 +1141,16 @@ fn compare_existing_parameter(
 }
 
 fn parameter_openapi_value(parameter: &Param) -> serde_json::Value {
-    let fields: serde_json::Map<String, serde_json::Value> =
+    let mut fields: serde_json::Map<String, serde_json::Value> =
         parameter.openapi_fields.iter().cloned().collect();
+    // The typed prose is the same Parameter Object `description` the document carries, so it is
+    // compared, and stripped for the structural comparison, exactly as an imported one was.
+    if let Some(description) = &parameter.description {
+        fields.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.clone()),
+        );
+    }
     serde_json::json!({ "content": parameter.openapi_content, "fields": fields })
 }
 
@@ -2437,7 +2445,8 @@ mod tests {
         let empty = ApiGraph::default();
         let policy = exemptions(&["internal", "beta"]);
 
-        assert!(diff_graphs(&empty, &empty, &policy).changes.is_empty());
+        let leftover = diff_graphs(&empty, &empty, &policy).changes;
+        assert!(leftover.is_empty(), "{leftover:?}");
 
         for added in [&checked, &exempt] {
             let finding = change(&diff_graphs(&empty, added, &policy), "operation.added").clone();
@@ -2680,6 +2689,7 @@ mod tests {
             style: None,
             explode: None,
             allow_reserved: false,
+            description: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: span("handlers.rs"),
@@ -3007,9 +3017,8 @@ mod tests {
             ..ApiGraph::default()
         };
 
-        assert!(diff_graphs(&base, &current, &BTreeSet::new())
-            .changes
-            .is_empty());
+        let leftover = diff_graphs(&base, &current, &BTreeSet::new()).changes;
+        assert!(leftover.is_empty(), "{leftover:?}");
     }
 
     #[test]

@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import argparse
 
-from .commands import root
+from .commands import books
 from .config import DESCRIPTION, PROGRAM, VERSION
 
 
+class OutputParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        from . import output
+
+        output.print_error(message, code=2)
+        raise SystemExit(2)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = OutputParser(
         prog=PROGRAM,
         description=DESCRIPTION,
     )
@@ -18,9 +26,80 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=VERSION,
     )
+    parser.add_argument(
+        "--json",
+        dest="json",
+        action="store_true",
+        help="print the server body (shorthand for --format json)",
+    )
+    parser.add_argument(
+        "--format",
+        dest="format",
+        choices=("human", "ai-friendly", "json", "jsonl"),
+        help="output format: human, ai-friendly, json, or jsonl",
+    )
+    parser.add_argument(
+        "--fields",
+        dest="fields",
+        help="comma-separated response fields, or help to list them",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="write the full result to a file, or - for stdout",
+    )
+    parser.add_argument(
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        help="print less on success",
+    )
+    parser.add_argument(
+        "-q",
+        dest="quiet",
+        action="store_true",
+        help="print less on success",
+    )
+    parser.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        help="write a request trace to stderr",
+    )
+    parser.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        help="do not ask before a destructive command",
+    )
+    parser.add_argument(
+        "-y",
+        dest="yes",
+        action="store_true",
+        help="do not ask before a destructive command",
+    )
+    parser.add_argument(
+        "--no-input",
+        dest="no_input",
+        action="store_true",
+        help="never prompt; refuse commands that would ask",
+    )
+    parser.add_argument(
+        "--color",
+        dest="color",
+        choices=("auto", "always", "never"),
+        help="when to color human output: auto, always, or never",
+    )
+    parser.add_argument(
+        "--no-pager",
+        dest="no_pager",
+        action="store_true",
+        help="do not page human output",
+    )
     subparsers = parser.add_subparsers(
         dest="_command",
         required=True,
     )
-    root.register(subparsers)
+    books.register(subparsers)
     return parser

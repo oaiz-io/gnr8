@@ -50,6 +50,7 @@
 
 pub mod builtins;
 pub mod cli;
+pub mod cli_spec;
 pub mod docs;
 pub mod layout;
 pub mod model_style;
@@ -61,7 +62,10 @@ use std::path::PathBuf;
 use crate::graph::{ApiGraph, Diagnostic, DiagnosticCategory, SourceSpan};
 use crate::Error;
 
-pub use cli::SdkCli;
+pub use cli::{OwnedCommand, SdkCli};
+pub use cli_spec::{
+    CliCommand, CliRenameError, CliSelector, CliSeverity, CliSwitchFlag, CliTopic, CliView,
+};
 pub use docs::SdkDocs;
 pub use layout::{OperationFileSplit, SdkFileLayout};
 pub use model_style::PyModelStyle;
@@ -718,7 +722,10 @@ pub mod prelude {
         SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticFiles, TsSdk,
     };
-    pub use super::cli::SdkCli;
+    pub use super::cli::{OwnedCommand, SdkCli};
+    pub use super::cli_spec::{
+        CliCommand, CliRenameError, CliSelector, CliSeverity, CliSwitchFlag, CliTopic, CliView,
+    };
     pub use super::docs::SdkDocs;
     pub use super::layout::{OperationFileSplit, SdkFileLayout};
     pub use super::model_style::PyModelStyle;
@@ -803,7 +810,8 @@ mod tests {
         let mut out = Artifacts::from_files(vec![super::Artifact::new("a.txt", "a")]);
         out.begin_stage("post[0]:Real");
         out.rewrite("a.txt", |text| format!("{text}!")).unwrap();
-        assert!(out.take_diagnostics().is_empty());
+        let leftover = out.take_diagnostics();
+        assert!(leftover.is_empty(), "{leftover:?}");
     }
 
     #[test]
@@ -812,7 +820,8 @@ mod tests {
             super::Artifact::new("a.txt", "a"),
             super::Artifact::new("b.txt", "b"),
         ]);
-        assert!(out.changes().is_empty());
+        let leftover = out.changes();
+        assert!(leftover.is_empty(), "{leftover:?}");
     }
     use crate::sdk::stage::PlanStage;
     use crate::Error;

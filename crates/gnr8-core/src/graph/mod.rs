@@ -132,7 +132,8 @@ mod tests {
             operations: vec![operation(None)],
             ..ApiGraph::default()
         };
-        assert!(effective_operation_tags(&ungrouped, &ungrouped.operations[0]).is_empty());
+        let leftover = effective_operation_tags(&ungrouped, &ungrouped.operations[0]);
+        assert!(leftover.is_empty(), "{leftover:?}");
 
         let indexed = EffectiveOperationTags::new(&with_policy);
         assert_eq!(

@@ -8,6 +8,219 @@ import (
 	"strings"
 )
 
+// Options configures one invocation of Run.
+//
+// Version, Commit and Date are stampable via -ldflags -X on the caller's main
+// because they are variables, not constants.
+type Options struct {
+	Version   string
+	Commit    string
+	Date      string
+	UserAgent string
+}
+
+var active Options
+var outputFormat string
+var fieldsSpec string
+var outputPath string
+var quiet bool
+var debugEnabled bool
+var yesFlag bool
+var noInput bool
+var commandPath string
+var flagArgs []string
+var previewFields []string
+var colorMode = "auto"
+var noPager bool
+var resultIsList bool
+var itemsKey string
+var nextCursorField string
+
+func resetInvocation(opts Options) {
+	active = opts
+	outputFormat = ""
+	fieldsSpec = ""
+	outputPath = ""
+	quiet = false
+	debugEnabled = false
+	yesFlag = false
+	noInput = false
+	commandPath = ""
+	flagArgs = nil
+	previewFields = nil
+	colorMode = "auto"
+	noPager = false
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
+	lastAnswer = capturedAnswer{}
+}
+
+func versionLine() string {
+	version := active.Version
+	if version == "" {
+		version = defaultVersion
+	}
+	out := program + " " + version
+	if active.Commit != "" && active.Commit != "none" {
+		out += " (" + active.Commit
+		if active.Date != "" && active.Date != "unknown" {
+			out += " " + active.Date
+		}
+		out += ")"
+	}
+	return out
+}
+
+func userAgent() string {
+	if active.UserAgent != "" {
+		return active.UserAgent
+	}
+	return ""
+}
+
+func setFormat(value string) int {
+	switch value {
+	case "human", "ai-friendly", "json", "jsonl":
+		outputFormat = value
+		return 0
+	default:
+		errorMessage(2, "--format must be one of human, ai-friendly, json, jsonl (got %q)", value)
+		return 2
+	}
+}
+
+func setColor(value string) int {
+	switch value {
+	case "auto", "always", "never":
+		colorMode = value
+		return 0
+	default:
+		errorMessage(2, "--color must be one of auto, always, never (got %q)", value)
+		return 2
+	}
+}
+
+func resolveFormat() {
+	if outputFormat != "" {
+		return
+	}
+	if env := os.Getenv(formatEnv); env != "" {
+		_ = setFormat(env)
+		if outputFormat != "" {
+			return
+		}
+	}
+	if stdoutIsTTY() {
+		outputFormat = "human"
+	} else {
+		outputFormat = "ai-friendly"
+	}
+}
+
+func peelBool(arg string, names ...string) bool {
+	for _, name := range names {
+		if arg == "--"+name || arg == "-"+name {
+			return true
+		}
+	}
+	return false
+}
+
+func peelValue(rest []string, names ...string) (string, []string, int) {
+	arg := rest[0]
+	for _, name := range names {
+		prefix := "--" + name + "="
+		short := "-" + name + "="
+		if strings.HasPrefix(arg, prefix) || strings.HasPrefix(arg, short) {
+			return arg[strings.Index(arg, "=")+1:], rest[1:], 0
+		}
+		if arg == "--"+name || arg == "-"+name {
+			if len(rest) < 2 {
+				errorMessage(2, "--%s needs a value", name)
+				return "", nil, 2
+			}
+			return rest[1], rest[2:], 0
+		}
+	}
+	return "", rest, -1
+}
+
+func peelGlobals(args []string) ([]string, int) {
+	rest := args
+	for len(rest) > 0 {
+		arg := rest[0]
+		switch {
+		case peelBool(arg, "json"):
+			outputFormat = "json"
+			rest = rest[1:]
+		case peelBool(arg, "quiet", "q"):
+			quiet = true
+			rest = rest[1:]
+		case peelBool(arg, "debug"):
+			debugEnabled = true
+			rest = rest[1:]
+		case peelBool(arg, "yes", "y"):
+			yesFlag = true
+			rest = rest[1:]
+		case peelBool(arg, "no-input"):
+			noInput = true
+			rest = rest[1:]
+		case peelBool(arg, "no-pager"):
+			noPager = true
+			rest = rest[1:]
+		default:
+			if value, next, code := peelValue(rest, "format"); code != -1 {
+				if code != 0 {
+					return nil, code
+				}
+				if code := setFormat(value); code != 0 {
+					return nil, code
+				}
+				rest = next
+				continue
+			}
+			if value, next, code := peelValue(rest, "fields"); code != -1 {
+				if code != 0 {
+					return nil, code
+				}
+				fieldsSpec = value
+				rest = next
+				continue
+			}
+			if value, next, code := peelValue(rest, "output", "o"); code != -1 {
+				if code != 0 {
+					return nil, code
+				}
+				outputPath = value
+				rest = next
+				continue
+			}
+			if value, next, code := peelValue(rest, "color"); code != -1 {
+				if code != 0 {
+					return nil, code
+				}
+				if code := setColor(value); code != 0 {
+					return nil, code
+				}
+				rest = next
+				continue
+			}
+			return rest, -1
+		}
+	}
+	return rest, -1
+}
+
+func resolveEnv() {
+	if os.Getenv(debugEnv) != "" {
+		debugEnabled = true
+	}
+	if os.Getenv(noInputEnv) != "" {
+		noInput = true
+	}
+}
+
 // One command and the prose its handler states.
 type cliCommand struct {
 	name    string
@@ -26,11 +239,11 @@ var cliGroups = []cliGroup{
 		name:    "books",
 		summary: "Browse and manage the catalogue",
 		commands: []cliCommand{
-			{name: "list-books", summary: "Returns every book in the catalogue."},
-			{name: "create-book", summary: "Adds a book to the catalogue."},
-			{name: "delete-book", summary: "Permanently removes one book from the catalogue."},
-			{name: "get-book", summary: "Returns one book by its identifier."},
-			{name: "update-book", summary: "Replaces the mutable fields of one book."},
+			{name: "list", summary: "Returns every book in the catalogue."},
+			{name: "create", summary: "Adds a book to the catalogue."},
+			{name: "delete", summary: "Permanently removes one book from the catalogue."},
+			{name: "get", summary: "Returns one book by its identifier."},
+			{name: "update", summary: "Replaces the mutable fields of one book."},
 		},
 	},
 }
@@ -154,40 +367,87 @@ func editDistance(from, to string) int {
 func dispatchBooks(args []string) int {
 	group := cliGroups[0]
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "%s: missing command under %s\n", program, group.name)
-		fmt.Fprintln(os.Stderr)
-		printGroupUsage(os.Stderr, group)
+		errorMessage(2, "missing command under %s", group.name)
+		if !machineOutput() {
+			fmt.Fprintln(os.Stderr)
+		}
+		if !machineOutput() {
+			printGroupUsage(os.Stderr, group)
+		}
 		return 2
 	}
 	switch args[0] {
 	case "-h", "-help", "--help":
 		printGroupUsage(os.Stdout, group)
 		return 0
-	case "list-books":
+	case "list":
 		return cmdListBooks(args[1:])
-	case "create-book":
+	case "create":
 		return cmdCreateBook(args[1:])
-	case "delete-book":
+	case "delete":
 		return cmdDeleteBook(args[1:])
-	case "get-book":
+	case "get":
 		return cmdGetBook(args[1:])
-	case "update-book":
+	case "update":
 		return cmdUpdateBook(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "%s: unknown command %q under %s\n", program, args[0], group.name)
-		if hint := suggestCommand(args[0], group.commands); hint != "" {
+		errorMessage(2, "unknown command %q under %s", args[0], group.name)
+		if hint := suggestCommand(args[0], group.commands); !machineOutput() && hint != "" {
 			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s %s`?\n", program, group.name, hint)
 		}
-		fmt.Fprintln(os.Stderr)
-		printGroupUsage(os.Stderr, group)
+		if !machineOutput() {
+			fmt.Fprintln(os.Stderr)
+		}
+		if !machineOutput() {
+			printGroupUsage(os.Stderr, group)
+		}
 		return 2
 	}
 }
 
+func checkRename(args []string) int {
+	renames := []struct {
+		from []string
+		to   string
+	}{
+		{[]string{"books", "list-books"}, "books list"},
+	}
+	for _, rename := range renames {
+		if len(args) < len(rename.from) {
+			continue
+		}
+		match := true
+		for i, token := range rename.from {
+			if args[i] != token {
+				match = false
+				break
+			}
+		}
+		if match {
+			errorMessage(2, "%s is now %s %s", strings.Join(rename.from, " "), program, rename.to)
+			return 2
+		}
+	}
+	return 0
+}
+
 // Run executes one invocation and returns the process exit code.
-func Run(args []string) int {
+func Run(args []string, opts Options) int {
+	resetInvocation(opts)
+	rest, code := peelGlobals(args)
+	if code >= 0 {
+		return code
+	}
+	args = rest
+	resolveFormat()
+	resolveEnv()
+	if code := checkRename(args); code != 0 {
+		return code
+	}
 	if len(args) == 0 {
-		printRootUsage(os.Stderr)
+		if !machineOutput() {
+			printRootUsage(os.Stderr)
+		}
 		return 2
 	}
 	switch args[0] {
@@ -195,17 +455,49 @@ func Run(args []string) int {
 		printRootUsage(os.Stdout)
 		return 0
 	case "-version", "--version":
-		fmt.Println(version)
+		fmt.Println(versionLine())
 		return 0
+	case "help":
+		return printHelp(args[1:])
+	case "completion":
+		return printCompletion(args[1:])
+	case "__complete":
+		return complete(args[1:])
 	case "books":
 		return dispatchBooks(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "%s: unknown command %q\n", program, args[0])
-		if hint := suggestTopLevel(args[0]); hint != "" {
+		errorMessage(2, "unknown command %q", args[0])
+		if hint := suggestTopLevel(args[0]); !machineOutput() && hint != "" {
 			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s`?\n", program, hint)
 		}
-		fmt.Fprintln(os.Stderr)
-		printRootUsage(os.Stderr)
+		if !machineOutput() {
+			fmt.Fprintln(os.Stderr)
+		}
+		if !machineOutput() {
+			printRootUsage(os.Stderr)
+		}
 		return 2
 	}
+}
+
+func printHelp(args []string) int {
+	jsonOut := outputFormat == "json"
+	rest := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOut = true
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	if jsonOut {
+		fmt.Println(helpSpecJSON)
+		return 0
+	}
+	if len(rest) == 0 {
+		printRootUsage(os.Stdout)
+		return 0
+	}
+	next := append(append([]string{}, rest...), "--help")
+	return Run(next, active)
 }

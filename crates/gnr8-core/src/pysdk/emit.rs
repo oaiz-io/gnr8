@@ -374,20 +374,29 @@ fn needs_alias(field: &Field, ident: &str) -> bool {
 /// `\UHHHHHHHH`. Text a human wrote reaches this function (an operation's prose, a schema example),
 /// and a no-break space, a soft hyphen, a byte-order mark or a decomposed accent are all characters
 /// Rust escapes, so `format!("{value:?}")` emitted Python that would not parse.
+///
+/// The quote character is `ruff format`'s: double, unless the text holds more double quotes than
+/// single ones, in which case single quotes need fewer escapes and the formatter would rewrite it.
 pub(crate) fn py_string_literal(value: &str) -> String {
+    let doubles = value.chars().filter(|ch| *ch == '"').count();
+    let singles = value.chars().filter(|ch| *ch == '\'').count();
+    let quote = if doubles > singles { '\'' } else { '"' };
     let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
+    out.push(quote);
     for ch in value.chars() {
         match ch {
-            '"' => out.push_str("\\\""),
+            '"' | '\'' if ch == quote => {
+                out.push('\\');
+                out.push(ch);
+            }
+            // The other quote character is bare inside this literal, in Python as in `str`'s own
+            // `Debug`; only `char::escape_debug` (which cannot know its quoting context) escapes
+            // the single quote.
+            '"' | '\'' => out.push(ch),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            // `str`'s own `Debug` leaves the single quote bare inside a double-quoted literal, and
-            // so does Python; only `char::escape_debug` (which cannot know its quoting context)
-            // escapes it.
-            '\'' => out.push('\''),
             // A one-character `escape_debug` is a character Rust prints verbatim.
             _ if ch.escape_debug().len() == 1 => out.push(ch),
             _ => {
@@ -403,7 +412,7 @@ pub(crate) fn py_string_literal(value: &str) -> String {
             }
         }
     }
-    out.push('"');
+    out.push(quote);
     out
 }
 
@@ -3810,20 +3819,32 @@ mod tests {
             assert_eq!(py_string_literal("\u{0}7"), r#""\x007""#);
         }
 
-        /// Text that needs no escape hatch keeps the bytes `format!("{value:?}")` produced, so no
-        /// committed generated file moves.
+        /// Text that needs no escape hatch, and holds no more double quotes than single ones,
+        /// keeps the bytes `format!("{value:?}")` produced.
         #[test]
         fn printable_text_is_unchanged_from_debug() {
             for value in [
                 "plain",
                 "it's",
-                "say \"hi\"",
+                "say \"hi\" isn't 'x'",
                 "back\\slash",
                 "line\nbreak\ttab\r",
                 "caf\u{e9} — 中 😀",
             ] {
                 assert_eq!(py_string_literal(value), format!("{value:?}"), "{value:?}");
             }
+        }
+
+        /// More double quotes than single ones: single quotes, as `ruff format` would rewrite the
+        /// literal. This deliberately moves such strings away from Rust's `Debug` spelling — the
+        /// generated SDK and CLI must be format-clean as emitted.
+        #[test]
+        fn text_with_more_double_quotes_is_single_quoted() {
+            assert_eq!(py_string_literal("say \"hi\""), "'say \"hi\"'");
+            assert_eq!(
+                py_string_literal("{\"a\":\"it's\"}"),
+                "'{\"a\":\"it\\'s\"}'"
+            );
         }
     }
 
@@ -4624,6 +4645,7 @@ mod tests {
                 style: None,
                 explode: None,
                 allow_reserved: false,
+                description: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: crate::graph::SourceSpan {
@@ -5050,6 +5072,7 @@ mod tests {
                 style: None,
                 explode: None,
                 allow_reserved: false,
+                description: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: SourceSpan {

@@ -9,6 +9,74 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.17.0 — 2026-10-02
+
+### Added
+
+- **Parameter descriptions are a graph fact.** A bound parameter's prose is the field's own doc
+  comment (plain prose, no tag grammar), the imported spec's `description`, or
+  `DocumentOperation::parameter` when the source has neither. A collision is a hard error. Generated
+  CLI `--help` prints that prose on the flag.
+- **Generated CLI output format flags.** `--format human|ai-friendly|json|jsonl`, `--json` as the
+  JSON shorthand, and `{PROG}_FORMAT`. A TTY defaults to `human`; anything else defaults to
+  `ai-friendly`. `--fields`, `-o/--output`, `-q/--quiet`, `--debug`, `-y/--yes` and `--no-input`
+  are reserved globals. Exit codes 0–6 name the caller's next action; transient HTTP statuses, a failed connection or a
+  timeout are 6 ("retry later"), so a success body that does not decode or a failed `-o` write is 1.
+  Python returns 130 on Ctrl-C. Errors print `error:` plus optional hints and a request id; under
+  `--json` they are one object on stderr carrying the server's `slug`.
+- **ai-friendly result envelopes.** Off-TTY default output is a bounded summary whose first line
+  names a versioned envelope written under `.{program}/output/` (or `{PROG}_OUTPUT_DIR`): atomic
+  0600 files, a `.gitignore`, a 100-file / 100 MB retention cap over envelopes and downloads that
+  never deletes the files the current run wrote, and a preflight before the request. The summary
+  reserves room for the next-page line and `jq` recipes; whether a result is a list is decided at
+  generation time from the graph. `--json` prints the captured server body.
+- **Go CLI library seam.** `Run(args, Options)` is the exported entry. `main.go` stamps
+  `version`/`commit`/`date` as variables so `-ldflags -X` can overwrite them.
+  `SdkCli::hand_owned_main()` skips that file; `SdkCli::owned_command` names a root command whose
+  implementation is hand-owned and never generated. Python rejects both — they are a Go seam.
+- **Declared CLI command spec.** `SdkCli::topic` names verbs, sub-nouns, positional identifiers,
+  body-field flags, switch flags, `@vN`/`@latest` selectors, and confirmation severity.
+  `rename_error` prints the replacement and exits 2 without sending a request. `view` names the
+  preview fields for the rows of one schema, in declared order. Absent a spec, command names stay
+  the kebab-case operation ids.
+- **Paginated commands emit `--cursor` and merged page JSON.** `--limit` / `--all` collect items
+  into `{itemsKey: […], "hasMore": …}` instead of a bare array, so `--json` is not the last page's
+  body. `--page-size` is a rename error naming `--limit`. A `ConfigurePagination` cursor policy
+  seeds `--cursor` onto the request.
+- **Help layout and `help --json`.** A declared command spec prints Arguments, Examples, Output,
+  See also, and Docs on `--help`. Generation fails when a spec command has no example.
+  `help --json` prints the command spec, including each flag's type and enum members.
+- **Human polish and shell completion.** `--color auto|always|never` (with `NO_COLOR` / `TERM=dumb`),
+  width truncation, `{PROG}_PAGER`/`PAGER` paging of long human TTY output, and a stderr progress
+  line on paginated walks. `completion bash|zsh|fish|powershell` prints a script; hidden
+  `__complete` answers static candidates from the spec plus live identifiers (one list call, 1s
+  timeout).
+
+### Fixed
+
+- CLI shell recipes quote paths and cursors as single arguments, including shell metacharacters.
+- Repeated identical results keep separate envelopes. Failed atomic writes remove their temporary
+  files, and binary downloads preserve their bytes and file envelopes.
+- Switch flags dispatch in both languages, validate collisions and operation inputs before emission,
+  and use the alternate operation's Go parameter type and result shape. Paginated switches honor
+  limits, retain server metadata, request the remaining size, and preserve only boundary cursors.
+- Each generated CLI ships its versioned result JSON Schema, checked against persisted envelopes.
+- Human errors retain the request id within six lines, including when the server sends many hints
+  or embedded line breaks.
+- Machine help includes path, body, switch, and global flag types. JSON usage and authentication
+  errors use the structured error renderer, and one large preview row cannot exceed the byte budget.
+- `--fields` projects JSON items while preserving page metadata and large integer values; `-o -`
+  prints the complete response without an envelope.
+
+### Changed
+
+- **Output is no longer unconditionally JSON.** `--format` and `--json` are reserved globals; a
+  parameter named `json` or `format` is a generation error, and so is one named `q`, `o` or `y`
+  (the short spellings of `--quiet`, `--output` and `--yes`).
+- **Per-flag prose is emitted.** A parameter's description is the one graph fact `--help` prints for
+  it. `SdkCli` is no longer a three-field type: it carries the program name, command scope, host,
+  library seam, and the declared command spec.
+
 ## 0.16.3 — 2026-09-30
 
 ### Changed

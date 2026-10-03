@@ -597,6 +597,14 @@ pub struct Param {
     /// Whether reserved query characters may remain unescaped.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_reserved: bool,
+    /// Human prose about the parameter, for documentation and generated `--help`.
+    ///
+    /// One source per parameter, like an operation's prose: the binding declaration's own doc
+    /// comment for source-extracted parameters (AGENTS.md rule 0.1 category 2), the spec's
+    /// `description` for `OpenApi`-imported ones, or `DocumentOperation::parameter` for a parameter
+    /// that has neither. It is prose only and never states structure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Exact `OpenAPI` 3 parameter `content` object, when the source used content instead of schema.
     ///
     /// SDK generators use [`Self::schema`] for typing; the `OpenAPI` target uses this value to avoid
@@ -1031,6 +1039,7 @@ impl Param {
             style: param.style,
             explode: param.explode,
             allow_reserved: param.allow_reserved,
+            description: param.description.filter(|text| !text.trim().is_empty()),
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: relativize_span(&param.span, root),
@@ -1581,7 +1590,11 @@ mod tests {
 
         assert_eq!(responses[1].status, 204);
         assert_eq!(responses[1].body_kind, "empty");
-        assert!(responses[1].content_types.is_empty());
+        assert!(
+            responses[1].content_types.is_empty(),
+            "{:?}",
+            responses[1].content_types
+        );
     }
 
     #[test]
@@ -1628,17 +1641,25 @@ mod tests {
         let graph = ApiGraph::from_facts(sample_facts(), "/root");
         assert_eq!(graph.base_path, "/");
         assert_eq!(graph.title, "API");
-        assert!(graph.security.is_empty());
+        assert!(graph.security.is_empty(), "{:?}", graph.security);
         assert_eq!(graph.runtime, RuntimePolicy::default());
-        assert!(graph.operation_runtime.is_empty());
-        assert!(graph.pagination.is_empty());
+        assert!(
+            graph.operation_runtime.is_empty(),
+            "{:?}",
+            graph.operation_runtime
+        );
+        assert!(graph.pagination.is_empty(), "{:?}", graph.pagination);
         let empty = ApiGraph::default();
         assert_eq!(empty.base_path, "/");
         assert_eq!(empty.title, "API");
-        assert!(empty.security.is_empty());
+        assert!(empty.security.is_empty(), "{:?}", empty.security);
         assert_eq!(empty.runtime, RuntimePolicy::default());
-        assert!(empty.operation_runtime.is_empty());
-        assert!(empty.pagination.is_empty());
+        assert!(
+            empty.operation_runtime.is_empty(),
+            "{:?}",
+            empty.operation_runtime
+        );
+        assert!(empty.pagination.is_empty(), "{:?}", empty.pagination);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 """One module per command group; each registers its own subparsers."""
 
-from . import root
+from . import books
 
-__all__ = ["root"]
+__all__ = ["books"]

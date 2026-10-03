@@ -1779,7 +1779,7 @@ fn generated_cli_go_shows_a_default_without_sending_it() {
     );
 
     let (code, _, stderr) = run_cli(&dir, "bookstore", &["list-books"], &[]);
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 6, "{stderr}");
     assert!(
         !stderr.contains("page_size"),
         "an omitted flag must not put its default on the wire: {stderr}"
@@ -1795,7 +1795,7 @@ fn generated_cli_go_shows_a_default_without_sending_it() {
         &["list-books", "--page-size", "5", "--verified"],
         &[],
     );
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 6, "{stderr}");
     assert!(
         stderr.contains("page_size=5"),
         "a supplied flag must be sent: {stderr}"
@@ -1849,7 +1849,7 @@ fn generated_cli_go_uses_the_declared_base_url() {
     );
     // With a default compiled in, omitting the flag reaches the network instead of failing usage.
     let (code, _, stderr) = run_cli(&dir, "bookstore", &["get-book", "--book-id", "1"], &[]);
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 6, "{stderr}");
     assert!(stderr.contains("127.0.0.1:1"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1918,13 +1918,13 @@ fn generated_cli_error_paths_are_diagnostics_with_documented_exit_codes() {
         ],
         &[],
     );
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 6, "{stderr}");
     let lines: Vec<&str> = stderr
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
     assert_eq!(lines.len(), 1, "{stderr}");
-    assert!(lines[0].starts_with("bookstore:"), "{stderr}");
+    assert!(lines[0].starts_with("error:"), "{stderr}");
     assert!(!stderr.contains("panic:"), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -2001,6 +2001,787 @@ fn generated_go_binary_alias_remains_a_byte_slice() {
     assert!(
         build.is_ok(),
         "Go binary/multipart SDK must compile: {build:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A graph with every shape the declared command spec reaches: a cursor-paginated list, a lookup
+/// by positional id with a `@latest` selector, a destructive delete, and a resource that holds an
+/// array without being a list.
+fn cli_spec_graph() -> gnr8_engine::graph::ApiGraph {
+    let provenance = serde_json::json!({ "file": "http.go", "start_line": 1, "end_line": 1 });
+    let string = serde_json::json!({ "type": "primitive", "of": { "prim": "string" } });
+    let field = |name: &str, schema: serde_json::Value| {
+        serde_json::json!({
+            "json_name": name,
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": true,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": false,
+            "schema": schema,
+            "description": null,
+            "example": null
+        })
+    };
+    let path_id = serde_json::json!({
+        "name": "id", "location": "path", "required": true, "schema": string, "provenance": provenance
+    });
+    let graph = serde_json::json!({
+        "module": "app",
+        "operations": [
+            {
+                "id": "listBooks", "method": "GET", "path": "/books", "handler": "listBooks",
+                "params": [{
+                    "name": "cursor", "location": "query", "required": false, "schema": string,
+                    "provenance": provenance
+                }, {"name": "page_size", "location": "query", "required": false,
+                    "schema": {"type": "primitive", "of": {"prim":"int", "bits":64, "signed":true}}, "provenance": provenance}],
+                "request_body": null, "request_body_required": false,
+                "responses": [{ "status": 200, "body": { "ref_id": "BookPage" } }],
+                "provenance": provenance
+            },
+            {
+                "id": "getBook", "method": "GET", "path": "/books/{id}", "handler": "getBook",
+                "params": [path_id],
+                "request_body": null, "request_body_required": false,
+                "responses": [{ "status": 200, "body": { "ref_id": "Book" } }],
+                "provenance": provenance
+            },
+            {
+                "id": "deleteBook", "method": "DELETE", "path": "/books/{id}", "handler": "deleteBook",
+                "params": [path_id],
+                "request_body": null, "request_body_required": false,
+                "responses": [{ "status": 204, "body": null }],
+                "provenance": provenance
+            }
+        ],
+        "schemas": [
+            {
+                "id": "Book", "name": "Book",
+                "body": { "type": "object", "of": [
+                    field("author", string.clone()),
+                    field("id", string.clone()),
+                    field("tags", serde_json::json!({ "type": "array", "of": string })),
+                    field("title", string.clone())
+                ]},
+                "provenance": provenance
+            },
+            {
+                "id": "BookPage", "name": "BookPage",
+                "body": { "type": "object", "of": [
+                    field("books", serde_json::json!({
+                        "type": "array", "of": { "type": "named", "of": "Book" }
+                    })),
+                    field("next_cursor", string.clone())
+                ]},
+                "provenance": provenance
+            }
+        ],
+        "pagination": [{
+            "operation_id": "listBooks", "mode": "cursor", "items_field": "books",
+            "cursor_param": "cursor", "next_cursor_field": "next_cursor",
+            "termination": "no_next_cursor", "page_size_param":"page_size"
+        }],
+        "diagnostics": [],
+        "base_path": "/",
+        "title": "Bookstore API",
+        "security": []
+    });
+    serde_json::from_value(graph).expect("cli spec graph")
+}
+
+fn cli_spec() -> SdkCli {
+    SdkCli::new("bookstore")
+        .topic(
+            CliTopic::new("books")
+                .concept("Browse and manage the catalogue")
+                .command(CliCommand::operation("listBooks", "list").example("bookstore books list"))
+                .command(
+                    CliCommand::operation("getBook", "get")
+                        .positional("id")
+                        .selector(CliSelector::new("listBooks", "id", "id"))
+                        .example("bookstore books get 1"),
+                )
+                .command(
+                    CliCommand::operation("deleteBook", "delete")
+                        .positional("id")
+                        .severity(CliSeverity::Moderate)
+                        .example("bookstore books delete 1"),
+                ),
+        )
+        .rename_error(CliRenameError::new(["books", "list-books"], "books list"))
+        .view(CliView::schema("Book").preview(["title", "id"]))
+}
+
+/// Serve exactly one canned HTTP answer on a loopback port; the handle yields the request line.
+fn serve_once(status: &'static str, body: String) -> (u16, std::thread::JoinHandle<String>) {
+    use std::io::{BufRead, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("local addr").port();
+    let handle = std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return String::new();
+        };
+        let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut request_line = String::new();
+        let _ = reader.read_line(&mut request_line);
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+        }
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        request_line
+    });
+    (port, handle)
+}
+
+/// Runtime internals a binary cannot reach: `Run` is reentrant, and retention prunes envelopes and
+/// downloads at the 100-file / 100 MB boundary without ever deleting the file just written.
+const GO_SPEC_RUNTIME_TEST: &str = r#"package cli
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+    "strings"
+    "os/exec"
+    "bytes"
+    "encoding/json"
+    "example.com/bookstore/sdk"
+    "net/http"
+    "net/http/httptest"
+    "strconv"
+)
+
+func TestRunStartsFromCleanState(t *testing.T) {
+	Run([]string{"--yes", "--json", "-q", "help"}, Options{})
+	if !yesFlag || !quiet || outputFormat != "json" {
+		t.Fatalf("first Run did not set its globals: yes=%v quiet=%v format=%q", yesFlag, quiet, outputFormat)
+	}
+	Run([]string{"help"}, Options{})
+	if yesFlag || quiet || outputFormat == "json" {
+		t.Fatalf("second Run inherited the first one's flags: yes=%v quiet=%v format=%q", yesFlag, quiet, outputFormat)
+	}
+}
+
+func writeAged(t *testing.T, path string, size int64, age time.Duration) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	when := time.Now().Add(-age)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func entries(t *testing.T, dir string) int {
+	t.Helper()
+	list, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(list)
+}
+
+func TestPruneOutputCapsEnvelopesAndDownloadsAtOneHundred(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 100; i++ {
+		writeAged(t, filepath.Join(dir, fmt.Sprintf("books-list-%03d.json", i)), 1, time.Duration(200-i)*time.Minute)
+	}
+	pruneOutput(dir)
+	if got := entries(t, dir); got != 100 {
+		t.Fatalf("100 files is the cap, not over it: %d left", got)
+	}
+	download := filepath.Join(dir, "books-get-abc.bin")
+	writeAged(t, download, 1, 0)
+	pruneOutput(dir, download)
+	if got := entries(t, dir); got != 100 {
+		t.Fatalf("a download is a file like any other: 101 must prune to 100, %d left", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "books-list-000.json")); err == nil {
+		t.Fatalf("the oldest envelope must go first")
+	}
+	if _, err := os.Stat(download); err != nil {
+		t.Fatalf("the file just written must survive: %v", err)
+	}
+}
+
+func TestPruneOutputNeverDeletesTheFileJustWritten(t *testing.T) {
+	dir := t.TempDir()
+	older := filepath.Join(dir, "books-list-old.json")
+	writeAged(t, older, 10, time.Hour)
+	big := filepath.Join(dir, "books-list-big.json")
+	writeAged(t, big, 101*1024*1024, 0)
+	pruneOutput(dir, big)
+	if _, err := os.Stat(big); err != nil {
+		t.Fatalf("an envelope over the byte cap must not prune itself: %v", err)
+	}
+	if _, err := os.Stat(older); err == nil {
+		t.Fatalf("older files must be pruned while the directory is over the byte cap")
+	}
+}
+
+func TestEnvelopeKeepsIdenticalResponsesFromSeparateRuns(t *testing.T) {
+    t.Setenv(outputDirEnv, t.TempDir())
+    resetInvocation(Options{Version: "test"})
+    commandPath = "books get"
+    raw := []byte(`{"id":"same"}`)
+    first, err := writeEnvelope(map[string]any{"id":"same"}, raw)
+    if err != nil { t.Fatal(err) }
+    firstBytes, err := os.ReadFile(first)
+    if err != nil { t.Fatal(err) }
+    second, err := writeEnvelope(map[string]any{"id":"same"}, raw)
+    if err != nil { t.Fatal(err) }
+    if first == second { t.Fatal("separate runs overwrote one envelope") }
+    after, err := os.ReadFile(first)
+    if err != nil || string(after) != string(firstBytes) { t.Fatal("old envelope changed", err) }
+    info, err := os.Stat(second)
+    if err != nil || info.Mode().Perm() != 0o600 { t.Fatal("envelope must be 0600", err) }
+}
+
+func TestAtomicRenameFailureCleansTemporaryFile(t *testing.T) {
+    dir := t.TempDir()
+    target := filepath.Join(dir, "occupied")
+    if err := os.Mkdir(target, 0o700); err != nil { t.Fatal(err) }
+    if err := atomicWrite(target, []byte("secret")); err == nil { t.Fatal("rename onto directory succeeded") }
+    files, err := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+    if err != nil || len(files) != 0 { t.Fatal("failed write leaked temporary files", files, err) }
+}
+
+func TestPreviewBudgetEvenForOneOversizedRow(t *testing.T) {
+    t.Setenv(outputDirEnv, t.TempDir())
+    resetInvocation(Options{})
+    commandPath = "books get"
+    fieldsSpec = "title"
+    original := os.Stdout
+    f, err := os.CreateTemp(t.TempDir(), "stdout")
+    if err != nil { t.Fatal(err) }
+    os.Stdout = f
+    defer func() { os.Stdout = original; f.Close() }()
+    raw := []byte(`{"title":"` + strings.Repeat("界", 5000) + `"}`)
+    lastAnswer.body = raw
+    if code := printAIFriendly(map[string]any{}); code != 0 { t.Fatal(code) }
+    content, err := os.ReadFile(f.Name())
+    if err != nil || len(content) > 4000 { t.Fatal("preview exceeds byte budget", len(content), err) }
+    if !strings.Contains(string(content), "jq") { t.Fatal("preview lost recipe") }
+}
+
+func TestLongCursorStillFitsBudget(t *testing.T) {
+    t.Setenv(outputDirEnv, t.TempDir())
+    resetInvocation(Options{})
+    commandPath = "books list"
+    itemsKey = "books"
+    nextCursorField = "next_cursor"
+    original := os.Stdout
+    f, _ := os.CreateTemp(t.TempDir(), "stdout")
+    os.Stdout = f
+    lastAnswer.body = []byte(`{"books":[],"next_cursor":"` + strings.Repeat("c", 5000) + `"}`)
+    code := printAIFriendly(map[string]any{})
+    os.Stdout = original
+    f.Close()
+    raw, err := os.ReadFile(f.Name())
+    if code != 0 || err != nil || len(raw) > 4000 || !strings.Contains(string(raw), "getpath") { t.Fatal(code, err, len(raw), string(raw)) }
+    t.Setenv(outputDirEnv, strings.Repeat("x", 3000))
+    if code := PreflightOutput(); code != 2 { t.Fatal("oversized recipe path accepted", code) }
+}
+
+func TestRecipeArgumentsRoundTripThroughShell(t *testing.T) {
+    for _, value := range []string{"a;b", "a|b", "a&b", "a>b", "a<b", "a*b", "a?b", "a(b)", "a'b", "a\nb", "$(echo wrong)", ""} {
+        got, err := exec.Command("sh", "-c", "printf '%s' " + shellQuote(value)).Output()
+        if err != nil || string(got) != value { t.Fatalf("unsafe quoting %q: %q %v", value, got, err) }
+    }
+}
+
+func TestBinaryJSONOutputIsByteExact(t *testing.T) {
+    resetInvocation(Options{})
+    original := os.Stdout
+    f, err := os.CreateTemp(t.TempDir(), "binary")
+    if err != nil { t.Fatal(err) }
+    os.Stdout = f
+    defer func() { os.Stdout = original; f.Close() }()
+    raw := []byte{0, 0xff, 0x42}
+    lastAnswer.body = raw
+    if code := printJSON(raw); code != 0 { t.Fatal(code) }
+    got, err := os.ReadFile(f.Name())
+    if err != nil || !bytes.Equal(got, raw) { t.Fatal("binary bytes changed", got, err) }
+}
+
+func TestErrorKeepsRequestIDWithinSixLines(t *testing.T) {
+    resetInvocation(Options{})
+    outputFormat = "human"
+    original := os.Stderr
+    f, err := os.CreateTemp(t.TempDir(), "stderr")
+    if err != nil { t.Fatal(err) }
+    os.Stderr = f
+    printError("test", "first\nsecond", []string{"a\nmore", "b", "c", "d", "e"}, "request-123", 422, 5)
+    os.Stderr = original
+    f.Close()
+    got, _ := os.ReadFile(f.Name())
+    if len(strings.Split(strings.TrimSpace(string(got)), "\n")) > 6 || !strings.Contains(string(got), "request-123") {
+        t.Fatalf("diagnostic must retain the request id within six lines: %s", got)
+    }
+}
+
+func TestHTTPExitClassesAreStructured(t *testing.T) {
+    for status, want := range map[int]int{400:5, 401:4, 403:4, 404:3, 408:6, 409:5, 410:3, 412:5, 422:5, 429:6, 500:1, 502:6, 503:6, 504:6} {
+        original := os.Stderr
+        f, err := os.CreateTemp(t.TempDir(), "stderr")
+        if err != nil { t.Fatal(err) }
+        os.Stderr = f
+        resetInvocation(Options{})
+        outputFormat = "json"
+        code := handleErr(&sdk.APIError{StatusCode:status, Slug:"test", Message:"test"})
+        os.Stderr = original
+        f.Close()
+        raw, err := os.ReadFile(f.Name())
+        if err != nil { t.Fatal(err) }
+        var got struct { Error struct { ExitCode int `json:"exitCode"`; Status int `json:"status"` } `json:"error"` }
+        if json.Unmarshal(raw, &got) != nil || code != want || got.Error.ExitCode != want || got.Error.Status != status {
+            t.Fatalf("status %d: code=%d diagnostic=%s", status, code, raw)
+        }
+    }
+}
+
+func TestPagedSwitchLimitsAndCursors(t *testing.T) {
+    var sizes []string
+    ignoreSize := false
+    server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.URL.Path != "/archived-books" { t.Error("switch used primary operation", r.URL.Path) }
+        sizes = append(sizes, r.URL.Query().Get("page_size"))
+        start, _ := strconv.Atoi(r.URL.Query().Get("cursor"))
+        count, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+        if count == 0 || count > 2 || ignoreSize { count = 2 }
+        end := start + count
+        if end > 4 { end = 4 }
+        items := []map[string]any{}
+        for i := start; i < end; i++ { items = append(items, map[string]any{"id":strconv.Itoa(i), "title":"book"}) }
+        next := ""
+        if end < 4 { next = strconv.Itoa(end) }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]any{"books":items, "next_cursor":next, "total":4})
+    }))
+    defer server.Close()
+    for _, limit := range []string{"3", "4", "1", "0", "all"} {
+        original := os.Stdout
+        f, err := os.CreateTemp(t.TempDir(), "stdout")
+        if err != nil { t.Fatal(err) }
+        os.Stdout = f
+        args := []string{"books", "list", "--archived", "--json", "--base-url", server.URL}
+        if limit == "all" { args = append(args, "--all") } else { args = append(args, "--limit", limit) }
+        before := len(sizes)
+        code := Run(args, Options{})
+        os.Stdout = original
+        f.Close()
+        if limit == "0" {
+            if code != 2 || len(sizes) != before { t.Fatal("invalid limit sent a request", code, sizes) }
+            continue
+        }
+        raw, _ := os.ReadFile(f.Name())
+        var page struct { Books []json.RawMessage; Next string `json:"next_cursor"`; HasMore bool `json:"hasMore"`; Total int }
+        if code != 0 || json.Unmarshal(raw, &page) != nil { t.Fatalf("bad page: %d %s", code, raw) }
+        want := 4
+        if limit != "all" { want, _ = strconv.Atoi(limit) }
+        if len(page.Books) != want || page.Total != 4 || page.HasMore != (want < 4) { t.Fatalf("incorrect pagination metadata: %s", raw) }
+        if want < 4 && page.Next != strconv.Itoa(want) { t.Fatalf("wrong boundary cursor: %s", raw) }
+        if limit == "3" && strings.Join(sizes[before:], ",") != "3,1" { t.Fatal("did not request remaining amount", sizes) }
+    }
+    ignoreSize = true
+    original := os.Stdout
+    f, _ := os.CreateTemp(t.TempDir(), "partial")
+    os.Stdout = f
+    code := Run([]string{"books", "list", "--archived", "--json", "--limit", "1", "--base-url", server.URL}, Options{})
+    os.Stdout = original
+    f.Close()
+    raw, _ := os.ReadFile(f.Name())
+    var partial map[string]json.RawMessage
+    if code != 0 || json.Unmarshal(raw, &partial) != nil { t.Fatal(code, string(raw)) }
+    if _, ok := partial["next_cursor"]; ok { t.Fatal("cursor would skip omitted items", string(raw)) }
+}
+
+func TestProjectionPreservesLargeIntegersAndPageMetadata(t *testing.T) {
+    resetInvocation(Options{})
+    fieldsSpec = "id"
+    itemsKey = "books"
+    raw := []byte(`{"books":[{"id":9007199254740993,"title":"omit"}],"next_cursor":"c2"}`)
+    got := projectRaw(raw)
+    var page map[string]json.RawMessage
+    if json.Unmarshal(got, &page) != nil || string(page["books"]) != `[{"id":9007199254740993}]` || string(page["next_cursor"]) != `"c2"` {
+        t.Fatal("projection changed integer precision or metadata", string(got))
+    }
+    if got := string(projectRaw([]byte(`{"id":9007199254740993,"title":"omit"}`))); got != `{"id":9007199254740993}` { t.Fatal("jsonl item projection changed", got) }
+}
+
+func TestAllEnvelopeKindsCanBeSaved(t *testing.T) {
+    resetInvocation(Options{})
+    t.Setenv(outputDirEnv, t.TempDir())
+    commandPath = "books get"
+    itemsKey = "books"
+    for _, input := range []struct { result any; raw []byte }{
+        {map[string]any{"id":"x"}, []byte(`{"id":"x"}`)},
+        {nil, nil},
+        {map[string]any{}, []byte(`{"books":[{"id":"x"}],"next_cursor":""}`)},
+        {[]byte{0,0xff,0x42}, []byte{0,0xff,0x42}},
+    } {
+        path, err := writeEnvelope(input.result, input.raw)
+        if err != nil { t.Fatal(err) }
+        payload, err := os.ReadFile(path)
+        if err != nil || !json.Valid(payload) { t.Fatal(err, string(payload)) }
+    }
+    checked := exec.Command("python3", "../../../../envelope_schema.py", "../../bookstore-cli-result-v1.json", outputDirPath())
+    if got, err := checked.CombinedOutput(); err != nil { t.Fatal("schema rejected emitted envelope", string(got), err) }
+}
+
+func TestSuccessfulRequestStillSucceedsWhenEnvelopeSaveFails(t *testing.T) {
+    resetInvocation(Options{})
+    blocker := filepath.Join(t.TempDir(), "file")
+    if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil { t.Fatal(err) }
+    t.Setenv(outputDirEnv, filepath.Join(blocker, "output"))
+    commandPath = "books delete"
+    if code := printAIFriendly(nil); code != 0 { t.Fatalf("failed save changed successful mutation to exit %d", code) }
+}
+"#;
+
+/// A CLI built from a declared command spec compiles, vets, and behaves: a retired invocation exits
+/// 2 naming its replacement without a request, a success body that does not decode is not "retry
+/// later", a `--json` error carries the server's slug, a full ai-friendly page keeps its next-page
+/// line and recipes, and a resource holding an array is not read as a list.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one generated program, built once, exercised end to end"
+)]
+fn generated_cli_go_command_spec_builds_vets_and_behaves() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI spec: go toolchain unavailable");
+        return;
+    }
+    let mut graph = cli_spec_graph();
+    let mut edition = graph.operations[1].clone();
+    edition.id = "getEdition".to_string();
+    edition.path = "/books/{id}/edition".to_string();
+    edition.params[0].schema = gnr8_engine::graph::Type::Primitive(gnr8_engine::graph::Prim::Int {
+        bits: 64,
+        signed: true,
+    });
+    graph.operations.push(edition);
+    let mut switch_parameter = graph.operations[0].params[0].clone();
+    switch_parameter.name = "switch_flag".to_string();
+    graph.operations[0].params.push(switch_parameter);
+    let mut alternate = graph.operations[0].clone();
+    alternate.id = "listArchivedBooks".to_string();
+    alternate.path = "/archived-books".to_string();
+    graph.operations.push(alternate);
+    let mut policy = graph.pagination[0].clone();
+    policy.operation_id = "listArchivedBooks".to_string();
+    graph.pagination.push(policy);
+    let mut cli = cli_spec();
+    cli.topics[0].commands[0] = cli.topics[0].commands[0]
+        .clone()
+        .switch_flag("archived", "listArchivedBooks");
+    cli.topics[0].commands.push(
+        gnr8_engine::sdk::prelude::CliCommand::operation("getEdition", "edition")
+            .positional("id")
+            .example("bookstore books edition 42"),
+    );
+    let dir = materialize_go_cli_with("cli-spec", &graph, cli);
+    run_go(&["vet", "./..."], &dir).expect("go vet over a spec CLI must be clean");
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed for a spec CLI");
+    std::fs::write(
+        dir.join("envelope_schema.py"),
+        include_str!("support/envelope_schema.py"),
+    )
+    .expect("write schema validator");
+    std::fs::write(
+        dir.join("cmd/bookstore/internal/cli/spec_runtime_test.go"),
+        GO_SPEC_RUNTIME_TEST,
+    )
+    .expect("write runtime test");
+    // `go test` reports failures on stdout, which `run_go` drops; keep both streams.
+    let tested = Command::new("go")
+        .args(["test", "./cmd/bookstore/internal/cli/"])
+        .current_dir(&dir)
+        .env("GOPROXY", "off")
+        .env("GOFLAGS", "-mod=mod")
+        .output()
+        .expect("run go test");
+    assert!(
+        tested.status.success(),
+        "the generated runtime's own tests must pass:\n{}{}",
+        String::from_utf8_lossy(&tested.stdout),
+        String::from_utf8_lossy(&tested.stderr)
+    );
+    let out_dir = dir.join("results");
+    let out_dir_str = out_dir.to_str().expect("utf-8 path");
+    let envs = [("BOOKSTORE_OUTPUT_DIR", out_dir_str)];
+
+    // A retired invocation: exit 2, the replacement named, and nothing reaches the server.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "list-books", "--base-url", &base],
+        &envs,
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("is now bookstore books list"), "{stderr}");
+    listener.set_nonblocking(true).expect("nonblocking");
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "a rename error must not send a request"
+    );
+
+    let (port, server) = serve_once("200 OK", r#"{"id":"42","title":"edition"}"#.to_string());
+    let integer_base = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "books",
+            "edition",
+            "42",
+            "--json",
+            "--base-url",
+            &integer_base,
+        ],
+        &envs,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(server.join().unwrap().starts_with("GET /books/42/edition"));
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "edition", "invalid", "--json", "--base-url", &base],
+        &envs,
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stderr).unwrap()["error"]["exitCode"],
+        2
+    );
+    let (port, server) = serve_once("200 OK", r#"{"books":[],"next_cursor":""}"#.to_string());
+    let switched_base = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "books",
+            "list",
+            "--archived",
+            "--switch-flag",
+            "user-value",
+            "--json",
+            "--base-url",
+            &switched_base,
+        ],
+        &envs,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let request = server.join().unwrap();
+    assert!(request.starts_with("GET /archived-books"), "{request}");
+    assert!(request.contains("switch_flag=user-value"), "{request}");
+    let (port, server) = serve_once("200 OK", r#"{"books":[],"next_cursor":""}"#.to_string());
+    let primary_base = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "books",
+            "list",
+            "--switch-flag",
+            "user-value",
+            "--json",
+            "--base-url",
+            &primary_base,
+        ],
+        &envs,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let request = server.join().unwrap();
+    assert!(request.starts_with("GET /books?"), "{request}");
+    assert!(request.contains("switch_flag=user-value"), "{request}");
+    let (code, help, stderr) = run_cli(&dir, "bookstore", &["help", "--json"], &envs);
+    assert_eq!(code, 0, "{stderr}");
+    let help: serde_json::Value = serde_json::from_str(&help).expect("help must be JSON");
+    let list = help["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["operation"] == "listBooks")
+        .unwrap();
+    for name in [
+        "archived", "json", "format", "fields", "yes", "no-input", "base-url",
+    ] {
+        assert!(
+            list["flags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|flag| flag["name"] == name),
+            "missing {name} in {list}"
+        );
+    }
+
+    for args in [
+        vec!["--json", "typo"],
+        vec!["books", "get", "--json"],
+        vec!["books", "get", "b1", "--unknown", "--json"],
+    ] {
+        let (code, stdout, stderr) = run_cli(&dir, "bookstore", &args, &envs);
+        assert_eq!(code, 2, "{stderr}");
+        assert_eq!(stdout, "");
+        let error: serde_json::Value =
+            serde_json::from_str(&stderr).expect("usage error must be one JSON object");
+        assert_eq!(error["error"]["exitCode"], 2);
+    }
+    let blocker = dir.join("not-a-directory");
+    std::fs::write(&blocker, "x").unwrap();
+    let blocked_output = blocker.join("output");
+    let blocked_env = [("BOOKSTORE_OUTPUT_DIR", blocked_output.to_str().unwrap())];
+    let (code, _, _) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "list", "--base-url", &base],
+        &blocked_env,
+    );
+    assert_eq!(code, 2);
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "preflight must prevent the request"
+    );
+
+    // A missing positional is a usage error naming the argument.
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "get", "--base-url", &base],
+        &envs,
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("missing argument <id>"), "{stderr}");
+
+    // A 200 whose body does not decode happened on the server: exit 1, never the retry class.
+    let (port, server) = serve_once("200 OK", "{not json".to_string());
+    let base = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "get", "abc", "--json", "--base-url", &base],
+        &envs,
+    );
+    let _ = server.join();
+    assert_eq!(code, 1, "{stderr}");
+
+    // A --json error is one object on stderr carrying the server's machine code.
+    let (port, server) = serve_once(
+        "404 Not Found",
+        r#"{"message":"no such book","slug":"book-not-found"}"#.to_string(),
+    );
+    let base = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "get", "abc", "--json", "--base-url", &base],
+        &envs,
+    );
+    let _ = server.join();
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains(r#""slug":"book-not-found""#), "{stderr}");
+
+    // A refused connection is the one failure worth retrying.
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "get", "abc", "--base-url", "http://127.0.0.1:1"],
+        &envs,
+    );
+    assert_eq!(code, 6, "{stderr}");
+
+    // A full page keeps the two things a caller needs next, and rows print the view's fields in
+    // the view's order.
+    let books: Vec<serde_json::Value> = (0..60)
+        .map(|i| {
+            serde_json::json!({
+                "id": format!("b{i}"),
+                "title": format!("A long enough title to fill the budget quickly, number {i}"),
+                "author": "Anonymous",
+                "tags": ["fiction"]
+            })
+        })
+        .collect();
+    let page = serde_json::json!({ "books": books, "next_cursor": "c2" }).to_string();
+    let (port, server) = serve_once("200 OK", page);
+    let base = format!("http://127.0.0.1:{port}");
+    let (code, stdout, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "list", "--base-url", &base],
+        &envs,
+    );
+    let _ = server.join();
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.len() <= 4000, "{} bytes:\n{stdout}", stdout.len());
+    assert!(stdout.contains("Showing "), "{stdout}");
+    assert!(
+        stdout.contains("Next page: bookstore books list --cursor c2"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("jq '.items[]'"), "{stdout}");
+    assert!(stdout.contains(r#"{"title":"A long"#), "{stdout}");
+
+    // An object holding an array is one resource: jsonl prints it as one line, not its tags.
+    let book = r#"{"id":"b1","title":"Dune","author":"Herbert","tags":["a","b"]}"#;
+    let (port, server) = serve_once("200 OK", book.to_string());
+    let base = format!("http://127.0.0.1:{port}");
+    let (code, stdout, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &[
+            "books",
+            "get",
+            "b1",
+            "--format",
+            "jsonl",
+            "--base-url",
+            &base,
+        ],
+        &envs,
+    );
+    let _ = server.join();
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("Dune"), "{stdout}");
+
+    let validated = Command::new("python3")
+        .arg(format!(
+            "{}/tests/support/envelope_schema.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .arg(dir.join("cmd/bookstore/bookstore-cli-result-v1.json"))
+        .arg(&out_dir)
+        .output()
+        .expect("validate Go envelopes");
+    assert!(
+        validated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validated.stderr)
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

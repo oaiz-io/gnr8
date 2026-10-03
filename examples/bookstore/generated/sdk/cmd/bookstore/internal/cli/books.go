@@ -6,26 +6,94 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 
 	"example.com/bookstore/sdk"
 )
 
 func cmdListBooks(args []string) int {
-	fs := flag.NewFlagSet("list-books", flag.ContinueOnError)
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books list-books — Returns every book in the catalogue.\n", program)
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books list-books [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books list — Returns every book in the catalogue.\n", program)
+		fmt.Fprintln(fs.Output(), "\nPass a genre to narrow the results to one genre; omit it to list everything.")
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books list [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books list")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  Book: id, title, author")
+		fmt.Fprintln(fs.Output(), "\nSee also  books get")
+		fmt.Fprintln(fs.Output(), "\nDocs      https://example.com/cli/books/list")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
 	genre := fs.String("genre", "", "")
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
 	}
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
+	}
+	commandPath = "books list"
+	previewFields = []string{"id", "title", "author"}
+	resultIsList = false
+	itemsKey = "books"
+	nextCursorField = ""
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"books"})
+	}
 	seen := visited(fs)
+	if len(flagArgs) > 0 {
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
+		return 2
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
+	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
 	if err != nil {
@@ -43,28 +111,97 @@ func cmdListBooks(args []string) int {
 }
 
 func cmdCreateBook(args []string) int {
-	fs := flag.NewFlagSet("create-book", flag.ContinueOnError)
+	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books create-book — Adds a book to the catalogue.\n", program)
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books create-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books create — Adds a book to the catalogue.\n", program)
+		fmt.Fprintln(fs.Output(), "\nThe book is stored immediately and returned with its generated identifier.")
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books create [flags]\n", program)
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books create --title Dune --author Herbert --genre fiction")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  Book: id, title, author")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
+	authorBody := fs.String("author", "", "")
+	genreBody := fs.String("genre", "", "")
+	priceBody := fs.Float64("price", 0, "")
+	subtitleBody := fs.String("subtitle", "", "")
+	tagsBody := fs.String("tags", "", "")
+	titleBody := fs.String("title", "", "")
 	body := fs.String("body", "", "request body, as an inline JSON document")
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
 	}
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
+	}
+	commandPath = "books create"
+	previewFields = []string{"id", "title", "author"}
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
+	}
 	seen := visited(fs)
-	if seen["body"] && seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "%s: --body and --body-file are mutually exclusive\n", program)
+	if len(flagArgs) > 0 {
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
 		return 2
 	}
-	if !seen["body"] && !seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "%s: --body or --body-file is required\n", program)
+	if seen["body"] && seen["body-file"] {
+		errorMessage(2, "--body and --body-file are mutually exclusive")
 		return 2
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
@@ -79,6 +216,35 @@ func cmdCreateBook(args []string) int {
 			return handleErr(err)
 		}
 	}
+	overlay := map[string]any{}
+	if seen["author"] {
+		overlay["author"] = *authorBody
+	}
+	if seen["genre"] {
+		overlay["genre"] = *genreBody
+	}
+	if seen["price"] {
+		overlay["price"] = *priceBody
+	}
+	if seen["subtitle"] {
+		overlay["subtitle"] = *subtitleBody
+	}
+	if seen["tags"] {
+		overlay["tags"] = *tagsBody
+	}
+	if seen["title"] {
+		overlay["title"] = *titleBody
+	}
+	if len(overlay) > 0 {
+		var err error
+		payload, err = overlayBody(payload, overlay)
+		if err != nil {
+			return handleErr(err)
+		}
+	}
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
 	var in sdk.CreateBookRequest
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return handleErr(&inputError{reason: fmt.Sprintf("body is not valid JSON: %v", err)})
@@ -91,22 +257,95 @@ func cmdCreateBook(args []string) int {
 }
 
 func cmdDeleteBook(args []string) int {
-	fs := flag.NewFlagSet("delete-book", flag.ContinueOnError)
+	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books delete-book — Permanently removes one book from the catalogue.\n", program)
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books delete-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books delete — Permanently removes one book from the catalogue.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books delete <id> [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nArguments:")
+		fmt.Fprintln(fs.Output(), "  <id>  required")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books delete 1 --yes")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  ErrorResponse")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "required")
+	id := new(string)
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
 	}
-	seen := visited(fs)
-	if !seen["id"] {
-		return missingFlag("id")
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
+	}
+	commandPath = "books delete"
+	previewFields = nil
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"code", "message"})
+	}
+	if len(flagArgs) == 0 {
+		errorMessage(2, "missing argument <id>")
+		return 2
+	}
+	*id = flagArgs[0]
+	flagArgs = flagArgs[1:]
+	if len(flagArgs) > 0 {
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
+		return 2
+	}
+	if code := Confirm("moderate", *id); code != 0 {
+		return code
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
@@ -122,27 +361,113 @@ func cmdDeleteBook(args []string) int {
 }
 
 func cmdGetBook(args []string) int {
-	fs := flag.NewFlagSet("get-book", flag.ContinueOnError)
+	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books get-book — Returns one book by its identifier.\n", program)
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books get-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books get — Returns one book by its identifier.\n", program)
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books get <id> [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nArguments:")
+		fmt.Fprintln(fs.Output(), "  <id>  required")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books get 1")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  Book: id, title, author")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "required")
+	id := new(string)
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
 	}
-	seen := visited(fs)
-	if !seen["id"] {
-		return missingFlag("id")
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
+	}
+	commandPath = "books get"
+	previewFields = []string{"id", "title", "author"}
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
+	}
+	if len(flagArgs) == 0 {
+		errorMessage(2, "missing argument <id>")
+		return 2
+	}
+	*id = flagArgs[0]
+	flagArgs = flagArgs[1:]
+	if len(flagArgs) > 0 {
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
+		return 2
+	}
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
 	if err != nil {
 		return handleErr(err)
+	}
+	if base, sel, ok := splitSelector(*id); ok {
+		listed, err := client.ListBooks(ctx, sdk.ListBooksParams{})
+		if err != nil {
+			return handleErr(err)
+		}
+		raw, err := json.Marshal(listed)
+		if err != nil {
+			return handleErr(err)
+		}
+		picked, code := pickSelectedID(raw, false, "books", sel, "id", "id")
+		if code != 0 {
+			return code
+		}
+		*id = picked
+		_ = base
 	}
 	idValue := *id
 	result, err := client.GetBook(ctx, idValue)
@@ -153,32 +478,106 @@ func cmdGetBook(args []string) int {
 }
 
 func cmdUpdateBook(args []string) int {
-	fs := flag.NewFlagSet("update-book", flag.ContinueOnError)
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s books update-book — Replaces the mutable fields of one book.\n", program)
-		fmt.Fprintf(fs.Output(), "\nUsage: %s books update-book [flags]\n", program)
+		fmt.Fprintf(fs.Output(), "%s books update — Replaces the mutable fields of one book.\n", program)
+		fmt.Fprintln(fs.Output(), "\nFields omitted from the payload keep their current values.")
+		fmt.Fprintf(fs.Output(), "\nUsage: %s books update <id> [flags]\n", program)
+		fmt.Fprintln(fs.Output(), "\nArguments:")
+		fmt.Fprintln(fs.Output(), "  <id>  required")
 		fmt.Fprintln(fs.Output(), "\nFlags:")
 		fs.PrintDefaults()
+		fmt.Fprintln(fs.Output(), "\nExamples:")
+		fmt.Fprintln(fs.Output(), "  bookstore books update 1 --title Dune")
+		fmt.Fprintln(fs.Output(), "\nOutput\n  Book: id, title, author")
 	}
 	baseURL := fs.String("base-url", defaultBaseURL, "host to send requests to")
-	id := fs.String("id", "", "required")
+	id := new(string)
+	authorBody := fs.String("author", "", "")
+	genreBody := fs.String("genre", "", "")
+	priceBody := fs.Float64("price", 0, "")
+	subtitleBody := fs.String("subtitle", "", "")
+	tagsBody := fs.String("tags", "", "")
+	titleBody := fs.String("title", "", "")
 	body := fs.String("body", "", "request body, as an inline JSON document")
 	bodyFile := fs.String("body-file", "", "read the request body from a file, or - for stdin")
+	jsonFlag := fs.Bool("json", false, "print the server body (shorthand for --format json)")
+	formatFlag := fs.String("format", "", "output format: human, ai-friendly, json, or jsonl")
+	fieldsFlag := fs.String("fields", "", "comma-separated response fields, or help to list them")
+	outputFlag := fs.String("output", "", "write the full result to a file, or - for stdout")
+	fs.StringVar(outputFlag, "o", "", "write the full result to a file, or - for stdout")
+	quietFlag := fs.Bool("quiet", false, "print less on success")
+	fs.BoolVar(quietFlag, "q", false, "print less on success")
+	debugFlag := fs.Bool("debug", false, "write a request trace to stderr")
+	yesBind := fs.Bool("yes", false, "do not ask before a destructive command")
+	fs.BoolVar(yesBind, "y", false, "do not ask before a destructive command")
+	noInputFlag := fs.Bool("no-input", false, "never prompt; refuse commands that would ask")
+	colorFlag := fs.String("color", "", "when to color human output: auto, always, or never")
+	noPagerFlag := fs.Bool("no-pager", false, "do not page human output")
 	parsed, code := parseFlags(fs, args)
 	if !parsed {
 		return code
 	}
+	if *jsonFlag {
+		outputFormat = "json"
+	} else if *formatFlag != "" {
+		if code := setFormat(*formatFlag); code != 0 {
+			return code
+		}
+	}
+	if *fieldsFlag != "" {
+		fieldsSpec = *fieldsFlag
+	}
+	if *outputFlag != "" {
+		outputPath = *outputFlag
+	}
+	if *quietFlag {
+		quiet = true
+	}
+	if *debugFlag {
+		debugEnabled = true
+	}
+	if *yesBind {
+		yesFlag = true
+	}
+	if *noInputFlag {
+		noInput = true
+	}
+	if *colorFlag != "" {
+		if code := setColor(*colorFlag); code != 0 {
+			return code
+		}
+	}
+	if *noPagerFlag {
+		noPager = true
+	}
+	commandPath = "books update"
+	previewFields = []string{"id", "title", "author"}
+	resultIsList = false
+	itemsKey = ""
+	nextCursorField = ""
+	if fieldsSpec == "help" {
+		return PrintFieldsHelp([]string{"author", "genre", "id", "price", "publishedAt", "publisher", "subtitle", "tags", "title"})
+	}
 	seen := visited(fs)
-	if !seen["id"] {
-		return missingFlag("id")
+	if len(flagArgs) == 0 {
+		errorMessage(2, "missing argument <id>")
+		return 2
+	}
+	*id = flagArgs[0]
+	flagArgs = flagArgs[1:]
+	if len(flagArgs) > 0 {
+		errorMessage(2, "unexpected argument %q", flagArgs[0])
+		return 2
 	}
 	if seen["body"] && seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "%s: --body and --body-file are mutually exclusive\n", program)
+		errorMessage(2, "--body and --body-file are mutually exclusive")
 		return 2
 	}
-	if !seen["body"] && !seen["body-file"] {
-		fmt.Fprintf(os.Stderr, "%s: --body or --body-file is required\n", program)
-		return 2
+	if outputFormat == "ai-friendly" && outputPath != "-" {
+		if code := PreflightOutput(); code != 0 {
+			return code
+		}
 	}
 	ctx := context.Background()
 	client, err := buildClient(*baseURL, []string{"ApiKeyAuth"})
@@ -193,6 +592,35 @@ func cmdUpdateBook(args []string) int {
 		if err != nil {
 			return handleErr(err)
 		}
+	}
+	overlay := map[string]any{}
+	if seen["author"] {
+		overlay["author"] = *authorBody
+	}
+	if seen["genre"] {
+		overlay["genre"] = *genreBody
+	}
+	if seen["price"] {
+		overlay["price"] = *priceBody
+	}
+	if seen["subtitle"] {
+		overlay["subtitle"] = *subtitleBody
+	}
+	if seen["tags"] {
+		overlay["tags"] = *tagsBody
+	}
+	if seen["title"] {
+		overlay["title"] = *titleBody
+	}
+	if len(overlay) > 0 {
+		var err error
+		payload, err = overlayBody(payload, overlay)
+		if err != nil {
+			return handleErr(err)
+		}
+	}
+	if len(payload) == 0 {
+		payload = []byte("{}")
 	}
 	var in sdk.UpdateBookRequest
 	if err := json.Unmarshal(payload, &in); err != nil {
