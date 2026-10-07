@@ -11,6 +11,8 @@ must move the minor version.
 
 ### Fixed
 
+- Go extraction carries supported validation bounds on named scalar and collection fields while
+  preserving their schema references.
 - OpenAPI YAML quotes the schema type name 'null', so nullable reference and union arms remain
   string-valued schema types when parsed.
 

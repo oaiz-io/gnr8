@@ -173,7 +173,7 @@ func extractFields(
 		if wire == wireJSON && omitOpt == optOmitEmpty && !serializerMayOmit {
 			diags.IneffectiveOmitEmpty(structName, f.Name(), typeString(f.Type()), file, line)
 		}
-		meta := fieldMetaFromTags(structName, f.Name(), tag, st.Tag(i), schema, file, line, diags)
+		meta := fieldMetaFromTags(structName, f.Name(), tag, st.Tag(i), schema, validationConstraintSchema(f.Type(), schema), file, line, diags)
 		description := optString(tag.Get("description"))
 		if description == nil {
 			description = optString(schemaTagValue(tag.Get("schema"), "description"))
@@ -215,20 +215,58 @@ func tagHasRequired(value string) bool {
 	return tags.HasFieldToken(value, "required")
 }
 
+// validationConstraintSchema classifies only the field's outer validation kind.
+// The emitted reference remains the source of truth for schema identity; this
+// shallow shape never leaves the validator appliers or visits element schemas.
+func validationConstraintSchema(source gotypes.Type, emitted facts.Type) facts.Type {
+	if emitted.Type != facts.TypeNamed {
+		return emitted
+	}
+	source = gotypes.Unalias(source)
+	for {
+		pointer, ok := source.(*gotypes.Pointer)
+		if !ok {
+			break
+		}
+		source = gotypes.Unalias(pointer.Elem())
+	}
+	named, ok := source.(*gotypes.Named)
+	if !ok {
+		return emitted
+	}
+	switch under := named.Underlying().(type) {
+	case *gotypes.Slice, *gotypes.Array:
+		return facts.ArrayType(facts.AnyType())
+	case *gotypes.Map:
+		return facts.MapTypeOf(facts.AnyType(), facts.AnyType())
+	case *gotypes.Basic:
+		switch {
+		case under.Info()&gotypes.IsString != 0:
+			return facts.PrimitiveType(facts.StringPrim())
+		case under.Info()&gotypes.IsInteger != 0 && under.Kind() != gotypes.Uintptr:
+			return facts.PrimitiveType(facts.IntPrim(64, under.Info()&gotypes.IsUnsigned == 0))
+		case under.Info()&gotypes.IsFloat != 0:
+			return facts.PrimitiveType(facts.FloatPrim(64))
+		}
+	}
+	return emitted
+}
+
 func fieldMetaFromTags(
 	structName string,
 	fieldName string,
 	tag reflect.StructTag,
 	rawTag string,
 	schema facts.Type,
+	validationSchema facts.Type,
 	file string,
 	line uint32,
 	diags *diag.Accumulator,
 ) *facts.FieldMeta {
 	meta := &facts.FieldMeta{}
 
-	constraints := constraintsFromBinding(structName, fieldName, tag.Get("binding"), schema, file, line, diags)
-	mergeConstraints(constraints, constraintsFromValidate(structName, fieldName, tag.Get("validate"), schema, file, line, diags))
+	constraints := constraintsFromBinding(structName, fieldName, tag.Get("binding"), validationSchema, file, line, diags)
+	mergeConstraints(constraints, constraintsFromValidate(structName, fieldName, tag.Get("validate"), validationSchema, file, line, diags))
 	applyDirectConstraints(constraints, tag, schema, structName, fieldName, file, line, diags)
 	if !constraintsEmpty(constraints) {
 		meta.Constraints = constraints
@@ -399,6 +437,10 @@ func constraintsFromTag(
 				if !applyStringLengthBound(constraints, name, value) {
 					unsupportedConstraintTag(diags, tagKind, structName, fieldName, token, file, line)
 				}
+				continue
+			}
+			if schema.Type == facts.TypeNamed {
+				unsupportedConstraintTag(diags, tagKind, structName, fieldName, token, file, line)
 				continue
 			}
 			bound := stringPtr(value)

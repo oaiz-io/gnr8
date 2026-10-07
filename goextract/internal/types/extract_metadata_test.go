@@ -19,6 +19,7 @@ func TestFieldMetaFromTagsParsesConstraintsDefaultsAndExtensions(t *testing.T) {
 		tag,
 		string(tag),
 		facts.PrimitiveType(facts.StringPrim()),
+		facts.PrimitiveType(facts.StringPrim()),
 		"dto.go",
 		10,
 		diags,
@@ -59,6 +60,7 @@ func TestFieldMetaFromTagsParsesNumericBindingsAndUnsupportedDiagnostics(t *test
 		"WindowDays",
 		tag,
 		string(tag),
+		facts.PrimitiveType(facts.IntPrim(64, true)),
 		facts.PrimitiveType(facts.IntPrim(64, true)),
 		"dto.go",
 		11,
@@ -120,6 +122,7 @@ func TestFieldMetaFromTagsLowersCollectionCardinalityWithoutChangingScalarRules(
 				tag,
 				string(tag),
 				tc.schema,
+				tc.schema,
 				"dto.go",
 				12,
 				diags,
@@ -150,6 +153,7 @@ func TestFieldMetaFromTagsLowersCollectionCardinalityWithoutChangingScalarRules(
 		dived,
 		string(dived),
 		facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
+		facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
 		"dto.go",
 		13,
 		divedDiags,
@@ -170,6 +174,7 @@ func TestFieldMetaFromTagsLowersCollectionCardinalityWithoutChangingScalarRules(
 		"Values",
 		unknown,
 		string(unknown),
+		facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
 		facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
 		"dto.go",
 		14,
@@ -208,7 +213,7 @@ func TestFieldMetaFromTagsLowersEverySizeSpellingOnCollections(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tag := reflect.StructTag(tc.tag)
 			diags := diag.New()
-			meta := fieldMetaFromTags("Rules", "V", tag, string(tag), tc.schema, "dto.go", 20, diags)
+			meta := fieldMetaFromTags("Rules", "V", tag, string(tag), tc.schema, tc.schema, "dto.go", 20, diags)
 			if meta == nil || meta.Constraints == nil {
 				t.Fatalf("expected collection constraints, got %#v", meta)
 			}
@@ -231,7 +236,7 @@ func TestFieldMetaFromTagsLowersEverySizeSpellingOnCollections(t *testing.T) {
 	// states it, so it is reported rather than turned into maxItems.
 	tag := reflect.StructTag(`json:"v" validate:"lt=0"`)
 	diags := diag.New()
-	meta := fieldMetaFromTags("Rules", "V", tag, string(tag), slice, "dto.go", 21, diags)
+	meta := fieldMetaFromTags("Rules", "V", tag, string(tag), slice, slice, "dto.go", 21, diags)
 	if meta != nil && meta.Constraints != nil && meta.Constraints.MaxItems != nil {
 		t.Fatalf("unsatisfiable bound must not be published: %#v", meta.Constraints)
 	}
@@ -260,6 +265,7 @@ func TestFieldMetaFromTagsKeepsStringSizeSpellingsAsLengths(t *testing.T) {
 				"V",
 				tag,
 				string(tag),
+				facts.PrimitiveType(facts.StringPrim()),
 				facts.PrimitiveType(facts.StringPrim()),
 				"dto.go",
 				22,
@@ -294,6 +300,7 @@ func TestFieldMetaFromTagsScopesConstraintsToTheFieldItself(t *testing.T) {
 		tag,
 		string(tag),
 		facts.PrimitiveType(facts.StringPrim()),
+		facts.PrimitiveType(facts.StringPrim()),
 		"dto.go",
 		12,
 		diags,
@@ -325,6 +332,7 @@ func TestFieldMetaFromTagsIgnoresMapKeyScopedTokens(t *testing.T) {
 		"Headers",
 		tag,
 		string(tag),
+		facts.MapTypeOf(facts.PrimitiveType(facts.StringPrim()), facts.PrimitiveType(facts.StringPrim())),
 		facts.MapTypeOf(facts.PrimitiveType(facts.StringPrim()), facts.PrimitiveType(facts.StringPrim())),
 		"dto.go",
 		13,
@@ -362,6 +370,7 @@ func TestFieldMetaFromTagsReportsUnknownRulesAtEveryScope(t *testing.T) {
 				"To",
 				tag,
 				string(tag),
+				facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
 				facts.ArrayType(facts.PrimitiveType(facts.StringPrim())),
 				"schema.go",
 				10,
