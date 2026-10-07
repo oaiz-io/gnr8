@@ -445,7 +445,6 @@ func TestPresenceAndNullabilityMatchEncodingJSON(t *testing.T) {
 
 import (
 	"encoding/json"
- "fmt"
 	"time"
 )
 
@@ -508,6 +507,9 @@ type Matrix struct {
 	res, err := load.Load(dir)
 	if err != nil {
 		t.Fatalf("load matrix fixture: %v", err)
+	}
+	if len(res.Errors) != 0 {
+		t.Fatalf("load matrix fixture errors: %+v", res.Errors)
 	}
 	diags := diag.New()
 	schemas := types.Extract(res, diags)
