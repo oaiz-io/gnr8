@@ -119,7 +119,7 @@ components:
           - oneOf:
             - type: integer
             - type: number
-          - type: null
+          - type: 'null'
         tags:
           type: array
           items:

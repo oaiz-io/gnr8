@@ -330,7 +330,7 @@ grep -A12 'CreateGoalInput:' openapi.yaml
         analyticsQuery:
           oneOf:
           - $ref: '#/components/schemas/GoalAnalyticsQueryInput'
-          - type: null
+          - type: 'null'
         benchField:                         # <-- NEW
           type: [string, 'null']
           description: Demo field added to show regeneration

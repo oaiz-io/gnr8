@@ -95,7 +95,7 @@ components:
           - oneOf:
             - type: integer
             - type: number
-          - type: null
+          - type: 'null'
         note:
           type: [string, 'null']
         price:

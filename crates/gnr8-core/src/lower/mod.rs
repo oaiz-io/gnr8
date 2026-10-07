@@ -1833,7 +1833,7 @@ mod tests {
             block.contains("$ref: '#/components/schemas/TargetDirection'"),
             "{block}"
         );
-        assert!(block.contains("type: null"), "{block}");
+        assert!(block.contains("type: 'null'"), "{block}");
     }
 
     #[test]
@@ -1905,7 +1905,7 @@ mod tests {
         // Byte-exact nested form (a union member nested under the outer nullable oneOf).
         assert!(
             block.contains(
-                "rating:\n          oneOf:\n          - oneOf:\n            - type: integer\n            - type: number\n          - type: null\n"
+                "rating:\n          oneOf:\n          - oneOf:\n            - type: integer\n            - type: number\n          - type: 'null'\n"
             ),
             "nullable union must render as a NESTED oneOf with a null member:\n{block}"
         );
@@ -2532,12 +2532,7 @@ mod tests {
                 .unwrap();
         let yaml_prop =
             &parsed["components"]["schemas"]["CreateGoalInput"]["properties"]["direction"];
-        assert_eq!(yaml_prop["oneOf"][0], expected_members[0], "{yaml}");
-        assert_eq!(
-            yaml_prop["oneOf"].as_array().map(Vec::len),
-            Some(2),
-            "{yaml}"
-        );
+        assert_eq!(yaml_prop["oneOf"], expected_members, "{yaml}");
         for key in ["description", "default", "x-gnr8-render"] {
             assert_eq!(yaml_prop[key], prop[key], "{key}:\n{yaml}");
         }

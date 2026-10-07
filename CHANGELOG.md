@@ -9,6 +9,11 @@ must move the minor version.
 
 ## Unreleased
 
+### Fixed
+
+- OpenAPI YAML quotes the schema type name 'null', so nullable reference and union arms remain
+  string-valued schema types when parsed.
+
 ## 0.17.0 — 2026-10-02
 
 ### Added
