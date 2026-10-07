@@ -1,6 +1,8 @@
 # Verify CLI and extractor followups — implementation plan
 
-Prepared 2026-10-07 against `95f8393eef34185763466eac64edfe35462672e8`, workspace 0.17.0,
+Prepared 2026-10-07; review amendments checked against `9a431ada1e8d6981d001426776d8964584aef885`
+(which adds only these two documents to the source baseline below).
+Source baseline: `95f8393eef34185763466eac64edfe35462672e8`, workspace 0.17.0,
 on `feat/verify-cli-and-extractor-fixes`. This is a plan, not implemented behavior.
 Evidence and exact current locations are in
 [the companion research](2026-09-30-verify-cli-and-extractor-followups.md).
@@ -133,10 +135,10 @@ unrelated pre-existing drift; report and isolate it instead of accepting it into
 
 | File | Work |
 |---|---|
-| `goextract/internal/types/extract.go` | Update `extractFields` to retain original field type for a new shallow `validationConstraintSchema` helper. Add a validation-schema argument to `fieldMetaFromTags`; use it only in `constraintsFromBinding` and `constraintsFromValidate`. Keep original `schema` for `applyDirectConstraints`, `literalForSchema`, default/format, and emitted `FieldFact.Schema`. Reuse `constraintsFromTag`, `applyMinMaxConstraint`, `applyCollectionBound`, and `applyStringLengthBound` unchanged once they receive the correct validation kind. |
+| `goextract/internal/types/extract.go` | Update `extractFields` to retain original field type for a new shallow `validationConstraintSchema` helper. Add a validation-schema argument to `fieldMetaFromTags`; use it only in `constraintsFromBinding` and `constraintsFromValidate`. Keep original `schema` for `applyDirectConstraints`, `literalForSchema`, default/format, and emitted `FieldFact.Schema`. Keep the existing size/numeric appliers; add a narrow remaining-named-shape rejection in `constraintsFromTag` before comparison rules can enter its unconditional numeric branch. |
 | `goextract/internal/types/extract_metadata_test.go` | Adapt direct `fieldMetaFromTags` callers to explicitly pass their existing test schema for both schema arguments. This is a mechanical signature update; preserve all existing assertions/tag spellings. |
-| `goextract/internal/types/extract_test.go` | Add the three real-source regression tests below, following temporary module → `load.Load` → `types.Extract` and current schema/field lookup helpers. |
-| `crates/gnr8-core/tests/gin_contract_regression.rs` | Add `named_field_constraints_reach_openapi_beside_refs` using an edited **temporary copy** of the fixture and the existing artifact/graph helpers. Keep current `run_pipeline` callers unchanged. |
+| `goextract/internal/types/extract_test.go` | Add the four real-source regression tests below, following temporary module → `load.Load` → `types.Extract` and current schema/field lookup helpers. |
+| `crates/gnr8-core/tests/gin_contract_regression.rs` | Add `named_field_constraints_reach_openapi_beside_refs` and `named_defined_pointer_fields_remain_unsupported` using edited **temporary copies** of the fixture and the existing artifact/graph helpers. Keep current `run_pipeline` callers unchanged. |
 | `CHANGELOG.md` | Add the item 3 Fixed entry under Unreleased. |
 
 No production `handlers.go` edit: parameter normalization already unwraps named types. Do not alter
@@ -148,29 +150,46 @@ format change, schema inlining, new tag, or second public type name.
 `validationConstraintSchema(source_type, emitted_schema)` returns an ephemeral, shallow schema
 used solely to select supported validator keywords. For an emitted non-reference schema, retain
 its current semantics, including well-known strings, bytes, and free-form JSON. For a named
-reference, unalias the original Go type, walk pointer/defined-pointer layers with a visited-type
-guard, and inspect `Named.Underlying()`. Translate slice/array to an array kind, map to a map kind,
-string to a string primitive, and integer/float to a numeric primitive. No recursive element walk
-is needed to apply field-size rules; shallow collection placeholders must never escape into facts.
-Unsupported kinds retain an unsupported shape for the existing diagnostics. Type parameters do
-not become concrete types by reading their constraint sets. Cycles terminate as unsupported.
+reference, unalias the original Go type and strip only ordinary `*gotypes.Pointer` (`go/types`) layers,
+unaliasing each element. Stop at `*gotypes.Named`; inspect its underlying kind once. Only classify
+component kinds already represented by `schemaFor`: slice/array as array, map as map, string as
+string primitive, and integer/float as numeric primitive. An alias to Rank and ordinary `*Rank`
+resolve to Rank's component; `type RankPtr *Rank` remains unsupported even though its pointee is
+numeric. Do not walk that defined pointer, inline it, invent a RankPtr component, or retarget its
+emitted reference. Supporting defined-pointer components is outside this item.
+
+No recursive element walk is needed for field-size rules; shallow collection placeholders never
+escape into facts. Unsupported named kinds retain their emitted Named shape. Min/max already
+rejects it. For field-scope `gte/lte/gt/lt`, after the existing value/scope checks and collection/string
+handling, explicitly diagnose a remaining Named shape and continue before numeric assignment.
+Use `unsupportedConstraintTag` so the existing code/category/source/token convention is preserved.
+This guard is required: an unsupported shape alone does not prevent that branch writing bounds.
+Keep non-reference comparison behavior and kind-independent `oneof` unchanged. Type parameters
+never become concrete types by reading constraint sets. Stop after inspecting one named underlying
+kind; do not recurse through named definitions.
 
 Keep `mapType` as the single emitted-type path. Do **not** call it again on underlying types for
 constraint classification: that would repeat diagnostics and needlessly visit element schemas.
 Do not overwrite the actual named `FieldFact.Schema`. Do not pass the validation shape to the
 whole metadata subsystem. The `gte/lte/gt/lt` switch receives the same corrected collection/string
-shape as min/max, eliminating its incorrect numeric emission for those named fields. The existing
-generic numeric branch on other unsupported kinds is pre-existing behavior outside this change;
-do not broaden the repair into a validator rewrite.
+shape as min/max, eliminating its incorrect numeric emission for those named fields. The remaining
+Named guard rejects unsupported named kinds, including defined pointers. The generic comparison
+behavior on other non-reference unsupported kinds remains outside this change; do not broaden the
+repair into a validator rewrite. `schemaFor` and `mapNamed` keep their existing emitted-type behavior:
+a source using a defined-pointer field still cannot lower successfully because its component is
+absent. This is a documented boundary and must remain an explicit error, never successful output
+with a dangling reference.
 
 ### Tests first
 
 | New test | Assertions and expected pre-fix red |
 |---|---|
-| `TestNamedFieldConstraintBounds` in `extract_test.go` | Build a temporary module defining `Tags []string`, `Slots [3]int`, `Labels map[string]string`, `Name string`, `Rank int`, `Ratio float64`, a named string enum, an alias to a named type, and pointer fields. Table-drive both `binding` and `validate` with `min/max/gte/lte/gt/lt`. Assert size/length/numeric keywords match the corresponding unnamed controls; assert no size constraint becomes numeric. Every field remains a named ref (true aliases resolve to their canonical named target), and supported rules have no unresolved diagnostics. **Red:** named min/max have no facts and named string/collection comparison rules carry wrong numeric facts. |
+| `TestNamedFieldConstraintBounds` in `extract_test.go` | Build a temporary module defining `Tags []string`, `Slots [3]int`, `Labels map[string]string`, `Name string`, `Rank int`, `Ratio float64`, a named string enum, an alias to a named type, ordinary pointer fields (including multiple pointer layers), and pointers to aliases. Table-drive both `binding` and `validate` with `min/max/gte/lte/gt/lt`. Assert size/length/numeric keywords match the corresponding unnamed controls; assert no size constraint becomes numeric. Each supported test field remains a named ref (true aliases and ordinary pointers resolve to their canonical named target); assert each referenced ID has an emitted component of the expected kind, and supported rules have no unresolved diagnostics. **Red:** named min/max have no facts and named string/collection comparison rules carry wrong numeric facts. |
 | `TestNamedFieldConstraintInvalidSizesAreDiagnosed` in `extract_test.go` | Named slices/maps/strings with negative/fractional sizes, malformed literals, `lt=0`, and overflowing strict lower bound. Assert exact existing metadata diagnostic category plus source field/token and no spurious numeric facts. Include valid named strict bounds in the matrix. **Red:** current `lt=0`/overflow comparison path can write numeric keywords, and valid strict bounds do not become size bounds. Malformed min/max cases are existing guards within the test. |
+| `TestNamedFieldConstraintUnsupportedNamedKinds` in `extract_test.go` | Define `Rank int`, `RankPtr *Rank`, an alias to RankPtr, ordinary pointers to RankPtr, and a named bool control. Both validator tag kinds exercise field-scope `min/max/gte/lte/gt/lt`. RankPtr stays Named and has no SchemaFact; every unsupported bound has the `schema.metadata.unresolved` diagnostic (category schema, source field/file/line/token) and no bound keywords. Ordinary `*Rank`/alias-to-Rank controls retain their emitted component and numeric bounds. **Red:** current comparison path writes numeric bounds on unsupported Named shapes; a helper that traverses defined pointers would also fail. Existing min/max rejection and absent RankPtr component are preservation assertions. |
 | `TestNamedFieldConstraintScopesStayOnField` in `extract_test.go` | Named collection with `validate:"min=1,dive,min=2,max=8"` and analogous map key/value scope; assert only field minItems/minProperties is extracted, known element rules retain their present treatment, and unknown/malformed rules retain source-aware diagnostics. Include alias/pointer coverage and well-known/free-form controls without new tag spellings. **Red:** the current field-scope named min rule is rejected. |
-| `named_field_constraints_reach_openapi_beside_refs` in `gin_contract_regression.rs` | Copy the existing Gin fixture with `copy_fixture`; append named type declarations to its temporary app.go and replace only the declaration types of `CollectionRules.Names`, `.Slots`, `.Labels`, `.Label`, `.Rank` with named equivalents. Existing routes and validation tags remain identical; use a fresh temporary Store. Run a GoGin → OpenApi31 pipeline and parse YAML through `noyalib`. Assert graph fields remain Named, metadata has expected bounds, and projected request/response property objects contain correct referenced names plus minItems/maxItems/minProperties/maxProperties/minLength/maxLength/minimum/maximum at the property or nullable wrapper. Assert underlying components retain their own kinds and do not acquire one field's bound. **Red:** those property constraints are missing or have the wrong keywords. |
+| `named_field_constraints_reach_openapi_beside_refs` in `gin_contract_regression.rs` | Copy the existing Gin fixture with `copy_fixture`; append named type declarations to its temporary app.go and replace only the declaration types of `CollectionRules.Names`, `.Slots`, `.Labels`, `.Label`, `.Rank` with named equivalents; add separate positive variants using ordinary `*Rank` and a true alias to Rank. Existing routes and validation tags remain identical; use a fresh temporary Store per variant. Run a GoGin → OpenApi31 pipeline and parse YAML through `noyalib`. Assert graph fields remain Named, metadata has expected bounds, and projected request/response property objects contain correct referenced names plus minItems/maxItems/minProperties/maxProperties/minLength/maxLength/minimum/maximum at the property or nullable wrapper. Recursively walk **every** `$ref` in parsed YAML, resolve its local JSON Pointer against the document (including nullable `oneOf` arms), and require a real component with the expected kind for each named field in both projections. Resolve graph Named IDs against graph.schemas too. Assert underlying components retain their own kinds and do not acquire one field's bound. **Red:** those property constraints are missing or have the wrong keywords; a dangling/wrong-kind component must also fail. |
+| `named_defined_pointer_fields_remain_unsupported` in `gin_contract_regression.rs` | In a separate temporary fixture change CollectionRules.Rank to `RankPtr` with `type Rank int; type RankPtr *Rank` and comparison tag `binding:"gte=1"`; leave it routed. Run GoGin → OpenApi31 and assert `CoreError::Lowering` containing `dangling $ref` and RankPtr. Never accept an artifact with that unresolved reference. The Go test above proves no numeric metadata is added. **Preservation:** the explicit lowering failure already occurs; the red companion is the Go unsupported-bound assertion. Do not demand that this negative pipeline succeeds. |
 
 Write source tests against current APIs and run them before the helper/signature change. The Rust
 source-to-artifact test also runs before the production fix; it is not a hand-written graph that
@@ -192,6 +211,7 @@ Run from repository root:
 
 ```sh
 cargo test --locked -p gnr8-engine --test gin_contract_regression named_field_constraints_reach_openapi_beside_refs
+cargo test --locked -p gnr8-engine --test gin_contract_regression named_defined_pointer_fields_remain_unsupported
 cargo test --locked -p gnr8-engine --lib metadata_on_
 INSTA_UPDATE=no cargo test --locked -p gnr8-engine --test snapshot_graph --test snapshot_diagnostics --test snapshot_openapi --test snapshot_sdk
 git diff --check
@@ -205,9 +225,10 @@ collection fields while preserving their schema references.”
 
 **Risks:** normalizing the entire metadata schema accidentally changes direct tags/default typing;
 avoid it with the separate argument. Named enums are strings for length rules while remaining enum
-references. Known string formats such as UUID must retain their wire semantics. Pointer chains and
-recursive defined types must terminate; do not recurse through collection elements. Validate both
-directions because response/input projection can widen nullability or rename reached components.
+references. Known string formats such as UUID must retain their wire semantics. Ordinary pointer
+chains stop at a named kind; defined-pointer kinds remain unsupported. Successful output must have
+resolved components, not just correct-looking reference strings. Do not recurse through collection
+elements. Validate both directions because response/input projection can widen nullability or rename reached components.
 
 ## Item 2 — verify every generated Go/Python operation command's help
 
@@ -220,8 +241,24 @@ target, and supports CLI checks independently of `.without_contract_tests()`.
 Add `CliHelpPlan { invocations: Vec<Vec<String>> }`, `CliHelpSuite { output_path, program, target,
 plan }`, and a typed `CliHelpTarget` enum:
 
-- `Go { module, go_version, package_metadata, emit_main }`;
+- `Go { verification: GoVerificationModule, emit_main }`;
 - `Python { package }`.
+
+Add the shared engine type `GoVerificationModule { module: String, go_version: String,
+package_metadata: bool }` and `ContractTestSuite.go_verification: Option<GoVerificationModule>`.
+Go declarations always set Some from GoSdk's existing fields, even without a CLI; Python and
+TypeScript set None. A Go suite missing this descriptor is an explicit runner failure, never a
+reason to invent a module/version. CLI Go descriptors use that same type and target facts. The
+contract suite's existing `package` remains the generated Go package name, not a module substitute.
+No wire serialization/public builder is added; update all existing struct literals mechanically.
+
+**Expanded scope:** item 2 also repairs Go SDK contract verification. GoSdk defaults contract tests
+to enabled, and `go test ./...` compiles the generated CLI packages too. With metadata disabled,
+those packages import the declared module while the current SDK temp module is gnr8.local/contract.
+A passing standalone CLI build cannot make that SDK suite pass. Carry module/version/policy through
+`GoSdk::contract_test_suites`, `PipelineOutcome`, `run_suites`, and `run_go`; share module preparation
+with CLI builds. Keep recursive `go test ./...` coverage, SDK sample selection/counts, and missing-tool
+failure policy. Do not narrow Go tests to the package root or turn off contract tests to hide this.
 
 Use `plan_cli_help(graph, cli)` to call the **same** `cli_operations`, `command_topic`,
 `command_sub_noun`, and `command_verb` helpers that emission uses. Construct argument vectors
@@ -244,19 +281,25 @@ a stale seed file must not mask a missing emitted main or Python entry. For hand
 copied cmd package is the declared source of the executable. Use safe path joins and the existing
 RAII temp cleanup. No writes to project output.
 
-**Go mechanism:** probe `go version`; materialize the target; with emitted metadata require its
-fresh go.mod. With `package_metadata=false`, always write the verification-only go.mod using the
-descriptor's exact module/version (this is declared configuration, not a guessed replacement
-module). Build once:
+**Shared Go preparation:** add host `materialize_go_target` in `verify.rs`, returning the existing
+`MaterializedTarget` or an explicit error. Both SDK `run_go` and CLI builds call it with their target
+prefix, fresh artifact group, copied companions, and declared `GoVerificationModule`. With emitted
+metadata require `<output_path>/go.mod` in the **fresh artifact group**, then use its materialized
+contents. With `package_metadata=false`, always overwrite the copied go.mod with the exact declared
+module/version; a stale companion go.mod must never select identity. This is declared configuration,
+not a guessed module or fallback. Remove `TEMP_GO_MODULE` and `TEMP_GO_VERSION`. Each runner keeps
+its own isolated tree and cleanup; no suite mutates another suite's tree or project output.
+
+**Go CLI mechanism:** probe `go version`; use shared Go preparation; build once:
 
 ```text
 go build -o <absolute-temp-binary-path> ./cmd/<program>
 <absolute-temp-binary-path> [topic [sub-noun]] verb --help
 ```
 
-Use `.exe` on Windows. Keep `GOPROXY=off`, `GOFLAGS=-mod=mod`; set `GOWORK=off` for the CLI build
-so a parent workspace cannot change module resolution. A build failure ends this target with a
-build reason; after a successful build, attempt every planned help invocation even if one fails.
+Use `.exe` on Windows. Both SDK `go test ./...` and CLI `go build` use `GOPROXY=off`,
+`GOFLAGS=-mod=mod`, and `GOWORK=off` so a parent workspace cannot change module resolution.
+A build failure ends this target with a build reason; after a successful build, attempt every planned help invocation even if one fails.
 
 **Python mechanism:** probe `python3 --version`; materialize; require fresh package `__init__.py`
 and `cli/__main__.py`. Write one temp harness using the existing importlib package-binding pattern:
@@ -293,22 +336,26 @@ output excerpt in reports. Do not add a graph diagnostic category for subprocess
 - Set `verified=true` only when no suite failed **and at least one suite passed**. Skips never count
   as passes. A mixed passing/skipped run exits 0 and visibly lists skips. An all-skipped CLI-only
   run has `verified=false`, exits 1, and explains that no checks executed. Both descriptor sets empty
-  remains a startup error, exit 2. Keep pipeline diagnostics/timings/worker reporting intact.
+  remains a startup error, exit 2, with wording naming both SDK contract tests and generated CLI
+  help checks. Update the existing E2E opt-out assertion that currently matches `no SDK contract
+  tests to run` to that new message; retain its no-descriptors expectation, add an exact exit-2
+  assertion, and preserve SDK counts.
+  Keep pipeline diagnostics/timings/worker reporting intact.
 
 ### Exact files and function-level scope
 
 | File | Work |
 |---|---|
-| `crates/gnr8-core/src/verify/mod.rs` | Add `CliHelpPlan`, `CliHelpSuite`, `CliHelpTarget`, `plan_cli_help`, and neutral planner tests. Do not change `ContractCaseClass`, sampling, or its cap. |
-| `crates/gnr8-core/src/sdk/builtins.rs` | Add `target_cli_help_suites` beside `target_contract_test_suites`: dispatch built-in GoSdk/PySdk with `.cli`, project graph as generation does, and construct descriptors from declared module/package/version/metadata/main facts. Other targets return no CLI suites. No alteration of `TargetExec::contract_test_suites` or emitted file set. |
+| `crates/gnr8-core/src/verify/mod.rs` | Add `GoVerificationModule` and the optional Go field on `ContractTestSuite`; add `CliHelpPlan`, `CliHelpSuite`, `CliHelpTarget`, `plan_cli_help`, and neutral planner tests. Do not change `ContractCaseClass`, sampling, or its cap. |
+| `crates/gnr8-core/src/sdk/builtins.rs` | Add `target_cli_help_suites` beside `target_contract_test_suites`: dispatch built-in GoSdk/PySdk with `.cli`, project graph as generation does, and construct descriptors from declared module/package/version/metadata/main facts. Other targets return no CLI suites. Update GoSdk's `TargetExec::contract_test_suites` implementation to carry declared module/version/metadata facts; set None in PySdk/TsSdk constructors. Keep the trait signature, sampler, and emitted file set unchanged. |
 | `crates/gnr8-core/src/pipeline/mod.rs` | Add `PipelineOutcome.cli_help_suites`, a `cli_help_suites(plan, ir)` collector using built-in declarations, and populate it alongside contract suites after emission/posts in `run`. Keep custom target behavior explicit. |
-| `crates/gnr8-core/tests/contract_tests.rs` | Extend the local `Generated` result/helper to retain CLI descriptors; add pipeline declaration tests below while preserving SDK suite assertions. |
+| `crates/gnr8-core/tests/contract_tests.rs` | Extend local `Generated`/`generate` to retain CLI descriptors and full SDK descriptors (the current tuple drops module facts); add declaration tests below while preserving SDK suite assertions. |
 | `crates/gnr8/src/verify/cli_help.rs` (new) | Add materialization/probe/build/Python-harness execution, typed outcome/failure/report structures, and a small local process-runner seam for deterministic absence/build-count tests. Real execution uses std::process; no shell commands. |
-| `crates/gnr8/src/verify.rs` | Declare `mod cli_help`, expose `run_cli_help_suites`, add CLI results to `VerifyReport::new`, counts/failures/human rendering, and adapt local report fixtures/tests. Leave `run_suites`, `run_go`, `run_python`, and `run_typescript` SDK behavior intact. |
+| `crates/gnr8/src/verify.rs` | Declare `mod cli_help`, expose `run_cli_help_suites`, add shared `materialize_go_target`; update `run_go` to require declared Go facts, remove synthetic-module constants, and set GOWORK=off. Add CLI report/count/rendering changes, adapt `suite`/`python_suite` literals, and add SDK Go module regressions. Keep `run_suites` signature/recursive test selection and Python/TypeScript execution policy unchanged. |
 | `crates/gnr8/src/main.rs` | In `run_verify`, check both descriptor sets, run both suite families, assemble reports, report correct failure kind/all-skipped state, and retain the 0/1/2 gate. |
 | `crates/gnr8/src/cli.rs` | Update the `Commands::Verify` help description to mention SDK contract tests and generated CLI help checks. Preserve its argument/flag shape and existing parse tests. |
-| `crates/gnr8/tests/verify_e2e.rs` | Add the two actual-pipeline CLI stories below using SPEC, temporary roots, worker scaffolding, and deliberate PostProcess defects. Keep the existing SDK-only E2E test. |
-| `docs/cli/commands.md` | Update verify section/table: exhaustive operation help checks, Go/Python mechanisms, separate CLI reports and absent-tool/all-skipped semantics. |
+| `crates/gnr8/tests/verify_e2e.rs` | Add the three actual-pipeline CLI stories below, including metadata disabled with default contract tests enabled, using SPEC, temporary roots, worker scaffolding, and deliberate PostProcess defects. Retain the existing SDK-only story and counts; adapt its final no-suite message assertion to the wording naming both suite families and assert exit 2. Extend `run_gnr8` or add a status-returning helper to assert numeric exit codes (the current helper returns only success bool). |
+| `docs/cli/commands.md` | Update verify section/table: exhaustive operation help checks, Go/Python mechanisms, separate CLI reports, declared-module preparation for both Go suites when package metadata is disabled, and absent-tool/all-skipped semantics. |
 | `docs/AGENT-USAGE.md` | Add generated CLI coverage/skip explanation beside the existing verify paragraph. |
 | `CHANGELOG.md` | Add item 2 under Unreleased → Added. |
 
@@ -329,6 +376,8 @@ PATH inside concurrently running Rust tests. Preserve existing report tests as c
 | engine verify `cli_help_plan_uses_effective_topics_sub_nouns_and_verbs` | Exact argv vectors for root, group, sub-noun, spec-renamed and ungrouped commands; deterministic order across permuted graph operations. Assert explicit empty selector remains Config error and no-selector empty graph gets root only. **Red:** missing/mismatched vectors in initial plan. |
 | `contract_tests.rs` `cli_help_suites_follow_target_declarations_independently_of_contract_tests` | Go/Python `.cli()` targets contribute descriptors with `.without_contract_tests()`, even on an empty graph; ordinary SDK, OpenApi, StaticFiles, custom targets, and TsSdk contribute none. Assert module/package/main/metadata details and unchanged generated artifact set. **Red:** no descriptors. |
 | `contract_tests.rs` `cli_help_suites_isolate_multiple_targets_and_selected_commands` | Two same-language targets carry different paths/programs/selectors, correct independent command plans, and no cross-target commands. **Red:** descriptors absent or aliased. |
+| `contract_tests.rs` `go_contract_suites_carry_declared_module_and_version_without_metadata` | Emit SDK+CLI with `.module("example.com/catalog/sdk").go_version("1.23").package_metadata(false)` and contract tests left enabled; assert nonzero SDK cases, Some declared Go facts, matching CLI facts, and no emitted go.mod. Include SDK-only and metadata-enabled controls plus None on Python/TypeScript. **Red:** compiling descriptor scaffolding lacks declared Go facts. |
+| verify runner `go_contract_verification_uses_declared_module_without_metadata` | Real generated Go SDK+CLI, default contract tests enabled, metadata disabled: `run_go` succeeds while testing `./...`; shared preparation uses exact module/version and overwrites a copied wrong-module go.mod. Assert original output unchanged. Metadata-enabled missing fresh go.mod is an explicit failure even with stale seed metadata; a Go suite with None Go facts fails explicitly without synthesizing a module. **Red:** current synthetic module prevents CLI imports resolving. |
 | CLI runner `go_cli_help_builds_once_and_runs_every_command` | Fake runner records one build and one invocation per planned argv, using declared module and absolute output binary. Inject a failing middle command; later commands still run and the suite fails with its exact argv/reason. **Red:** no runner behavior/incorrect call count. |
 | CLI runner `go_cli_help_uses_declared_module_without_emitted_metadata` | Real emitted Go CLI with metadata disabled builds and returns help; its verification module uses target module/version and never touches original output. **Red:** missing runner or wrong temp module breaks imports. |
 | CLI runner `python_cli_help_runs_module_with_declared_package_at_an_arbitrary_path` | Real generated Python CLI at directory not equal to package name; all help invocations succeed without credentials, positional inputs, or installation. A network/credential-helper sentinel must remain unused. **Red:** missing runner/incorrect import or argv setup. |
@@ -336,6 +385,7 @@ PATH inside concurrently running Rust tests. Preserve existing report tests as c
 | CLI runner `cli_help_rejects_empty_output_and_nonzero_help_exits` | Exit 0 whitespace on both streams fails; exit 0 nonempty stdout or stderr passes; nonzero with text fails with code/output/argv. **Red:** old success-only process logic accepts empty output or new runner lacks outcomes. |
 | CLI runner `cli_help_uses_fresh_artifacts_and_preserves_owned_companions` | Seed stale generated files and a hand-owned Go main/companion; fresh artifacts overwrite stale files and helper remains usable. Missing required fresh emitted entry cannot pass via a stale seed. Missing hand-owned main fails; no alternate main synthesized. **Red:** no CLI runner/materialization checks. |
 | verify report `cli_help_reports_distinguish_pass_fail_skip_and_all_skipped` | Exact JSON/human CLI labels, command context, counts.skipped, same-language disambiguation, mixed pass/skip success, any failure false, all-skipped false; existing SDK-only counts/rows stay stable. **Red:** missing report fields/status or incorrect verified predicate. |
+| E2E `verify_checks_go_cli_with_metadata_disabled_and_contract_tests_enabled` | Start from SPEC and a scaffolded worker, configure GoSdk's declared module/version plus `.cli(SdkCli::new("catalog")).package_metadata(false)`; **do not** call `.without_contract_tests()`. Fresh output starts with no sdk/go.mod. `--json verify` must exit 0 with verified=true, one passed SDK suite (cases > 0), one passed CLI suite (root + selected operations), counts passed=2/failed=0/skipped=0; human verify must show both passing rows. Assert sdk/go.mod stays absent and output bytes stay unchanged. Add a stale wrong-module sdk/go.mod and repeat verification: still pass and leave that file unchanged, proving it cannot mask/select identity. An emitted-metadata control also passes. **Red before host integration:** current verify reports SDK failure from declared-module imports under gnr8.local/contract. **Red after adding CLI only:** CLI passes but SDK still fails. Record that second red before repairing `run_go`. |
 | E2E `verify_checks_go_cli_help_and_gates_a_help_defect` | Pipeline `.cli()` plus a named selected/grouped operation; valid verify human/JSON succeeds with SDK and CLI results. Test PostProcess corrupts CLI help to return nonzero/empty output while leaving SDK contract tests passing; verify exits 1 naming the operation. `without_contract_tests()` retains CLI verification. **Red:** original verify does not detect the help defect / sees no SDK suite after opt-out. |
 | E2E `verify_checks_python_cli_help_without_installing_the_program` | Python `.cli()` at arbitrary path succeeds; add a PostProcess that breaks `cli/__main__.py` import/exit and assert verify exits 1 with CLI reason while SDK suite passes. Also inspect no output writes from verify. **Red:** original verify does not exercise the module entry point. |
 
@@ -348,10 +398,14 @@ runner tests and planner/report tests must always run, with no toolchain skip.
 
 1. Add planner/descriptors with red planner and declaration tests; implement selector/invocation
    planning and pipeline collection. Verify unchanged generated artifact bytes.
-2. Add red runner tests, typed failures, tool probe classification, and materialization. Implement
-   Go build-once execution and Python module harness. Verify absent tools separately from bad output.
-3. Add red report/E2E assertions, integrate `run_verify` and reporting, then implement aggregate
-   counts/exit policy. Preserve the existing SDK-only E2E expected passed/failed values.
+2. Add red runner tests, typed failures, tool probe classification, and CLI materialization/execution.
+   Implement Go build-once and Python module harness. Verify absent tools separately from bad output.
+3. Add red report/E2E assertions and integrate both suite families. Run the metadata-disabled host
+   E2E before the SDK module repair: require the CLI suite to pass while SDK `go test ./...` fails.
+   Then route both Go runners through shared declared-module preparation and set GOWORK=off for
+   both. Rerun that same host E2E to green, including stale metadata and emitted-metadata controls.
+   Finish aggregate counts/exit policy. Preserve the SDK-only E2E passed/failed values and adapt its
+   no-suite wording assertion.
 4. Update user docs and Added changelog entry around the final behavior, then run the focused gates.
 
 ### Exact verification commands
@@ -359,6 +413,9 @@ runner tests and planner/report tests must always run, with no toolchain skip.
 ```sh
 cargo test --locked -p gnr8-engine --lib cli_help
 cargo test --locked -p gnr8-engine --test contract_tests cli_help
+cargo test --locked -p gnr8-engine --test contract_tests go_contract_suites_carry_declared_module_and_version_without_metadata
+cargo test --locked -p gnr8-cli --bin gnr8 verify::tests::go_contract_verification_uses_declared_module_without_metadata
+cargo test --locked -p gnr8-cli --test verify_e2e verify_checks_go_cli_with_metadata_disabled_and_contract_tests_enabled
 cargo test --locked -p gnr8-cli --bin gnr8 verify::cli_help
 cargo test --locked -p gnr8-cli --bin gnr8 cli_help_reports
 cargo test --locked -p gnr8-engine --test contract_tests
@@ -384,7 +441,9 @@ operation command's `--help` for generated Go and Python CLIs, with explicit ski
 **Risks and bounds:** reporting skips as passes would weaken the gate; all-skipped must fail and
 old SDK failures remain failures. A missing Go tool can prevent generation at gofmt before a probe;
 document the distinction, do not add an extractor/generator bypass. Guessed module/package names
-break valid output layouts; all runner identities come from target declarations. Go hand-owned
+break valid output layouts; both SDK and CLI runner identities come from target declarations.
+A CLI-only test misses SDK recursive compilation: the default-enabled metadata-disabled host E2E
+is mandatory. Copied stale module files cannot select verification identity. Go hand-owned
 entry points rely on copied companions and may fail when absent. Captured help can use stderr;
 accept either stream but require text. Runtime grows with selected command count, intentionally
 uncapped. Existing process runners use blocking child output; a misbehaving trusted hand-owned main

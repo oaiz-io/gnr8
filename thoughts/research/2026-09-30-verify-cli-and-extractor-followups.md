@@ -2,6 +2,8 @@
 
 Research performed 2026-10-07 in `/workspace/gnr8-followups`, on
 `feat/verify-cli-and-extractor-fixes`, HEAD `95f8393eef34185763466eac64edfe35462672e8`.
+Review amendments checked against `9a431ada1e8d6981d001426776d8964584aef885`; that commit
+adds only these two documents, so source citations still apply unchanged.
 The requested filename retains 2026-09-30. Scope: research and planning only; no product changes.
 PR #91, PR #104, release history, and issue #93 are supplied background, not independently
 verified remote records. Findings below describe this checkout. Citations are repository-relative
@@ -11,10 +13,10 @@ verified remote records. Findings below describe this checkout. Citations are re
 
 - `AGENTS.md` is the governing invariants document. It forbids foreign dialects and output
   imitation, requires one deterministic source per fact, and makes configuration a Rust binary
-  crate (`AGENTS.md:17`, `AGENTS.md:45`, `AGENTS.md:229`, `AGENTS.md:261`).
+  crate (`AGENTS.md:22`, `AGENTS.md:38`, `AGENTS.md:229`, `AGENTS.md:261`).
 - Runtime-enforced `binding:`/`validate:` rules are explicitly distinguished from the prohibited
-  `enum:`/`enums:` spelling; pre-existing prose tag readers must not grow (`AGENTS.md:81`,
-  `AGENTS.md:88`). Extending the already-supported validation rules to the source type's named
+  `enum:`/`enums:` spelling; pre-existing prose tag readers must not grow (`AGENTS.md:82`,
+  `AGENTS.md:92`). Extending the already-supported validation rules to the source type's named
   underlying kind fits this boundary; it adds no tag grammar. This is the invariant rationale,
   not a proposal to read additional validator metadata.
 - The workspace is version 0.17.0 (`Cargo.toml:9`). Directory names differ from package names:
@@ -94,6 +96,16 @@ pointers, while normal named types become package-qualified references
 `schemaFor` already uses `Named.Underlying()` to emit basic, slice, array, and map component bodies
 (`goextract/internal/types/extract.go:74`, `goextract/internal/types/extract.go:87`,
 `goextract/internal/types/extract.go:100`). Underlying kind is available before lowering discards it.
+That switch does **not** emit a component for a named type whose underlying type is a pointer:
+`type RankPtr *Rank` reaches its default (`goextract/internal/types/extract.go:107`). Meanwhile
+`mapNamed` still returns its package-qualified reference (`goextract/internal/types/extract.go:963`).
+An ordinary `*Rank` is different: `mapType` strips that pointer and references the emitted Rank
+component (`goextract/internal/types/extract.go:919`). Following a defined pointer for validation
+would attach numeric bounds to a reference that cannot resolve. Limit classification to named
+basic/slice/array/map component kinds with supported bounds, including aliases and ordinary
+pointers to those types; never traverse `Named.Underlying()` when it is a pointer. Defined-pointer
+component support is outside this repair. Lowering already rejects a dangling reference through
+`resolve_ref` with `CoreError::Lowering` (`crates/gnr8-core/src/lower/mod.rs:1156`).
 
 ### Constraint paths and siblings
 
@@ -147,8 +159,13 @@ length bounds, map cardinality, and numeric bounds onto the property object
 entire parsed YAML and JSON object containing `$ref` and `minItems: 1`
 (`crates/gnr8-core/src/lower/mod.rs:2547`, `crates/gnr8-core/src/lower/mod.rs:2576`,
 `crates/gnr8-core/src/lower/mod.rs:2591`). Its sample uses a string-enum target with minItems, so it
-proves keyword retention, not source-kind correctness. Nullable refs carry metadata on the outer
-`oneOf` wrapper (`crates/gnr8-core/src/lower/mod.rs:2479`). The Gin regression test already drives
+proves keyword retention, not source-kind correctness or reference resolution. The source-to-OpenAPI
+regression must walk all local `$ref` values in the parsed artifact, resolve each JSON Pointer to an actual component,
+and check that target's underlying kind in both request and response projections. Include ordinary
+pointer/alias fields in that successful pipeline. In a separate defined-pointer source case, assert
+no component is emitted and no bound is extracted; retain the existing explicit dangling-reference
+lowering error rather than treating that case as successful output. Nullable refs carry metadata on
+the outer `oneOf` wrapper (`crates/gnr8-core/src/lower/mod.rs:2479`). The Gin regression test already drives
 extraction through YAML emission and checks collection cardinality in both directions
 (`crates/gnr8-core/tests/gin_contract_regression.rs:57`,
 `crates/gnr8-core/tests/gin_contract_regression.rs:783`).
@@ -199,7 +216,11 @@ output prefix (`crates/gnr8/src/verify.rs:180`). Materialization copies hand-own
 overwrites fresh generated files; temp trees are removed on Drop
 (`crates/gnr8/src/main.rs:1108`, `crates/gnr8/src/main.rs:1194`). No project output is written.
 Go runs with `GOPROXY=off`, using a temporary module if metadata is absent
-(`crates/gnr8/src/verify.rs:264`, `crates/gnr8/src/verify.rs:274`).
+(`crates/gnr8/src/verify.rs:264`, `crates/gnr8/src/verify.rs:274`). That module is currently
+`gnr8.local/contract` with Go 1.21 (`crates/gnr8/src/verify.rs:30`, `:33`). `ContractTestSuite`
+carries only the package name, not the declared module/version/metadata policy; Go's declaration
+calls `sdk_package(&self.module)` (`crates/gnr8-core/src/verify/mod.rs:101`,
+`crates/gnr8-core/src/sdk/builtins.rs:3123`). The SDK descriptor must carry those target facts too.
 
 Reports have `verified`, `suites`, passed/failed `counts`, timing buckets, pipeline diagnostic
 counts, and worker origin. Suite failures carry a reason and captured process output, distinct
@@ -220,9 +241,22 @@ exit 1, run-stopping errors exit 2 (`crates/gnr8/src/main.rs:34`,
 Go emits `cmd/<program>/main.go`, importing `cmd/<program>/internal/cli`; hand-owned main can
 suppress that one file (`crates/gnr8-core/src/gosdk/cli.rs:50`,
 `crates/gnr8-core/src/gosdk/cli.rs:60`, `crates/gnr8-core/src/gosdk/cli.rs:225`). CLI generation
-uses the declared module path (`crates/gnr8-core/src/sdk/builtins.rs:3066`). A temp module for CLI
-builds must use **that module**, not the SDK-contract runner's `gnr8.local/contract` name.
-Go CLI does not require emitted package metadata (`crates/gnr8-core/src/sdk/builtins.rs:3828`).
+uses the declared module path (`crates/gnr8-core/src/sdk/builtins.rs:3066`). Go CLI does not require
+emitted package metadata (`crates/gnr8-core/src/sdk/builtins.rs:3828`), and Go contract tests default
+to enabled (`crates/gnr8-sdk/src/sdk/builtins.rs:2311`). Therefore `.cli(...).package_metadata(false)`
+with a nonempty contract plan currently fails overall verification: SDK `go test ./...` compiles
+`cmd/<program>` and its internal CLI packages, whose imports name the declared module, while the
+temp module names `gnr8.local/contract`. Fixing only CLI builds leaves that SDK suite failing.
+
+Both Go runner families must receive the same declared module/version/metadata policy and use one
+shared materialization/module-preparation helper. Metadata disabled means always writing that exact
+verification-only module into each isolated tree, replacing any copied go.mod; metadata enabled
+means requiring the fresh emitted go.mod. Set `GOWORK=off` for both test and build execution. Keep
+`go test ./...`, SDK sampling, and SDK missing-toolchain failures. This expands item 2 into SDK Go
+verification and its descriptor construction, without changing SDK generation or public builders.
+The required red-first **host E2E** uses metadata disabled and default-enabled contract tests, asserts
+that both SDK and CLI suites pass and overall `verified=true`, and leaves the project go.mod absent.
+An isolated CLI runner test cannot prove this aggregate behavior.
 
 Python emits `cli/__main__.py` invoking `.main.main`; installed scripts point at
 `<package>.cli:main` (`crates/gnr8-core/src/pysdk/cli.rs:225`,
@@ -262,8 +296,11 @@ defect into fresh generated output (`crates/gnr8/tests/verify_e2e.rs:98`,
 1. Repair scalar schema-type emission through the existing YAML quoting helper. Assert parsed null
    arms, JSON symmetry, and real null literals. Update all occurrence-inventory artifacts.
 2. For Go field validation, derive a shallow validation-only shape from the original typed field
-   when its emitted schema is a named reference. Resolve aliases/pointers/named underlying kinds
-   deterministically, retain format/free-form semantics already represented by non-reference
+   when its emitted schema is a named reference. Unalias and strip ordinary pointer layers only;
+   classify supported basic/slice/array/map component kinds. Defined-pointer underlying kinds stay
+   unsupported. Reject remaining named shapes in the comparison-bound path too, before its current
+   unconditional numeric branch. Assert resolved components in source-to-OpenAPI output, not just
+   reference spelling/metadata. Retain format/free-form semantics already represented by non-reference
    schemas, and feed the shape only to existing binding/validate appliers. Keep FieldFact.Schema
    named. Never rerun mapType merely to obtain kind: that can repeat diagnostics or descend into
    recursive collections. No production handler changes or expansion of direct/prose tag readers.
@@ -277,7 +314,10 @@ defect into fresh generated output (`crates/gnr8/tests/verify_e2e.rs:98`,
    command suite. A hand-owned main is still built at its declared cmd path from copied companions;
    a missing main is a failure, not a substitute entry point.
 5. Go: build the declared cmd package once per CLI target in its materialized tree, then run the
-   resulting absolute binary path with each command vector plus `--help`. Python: use python3 and
+   resulting absolute binary path with each command vector plus `--help`. Carry a shared
+   `GoVerificationModule { module, go_version, package_metadata }` into both CLI and SDK descriptors;
+   use one temp-module helper for both Go build and `go test ./...`, with no guessed module/version.
+   Add a red-first host test with metadata disabled and default contract tests enabled. Python: use python3 and
    a single importlib/runpy harness to bind the declared package and execute its `.cli` module with
    each vector plus `--help`, without installation or a second execution strategy.
 6. New CLI checks skip only when their interpreter/compiler executable cannot be found. Other probe
@@ -302,6 +342,44 @@ defect into fresh generated output (`crates/gnr8/tests/verify_e2e.rs:98`,
   NestJS toolchain absence is a possible skip in its snapshot test
   (`crates/gnr8-core/tests/snapshot_nestjs_openapi.rs:40`); restore its test compiler before including
   it in implementation validation.
+
+## Review verification (2026-10-07)
+
+Both supplied findings are accepted after independent source inspection. A temporary, standard-library
+Go module reproducing the generated cmd/internal import structure failed `go test ./...` with
+`module gnr8.local/contract` and `GOPROXY=off` (declared-module import could not resolve), then passed
+with `module example.com/catalog/sdk` and the same sources/version/environment. This isolates the
+module-identity failure; it is not a substitute for the planned host E2E over real generated output.
+Running this checkout's `goextract` over a temporary source module also reproduced the named-type
+failure: ordinary `*Rank` with `min=1` referenced the emitted Rank component but had unresolved
+metadata; `RankPtr` with `gte=1` referenced an absent component and incorrectly carried minimum=1.
+This directly confirms why comparison rules need the explicit unsupported-Named guard. The
+`resolve_ref` switch confirms the downstream dangling-reference error. The existing
+`dangling_request_body_ref_returns_lowering_error` lower unit test passed (1 test). No product source
+or committed fixture was changed during verification.
+
+The future implementation must record red/green runs for these focused commands from the root
+(the tests are **proposed**, not present or run in this documentation phase):
+
+```sh
+cargo test --locked -p gnr8-engine --test contract_tests go_contract_suites_carry_declared_module_and_version_without_metadata
+cargo test --locked -p gnr8-cli --test verify_e2e verify_checks_go_cli_with_metadata_disabled_and_contract_tests_enabled
+cargo test --locked -p gnr8-engine --test gin_contract_regression named_field_constraints_reach_openapi_beside_refs
+cargo test --locked -p gnr8-engine --test gin_contract_regression named_defined_pointer_fields_remain_unsupported
+```
+
+From `goextract`, run `go test ./internal/types -run '^TestNamedFieldConstraint' -count=1`,
+including the unsupported-named comparison regression. The negative defined-pointer OpenAPI case
+preserves its existing explicit error; the supported-kind artifact and unsupported-bound assertions
+supply the red regressions. Require nonzero matching counts and available toolchains. The plan
+contains the full runner/control commands. Update the existing SDK-only E2E opt-out message check
+when no-suite wording names both suite families; keep its no-descriptors exit-2 gate.
+
+Re-review checked source citations, existing test symbols, Cargo package/bin/test target names,
+and declared builder methods against this checkout. New helper/type/test symbols are explicit
+implementation proposals. It also resolved the comparison guard and old no-suite E2E message
+assertion omissions in the plan. `make invariants` and `git diff --check` passed. Final documentation
+re-review: no unresolved BLOCKING or SHOULD-FIX issue.
 
 ## Open questions
 
