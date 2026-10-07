@@ -1,6 +1,6 @@
-//! `gnr8 verify` — run each generated SDK's contract test with that language's own test tool.
+//! `gnr8 verify` — run generated SDK contracts and CLI help checks.
 //!
-//! The pipeline declares the suites (`gnr8_engine::verify::ContractTestSuite`); this module
+//! The engine declares both suite families; this module
 //! materializes the artifact set into a temp tree and runs the tool there. The temp tree starts as a
 //! copy of the target's real output directory and the fresh artifacts are written over it, so a
 //! package that ships hand-owned companions beside its generated files still imports, while every
@@ -11,26 +11,20 @@
 //! Each runner is the language's own tool, spawned with fixed argument literals — never a shell.
 //! Nothing here decides what the tests assert; that is the graph's job, in `gnr8-engine::verify`.
 
+mod cli_help;
+
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gnr8_engine::sdk::Artifact;
-use gnr8_engine::verify::{ContractTestLanguage, ContractTestSuite};
+use gnr8_engine::verify::{ContractTestLanguage, ContractTestSuite, GoVerificationModule};
 
 use crate::{
     command_available, command_output_excerpt, duration_ms, link_typescript_node_modules,
     materialize_artifact_group, run_typescript_compiler, typescript_compiler, DiagnosticCounts,
 };
-
-/// The Go module path a suite is given when the target emits no package metadata of its own.
-///
-/// Only ever written into the temp tree: `go test` needs a module, and a target configured
-/// `.package_metadata(false)` deliberately does not ship one.
-const TEMP_GO_MODULE: &str = "gnr8.local/contract";
-
-/// The Go language version for that temp module — a floor every supported toolchain accepts.
-const TEMP_GO_VERSION: &str = "1.21";
 
 /// Timing buckets for one `verify` run, in milliseconds.
 #[derive(Debug, serde::Serialize)]
@@ -48,6 +42,7 @@ pub(crate) struct VerifyTimings {
 pub(crate) struct VerifyCounts {
     passed: usize,
     failed: usize,
+    skipped: usize,
 }
 
 /// One suite's result.
@@ -91,10 +86,12 @@ const FAILED: &str = "failed";
 /// The full `gnr8 verify` report — the shape `--json` serializes.
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct VerifyReport {
-    /// Whether every suite passed.
+    /// Whether no suite failed and at least one suite passed.
     pub(crate) verified: bool,
     /// One entry per generated contract-test suite.
     pub(crate) suites: Vec<SuiteReport>,
+    /// One entry per generated CLI target.
+    pub(crate) cli_suites: Vec<cli_help::CliHelpReport>,
     /// Per-status suite counts.
     counts: VerifyCounts,
     /// Timing buckets in milliseconds.
@@ -109,18 +106,30 @@ impl VerifyReport {
     /// Assemble the report from the suite results.
     pub(crate) fn new(
         suites: Vec<SuiteReport>,
+        cli_suites: Vec<cli_help::CliHelpReport>,
         timings_ms: VerifyTimings,
         diagnostics: DiagnosticCounts,
         worker: String,
     ) -> Self {
-        let passed = suites.iter().filter(|suite| suite.passed()).count();
+        let passed = suites.iter().filter(|suite| suite.passed()).count()
+            + cli_suites
+                .iter()
+                .filter(|suite| suite.status == cli_help::CliHelpStatus::Passed)
+                .count();
+        let skipped = cli_suites
+            .iter()
+            .filter(|suite| suite.status == cli_help::CliHelpStatus::Skipped)
+            .count();
+        let failed = suites.len() + cli_suites.len() - passed - skipped;
         Self {
-            verified: passed == suites.len(),
+            verified: failed == 0 && passed > 0,
             counts: VerifyCounts {
                 passed,
-                failed: suites.len() - passed,
+                failed,
+                skipped,
             },
             suites,
+            cli_suites,
             timings_ms,
             diagnostics,
             worker,
@@ -134,26 +143,84 @@ impl VerifyReport {
 
     /// The human report: one padded `label  status` line per suite.
     pub(crate) fn render_human(&self) -> String {
-        let width = self
+        let rows: Vec<(&str, &str)> = self
             .suites
             .iter()
-            .map(|suite| suite.label.chars().count())
+            .map(|s| (s.label.as_str(), s.status))
+            .chain(
+                self.cli_suites
+                    .iter()
+                    .map(|s| (s.label.as_str(), s.status.id())),
+            )
+            .collect();
+        let width = rows
+            .iter()
+            .map(|(label, _)| label.chars().count())
             .max()
             .unwrap_or(0)
             + 2;
         let mut out = String::new();
-        for suite in &self.suites {
-            let padding = width.saturating_sub(suite.label.chars().count());
-            out.push_str(&suite.label);
-            out.push_str(&" ".repeat(padding));
-            out.push_str(suite.status);
+        for (label, status) in rows {
+            out.push_str(label);
+            out.push_str(&" ".repeat(width.saturating_sub(label.chars().count())));
+            out.push_str(status);
             out.push('\n');
+        }
+        for suite in &self.cli_suites {
+            if suite.commands.is_empty() {
+                if let Some(reason) = &suite.reason {
+                    let _ = writeln!(out, "  {}: {}", suite.label, reason.explain());
+                }
+            } else {
+                for command in &suite.commands {
+                    if let Some(reason) = &command.reason {
+                        let _ = writeln!(out, "  {}: {}", suite.label, reason.explain());
+                    }
+                }
+            }
+        }
+        if self.no_checks_executed() {
+            out.push_str("no checks executed: all generated CLI help suites were skipped\n");
         }
         out
     }
+
+    pub(crate) fn no_checks_executed(&self) -> bool {
+        self.counts.passed == 0 && self.counts.failed == 0 && self.counts.skipped > 0
+    }
+
+    pub(crate) fn cli_failure_messages(&self) -> Vec<String> {
+        let mut messages = Vec::new();
+        for suite in self
+            .cli_suites
+            .iter()
+            .filter(|s| s.status == cli_help::CliHelpStatus::Failed)
+        {
+            if suite.commands.is_empty() {
+                if let Some(reason) = &suite.reason {
+                    messages.push(format!(
+                        "{} help checks failed: {}",
+                        suite.label,
+                        reason.explain()
+                    ));
+                }
+            } else {
+                for command in &suite.commands {
+                    if let Some(reason) = &command.reason {
+                        messages.push(format!(
+                            "{} help check failed: {}",
+                            suite.label,
+                            reason.explain()
+                        ));
+                    }
+                }
+            }
+        }
+        messages
+    }
 }
 
-/// Run every declared suite and report what its tool did.
+/// Run every declared SDK contract suite and report what its tool did.
 ///
 /// A suite that cannot run — a missing toolchain, an artifact set that does not materialize — is a
 /// failure, not a skip: a verification that quietly verified nothing is worse than a red one.
@@ -169,6 +236,56 @@ pub(crate) fn run_suites(
         .map(|(suite, label)| {
             let owned = artifacts_under(artifacts, &suite.output_path);
             run_suite(project_root, suite, label, &owned)
+        })
+        .collect()
+}
+
+/// Run generated CLI help suites separately from sampled SDK contracts.
+pub(crate) fn run_cli_help_suites(
+    root: &Path,
+    suites: &[gnr8_engine::verify::CliHelpSuite],
+    artifacts: &[Artifact],
+) -> Vec<cli_help::CliHelpReport> {
+    suites
+        .iter()
+        .zip(cli_help_labels(suites))
+        .map(|(suite, label)| {
+            cli_help::run(
+                root,
+                suite,
+                &artifacts_under(artifacts, &suite.output_path),
+                label,
+            )
+        })
+        .collect()
+}
+
+fn cli_help_labels(suites: &[gnr8_engine::verify::CliHelpSuite]) -> Vec<String> {
+    let base: Vec<String> = suites
+        .iter()
+        .map(|suite| {
+            format!(
+                "{} CLI {}",
+                match suite.target {
+                    gnr8_engine::verify::CliHelpTarget::Go { .. } => "Go",
+                    gnr8_engine::verify::CliHelpTarget::Python { .. } => "Python",
+                },
+                suite.program
+            )
+        })
+        .collect();
+    let mut counts = BTreeMap::new();
+    for label in &base {
+        *counts.entry(label).or_insert(0) += 1;
+    }
+    base.iter()
+        .zip(suites)
+        .map(|(label, suite)| {
+            if counts.get(label).copied().unwrap_or(0) > 1 {
+                format!("{label} ({})", suite.output_path)
+            } else {
+                label.clone()
+            }
         })
         .collect()
 }
@@ -252,32 +369,57 @@ fn output_dir(project_root: &Path, output_path: &str) -> Option<PathBuf> {
     crate::safe_temp_artifact_path(project_root, output_path).ok()
 }
 
+fn materialize_go_target(
+    project_root: &Path,
+    output_path: &str,
+    artifacts: &[Artifact],
+    verification: &GoVerificationModule,
+) -> Result<crate::MaterializedTarget, String> {
+    let metadata_path = format!("{}/go.mod", output_path.trim_end_matches('/'));
+    if verification.package_metadata && !artifacts.iter().any(|a| a.path == metadata_path) {
+        return Err(format!(
+            "generated Go target {output_path} is missing fresh go.mod"
+        ));
+    }
+    let seed = crate::safe_temp_artifact_path(project_root, output_path)?;
+    let materialized =
+        materialize_artifact_group(output_path, artifacts, "verify-go", Some(&seed))?;
+    if !verification.package_metadata {
+        std::fs::write(
+            materialized.target_dir.join("go.mod"),
+            format!(
+                "module {}\n\ngo {}\n",
+                verification.module, verification.go_version
+            ),
+        )
+        .map_err(|err| format!("failed to write declared verification go.mod: {err}"))?;
+    }
+    Ok(materialized)
+}
+
 fn run_go(
     project_root: &Path,
     suite: &ContractTestSuite,
     artifacts: &[Artifact],
 ) -> Result<(), String> {
+    let verification = suite
+        .go_verification
+        .as_ref()
+        .ok_or_else(|| "Go contract suite is missing its declared Go module facts".to_string())?;
     command_available("go", &["version"])?;
-    let seed = output_dir(project_root, &suite.output_path);
     let materialized =
-        materialize_artifact_group(&suite.output_path, artifacts, "verify-go", seed.as_deref())?;
-    let go_mod = materialized.target_dir.join("go.mod");
-    if !go_mod.is_file() {
-        // The target emits no package metadata, so the temp tree gets a module of its own. Nothing
-        // is written into the project; `go test` simply needs a module root to work in.
-        std::fs::write(
-            &go_mod,
-            format!("module {TEMP_GO_MODULE}\n\ngo {TEMP_GO_VERSION}\n"),
-        )
-        .map_err(|err| format!("failed to write a temporary go.mod: {err}"))?;
-    }
+        materialize_go_target(project_root, &suite.output_path, artifacts, verification)?;
     // The generated SDK is standard-library only, so the module proxy is off: a test that reached
     // for the network would be a defect, not a slow run.
     run_tool(
         "go",
         &["test", "./..."],
         &materialized.target_dir,
-        &[("GOPROXY", "off"), ("GOFLAGS", "-mod=mod")],
+        &[
+            ("GOPROXY", "off"),
+            ("GOFLAGS", "-mod=mod"),
+            ("GOWORK", "off"),
+        ],
     )
 }
 
@@ -473,6 +615,7 @@ mod tests {
             package: "sdk".to_string(),
             test_file: format!("{dir}/contract_test.go"),
             cases: 3,
+            go_verification: None,
         }
     }
 
@@ -492,6 +635,7 @@ mod tests {
                     reason: (*status == FAILED).then(|| "boom".to_string()),
                 })
                 .collect(),
+            Vec::new(),
             VerifyTimings {
                 pipeline: 1,
                 tests: 2,
@@ -505,6 +649,149 @@ mod tests {
             },
             "reused".to_string(),
         )
+    }
+
+    #[test]
+    fn go_contract_verification_uses_declared_module_without_metadata() {
+        if std::process::Command::new("go")
+            .arg("version")
+            .output()
+            .is_err()
+            || std::process::Command::new("gofmt")
+                .arg("-h")
+                .output()
+                .is_err()
+        {
+            eprintln!("skipping: Go toolchain unavailable");
+            return;
+        }
+        let (root, out) = super::cli_help::tests::generated(true, false);
+        let suite = &out.contract_test_suites[0];
+        let owned = super::artifacts_under(&out.artifacts, &suite.output_path);
+        super::run_go(&root, suite, &owned)
+            .expect("declared module must resolve CLI imports during recursive SDK tests");
+        std::fs::create_dir_all(root.join("sdk")).unwrap();
+        let stale = "module wrong.test/stale\n\ngo 1.22\n";
+        std::fs::write(root.join("sdk/go.mod"), stale).unwrap();
+        let declared = suite.go_verification.as_ref().unwrap();
+        let materialized =
+            super::materialize_go_target(&root, &suite.output_path, &owned, declared).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(materialized.target_dir.join("go.mod")).unwrap(),
+            "module example.com/catalog/sdk\n\ngo 1.23\n"
+        );
+        super::run_go(&root, suite, &owned).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("sdk/go.mod")).unwrap(),
+            stale
+        );
+        let mut absent = suite.clone();
+        absent.go_verification = None;
+        assert!(super::run_go(&root, &absent, &owned)
+            .unwrap_err()
+            .contains("declared Go module"));
+        let mut metadata = suite.clone();
+        metadata.go_verification.as_mut().unwrap().package_metadata = true;
+        assert!(super::run_go(&root, &metadata, &owned)
+            .unwrap_err()
+            .contains("fresh go.mod"));
+        let (metadata_root, metadata_out) = super::cli_help::tests::generated(true, true);
+        super::run_go(
+            &metadata_root,
+            &metadata_out.contract_test_suites[0],
+            &super::artifacts_under(&metadata_out.artifacts, "sdk"),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(metadata_root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_help_reports_distinguish_pass_fail_skip_and_all_skipped() {
+        use super::cli_help::{CliHelpStatus, FailureKind};
+        let mut sdk_report = report(&[("go", PASSED)]);
+        let mut skipped = super::cli_help::tests::report_for_status(CliHelpStatus::Skipped);
+        skipped.label = "Python CLI catalog".into();
+        skipped.language = "python";
+        sdk_report = VerifyReport::new(
+            sdk_report.suites,
+            vec![skipped],
+            sdk_report.timings_ms,
+            sdk_report.diagnostics,
+            sdk_report.worker,
+        );
+        assert!(sdk_report.verified);
+        assert_eq!(sdk_report.counts.skipped, 1);
+        assert_eq!(sdk_report.counts.passed, 1);
+        let json = serde_json::to_value(&sdk_report).unwrap();
+        assert_eq!(json["cli_suites"][0]["status"], "skipped");
+        assert_eq!(json["cli_suites"][0]["reason"]["code"], "toolchain_absent");
+        assert!(sdk_report.render_human().contains("Python CLI catalog"));
+        assert!(sdk_report.render_human().contains("skipped"));
+        assert!(sdk_report.render_human().contains("cannot probe"));
+        let base = report(&[]);
+        let all_skipped = VerifyReport::new(
+            Vec::new(),
+            vec![super::cli_help::tests::report_for_status(
+                CliHelpStatus::Skipped,
+            )],
+            base.timings_ms,
+            base.diagnostics,
+            base.worker,
+        );
+        assert!(!all_skipped.verified);
+        assert_eq!(all_skipped.counts.passed, 0);
+        assert!(all_skipped.render_human().contains("no checks executed"));
+        let base = report(&[]);
+        let failed = VerifyReport::new(
+            Vec::new(),
+            vec![super::cli_help::tests::report_for_status(
+                CliHelpStatus::Failed,
+            )],
+            base.timings_ms,
+            base.diagnostics,
+            base.worker,
+        );
+        assert!(!failed.verified);
+        assert_eq!(failed.counts.failed, 1);
+        let command = &failed.cli_suites[0].commands[1];
+        assert_eq!(
+            command.reason.as_ref().unwrap().code,
+            FailureKind::NonzeroHelpExit
+        );
+        let text = failed.render_human();
+        assert!(
+            text.contains("items --help") && text.contains("nonzero_help_exit"),
+            "{text}"
+        );
+        let base = report(&[]);
+        let mut a = super::cli_help::tests::report_for_status(CliHelpStatus::Passed);
+        let mut b = super::cli_help::tests::report_for_status(CliHelpStatus::Passed);
+        a.output_path = "public".into();
+        b.output_path = "admin".into();
+        let suites = vec![
+            super::cli_help::tests::declared_suite("public"),
+            super::cli_help::tests::declared_suite("admin"),
+        ];
+        let labels = super::cli_help_labels(&suites);
+        assert_eq!(
+            labels,
+            vec!["Go CLI catalog (public)", "Go CLI catalog (admin)"]
+        );
+        a.label = labels[0].clone();
+        b.label = labels[1].clone();
+        let passed = VerifyReport::new(
+            Vec::new(),
+            vec![a, b],
+            base.timings_ms,
+            base.diagnostics,
+            base.worker,
+        );
+        assert!(passed.verified);
+        assert_eq!(passed.counts.passed, 2);
+        assert_eq!(passed.counts.skipped, 0);
+        assert!(passed.render_human().contains("Go CLI catalog (public)"));
+        assert!(passed.render_human().contains("Go CLI catalog (admin)"));
     }
 
     #[test]
@@ -534,6 +821,7 @@ mod tests {
                     reason: None,
                 },
             ],
+            Vec::new(),
             VerifyTimings {
                 pipeline: 1,
                 tests: 2,
@@ -589,7 +877,7 @@ mod tests {
         );
     }
 
-    fn temp_root(name: &str) -> PathBuf {
+    pub(super) fn temp_root(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -627,6 +915,7 @@ mod tests {
             package: "sdk".to_string(),
             test_file: "generated/sdk/contract_test.py".to_string(),
             cases: 1,
+            go_verification: None,
         }
     }
 

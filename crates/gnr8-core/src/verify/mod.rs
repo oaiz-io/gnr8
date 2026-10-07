@@ -1,4 +1,4 @@
-//! Graph-derived contract-test planning.
+//! Graph-derived SDK contract and exhaustive CLI help planning.
 //!
 //! A generated SDK that compiles can still send the wrong request or refuse a valid response. This
 //! module turns an [`ApiGraph`] into a language-neutral [`ContractTestPlan`]: a small, capped,
@@ -109,6 +109,81 @@ pub struct ContractTestSuite {
     pub test_file: String,
     /// How many cases the suite carries.
     pub cases: usize,
+    /// Declared Go module facts; other languages carry none.
+    pub go_verification: Option<GoVerificationModule>,
+}
+
+/// Declared Go module facts used by verification in an isolated tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoVerificationModule {
+    /// The target's module path.
+    pub module: String,
+    /// The target's Go language version.
+    pub go_version: String,
+    /// Whether generation emits module metadata.
+    pub package_metadata: bool,
+}
+
+/// Every generated command invocation, without sampling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliHelpPlan {
+    /// Arguments preceding `--help`, including the empty root invocation.
+    pub invocations: Vec<Vec<String>>,
+}
+
+/// The declared executable target for help verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliHelpTarget {
+    /// A Go cmd package.
+    Go {
+        /// Declared module facts.
+        verification: GoVerificationModule,
+        /// Whether the main entry is generated.
+        emit_main: bool,
+    },
+    /// A Python package with a cli module.
+    Python {
+        /// Declared import name.
+        package: String,
+    },
+}
+
+/// A generated CLI target and its exhaustive help checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliHelpSuite {
+    /// Project-relative output directory.
+    pub output_path: String,
+    /// Declared executable name.
+    pub program: String,
+    /// Language and entry declaration.
+    pub target: CliHelpTarget,
+    /// Commands to exercise.
+    pub plan: CliHelpPlan,
+}
+
+/// Plan help checks using the same command facts as generation.
+///
+/// # Errors
+/// Returns a configuration error if a selector matches no operation.
+pub fn plan_cli_help(graph: &ApiGraph, cli: &gnr8::sdk::SdkCli) -> Result<CliHelpPlan, CoreError> {
+    use crate::sdk::emit_common::{cli_operations, command_sub_noun, command_topic, command_verb};
+    let mut invocations = BTreeSet::from([Vec::new()]);
+    for op in cli_operations(graph, cli)? {
+        let mut argv = Vec::new();
+        if let Some(topic) = command_topic(cli, op) {
+            argv.push(topic);
+            invocations.insert(argv.clone());
+        }
+        if let Some(sub_noun) = command_sub_noun(cli, op) {
+            argv.push(sub_noun);
+            invocations.insert(argv.clone());
+        }
+        argv.push(command_verb(cli, op));
+        invocations.insert(argv);
+    }
+    Ok(CliHelpPlan {
+        invocations: invocations.into_iter().collect(),
+    })
 }
 
 /// One class of wire contract a sampled case proves.
@@ -1395,6 +1470,91 @@ mod tests {
               ]
             }"#,
         )
+    }
+
+    #[test]
+    fn cli_help_plan_covers_every_selected_command_without_sampling() {
+        use gnr8::sdk::prelude::*;
+        let mut graph = catalog_graph();
+        let template = graph.operations[0].clone();
+        graph.operations = (0..40)
+            .map(|i| {
+                let mut op = template.clone();
+                op.id = format!("readItem{i}");
+                op.group = Some("Items".into());
+                op
+            })
+            .collect();
+        let excluded = graph.operations[0].id.clone();
+        let cli = SdkCli::new("catalog").commands(OperationSelector::not(
+            OperationSelector::operation(&excluded),
+        ));
+        let plan = super::plan_cli_help(&graph, &cli).unwrap();
+        assert_eq!(plan.invocations.len(), 41);
+        assert!(plan.invocations.contains(&Vec::new()));
+        assert!(plan.invocations.contains(&vec!["items".into()]));
+        for op in &graph.operations[1..] {
+            assert!(plan.invocations.contains(&vec![
+                "items".into(),
+                crate::sdk::emit_common::command_name(op)
+            ]));
+        }
+        assert!(!plan
+            .invocations
+            .contains(&vec!["items".into(), "read-item0".into()]));
+    }
+
+    #[test]
+    fn cli_help_plan_uses_effective_topics_sub_nouns_and_verbs() {
+        use gnr8::sdk::prelude::*;
+        let mut graph = catalog_graph();
+        graph.operations[0].group = Some("Original".into());
+        let mut grouped = graph.operations[0].clone();
+        grouped.id = "getStatus".into();
+        grouped.group = Some("SystemStatus".into());
+        graph.operations.push(grouped);
+        let cli = SdkCli::new("catalog").topic(
+            CliTopic::new("catalogue").command(
+                CliCommand::operation("listItems", "browse")
+                    .sub_noun("items")
+                    .example("catalog catalogue items browse"),
+            ),
+        );
+        let expected: Vec<Vec<String>> = vec![
+            vec![],
+            vec!["catalogue"],
+            vec!["catalogue", "items"],
+            vec!["catalogue", "items", "browse"],
+            vec!["create-item"],
+            vec!["system-status"],
+            vec!["system-status", "get-status"],
+        ]
+        .into_iter()
+        .map(|v| v.into_iter().map(str::to_string).collect())
+        .collect();
+        assert_eq!(
+            super::plan_cli_help(&graph, &cli).unwrap().invocations,
+            expected
+        );
+        graph.operations.reverse();
+        assert_eq!(
+            super::plan_cli_help(&graph, &cli).unwrap().invocations,
+            expected
+        );
+        graph.operations.clear();
+        assert_eq!(
+            super::plan_cli_help(&graph, &SdkCli::new("empty"))
+                .unwrap()
+                .invocations,
+            vec![Vec::<String>::new()]
+        );
+        assert!(matches!(
+            super::plan_cli_help(
+                &graph,
+                &SdkCli::new("empty").commands(OperationSelector::operation("missing"))
+            ),
+            Err(crate::CoreError::Config { .. })
+        ));
     }
 
     #[test]

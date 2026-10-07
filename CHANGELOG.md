@@ -9,6 +9,11 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- `gnr8 verify` checks root, group, and every selected operation command's `--help` for generated
+  Go and Python CLIs, with explicit skipped-tool reports.
+
 ### Fixed
 
 - Go extraction carries supported validation bounds on named scalar and collection fields while

@@ -135,7 +135,7 @@ fn toolchains_available() -> bool {
 
 /// Run `gnr8 <args...>` in `root`, sharing through a store inside the staging dir so the run never
 /// reads or writes the developer's own.
-fn run_gnr8(root: &Path, args: &[&str]) -> (bool, String, String) {
+fn run_gnr8_status(root: &Path, args: &[&str]) -> (i32, String, String) {
     let output = Command::new(GNR8_BIN)
         .args(args)
         .current_dir(root)
@@ -143,10 +143,15 @@ fn run_gnr8(root: &Path, args: &[&str]) -> (bool, String, String) {
         .output()
         .expect("spawn the gnr8 host binary");
     (
-        output.status.success(),
+        output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+fn run_gnr8(root: &Path, args: &[&str]) -> (bool, String, String) {
+    let (code, out, err) = run_gnr8_status(root, args);
+    (code == 0, out, err)
 }
 
 #[test]
@@ -287,11 +292,258 @@ fn verify_emits_runs_and_gates_the_generated_contract_test() {
         !contract_test.is_file(),
         "a target that stops emitting the file must have it removed"
     );
-    let (ok, _out, err) = run_gnr8(&root, &["verify"]);
+    let (code, out, err) = run_gnr8_status(&root, &["verify"]);
+    assert_eq!(code, 2, "{out}\n{err}");
+    let ok = code == 0;
     assert!(
-        !ok && err.contains("no SDK contract tests to run"),
+        !ok && err.contains("no SDK contract tests or generated CLI help checks to run"),
         "verify must say plainly that there is nothing to verify:\n{err}"
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+fn cli_root(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "gnr8-cli-verify-{name}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("openapi.yaml"), SPEC).unwrap();
+    let (code, out, err) = run_gnr8_status(&root, &["init"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    root
+}
+
+fn cli_pipeline(target: &str, defect: Option<(&str, &str)>) -> String {
+    let post = defect
+        .map(|(path, contents)| {
+            format!(
+                r"
+struct BreakHelp;
+impl PostProcess for BreakHelp {{
+    fn run(&self, out: &mut Artifacts, _cx: &Cx) -> Result<(),gnr8::Error> {{
+        out.rewrite({path:?}, |_| {contents:?}.to_string())
+    }}
+}}
+"
+            )
+        })
+        .unwrap_or_default();
+    let post_call = if defect.is_some() {
+        ".post(Custom(BreakHelp))"
+    } else {
+        ""
+    };
+    format!(
+        r#"use gnr8::sdk::prelude::*;
+{post}
+fn main() -> std::process::ExitCode {{
+    gnr8::worker::run(Pipeline::new().source(OpenApi::new().input("openapi.yaml"))
+        .target({target}){post_call})
+}}
+"#
+    )
+}
+
+fn output_bytes(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        if !dir.exists() {
+            return;
+        }
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else {
+                out.insert(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    std::fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn verify_checks_go_cli_with_metadata_disabled_and_contract_tests_enabled() {
+    if !toolchains_available() {
+        eprintln!("skipping: Go/cargo toolchain unavailable");
+        return;
+    }
+    let root = cli_root("go-module");
+    let target = r#"GoSdk::new().module("example.com/catalog/sdk").go_version("1.23").cli(SdkCli::new("catalog")).package_metadata(false).to("sdk")"#;
+    std::fs::write(root.join(".gnr8/src/main.rs"), cli_pipeline(target, None)).unwrap();
+    let (code, out, err) = run_gnr8_status(&root, &["generate"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(!root.join("sdk/go.mod").exists());
+    for stale in [false, true] {
+        if stale {
+            std::fs::write(
+                root.join("sdk/go.mod"),
+                "module wrong.test/stale\n\ngo 1.22\n",
+            )
+            .unwrap();
+        }
+        let before = output_bytes(&root.join("sdk"));
+        let (code, out, err) = run_gnr8_status(&root, &["--json", "verify"]);
+        // Keep both results visible in the red evidence before repairing recursive SDK compilation.
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            code, 0,
+            "SDK: {} CLI: {}\n{out}\n{err}",
+            report["suites"], report["cli_suites"]
+        );
+        assert_eq!(report["verified"], true);
+        assert_eq!(report["suites"].as_array().unwrap().len(), 1);
+        assert_eq!(report["suites"][0]["status"], "passed");
+        assert!(report["suites"][0]["cases"].as_u64().unwrap() > 0);
+        assert_eq!(report["cli_suites"].as_array().unwrap().len(), 1);
+        assert_eq!(report["cli_suites"][0]["status"], "passed");
+        assert_eq!(report["cli_suites"][0]["cases"], 3);
+        assert_eq!(
+            report["counts"],
+            serde_json::json!({"passed":2,"failed":0,"skipped":0})
+        );
+        assert_eq!(before, output_bytes(&root.join("sdk")));
+        assert_eq!(root.join("sdk/go.mod").exists(), stale);
+        let (code, out, err) = run_gnr8_status(&root, &["verify"]);
+        assert_eq!(code, 0, "{out}\n{err}");
+        assert!(
+            out.contains("Go SDK")
+                && out.contains("Go CLI catalog")
+                && out.lines().all(|l| l.ends_with("passed")),
+            "{out}"
+        );
+    }
+    std::fs::write(
+        root.join(".gnr8/src/main.rs"),
+        cli_pipeline(
+            &target.replace("package_metadata(false)", "package_metadata(true)"),
+            None,
+        ),
+    )
+    .unwrap();
+    let (code, out, err) = run_gnr8_status(&root, &["--json", "verify"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()["counts"]["passed"],
+        2
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_checks_go_cli_help_and_gates_a_help_defect() {
+    if !toolchains_available() {
+        eprintln!("skipping: Go/cargo toolchain unavailable");
+        return;
+    }
+    let root = cli_root("go-help");
+    let target = r#"GoSdk::new().module("example.com/catalog/sdk").cli(SdkCli::new("catalog").commands(OperationSelector::operation("listItems")).topic(CliTopic::new("items").command(CliCommand::operation("listItems","browse").example("catalog items browse")))).to("sdk")"#;
+    let healthy = cli_pipeline(target, None);
+    std::fs::write(root.join(".gnr8/src/main.rs"), &healthy).unwrap();
+    let (good_code, good_out, good_err) = run_gnr8_status(&root, &["--json", "verify"]);
+    let broken="package main\nimport (\"os\"; \"fmt\")\nfunc main() {if len(os.Args)>2 && os.Args[1]==\"items\" && os.Args[2]==\"browse\" {fmt.Fprintln(os.Stderr,\"broken help\");os.Exit(3)};fmt.Println(\"usage\")}\n";
+    std::fs::write(
+        root.join(".gnr8/src/main.rs"),
+        cli_pipeline(target, Some(("sdk/cmd/catalog/main.go", broken))),
+    )
+    .unwrap();
+    let (code, out, err) = run_gnr8_status(&root, &["--json", "verify"]);
+    assert_eq!(code, 1, "must gate the help defect\n{out}\n{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["suites"][0]["status"], "passed");
+    assert_eq!(report["cli_suites"][0]["status"], "failed");
+    assert_eq!(
+        report["cli_suites"][0]["reason"]["argv"],
+        serde_json::json!(["items", "browse", "--help"])
+    );
+    assert_eq!(
+        report["cli_suites"][0]["reason"]["code"],
+        "nonzero_help_exit"
+    );
+    assert!(
+        err.contains("items browse --help") && !err.contains("contract tests failed"),
+        "{err}"
+    );
+    assert_eq!(good_code, 0, "{good_out}\n{good_err}");
+    let good: serde_json::Value = serde_json::from_str(&good_out).unwrap();
+    assert_eq!(good["counts"]["passed"], 2);
+    std::fs::write(
+        root.join(".gnr8/src/main.rs"),
+        healthy.replace("GoSdk::new()", "GoSdk::new().without_contract_tests()"),
+    )
+    .unwrap();
+    let (code, out, err) = run_gnr8_status(&root, &["--json", "verify"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["suites"], serde_json::json!([]));
+    assert_eq!(report["counts"]["passed"], 1);
+    let (code, out, err) = run_gnr8_status(&root, &["verify"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains("Go CLI catalog") && out.contains("passed"),
+        "{out}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_checks_python_cli_help_without_installing_the_program() {
+    if Command::new("python3").arg("--version").output().is_err()
+        || Command::new("cargo").arg("--version").output().is_err()
+    {
+        eprintln!("skipping: Python/cargo toolchain unavailable");
+        return;
+    }
+    let root = cli_root("python-help");
+    let target = r#"PySdk::new().module("catalog_client").dataclasses().cli(SdkCli::new("catalog")).to("unrelated-directory")"#;
+    std::fs::write(root.join(".gnr8/src/main.rs"), cli_pipeline(target, None)).unwrap();
+    let (code, out, err) = run_gnr8_status(&root, &["generate"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let before = output_bytes(&root.join("unrelated-directory"));
+    let (good_code, good_out, good_err) = run_gnr8_status(&root, &["--json", "verify"]);
+    assert_eq!(before, output_bytes(&root.join("unrelated-directory")));
+    std::fs::write(
+        root.join(".gnr8/src/main.rs"),
+        cli_pipeline(
+            target,
+            Some((
+                "unrelated-directory/cli/__main__.py",
+                "raise RuntimeError('CLI entry defect')\n",
+            )),
+        ),
+    )
+    .unwrap();
+    let (code, out, err) = run_gnr8_status(&root, &["--json", "verify"]);
+    assert_eq!(code, 1, "must exercise module entry\n{out}\n{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["suites"][0]["status"], "passed");
+    assert_eq!(report["cli_suites"][0]["status"], "failed");
+    assert!(err.contains("CLI entry defect"), "{err}");
+    assert_eq!(before, output_bytes(&root.join("unrelated-directory")));
+    assert_eq!(good_code, 0, "{good_out}\n{good_err}");
+    let good: serde_json::Value = serde_json::from_str(&good_out).unwrap();
+    assert_eq!(good["counts"]["passed"], 2);
+    std::fs::write(root.join(".gnr8/src/main.rs"), cli_pipeline(target, None)).unwrap();
+    let (code, out, err) = run_gnr8_status(&root, &["verify"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.contains("Python SDK")
+            && out.contains("Python CLI catalog")
+            && out.lines().all(|l| l.ends_with("passed")),
+        "{out}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
