@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.17.1 — 2026-10-07
+
 ### Added
 
 - `gnr8 verify` checks root, group, and every selected operation command's `--help` for generated
