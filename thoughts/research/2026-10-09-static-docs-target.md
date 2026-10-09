@@ -24,6 +24,22 @@ statement below comes from the brief's own summary of it — its eleven conventi
 and is labelled *(scan, via brief)*. One general-knowledge statement is labelled as such. No
 repository claim in this document depends on the scan.
 
+**Revision — adversarial review round 1 (2026-10-09).** The companion plan
+([`2026-10-09-static-docs-target-plan.md`](2026-10-09-static-docs-target-plan.md)) and an independent
+review corrected this document in eight places. Each correction is made in place and carries a
+*Superseded* note naming what it replaced:
+
+- **§1.1** — the security-requirement anchor;
+- **§1.3** — the new-variant precedent;
+- **§1.4** — the `file_stem` anchor;
+- **§3.1 / §3.2(a) / §3.5** — what "rendered by the SDK's own functions" covers;
+- **§3.3** — what a tag "badge" is;
+- **§3.4** — the sampler workstream name and its composition rule;
+- **§3.7** — the TypeScript and Python rung-2 mechanisms, what `require_fresh` checks, and rung 3's
+  substitution;
+- **§5 / §6** — the first release now contains the constraint-respecting sampler; Open 1 and
+  Open 6 are answered.
+
 Acting on the standard above, **six product facts carried into this work needed correcting**:
 
 | The brief said | This checkout says |
@@ -91,7 +107,7 @@ deterministic for free.
 | Intro, version, contact, license, terms | `OpenApiMetadataPolicy` | `graph.rs:164-185` | `OpenApiMetadata` transform, or the importer |
 | Servers | `openapi_metadata.servers`, in configured order | `graph.rs:182-184`, `:253-275` | same |
 | Base path | `ApiGraph.base_path`. `Operation.path` is group-relative and the mount prefix is not folded in | `graph.rs:69-71`, `:521-526`; joined by `join_path` (`crates/gnr8-core/src/sdk/emit_common.rs:1967`) | `SetBasePath` |
-| Security | `ApiGraph.security`, `security_requirements`, `operation_security`; per-operation `security` / `security_overrides_global` | `graph.rs:78-87`, `:483-503`, `:560-565`; resolved by `operation_auth_alternatives` (`emit_common.rs:971`) | `ApplySecurity` (rule 4) |
+| Security | `ApiGraph.security`, `security_requirements`, `operation_security`; per-operation `security` / `security_overrides_global` | `graph.rs:78-87`; scheme type `SecurityScheme` `:483-503`; requirement types `SecurityRequirementGroup` / `OperationSecurityPolicy` `:277-291` (*Superseded:* this row cited `:483-503` for both); `:560-565`; resolved by `operation_auth_alternatives` (`emit_common.rs:971`) | `ApplySecurity` (rule 4) |
 | Retries and timeouts | `RuntimePolicy` | `graph.rs:293-311` | `ConfigureSdkRuntime` |
 
 **Operation level**
@@ -199,11 +215,11 @@ for a fact or a fallback path"*). A new built-in target touches nine places:
 | 1 | Declaration struct and builder (serde) | `crates/gnr8-sdk/src/sdk/builtins.rs` | `OpenApi31` `:2147-2187`; `GoSdk` `:2278-2427` |
 | 2 | `BuiltinTarget` variant and `From` impl | `crates/gnr8-sdk/src/sdk/stage.rs:88-91`, `:178-182` | serde tag `"stage"` (`:40`), so it serializes as `"static_docs"` |
 | 3 | Prelude export | `crates/gnr8-sdk/src/sdk/mod.rs:715-723` | `StaticFiles`, `TsSdk` |
-| 4 | `impl TargetExec` | trait at `crates/gnr8-core/src/sdk/builtins.rs:75-117` | `OpenApi31` at `:2864-2906`; an empty path is `CoreError::Config` (`:2872-2877`) |
+| 4 | `impl TargetExec` | trait at `crates/gnr8-core/src/sdk/builtins.rs:75-117` | `OpenApi31` at `:2864-2906`; an empty path is `CoreError::Config` (`:2872-2877`). *Note (review round 1, note 2):* `StaticDocs` skips this row and gets a direct arm in each dispatch function instead (plan §3.2), because it alone needs the plan's sibling declarations |
 | 5 | Dispatch arms | `generate_target` `:4319-4334`, `target_output_anchors` `:4336-4347`, `target_readiness_targets` `:4349-4360`, `target_contract_test_suites` `:4362-4379`, `target_cli_help_suites` `:4381-4431` | exhaustive `match`es, so the compiler lists every site |
 | 6 | Emission memo | the key serializes every built-in declaration in plan order (`crates/gnr8-core/src/pipeline/emission.rs:96-106`) | nothing to add while the target stays pure. Only `StaticFiles` opts out, because it reads the project tree (`:19-21`, `:97-101`) |
 | 7 | Verify-suite collection | `PipelineOutcome.cli_help_suites` (`pipeline/mod.rs:179-180`, `:234-249`, `:408`); host runner `crates/gnr8/src/verify/cli_help.rs` (`run` `:120`, `require_fresh` `:229`, `prepare_target` `:241`, `execute_checks` `:344`) | #106 (`CHANGELOG.md:16-17`) |
-| 8 | Release classification | `BuiltinTarget` is not `#[non_exhaustive]` — the only such enum in the SDK crate is `crates/gnr8-sdk/src/error.rs:13` — and the published crate is `gnr8` (`crates/gnr8-sdk/Cargo.toml:12`). A new variant breaks exhaustive matchers, which means a **minor** bump (`docs/RELEASE.md:90-93`) and a **Breaking** changelog heading. Precedent: 0.16.1 (`CHANGELOG.md:164-170`) | |
+| 8 | Release classification | `BuiltinTarget` is not `#[non_exhaustive]` — the only such enum in the SDK crate is `crates/gnr8-sdk/src/error.rs:13` — and the published crate is `gnr8` (`crates/gnr8-sdk/Cargo.toml:12`). A new variant breaks exhaustive matchers, which means a **minor** bump (`docs/RELEASE.md:90-93`) and a **Breaking** changelog heading. Precedents for a *new variant* on a public non-`#[non_exhaustive]` enum: 0.12.0 (`CHANGELOG.md:613-619`, `OperationSelector` gains `SourcePrefix`) and 0.8.0 (`:892-900`, `CoreError::GoToolchainSkew`). *Superseded:* this row cited 0.16.1 (`:164-170`), which concerns new struct fields, not a new variant. The conclusion is unchanged | |
 | 9 | Protocol | No `PROTOCOL_VERSION` bump is implied. The handshake digest embeds the exact SDK version (`crates/gnr8-sdk/src/protocol/mod.rs:68-79`, compared at `crates/gnr8-core/src/worker/mod.rs:301`). #96 added `SdkCli` to two declarations, and its only bump (7→8) was for `ArtifactChanges.diagnostics` (`git show ea84ef1 -- crates/gnr8-sdk/src/protocol/mod.rs`) | |
 
 **Execution contract.** Built-in targets run in parallel because each is *"a pure function of the
@@ -232,7 +248,8 @@ difference is that docs are a separate, language-neutral target.
 - The per-language timeout semantics (`sdk/docs.rs:77-102`). They are three hand-written strings
   today. They must become one function both renderers call, or the README and the docs site will
   drift.
-- `kebab` / `file_stem` (`emit_common.rs:88`, `:103-113`) and `check_unique_model_file_names`
+- `file_stem` / `kebab` (`emit_common.rs:86-101`, `:103-113`; *superseded:* `:88` pointed inside
+  `file_stem`) and `check_unique_model_file_names`
   (`:1280`), for file naming and collision refusal.
 - `EffectiveOperationTags` (`crates/gnr8-core/src/graph/mod.rs:25`).
 - The rule that a section with nothing to say is omitted, not printed as an empty heading
@@ -296,9 +313,17 @@ brief: "Stripe needs separate SDK specs")*. gnr8 already emits the OpenAPI docum
 CLIs and their contract tests as pure functions of **one frozen graph in one process**
 (`pipeline/mod.rs:462-468`). So its docs can make a promise no integration can:
 
-> **Every statement on a page renders a graph fact. Every code sample is rendered by the same
+> **Every statement on a page renders a graph fact. Every code sample spells its names with the same
 > functions that emitted the SDK it calls. And `gnr8 verify` proves the sample still compiles — and,
-> at the top rung, that it sends exactly the request printed beside it.**
+> at the top rung, that it sends the request printed beside it.**
+
+*Superseded wording (review round 1, note 1):* this used to say every sample is "rendered by the
+same functions that emitted the SDK". That holds for **names** — `operation_method_name`, `exported`
+and `go_type` are imported into `gosdk/contract.rs:26-29`. It does **not** hold for **call shape**:
+`call_arguments` re-derives the argument-slot order and says so — *"The slot order is the one
+`emit_operation` declares"* (`gosdk/contract.rs:486-489`). That is a second derivation, kept honest
+today by compiling the contract test. So the no-drift guarantee for call shape comes from
+**verification** (rungs 2–3, §3.7), not from construction, and no public wording may claim more.
 
 Matching the eleven conventions is the floor. The win is that the docs are **checked claims**: a
 reference that cannot silently disagree with the SDK, and that says so in CI when the API moves.
@@ -312,7 +337,9 @@ only the first half of one today:
    (`operation_method_name` × 3, `exported`/`snake`/`camel`, and the credential options), called
    rather than re-derived.
 2. *Call shape is real.* Argument order and literal construction come from the contract renderers'
-   `call_arguments`, lifted into a shared renderer (§3.5).
+   `call_arguments`, lifted into a shared renderer (§3.5). Its slot order is a derivation separate
+   from the emitter's, so "real" here is a verified property (rungs 2–3), not a constructed one
+   (§3.1).
 3. *Values are valid.* Values come from the sampler, which must first learn to honour declared
    constraints (§1.2.4).
 
@@ -338,6 +365,11 @@ gnr8 already publishes its own `llms.txt` and `llms-full.txt` at the repository 
 invariant gate's scope (`scripts/check-invariants.sh:21-22`). No second machine format: the graph
 itself is already emitted as `generated/gnr8.graph.json` (`pipeline/mod.rs:410-411`). The index can
 link to it rather than invent a JSON docs format.
+
+**Stability (review round 1, note 16).** `llms.txt` is an index for agents to read, not an API for
+scripts to parse. Its layout follows the external proposal's shape and may change in any release.
+The machine contract for API facts remains the versioned graph artifact
+(`crates/gnr8-core/src/graph_artifact.rs:1-5`, `:12`).
 
 **(d) Error catalog — KEEP, keyed by (status × schema).** The catalog is built from `SdkErrorPlan`
 (`model.rs:170-190`). Each entry gives:
@@ -406,7 +438,8 @@ File-level links can be checked against the emitted set alone (§3.7, rung 0).
 
 1. `# \`createBook\`` — the operation id (rule 3: §4.3).
 2. One line: `` `POST /books` ``, with the base path joined by `join_path`, the group link, tags as
-   badges, and **Deprecated** when set.
+   inline code spans (`` `books` `` — "badge" in earlier wording meant only this; no image, no
+   hosted badge service), and **Deprecated** when set.
 3. Summary, then description, via `operation_prose`.
 4. **Authentication** — the operation's requirement alternatives, linked to `authentication.md`.
 5. **Parameters** — one table per location, with columns Name, Type (schema links), Required,
@@ -431,7 +464,7 @@ located: Open 1). Enum members appear in graph order.
 
 **Navigation** is by `op.group` alone. That is the grouping fact the SDK services
 (`model.rs:341`) and CLI topics (`emit_common.rs:120-125`) already use, and for imported specs it is
-the first tag. Tags render as badges only. Ungrouped operations appear directly on the index. There
+the first tag. Tags render only as inline code spans on the operation line. Ungrouped operations appear directly on the index. There
 is no invented `default` group: the SDK model names one (`model.rs:341`), but the CLI deliberately
 does not (`emit_common.rs:120-122`), and a docs heading is a published name.
 
@@ -459,8 +492,14 @@ pattern rule 3 names first. The sampled call is always the sampled call. The dec
 always shown where it is declared. A page with both shows both, each labelled for what it is.
 
 The sampler's values are synthetic (`"gnr8"`, `7`, `1.5`). That is acceptable **only once they are
-valid**. Workstream D2 (§5) teaches the sampler the declared `Constraints` once, so the contract
-tests and the docs both benefit. Two rules:
+valid**. The sampler workstream — **S1**, landed in the plan's P1 and therefore in the first release
+(§5) — teaches the sampler the declared `Constraints` once, so the contract tests and the docs both
+benefit. (*Superseded name:* this workstream was called "D2" here, which collided with the plan's
+decision D2; review round 1, note 21.)
+
+Constraint-respecting is defined **per value, not per constraint**: a sampled value is published
+only if it satisfies *every* constraint on its input at once. Otherwise the input is refused. The
+plan (§4.2) gives the candidate order and the single `satisfies` check. Three rules:
 
 - **`pattern` is never synthesized.** gnr8 carries no regex engine and should not grow one for
   this. An operation whose required input is pattern-constrained gets a **typed refusal reason**
@@ -470,6 +509,10 @@ tests and the docs both benefit. Two rules:
   reason (§1.2.5). It already refuses unions in request position and byte strings
   (`verify/mod.rs:1102-1104`, `:1250-1252`) and non-default serialization styles (`:981-988`); docs
   print those reasons too.
+- **A graph error is never a refusal.** `Candidate::build` already propagates real errors with `?`
+  (`verify/mod.rs:498`, `:526`), and a dangling reference is a `CoreError`, as it already is in
+  `SdkModel::build` (`model.rs:572-581`). Printing such an error as a page note would fail open, so
+  it stays an error that fails generation.
 
 ### 3.5 Snippets: one call-site renderer, two consumers
 
@@ -504,6 +547,36 @@ book, err := client.CreateBook(ctx, sdk.CreateBookRequest{Author: "gnr8", Genre:
   snippet passes.
 - **Snippets exist only for SDK targets the pipeline actually emits** (§3.6). There are no snippets
   for custom targets, which are user code gnr8 does not model.
+
+**Consumer import identity — one rule, no fallback.** *Superseded (review round 1, finding 14):* an
+earlier plan draft imported a TypeScript registry name when package metadata was on and a
+docs-relative path otherwise. That is the "if present use A, otherwise B" shape rule 3 forbids. The
+rule for all three languages is:
+
+- **The identity is what the sibling SDK target's own emitted package manifest declares.** For Go,
+  that is the `go.mod` `module` line and the package clause name (written only when
+  `package_metadata` is on, `crates/gnr8-core/src/sdk/builtins.rs:3079-3083`). For Python, it is the
+  import package `pyproject.toml` lists (`builtins.rs:3191-3203`; for example
+  `examples/fastapi-bookstore/generated/sdk/pyproject.toml:14-15`). For TypeScript, it is the
+  `package.json` `name` (`builtins.rs:3436-3455`).
+- **A target that emits no manifest has no consumer identity.** Its section prints a typed note
+  instead of a snippet: *"No sample call: this SDK target emits no package metadata, so it has no
+  published import name."* The HTTP exchange and the other languages' sections are unaffected.
+
+A consumer's import path for an unpublished SDK depends on where they vendor it, which no
+declaration states. The docs therefore print no import for one.
+
+**Go qualification reaches more than a top-level alias** (review round 1, finding 11). The Go literal
+renderer spells model names in four places:
+
+- inside composite types from `go_type`: `[]T`, `map[K]V`, pointers (`gosdk/emit.rs:143-158` is the
+  `Named` leaf);
+- in `Ptr[T]` type arguments (`gosdk/contract.rs:551`, `:600-610`);
+- in enum and struct literals (`:673`, `:697`).
+
+It also renders date-times through `contractTime`, a helper only the test harness defines
+(`:624`, `:229`). The plan (§4.1) designs the qualifier for all four places and for the date-time
+helper.
 
 ### 3.6 Plumbing: `StaticDocs` reads sibling declarations, never sibling output
 
@@ -542,12 +615,21 @@ earlier, with a message naming both targets, like `OpenApi31`'s empty-path error
 |---|---|---|---|
 | **0 — structural** | Every operation has exactly one page and every operation page has an operation. Every relative link resolves to a file in this target's own output. No file-name collision. No empty heading. | Generation time, as a hard `CoreError`, plus unit tests | none |
 | **1 — determinism** | Same graph and declarations ⇒ same bytes | `gnr8 check`, `examples-check` (§1.5), and the `determinism` gate test extended to `StaticDocs` (`Makefile:69`) | none |
-| **2 — snippets compile** | Every snippet type-checks against the SDK it documents. Go: an external `_test` package in a temporary copy of the module, then `go vet`. TypeScript: `tsc --noEmit --strict --lib es2022,dom`, the flags the `tssdk_compile` gate uses (`Makefile:53-55`). Python: see Open 6. | `gnr8 verify` docs suite, declared by `StaticDocs` the way `CliHelpSuite` is (`builtins.rs:4381-4431`). Like `cli_help.rs`, it refuses stale artifacts (`require_fresh`, `:229`) and reports skipped toolchains explicitly (`CHANGELOG.md:16-17`) | per language |
-| **3 — snippets send the page's request** | Each snippet runs against its language's existing fake transport (Go `RoundTripper`, `gosdk/contract.rs:3-6`; Python opener seam, `pysdk/contract.rs:7-10`), and the wire is asserted equal to the page's HTTP exchange — the same assertion the contract test makes (`gosdk/contract.rs:299-323`) | `gnr8 verify` | per language |
+| **2 — snippets resolve against the SDK** | Every name and argument in every snippet resolves against the SDK it documents. **Go:** an external `<pkg>_test` package in a temporary copy of the module, then `go vet`. **TypeScript:** a temporary tree whose `tsconfig.json` carries exactly the `tssdk_compile` gate's options (`crates/gnr8-core/tests/tssdk_compile.rs:101-116`: `--noEmit --strict --noUnusedLocals --exactOptionalPropertyTypes --noUncheckedIndexedAccess --target es2022 --module esnext --moduleResolution bundler --lib es2022,dom`), plus a `paths` entry mapping the SDK's published `package.json` name to the copied SDK's `index.ts`, so the import the page prints is the import that resolves. **Python:** the construction line runs for real, and the call runs against a client built through the opener seam (`pysdk/contract.rs:161-162`) whose stub answers every request with a non-success status. The check passes only if the call raises the SDK's typed `ApiError`. That proves the method name, every keyword and every model constructor resolved, and that a request was built. `py_compile` plus `import` would prove none of that, because a function body runs only when called. | `gnr8 verify` docs suite, declared by `StaticDocs` the way `CliHelpSuite` is (`builtins.rs:4381-4431`). It reports skipped toolchains explicitly (`CHANGELOG.md:16-17`) and requires each expected page among this run's fresh artifacts (`require_fresh`, `:229`, checks presence and nothing more). It also checks that every snippet appears verbatim in its page **after** post-processors, so a post-process that rewrites a snippet is caught | per language |
+| **3 — snippets send the page's request** | Each snippet's call runs against its language's existing fake transport (Go `RoundTripper`, `gosdk/contract.rs:3-6`; Python opener seam, `pysdk/contract.rs:7-10`), and the wire is asserted equal to the page's HTTP exchange — the same assertion the contract test makes (`gosdk/contract.rs:299-323`). Equality holds **after substitution**: the page prints credentials and the base URL as variables, and the harness injects the contract constants (`verify/mod.rs:38-48`) and `http://gnr8.test` (`:32-36`), a base URL with no path. A deployment whose server URL carries a path prefix prepends it to every printed path, and the page says so | `gnr8 verify` | per language |
+
+*Superseded (review round 1, findings 4, 5 and 8, and note 9):*
+
+- Rung 2 was described as `tsc --noEmit --strict --lib es2022,dom`, *"the flags the `tssdk_compile`
+  gate uses (`Makefile:53-55`)"*. Those lines are a comment that lists a subset of the flags, and
+  that recipe could not resolve the import it rendered.
+- Python rung 2 was left open.
+- `require_fresh` was described as refusing stale artifacts; it checks presence only.
+- Rung 3 was described as exact equality with no substitution.
 
 Rung 3 is the claim no surveyed tool is reported to make: **the request on the page is the request
-the SDK sends, for every operation, in every generated language.** It reuses harnesses gnr8 already
-emits and already runs.
+the SDK sends, for every operation, in every generated language** — modulo the variable
+substitution above. It reuses harnesses gnr8 already emits and already runs.
 
 ### 3.8 Configuration surface (rule 4)
 
@@ -665,16 +747,22 @@ sees — never as a `StaticDocs` option that only the docs see.
 
 ## 5. Phasing, test strategy and size
 
-**First shippable vertical slice: P0 + P1** — the bookstore reference with Go snippets. A slice
-without snippets would be a better `reference.md` and nothing more. The snippet is the thesis, so it
-ships first, in one language, end to end.
+**First shippable vertical slice: P0 + P1** — the bookstore reference with Go snippets **whose
+values satisfy every declared constraint**. A slice without snippets would be a better
+`reference.md` and nothing more. The snippet is the thesis, so it ships first, in one language, end
+to end — and only with values this document does not itself call defective (§1.2.4).
+
+*Superseded (review round 1, finding 22):* the constraint-respecting sampler was scheduled in P2, so
+the first release would have printed constraint-blind values (`"gnr8"` for a `minLength: 5` field)
+— which §1.2.4 calls *"a defect on a published page"*. It now lands in P1. The contract-test
+re-baseline it causes therefore ships in the first release as a **Fixed** entry.
 
 | Phase | Delivers | Red-first tests | Rough size |
 |---|---|---|---|
-| **P0 — declaration and plumbing** | `StaticDocs` with `.to()`; the `BuiltinTarget` variant; prelude export; `TargetExec` stub; sibling-declarations argument; dispatch arms | Serde round-trip of `BuiltinTarget::StaticDocs` (pattern: `crates/gnr8-sdk/src/sdk/stage.rs:327-334`); empty `to` ⇒ `Config`; the memo key changes when the declaration changes (pattern: the memo's own tests, `pipeline/emission.rs:418`, `:433`, `:505`) | ~300 lines |
-| **P1 — vertical slice** | `index.md`, `groups/`, `operations/`, `schemas/` and `llms.txt` from graph facts; the Go call-site renderer lifted with `InPackage`/`Consumer`; the HTTP exchange; rung 0 as hard errors; `examples/bookstore` opts in and commits `generated/docs/` | (1) Hand-write the expected `index.md` and one operation page for the goalservice fixture **first**, under `fixtures/goalservice/expected/docs/`, then build a `snapshot_docs` test after `snapshot_sdk.rs`. The hand-written expectation is the spec. (2) Go `contract_test.go` stays byte-identical after the lift. (3) A rung-0 unit test per invariant: dangling link, kebab collision, missing page. (4) Extend `determinism`. | ~1.5–2k lines, tests included |
-| **P2 — every language** | Python and TypeScript call-site lifts; CLI subsections; D2: the constraint-honouring sampler with typed refusals | Every sample satisfies its `Constraints` (property-style over fixture graphs); the contract snapshots re-baseline once, deliberately, in their own commit; `fastapi-bookstore` and `nestjs-bookstore` opt in | ~1–1.5k |
-| **P3 — `gnr8 verify`, rung 2** | Declared docs-snippet suite; host runner beside `crates/gnr8/src/verify/cli_help.rs`; explicit skip reports | Runner tests in the shape of `cli_help.rs` (fresh-artifact refusal, missing-toolchain skip, a planted non-compiling snippet fails) | ~800 |
+| **P0 — declaration and plumbing** | `StaticDocs` with `.to()`; the `BuiltinTarget` variant; prelude export; a `StaticDocs` arm in each dispatch function (plan §3.2 — no `TargetExec` impl, so there is one entry point); sibling-declarations argument | Serde round-trip of `BuiltinTarget::StaticDocs` (pattern: `crates/gnr8-sdk/src/sdk/stage.rs:327-334`); empty `to` ⇒ `Config`; the memo key changes when the declaration changes (pattern: the memo's own tests, `pipeline/emission.rs:418`, `:433`, `:505`) | ~300 lines |
+| **P1 — vertical slice** | `index.md`, `groups/`, `operations/`, `schemas/` and `llms.txt` from graph facts; the Go call-site renderer lifted with `InPackage`/`Consumer`; the HTTP exchange; rung 0 as hard errors; **S1, the constraint-respecting sampler with typed refusals**; `examples/bookstore` opts in and commits `generated/docs/` | (1) Hand-write the expected `index.md` and one operation page for the goalservice fixture **first**, under `fixtures/goalservice/expected/docs/`, then build a `snapshot_docs` test after `snapshot_sdk.rs`. The hand-written expectation is the spec. (2) Go `contract_test.go` stays byte-identical after the lift, against a baseline snapshot committed *before* the lift. (3) A rung-0 unit test per invariant: dangling link, kebab collision, missing page. (4) Extend `determinism`. (5) Every sample satisfies all of its `Constraints` (property-style over synthetic graphs — no example or fixture declares length or range bounds today); the contract tests re-baseline once, deliberately, in their own commit | ~2–2.5k lines, tests included |
+| **P2 — every language** | Python and TypeScript call-site lifts; CLI subsections; `fastapi-bookstore` and `nestjs-bookstore` opt in | Consumer import identity (plan §4.1); Python and TypeScript rung-2 checks in gnr8's own tests | ~0.8–1.2k |
+| **P3 — `gnr8 verify`, rung 2** | Declared docs-snippet suite; host runner beside `crates/gnr8/src/verify/cli_help.rs`; explicit skip reports | Runner tests in the shape of `cli_help.rs` (missing fresh page refused, missing-toolchain skip, a planted non-compiling snippet fails, a post-process that rewrites a snippet fails) | ~800 |
 | **P4 — reference completeness and rung 3** | `errors.md`, `authentication.md`, per-page diagnostics, pagination; snippet execution against the fake transports with the wire asserted | Each page type snapshot-tested; a planted wire mismatch fails rung 3 | ~0.8–1.2k |
 | **P5 — docs and release** | A docs page for the target, `docs/reference/public-api.md`, the repository `llms.txt` index, and a CHANGELOG **Breaking** entry (new `BuiltinTarget` variant ⇒ minor, so 0.18.0) | `make invariants` | ~300 |
 
@@ -683,7 +771,8 @@ the committed `examples/*/generated/docs/` trees under `examples-check`. Opt exa
 their language's snippets land, so no example ever commits a page with a known-missing section.
 Pages are small, one file per fact, so a regression's diff names the page and section that moved.
 
-**Total:** roughly 5–6.5k lines including tests, in six PR-sized phases. P0+P1 is the first release.
+**Total:** roughly 5–6.5k lines including tests, in six PR-sized phases. P0+P1, including the
+constraint-respecting sampler, is the first release.
 
 ---
 
@@ -691,10 +780,12 @@ Pages are small, one file per fact, so a regression's diff names the page and se
 
 Ordered by how much the answer would change the design. Items for the owner are in §7.
 
-1. **Where the field-table Required / Nullable decision lives.** Docs must reuse the per-direction
-   decision the OpenAPI lowering and the SDK emitters make. This session did not locate the single
-   function to call; `verify/mod.rs:1200-1206` is only the inbound-presence view. If no single
-   function exists, extracting one is part of P1. A docs-local recomputation is the rule-3 failure.
+1. ~~**Where the field-table Required / Nullable decision lives.**~~ **Answered (review round 1,
+   note 19).** `SchemaDirections::field_is_required` / `field_is_nullable`
+   (`crates/gnr8-core/src/graph/direction.rs:61`, `:78`) is the single per-direction decision. The
+   OpenAPI lowering calls it (`lower/mod.rs:938`, `:948`), and so do all three emitters
+   (`gosdk/emit.rs:517`, `pysdk/emit.rs:448`, `tssdk/emit.rs:482`). Docs call it.
+   `verify/mod.rs:1200-1206` is an inbound-only helper that docs must not use.
 2. **`llms-full.txt`.** gnr8's own repository ships one. For a 400-operation API, concatenating
    every page could be megabytes on every regeneration. It is deferred until someone asks, and it
    would be derived from the same nav model if added.
@@ -708,9 +799,11 @@ Ordered by how much the answer would change the design. Items for the owner are 
    extras sit opaquely in `Param.openapi_fields` (`graph.rs:614-620`). `StaticDocs` renders typed
    facts only, so those do not appear. Parsing them in a second target would give the OpenAPI
    fragment two readers.
-6. **Python rung 2.** The standard library has no static type checker. The candidates are binding
-   each call against `inspect.signature`, or skipping rung 2 for Python and relying on rung 3
-   (execution through the opener seam), which subsumes it.
+6. ~~**Python rung 2.**~~ **Answered (review round 1, finding 5): execution against a stub
+   transport** (§3.7). The real construction line runs, then the call runs against an opener stub
+   that answers every request with a non-success status, and the check passes only on the SDK's
+   typed `ApiError`. Neither `py_compile` nor `inspect.signature` binding would check a method name
+   inside a function body that never runs.
 7. **Linking the index to sibling artifacts.** The index could link to the OpenAPI document and
    `gnr8.graph.json` that the same pipeline writes. The paths come from sibling declarations, so
    this is cheap after §3.6.
@@ -730,6 +823,13 @@ Ordered by how much the answer would change the design. Items for the owner are 
    known-inconsistency `description:"…"` / `example:"…"` tag grammar be deleted
    (`AGENTS.md:82-86`; `goextract/internal/types/extract.go:177-183`). This is the owner's
    invariant text, so it is the owner's call.
+
+   *Added (review round 1, findings 15 and 18):* the plan's defaults (plan D1 as amended, and D4)
+   render, on docs pages, exactly the field and parameter facts `openapi.yaml` already publishes.
+   That includes parameter prose from the 0.17.0 widening, and field facts that on the Go path come
+   from tag spellings no Go runtime consumes (`default:`, `format:`, `minLength:` …,
+   `goextract/internal/types/extract.go:270-322`). Rendering them on a second artifact does not
+   settle this item. The plan lists both as owner-informable defaults that you may override.
 2. **What happens to the per-SDK `reference.md`?** `SdkDocs::reference()` is on by default
    (`crates/gnr8-sdk/src/sdk/docs.rs:32-36`) and renders a second, thinner operation reference from
    the same graph (`crates/gnr8-core/src/sdk/docs.rs:133-170`). The options are:
@@ -741,7 +841,7 @@ Ordered by how much the answer would change the design. Items for the owner are 
    The `README.md` quick start should be regenerated from the §3.5 renderer under every option,
    because today it is a placeholder.
 3. **May a tag ever subtract operations from the docs?** v1 mirrors the graph — the set
-   `openapi.yaml` publishes — and shows tags as badges. A public reference built from a graph that
+   `openapi.yaml` publishes — and shows tags as inline code spans. A public reference built from a graph that
    includes internal routes would need a tag to *remove* operations from a contract rendering. That
    is the same "first place a tag changes an artifact" question the CLI research deferred to you
    (`thoughts/research/2026-09-11-cli-pre-ship-requirements.md` §4, Open 1), now for an artifact

@@ -6,11 +6,23 @@ not re-argue it. Market context comes from `.briefs/market-scan.md`, read for th
 
 Target release: **0.18.0** — **Breaking**, because the published `gnr8` crate gains a variant on a
 non-`#[non_exhaustive]` enum (R§1.3 row 8). The breaking change lands once, in the first release
-that contains phases P0+P1. Every later phase is additive.
+that contains phases P0+P1. P1 includes S1, the constraint-respecting sampler (§4.2), so that
+release prints no sample value its own baseline calls defective. Every later phase is additive.
 
 Branch `research/docs-target` @ `ba446cb` · workspace `0.17.1` (`Cargo.toml:9`). Every `file:line`
 below was re-read in this checkout. No product code has changed since the research commit, so the
 research doc's anchors still hold, and the anchors new to this plan were read for it.
+
+**Revision — adversarial review round 1 (`.briefs/03-review-notes.md`; tip `ff694d8`).** The review
+found 2 blocking and 9 should-fix issues, plus 13 notes. Every resolution below is made in place and
+carries a *Superseded* note naming what it replaced. The release-scope changes:
+
+- **The first release now contains the constraint-respecting sampler.** It moved from P2 to P1
+  (finding 22), so 0.18.0 never publishes a value the baseline calls defective.
+- **The consumer import identity is one rule for all three languages** (finding 14): what the SDK
+  target's own emitted manifest declares, or else a typed note and no snippet.
+- **D1 is amended** to render exactly the field facts `openapi.yaml` publishes (finding 15), and
+  **D4** records parameter prose (finding 18). Both are listed in §11 as owner-informable.
 
 Two rules govern the plan, carried from the research and CLI documents:
 
@@ -23,66 +35,113 @@ Two rules govern the plan, carried from the research and CLI documents:
 
 | Input said | This plan says |
 |---|---|
-| Market scan: *"Stable operationId-derived slugs + a sidebar manifest so any SSG (Docusaurus, MkDocs, Hugo) can consume the output"* (`.briefs/market-scan.md:80`) | **Slugs yes** (§6). **Sidebar manifest no.** A file shaped for a site generator's nav is that tool's config format (rule 0.1; R§3.9), and a second machine index would be a second format (R§3.2(c)). The one machine-readable index is `llms.txt`, written in exactly `index.md` order, so a user's own script can build any sidebar from it. |
+| Market scan: *"Stable operationId-derived slugs + a sidebar manifest so any SSG (Docusaurus, MkDocs, Hugo) can consume the output"* (`.briefs/market-scan.md:80`) | **Slugs yes** (§6). **Sidebar manifest no.** A file shaped for a site generator's nav is that tool's config format (rule 0.1; R§3.9), and a second machine index would be a second format (R§3.2(c)). `llms.txt` is an index for agents, **not** an API for scripts (§6, stability). *Superseded (note 16):* this row used to invite user scripts to build sidebars from `llms.txt`. |
 | Market scan: *"curl example"* (`.briefs/market-scan.md:77`) | An HTTP message, not `curl` (R§3.2(g)). |
-| Research P0: *"`TargetExec` stub"* (R§5) | `TargetExec::generate` cannot carry the sibling declarations without editing **59** direct `.generate(` call sites (`grep -rnE 'TargetExec::generate\|\.generate\(&(ir\|graph\|g),' crates` = 59). `generate_target` has exactly **one** caller (`crates/gnr8-core/src/pipeline/mod.rs:501`). So the plan adds one defaulted trait method rather than changing the required one (§3.3). |
+| Research P0: *"`TargetExec` stub"* (R§5) | `TargetExec::generate` cannot carry the sibling declarations without editing **59** direct `.generate(` call sites (`grep -rnE 'TargetExec::generate\|\.generate\(&(ir\|graph\|g),' crates` = 59). `generate_target` has exactly **one** caller (`crates/gnr8-core/src/pipeline/mod.rs:501`) and is a free function with an exhaustive `match` (`crates/gnr8-core/src/sdk/builtins.rs:4326-4333`). So its `StaticDocs` arm calls `crate::staticdocs::generate(t, ir, out, plan)` directly, and `StaticDocs` has **no** `TargetExec` impl (§3.2–§3.3). *Superseded (note 2):* the plan used to add a defaulted `generate_in_plan` trait method plus an always-refusing `generate` — two entry points on one type. |
 | Research: snapshots under `fixtures/goalservice/expected/docs/` (R§5) | **Both, with different jobs.** Two hand-written golden pages are the red-first spec (exact bytes). An `insta` snapshot covers the whole tree, following the house precedent: `snapshot_sdk.rs` asserts an `insta` snapshot (`crates/gnr8-core/tests/snapshot_sdk.rs:22-27`) that was reviewed against `fixtures/goalservice/expected/sdk/*.go` (`:8`). |
-| Research Open 6: Python rung 2 is undecided | **Resolved.** For Python, rung 2 is `py_compile` plus `import`. Argument names are proved at rung 3, which executes the call. Signature-binding tricks are not needed. |
-| Research Open 1: where Required/Nullable is decided | **Not answerable without new reading, so it becomes the first task of P1** (W1.1). It has a hard rule: reuse the one decision or extract it; never recompute it. |
+| Research Open 6: Python rung 2 is undecided | **Resolved: execution against a stub transport** (§5, rung 2). The real construction line runs, then the call runs against an opener-seam stub that answers every request with a non-success status, and the check passes only on the SDK's typed `ApiError`. *Superseded (finding 5):* this row chose `py_compile` plus `import`, which never resolves a method name inside an uncalled function body. |
+| Research Open 1: where Required/Nullable is decided | **Answered in this tree:** `SchemaDirections::field_is_required` / `field_is_nullable` (`crates/gnr8-core/src/graph/direction.rs:61`, `:78`). The lowering (`lower/mod.rs:938`, `:948`) and all three emitters (`gosdk/emit.rs:517`, `pysdk/emit.rs:448`, `tssdk/emit.rs:482`) call it; docs call it too, never `verify/mod.rs:1204`. *Superseded (note 19):* this row scheduled a P1 spike (old W1.1) and Risk 7. |
 
 ---
 
 ## 0. Decisions of record
 
 The owner greenlit the feature and did not answer the research's three OPEN-FOR-EMIL items. Per
-standing practice, research resolves what research can. These three defaults are binding for this
+standing practice, research resolves what research can. These four defaults are binding for this
 plan and **owner-informable**: each can be overridden without reshaping the phases (§11).
 
-> **D1 — Schema-field prose: rule 0.1 is not extended in v1.**
-> Schema pages render each field's type, required, nullable, default and constraints. They carry
-> **no doc-comment prose for named types or body fields**. Extending category 2 to them needs an
-> `AGENTS.md` amendment and is a separate follow-up, out of scope here. The `description:"…"` /
-> `example:"…"` tags are untouched: not removed, not extended, and not advertised.
-> *Rationale: a docs target must not be the vehicle for widening an invariant, and pages without a
-> type-level sentence are correct under either future answer (R§4.2).*
+> **D1 (amended) — No new prose source, and field facts at parity with `openapi.yaml`.**
+> `StaticDocs` reads **no** new prose: no doc comment of a named type, and no doc comment of a body
+> field. Extending category 2 to them needs an `AGENTS.md` amendment and is out of scope here. The
+> schema field table renders **exactly the human-facing field facts the OpenAPI target already
+> publishes**, taken from the graph: type and format, required, nullable, constraints, default,
+> description and example. That is `lower/mod.rs:938-982`: `required` from `SchemaDirections`,
+> `description` at `:956-957`, `example` at `:959-960`, and `format` / `default` / constraints via
+> `apply_field_meta` at `:975-982`. `x-*` vendor extensions are machine metadata for other tools and
+> are not rendered. The page renders no field fact `openapi.yaml` does not publish, and hides none of
+> the human-facing ones it does.
+> *Rationale: the same parity principle as D3 — a reference is a rendering of the contract.*
 
-Consequence for rendering: `FieldFact.description` and `FieldFact.example` (`facts.rs:231-234`) are
-graph facts, and today they come only from the tag grammar or from an imported spec
-(`goextract/internal/types/extract.go:177-183`; `pyextract/schemas.py:117-118`). Under D1 the field
-table has **no Description and no Example column**. Rendering them would make the tag grammar the
-de-facto way to get words onto a schema page — exactly the pressure `AGENTS.md:82-86` says not to
-add. Parameter prose (`graph.rs:600-607`) **is** rendered, because it shipped in 0.17.0 and is
-already printed by the CLI (`emit_common.rs:804-824`).
+*Superseded (finding 15, note 20).* D1 originally dropped the **Description** and **Example** columns
+because rendering them *"would make the tag grammar the de-facto way to get words onto a schema
+page"*. That reason applied equally to the columns it kept. On the Go path, `FieldMeta` comes from
+struct tags no Go runtime consumes:
 
-> **D2 — Per-SDK `reference.md`: keep it, byte-unchanged.**
+- `default:"…"` / `schema:"default=…"` (`goextract/internal/types/extract.go:275-281`);
+- `format:"…"` (`:283-289`);
+- `minLength` / `maxLength` / `minimum` / `maximum` / `pattern` / `enums`, applied over
+  `binding` / `validate` (`applyDirectConstraints`, called at `:270`);
+- extension tags (`:293-322`).
+
+A bound parameter's `default` is likewise read from a `default:"…"` tag
+(`goextract/internal/handlers/handlers.go:8657-8663`). The graph records no per-fact origin, so no
+column-level line separates tag-derived from runtime-derived facts. Dropping two columns while
+keeping three was not a consistent position.
+
+Old D1 also stripped `OpenApi`-imported APIs of the description and example their own spec states.
+Parity fixes that too.
+
+Whether docs should *withhold* tag-derived facts that `openapi.yaml` already publishes is the
+owner's call. It is listed in §11. The `StaticDocs` documentation names no tag as a way to put words
+on a page (§7 P5).
+
+> **D2 — Per-SDK `reference.md`: keep it, byte-unchanged by `StaticDocs`.**
 > `SdkDocs` (`README.md` + `reference.md`) stays exactly as it is. `StaticDocs` adds a separate
-> surface and changes no byte of any SDK directory. There is no half-migration: `reference.md` is
-> not re-rendered through the new renderer, not reduced to a pointer, and not retired.
-> *Rationale: retiring it is not simpler — and `reference.md` travels inside the published SDK
-> package, where `generated/docs/` never does.*
+> surface and changes no byte of any SDK directory. (The S1 sampler fix in P1 does change
+> `contract_test.*` — §8.) There is no half-migration: `reference.md` is not re-rendered through the
+> new renderer, not reduced to a pointer, and not retired.
+> *Rationale: keeping it costs nothing and breaks nobody. Retiring it is a second breaking change
+> for no benefit. It is the package-local reference an agent reads beside the generated code in the
+> user's repository. It also ships inside a published Go module zip, which carries the whole
+> directory, but **not** inside an npm package or a Python wheel.*
 
-Retirement was costed against this checkout before choosing:
+Retirement was costed against this checkout before choosing. *Superseded (finding 17): three of the
+original facts were false.*
 
-- `reference.md` is committed in all five examples (`git ls-files | grep 'generated/.*reference.md$'`);
-- it is referenced from 12 docs pages, `llms.txt`, `llms-full.txt`, and the README's own agent
-  workflow (`crates/gnr8-core/src/sdk/docs.rs:58`);
-- it is the only operation reference that ships **inside** the SDK package a registry consumer
-  installs.
+- **Committed in all five examples** (`git ls-files | grep 'generated/.*reference.md$'`).
+- **Referenced from six docs pages**, not twelve:
+  - `docs/sdk/generation.md:37-39`, `:143`, `:148`;
+  - `docs/AGENT-USAGE.md:188`;
+  - `docs/guides/go-gin-to-python-typescript.md:58-59`;
+  - `docs/guides/nestjs-to-typescript-sdk.md:53`;
+  - `docs/guides/python-apis-to-python-sdk.md:61`;
+  - `docs/diagnostics/reference.md:101`.
 
-Removing it would be a second breaking change, a five-example plus twelve-page churn, and a loss for
-package-only consumers. All of that would be paid to delete roughly 130 renderer lines
-(`sdk/docs.rs:133-260`).
+  Three more files only link `docs/diagnostics/reference.md`, a different page. It is also named in
+  `llms-full.txt:77` and the README's own agent workflow (`crates/gnr8-core/src/sdk/docs.rs:58`). It
+  is **not** in `llms.txt`, whose only `reference.md` hit is the diagnostics page (`llms.txt:19`).
+- **Not in every published package.** The emitted `package.json` declares `"files": ["dist"]`
+  (`crates/gnr8-core/src/sdk/builtins.rs:4027`), so npm leaves it out. The emitted `pyproject.toml`
+  lists only Python packages and no package data
+  (`examples/fastapi-bookstore/generated/sdk/pyproject.toml:14-15`), so a wheel leaves it out — the
+  reviewer built one and confirmed. Only a Go module zip, which is the whole directory, carries it.
+
+Removing it would still be a second breaking change and a five-example plus six-page churn, all to
+delete roughly 130 renderer lines (`sdk/docs.rs:133-260`). The decision stands on those grounds.
 
 The known README defect — the quick start is a placeholder (R§0; `sdk/docs.rs:103-129`) — is
-**deferred** to a follow-up issue filed when P2 lands, because that is when the snippet renderer
-exists. Fixing it inside this plan would move SDK-directory bytes in a docs-target release.
+**deferred** to a follow-up issue filed when P2 lands, because the Go renderer exists from P1 but
+Python and TypeScript only from P2. Fixing it inside this plan would move SDK-directory bytes in a
+docs-target release.
 
 > **D3 — No tag filtering: docs mirror exactly what `openapi.yaml` publishes.**
-> Every operation in the frozen graph gets a page. Tags render as badges only.
+> Every operation in the frozen graph gets a page. Tags render as inline code spans on the operation
+> line — never as images or hosted badges (*superseded wording, note 13: "badges"*).
 > *Rationale: a reference is a rendering of the contract, and the question of whether a tag may
 > subtract operations from an artifact was already deferred for the CLI
 > (`thoughts/research/2026-09-11-cli-pre-ship-requirements.md` §4, Open 1); docs take the same
 > default.*
+
+> **D4 — Parameter prose is rendered (new, finding 18).**
+> The parameter table has a Description column from `Param.description` (`graph.rs:600-607`). The
+> OpenAPI target already publishes that value (`lower/mod.rs:598`), and the CLI prints it
+> (`emit_common.rs:804-824`).
+> *This is not neutral.* Since 0.17.0 that prose comes from the binding field's doc comment
+> (`CHANGELOG.md:30-33`; `facts.rs:131-134`). `AGENTS.md:68-72`, last rewritten before 0.17.0
+> (`f3ae797`, #103), still limits category 2 to the operation summary and description, and
+> `AGENTS.md:94` says a pre-existing reading *"is not a precedent"*. Rendering the fact on a third
+> artifact does not settle that question. D4 is therefore an owner-informable default (§11), not a
+> derivation. Overriding it drops one column.
 
 ---
 
@@ -90,9 +149,21 @@ exists. Fixing it inside this plan would move SDK-directory bytes in a docs-targ
 
 > `Pipeline::target(StaticDocs::new().to("generated/docs"))` writes one deterministic tree of plain
 > Markdown pages plus one `llms.txt`, derived from the same frozen graph as every other target. Each
-> code sample in it is rendered by the functions that emitted the SDK it calls, for exactly the SDK
-> targets the same pipeline declares. It reads nothing that is not the graph or a sibling built-in
-> declaration, adds no dependency, and changes no byte of any other target's output.
+> code sample in it spells its names with the functions that emitted the SDK it calls, renders its
+> call shape with the call-site renderer the contract tests use, and is checked against that SDK by
+> `gnr8 verify` — for exactly the SDK targets the same pipeline declares. It reads nothing that is
+> not the graph or a sibling built-in declaration, and adds no dependency. Declaring it changes no
+> byte of any other target's output.
+
+The release that introduces it (0.18.0) also changes generated `contract_test.*` files. The cause is
+the S1 sampler fix (§4.2), which ships in the same release as a **Fixed** entry, not as an effect of
+declaring `StaticDocs`.
+
+*Superseded (notes 1 and 23).* The sentence used to say each sample is *"rendered by the functions
+that emitted the SDK"*. That is true for names only. The contract renderer re-derives the argument
+order itself (`gosdk/contract.rs:486-489`), so call-shape fidelity comes from rungs 2–3, not from
+construction. The sentence also said gnr8 *"changes no byte of any other target's output"*, which the
+sampler fix contradicts.
 
 ---
 
@@ -180,37 +251,40 @@ because `sdk/docs.rs` is the `SdkDocs` renderer and D2 keeps the two apart.
 | `staticdocs/markdown.rs` | escaping (`cell()` for table cells, `code_span()`), and the fixed headings as `const`s |
 | `staticdocs/links.rs` | `LinkRegistry` — every relative link a page emits is recorded with its source page; `check(&emitted_paths)` is rung 0 |
 | `staticdocs/example.rs` | the HTTP exchange plus the per-sibling SDK and CLI sections, built on the call-site renderers (§4) |
+| `staticdocs/snippets.rs` | `consumer_identity` (§4.1) and `pub fn compile_unit` (§3.3) — the one producer of snippet text for pages, gnr8's own rung-2 tests and the verify suite |
 
-`impl TargetExec for StaticDocs` lives in `crates/gnr8-core/src/sdk/builtins.rs`, beside `OpenApi31`
-(`:2864-2906`):
+**There is no `impl TargetExec for StaticDocs`.** Every dispatch function in
+`crates/gnr8-core/src/sdk/builtins.rs` is a free function with an exhaustive `match`, so each one
+gains a `StaticDocs` arm that calls into `crate::staticdocs`:
 
-- **`generate`** returns `CoreError::Config`: *"StaticDocs runs inside a pipeline plan; it documents
-  the plan's own SDK targets"*. This is the refusal that keeps **one** generation path (§3.3).
-- **`generate_in_plan`** (§3.3) does the work:
+- **`generate_target`** (`:4319-4334`) calls `crate::staticdocs::generate(t, ir, out, plan)` (§3.3).
+  Inside it:
   - an empty `dir` is a `CoreError::Config`, matching `OpenApi31` (`:2872-2877`);
-  - a `dir` that equals or contains a sibling SDK target's `dir`, or lies inside one, is a
-    `CoreError::Config` naming both targets, before `artifact.path_collision`
-    (`pipeline/mod.rs:612-619`) would fire anyway;
-  - then it calls `crate::staticdocs::generate`.
-- **`output_anchors`** returns `[dir]`, for the reason `OpenApi31` gives (`builtins.rs:2886-2894`).
-- **`readiness_targets`** returns `[]`: `ReadinessKind` is closed
+  - a `dir` that equals, contains or lies inside a sibling SDK target's `dir` is a
+    `CoreError::Config` naming both targets, raised before `artifact.path_collision`
+    (`pipeline/mod.rs:612-619`) would fire anyway.
+- **`target_output_anchors`** (`:4336-4347`) returns `[dir]`, for the reason `OpenApi31` gives
+  (`builtins.rs:2886-2894`).
+- **`target_readiness_targets`** (`:4349-4360`) returns `[]`, because `ReadinessKind` is closed
   (`crates/gnr8-sdk/src/sdk/mod.rs:555-571`).
-- **`contract_test_suites`** returns `[]`.
+- **`target_contract_test_suites`** (`:4362-4379`) returns `[]`.
+- **`target_cli_help_suites`** (`:4381-4431`) returns `[]`: `StaticDocs` joins the arm at
+  `:4419-4422`.
 
-The other dispatch functions gain a `StaticDocs` arm, and the compiler lists every site because the
-matches are exhaustive: `target_output_anchors` (`:4336-4347`), `target_readiness_targets`
-(`:4349-4360`), `target_contract_test_suites` (`:4362-4379`) and `target_cli_help_suites`
-(`:4381-4431`, where `StaticDocs` joins the arm at `:4419-4422` that returns nothing).
+The compiler lists every site. *Superseded (note 2):* the plan used to add a defaulted
+`TargetExec::generate_in_plan` for all seven impls plus an `impl TargetExec for StaticDocs` whose
+`generate` always refused — two entry points on one type, one of them dead. A dispatch arm has one.
 
 The emission memo needs **no change**. `StaticDocs` is a pure function of graph plus declarations,
 and the key already serializes every built-in declaration in plan order
 (`pipeline/emission.rs:96-106`). Only `StaticFiles` opts out of the memo (`:97-101`). The `Header`
-post-process touches only `.go` files (`builtins.rs:3726`, `:3745-3749`), so pages are never
+post-process touches only `.go` files (`builtins.rs:3726`, `:3745-3750`), so pages are never
 stamped.
 
 ### 3.3 Reading sibling declarations (research decision 2)
 
-`crates/gnr8-core/src/sdk/builtins.rs`, beside the `TargetExec` trait (`:75-117`):
+`crates/gnr8-core/src/sdk/builtins.rs`, beside the `TargetExec` trait (`:75-117`), which is
+unchanged:
 
 ```rust
 /// The built-in target declarations of the plan being run, in plan order.
@@ -227,45 +301,64 @@ impl<'a> PlanTargets<'a> {
     /// Every Go/Python/TypeScript SDK declaration, in plan order.
     pub fn sdks(&self) -> impl Iterator<Item = SiblingSdk<'a>> + 'a;
 }
-
-pub trait TargetExec {
-    // …existing methods unchanged…
-
-    /// Generate as part of a plan. Every built-in except `StaticDocs` ignores `plan`.
-    fn generate_in_plan(
-        &self,
-        ir: &ApiGraph,
-        out: &mut Artifacts,
-        cx: &Cx,
-        store: Option<&Store>,
-        plan: &PlanTargets<'_>,
-    ) -> Result<(), CoreError> {
-        let _ = plan;
-        self.generate(ir, out, cx, store)
-    }
-}
 ```
 
-`generate_target` (`:4319-4334`) gains `plan: &PlanTargets<'_>` and calls `generate_in_plan` in
-every arm. Its single caller (`pipeline/mod.rs:501`) passes `&PlanTargets::new(&builtin_targets)`.
-That vector already exists at `:474`, built by `emission::builtin_targets`
-(`pipeline/emission.rs:197-206`). The 59 direct `.generate(` call sites, all of them tests or
-non-plan helpers, are untouched.
+`generate_target` (`:4319-4334`) gains a `plan: &PlanTargets<'_>` parameter. Only its `StaticDocs`
+arm reads it, and every other arm calls `t.generate(ir, out, cx, store)` exactly as today. Its single
+caller (`pipeline/mod.rs:501`) passes `&PlanTargets::new(&builtin_targets)`. That vector already
+exists at `:474`, built by `emission::builtin_targets` (`pipeline/emission.rs:197-206`). The 59
+direct `.generate(` call sites, all of them tests, are untouched.
 
 `StaticDocs` reads declarations only, never sibling artifacts. That preserves the parallel-purity
 contract (`pipeline/mod.rs:462-468`) and the memo premise (`emission.rs:12-13`). With two SDKs of
 one language, each gets a subsection labelled by its module, in plan order. With none, pages carry
 the HTTP exchange and nothing is missing.
 
+**The compile-unit producer lands in P1, not P3** (finding 6). `staticdocs::snippets` exposes:
+
+```rust
+pub fn compile_unit(
+    graph: &ApiGraph,
+    sdk: SiblingSdk<'_>,
+    language: ContractTestLanguage,
+) -> Result<Option<CompileUnit>, CoreError>
+```
+
+Both the operation pages and the compile unit consume the same `render_call` output (§4.1).
+`compile_unit` is `pub` because gnr8's integration tests in `crates/gnr8-core/tests/` can reach only
+`pub` items. That costs no published API, because `gnr8-engine` is `publish = false`
+(`crates/gnr8-core/Cargo.toml:3`).
+
+`None` means the sibling has no consumer identity (§4.1). P1's own rung-2 test calls `compile_unit`.
+P3's verify suite calls the same function.
+
 The same `PlanTargets` feeds the verify suite (§5): a new `target_docs_suites(spec, ir, plan)` sits
 beside `target_cli_help_suites`, and `pipeline::docs_suites(plan, ir)` beside `cli_help_suites`
 (`pipeline/mod.rs:234-249`). `PipelineOutcome` (`:166-183`) gains `docs_suites`, filled at
 `:407-408`.
 
+**Warm-path cost** (note 3, a known limitation). `pipeline::run` builds suites on every run, after
+the memoized block (`:407-408`), so `docs_suites` renders every compile unit on every warm
+`generate` / `check`. Risk 2 measures that cost before P3 ships. If it shows in the warm numbers,
+`docs_suites` moves out of `pipeline::run` to the `verify` entry point, the only consumer, which runs
+the pipeline anyway. The same measurement covers the memo-disabling effect of a companion
+`StaticFiles` stage (`emission.rs:97-101`).
+
 ### 3.4 What each page contains
 
-The page model, section order and navigation rules are R§3.3, adopted unchanged, with D1 applied: the
-field table columns are **Field, Type, Required, Nullable, Constraints, Default**. Headings are
+The page model, section order and navigation rules are R§3.3, adopted unchanged, with D1 (amended)
+and D4 applied:
+
+- The **field table** columns are **Field, Type (with format), Required, Nullable, Constraints,
+  Default, Description, Example**. *Superseded:* the original D1 table had no Description and no
+  Example column.
+- **Required** and **Nullable** come from `SchemaDirections::field_is_required` /
+  `field_is_nullable` for the schema's projected direction (`graph/direction.rs:61`, `:78`). They
+  are never recomputed.
+- The **parameter table** has a **Description** column (D4).
+- Tags are inline code spans (D3).
+
+Headings are
 fixed `const`s in `staticdocs/markdown.rs`, and a unit test asserts none matches the invariant gate's
 patterns (`scripts/check-invariants.sh:107-109`; §9). Links are relative and file-level only
 (R§3.3).
@@ -281,7 +374,7 @@ lifted renderer with `Qualify::InPackage`.
 
 | Language | New file | Functions lifted from (current private location) |
 |---|---|---|
-| Go | `crates/gnr8-core/src/gosdk/callsite.rs` | `call_arguments` `gosdk/contract.rs:490-530`, `params_literal` `:532-560`, `body_literal` `:562-593`, `go_pointer_wrap` `:600-610`, `go_literal` `:613`, `go_primitive_literal` `:706`, `format_float` `:729`, `go_scalar` `:739`, `client_options` `:421-448` |
+| Go | `crates/gnr8-core/src/gosdk/callsite.rs` | `call_arguments` `gosdk/contract.rs:490-530`, `params_literal` `:532-560`, `body_literal` `:562-593`, `go_pointer_wrap` `:600-610`, `go_literal` `:613`, `go_primitive_literal` `:706`, `format_float` `:729`, `go_scalar` `:739`, `client_options` `:421-448`. **Also changed in place:** `go_type` (`gosdk/emit.rs:114`) gains a qualified twin (below) |
 | Python | `crates/gnr8-core/src/pysdk/callsite.rs` | `call_arguments` `pysdk/contract.rs:393`, `body_literal` `:420`, `py_literal` `:446`, `py_primitive_literal` `:540`, `format_float` `:562`, `py_scalar` `:571`, `client_credentials` `:353` |
 | TypeScript | `crates/gnr8-core/src/tssdk/callsite.rs` | `call_arguments` `tssdk/contract.rs:450`, `params_object` `:531`, `body_expression` `:550`, `ts_literal` `:575`, `ts_primitive_literal` `:639`, `ts_json_literal` `:658`, `ts_scalar` `:666`, `client_credentials` `:411` |
 
@@ -293,9 +386,9 @@ The shared shape (in `crates/gnr8-core/src/sdk/emit_common.rs`, beside `Operatio
 pub(crate) enum Qualify<'a> {
     /// Inside the SDK package — the contract tests (unchanged output).
     InPackage,
-    /// From a consumer's code — docs: Go `sdk.ListBooksParams`, Python `from bookstore import …`,
-    /// TypeScript `import { … } from "<package>"`.
-    Consumer { import: &'a str, alias: &'a str },
+    /// From a consumer's code. `identity` is the one consumer identity (below); there is no
+    /// other way to construct this variant.
+    Consumer { identity: &'a ConsumerIdentity },
 }
 
 /// The sampled inputs of one call, whichever planner produced them.
@@ -314,16 +407,68 @@ Each language exposes
 A `ContractCase` (`verify/mod.rs:355-384`) and the new `OperationSample` both lend themselves as
 `CallInputs`.
 
-**Consumer-mode identifiers come from the sibling declaration, never re-derived:**
+**Consumer import identity — one rule for all three languages, with no fallback** (finding 14).
 
-- Go imports the module path (`GoSdk.module`) under the package name `sdk_package(module)`, the
-  derivation the target itself uses (`builtins.rs:3040`).
-- Python imports `sdk_package(module)`, as at `:3168`.
-- TypeScript imports `package_info.resolved_name(&package)`, as at `:3442`. When the declaration's
-  package metadata is off, there is no registry name to import. The TypeScript section then renders
-  with the import specifier `"./<dir relative to docs>"`, a relative path computed from the two
-  declared directories. That is a deterministic function of two declared facts, not a guessed name
-  (risk 6, §10).
+```rust
+/// What a consumer imports. Exists only when the SDK target emits a package manifest.
+pub(crate) struct ConsumerIdentity { pub import: String, pub qualifier: String }
+
+pub(crate) fn consumer_identity(sdk: SiblingSdk<'_>) -> Result<Option<ConsumerIdentity>, CoreError>;
+```
+
+The identity is **what that SDK target's own emitted package manifest declares**, computed by the same
+function the manifest writer uses:
+
+| Language | Manifest written when | Identity |
+|---|---|---|
+| Go | `package_metadata` (`builtins.rs:3079-3083` writes `go.mod`) | `import` = the `go.mod` `module` path (`GoSdk.module`); `qualifier` = the package clause name `sdk_package(module)` (`:3040`) |
+| Python | `package_metadata` (`:3191-3203` writes `pyproject.toml`) | `import` = the import package `pyproject.toml` lists, `sdk_package(module)` (`:3168`; e.g. `examples/fastapi-bookstore/generated/sdk/pyproject.toml:14-15`); names are imported with `from <import> import …` |
+| TypeScript | `effective_package_metadata()` (`:3436-3455` writes `package.json`; default **off**, `crates/gnr8-sdk/src/sdk/builtins.rs:2706-2710`) | `import` = the `package.json` `name`, `package_info.resolved_name(&package)` (`:3442`) |
+
+If the target emits no manifest, `consumer_identity` returns `None`. The SDK section then prints the
+typed note *"No sample call: this SDK target emits no package metadata, so it has no published
+import name."* and renders no snippet. The HTTP exchange and the other languages' sections are
+unaffected. A consumer's import path for an unpublished SDK depends on where they vendor it, which no
+declaration states, so there is nothing to print.
+
+This is the same pattern as a sampler refusal (R§3.4): a missing fact is stated, never filled in.
+
+*Superseded (finding 14).* §4.1 used to import the registry name when TypeScript package metadata was
+on, and otherwise a specifier `"./<dir relative to docs>"`. That is the *"if present use A,
+otherwise B"* shape AGENTS.md rule 3 forbids by name, and it ran on TypeScript's **default** path. It
+also gave Go and Python no rule at all for the no-manifest case. Risk 6 is withdrawn accordingly.
+Consequence for P2: `examples/nestjs-bookstore` declares no `.package(…)`
+(`examples/nestjs-bookstore/.gnr8/src/main.rs:36`), so it opts into package metadata in its own
+commit (§8).
+
+**Go qualification is threaded through the emitter's own type speller** (finding 11). A top-level
+alias cannot qualify `[]Book`, `map[string]*Book` or `Ptr[Genre]`. The in-package renderer spells
+model names in five places:
+
+1. the `Type::Named` leaf of `go_type` (`gosdk/emit.rs:143-158`), reached from composite spellings
+   (`[]T`, `map[K]V`, pointers) and from literals (`gosdk/contract.rs:631`, `:644`, `:690`);
+2. `Ptr[T]` type arguments (`:551`, `:600-610`);
+3. the enum-newtype literal `{name}("…")` (`:673`);
+4. the struct literal `{name}{…}` (`:697`);
+5. the `{Method}Params{…}` literal (`:555-559`).
+
+The design:
+
+- **One speller, not two.** `go_type`'s body moves into `go_type_in(schema, nullable, graph,
+  qualifier: &str)`, which prefixes `qualifier` at the `Named` leaf only. `go_type` becomes
+  `go_type_in(.., "")`. SDK emission keeps calling `go_type`, so its bytes cannot move, and the docs
+  call `go_type_in(.., "sdk.")`. Places 2–5 take the same `qualifier`, with `Ptr` itself spelled
+  `{qualifier}Ptr`.
+- **Byte-identity.** A test pins it: `go_type(..) == go_type_in(.., "")` for every schema of the
+  fixture graphs, plus the contract-test baseline (W1.0).
+- **Date-times have no harness helper outside the test.** In-package rendering keeps
+  `contractTime("…")` (`gosdk/contract.rs:624`, defined only in the test harness at `:229`). Consumer
+  rendering emits the stdlib expression `time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)`,
+  computed from the sampled RFC 3339 literal, and adds `"time"` to the imports.
+- **Python and TypeScript need no type-level qualifier.** Python spells model names bare in
+  constructor calls (`pysdk/contract.rs:446-540`, e.g. `{name}(…)`), which the consumer's
+  `from <import> import …` line satisfies. TypeScript object literals are structural
+  (`tssdk/contract.rs:575-640`), so only `Client` is imported.
 
 **Consumer-mode credentials and base URL are variables** (R§3.5): Go `baseURL`, `apiKey`, `token`;
 Python `base_url`, `api_key`, `token`; TypeScript `baseUrl`, `apiKey`, `token`. They are never
@@ -331,59 +476,132 @@ Python `base_url`, `api_key`, `token`; TypeScript `baseUrl`, `apiKey`, `token`. 
 
 **Results are consumed so every snippet compiles as written.** Go ends with `if err != nil { return
 err }` and `fmt.Printf("%+v\n", result)`. Python and TypeScript bind the result and print it. The
-snippet is the text the page shows *and* the text the compile unit wraps (§5, rung 2), produced by
-one call.
+page snippet and the compile-unit entry are both assembled from the one `CallSite` that
+`render_call` returns (§3.3).
 
-### 4.2 The sampler: per-operation, typed refusals, constraint-respecting
+### 4.2 The sampler (workstream S1, lands in P1): per-operation, typed refusals, constraint-respecting
+
+*Superseded (finding 22):* this workstream was W1.3 *"structure only — the constraint table lands in
+P2"* plus W2.3. The whole of it now lands in **P1**, so the first release never publishes a
+constraint-blind value.
 
 In `crates/gnr8-core/src/verify/mod.rs`:
 
-- **A per-operation sample.** Add `pub(crate) fn sample_operation(op, graph) -> Result<OperationSample, SampleRefusal>`.
-  It holds what `Candidate::build` (`:493-539`) computes today. `Candidate::build` becomes its
-  caller, so `plan_contract_tests` (`:449-476`) keeps its cap and its skip-on-refusal behaviour —
+- **A per-operation sample with an error channel** (finding 12):
+
+  ```rust
+  pub(crate) enum Sampled { Sample(OperationSample), Refused(SampleRefusal) }
+  pub(crate) fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, CoreError>;
+  ```
+
+  `Err` carries what `Candidate::build` already propagates with `?`:
+  `request_body_models_of(op, graph)?` (`:498`) and `sample_auth(op, graph)?` (`:526`). A dangling
+  reference is also `Err`, as in `SdkModel::build` (`model.rs:572-581`). Today the sampler drops a
+  missing schema silently (`graph.schemas.iter().find(..)?`, `:1086`), which would print a graph
+  error as a page note and so fail open. `Candidate::build` (`:493-539`) becomes a caller of
+  `sample_operation`, so `plan_contract_tests` (`:449-476`) keeps its cap and its skip-on-refusal —
   one sampling path, two consumers.
-- **Typed refusals.** Add
-  `pub(crate) enum SampleRefusal { RequestUnion { subject }, Bytes { subject }, SerializationStyle { param }, Pattern { subject }, UnsatisfiableBounds { subject }, TooDeep, Unresolved { ref_id } }`
-  with a `Display` the page prints verbatim: *"No sample call: parameter `isbn` declares `pattern`."*
-  It replaces the bare `None`s at `:981-988`, `:1102-1104` and `:1250-1252`.
-- **The success sample.** Expose `success_sample` (`:650`) through `OperationSample`, so the HTTP
+- **Typed refusals:**
+
+  ```rust
+  pub(crate) enum SampleRefusal {
+      RequestUnion { subject },
+      Bytes { subject },
+      SerializationStyle { param },
+      NoJsonBody,
+      Pattern { subject },
+      Unsatisfiable { subject, constraint },
+      UnknownFormat { subject, format },
+      TooDeep,
+  }
+  ```
+
+  Each has a `Display` the page prints verbatim: *"No sample call: parameter `isbn` declares
+  `pattern`."* They replace the bare `None`s at `:981-988`, `:1102-1104` and `:1250-1252`.
+  `NoJsonBody` is the existing `encoding != Json` skip (`:502`) followed by the
+  `body_required && bodies.is_empty()` refusal (`:523`). `TooDeep` is the sampler's own budget
+  (`MAX_SAMPLE_DEPTH`, `:56-61`). *Superseded:* the earlier enum lacked `NoJsonBody` and printed
+  `Unresolved { ref_id }` as a refusal.
+- **The success sample.** `success_sample` (`:650`) is exposed through `OperationSample`, so the HTTP
   exchange shows the same canned reply the decode case uses.
 
-**What "constraint-respecting" means, per constraint kind gnr8 carries** (`Constraints`,
-`crates/gnr8-sdk/src/facts.rs:275-312`). Constraints are read from `Param.constraints`, from
-`Param.item_constraints` for array items and map values (`graph.rs:582-587`), and from
-`FieldFact.meta.constraints` for body fields (`facts.rs:247-248`):
+**Constraint-respecting is defined per value, not per constraint** (finding 12). Constraints are read
+from three places:
 
-| Constraint | Applies to | Sampled value | Refusal |
-|---|---|---|---|
-| `enum_values` (`oneof`) | scalars | the **first** listed member, as stored | empty list ⇒ `UnsatisfiableBounds` |
-| `min_length` / `max_length` | strings, well-known strings | the base value (`"gnr8"`, or the well-known literal) repeated and truncated to `clamp(len(base), min, max)` | `min > max`; or a well-known format (uuid, date-time, email, uri, …) whose fixed literal falls outside the bounds — a format is never truncated |
-| `minimum` / `maximum` (inclusive) | integers, floats, decimal | the base value (`7` / `1.5` / `"1.50"`) when it lies inside the bounds. Otherwise the nearest inclusive bound: `minimum` if the base is below, `maximum` if above | an unparseable bound; `minimum > maximum` |
-| `exclusive_minimum` / `exclusive_maximum` | integers, floats | integers: the base if inside, else `exclusive_minimum + 1` / `exclusive_maximum − 1`. Floats: the base if inside, else the midpoint of the effective interval, with an unbounded side taken as `bound ± 1` | an empty interval (integers: `lo + 1 > hi − 1`) |
-| `min_items` / `max_items` | arrays | `max(1, min_items)` copies of the item sample, capped at `max_items`. `max_items == 0` ⇒ `[]` | `min_items > max_items` |
-| `min_properties` / `max_properties` | maps; objects | maps: `max(1, min)` entries keyed `key`, `key2`, … (capped). Objects: the required fields, plus optional fields in field order until `min_properties` is met | still short after all fields; `required > max_properties` |
-| `pattern` | strings | **never synthesized** — gnr8 carries no regex engine and will not grow one for this | always `Pattern` when the constrained input is required. An optional constrained input is left out of the sample, as optional unconstructible inputs already are (`:972-975`) |
+- `Param.constraints`;
+- `Param.item_constraints`, for array items and map values (`graph.rs:582-587`);
+- `FieldFact.meta.constraints`, for body fields (`facts.rs:247-248`).
 
-Two more rules:
+All twelve `Constraints` fields (`crates/gnr8-sdk/src/facts.rs:275-312`) feed **one predicate**,
+`satisfies(value, &Constraints) -> Result<(), Violation>`. A sampled value is used **only if it
+satisfies every constraint on its input at once**. For each input, the sampler tries candidates in
+this fixed order and takes the first that passes `satisfies`:
+
+1. **If `enum_values` is non-empty:** each member in stored order, parsed to the input's type (an
+   unparseable member is skipped). Inline `Type::Enum` members (`facts.rs:386-387`) are the domain
+   when `enum_values` is empty; when both exist, the candidates are their intersection, in
+   `enum_values` order.
+2. **Otherwise, one adjusted base value:**
+   - **Strings:** the base (`"gnr8"`, or the well-known literal) repeated and truncated to
+     `clamp(len(base), min_length, max_length)`. A well-known format is never truncated, so it is
+     its literal or nothing.
+   - **Numbers:** the base (`7` / `1.5` / `"1.50"`) when it lies inside the effective interval.
+     Otherwise the nearest inclusive bound, or for an exclusive bound the nearest admissible value
+     (integers ±1; floats the midpoint of the interval, an unbounded side taken as `bound ± 1`).
+   - **Arrays:** `max(1, min_items)` copies of the item sample, capped at `max_items`.
+     `max_items == 0` gives `[]`.
+   - **Maps:** `max(1, min_properties)` entries keyed `key`, `key2`, …, capped.
+   - **Objects:** the required fields, plus optional fields in field order until `min_properties` is
+     met.
+
+If no candidate passes `satisfies`, the input is `Unsatisfiable { subject, constraint }`, naming the
+first constraint the last candidate violated. Two cases fall here. One is contradictory bounds, such
+as `min > max` or an empty interval. The other is a combination no candidate meets, such as
+`enum_values` members all shorter than `min_length`.
+
+**`pattern` is never synthesized**, because gnr8 carries no regex engine and will not grow one. A
+required input carrying `pattern` is `Pattern`. An optional one is left out of the sample, as
+optional unconstructible inputs already are (`:972-975`).
+
+**`FieldMeta.format`** (`facts.rs:252-254`) restricts the value space the way a constraint does:
+
+- a format that names a well-known scalar (`uuid`, `date-time`, `date`, `duration`, `email`, `uri`,
+  `decimal`) selects that literal (`:1256-1266`), which must then pass `satisfies`;
+- any other format string is `UnknownFormat`.
+
+**Two more rules:**
 
 - **The sampler never consults `default`, `FieldFact.example` or a declared `MediaExample`.** It is
-  type plus constraints only (R§3.4). Constraints *restrict* the value space; they never supply a
+  type plus constraints plus format only (R§3.4). These restrict the value space; none supplies a
   competing value. That is what keeps this rule-3-clean.
-- **Effect on contract tests.** Any operation whose inputs carry constraints may now get different
-  sample values, so its `contract_test.*` text changes. That is a **Fixed** entry — a test that
-  sent an invalid request now sends a valid one — and it lands as its own re-baseline commit in P2
-  (§8).
-
----
+- **Effect on contract tests.** Any operation whose inputs carry constraints or a format may now get
+  different values, so its `contract_test.*` text changes. That is a **Fixed** entry in 0.18.0 — a
+  test that sent an invalid request now sends a valid one — and it lands as its own re-baseline
+  commit inside P1 (§8). No committed example or fixture declares length or range bounds today
+  (`examples/bookstore/models.go:42-44` declares only `binding:"required"`), so P1 proves the rule on
+  synthetic graphs (§7).
 
 ## 5. The verification ladder, placed
 
 | Rung | Check | Runs in | Mechanism | Failure |
 |---|---|---|---|---|
-| **0 — structural** | Operation pages are in bijection with graph operations. Every relative link names a file this target emits. No slug collision (§6). No empty heading. Every snippet in a page is byte-equal to the corresponding entry of the compile unit (rung 2). | **Generation** (`staticdocs::links::LinkRegistry::check`, `staticdocs::generate`) and Rust unit tests | Pages are rendered into memory, the emitted path set is known before `out.create`, and the registry is checked against it | Hard `CoreError::SdkGen`. A rung-0 failure is a gnr8 renderer bug, so generation fails closed |
+| **0 — structural** | Operation pages are in bijection with graph operations. Every relative link names a file this target emits. No slug collision (§6). No empty heading. | **Generation** (`staticdocs::links::LinkRegistry::check`, `staticdocs::generate`) and Rust unit tests | Pages are rendered into memory, the emitted path set is known before `out.create`, and the registry is checked against it | Hard `CoreError::SdkGen`. A rung-0 failure is a gnr8 renderer bug, so generation fails closed |
 | **1 — determinism** | Same graph + declarations ⇒ same bytes | Rust tests (`determinism.rs` extended), `gnr8 check`, `make examples-check` (`Makefile:127-155`) | Regenerate and diff | Test failure; `gnr8 check` drift exit |
-| **2 — snippets compile** | Every snippet type-checks against the SDK it documents | `gnr8 verify` (P3) **and** gnr8's own Rust tests from P1 (Go) and P2 (Python, TypeScript) | A temporary tree holding a copy of the SDK dir plus one compile unit per language. Go: `docs_snippets_test.go` in package `<pkg>_test`, each snippet wrapped in `func docsSnippet<Op>(ctx context.Context, baseURL, apiKey, token string) error`, then `go vet ./...`. TypeScript: `snippets.ts` and `tsc --noEmit --strict --lib es2022,dom`, the flags in `Makefile:53-55`. Python: `snippets.py`, each snippet a function body, then `python3 -m py_compile` and `import` | `verify` reports `Failed`. A missing toolchain is `Skipped` with an explicit reason (precedent `CHANGELOG.md:16-17`). Stale artifacts are refused (`require_fresh`, `crates/gnr8/src/verify/cli_help.rs:229`) |
-| **3 — snippets send the page's request** | Each snippet's **call statement** runs against the language's existing fake transport, and the recorded wire equals the page's HTTP exchange | `gnr8 verify` (P4) and Rust tests | The compile unit is extended into a test. The harness constructs the client the way the contract harness does (`gosdk/contract.rs:111`, `pysdk/contract.rs:107`, `tssdk/contract.rs:97`), then runs the snippet's `call` against it and asserts with the contract assertions (`gosdk/contract.rs:299-323`) using the expected values from the page's HTTP exchange. The construction line is proved by rung 2, not rung 3 (risk 5) | `verify` reports `Failed` with the operation and the first differing wire field |
+| **2 — snippets resolve against the SDK** | Every name and argument in every snippet resolves against the SDK it documents, and every snippet appears verbatim in its page after post-processors | `gnr8 verify` (P3) **and** gnr8's own Rust tests from P1 (Go) and P2 (Python, TypeScript), all through `staticdocs::snippets::compile_unit` (§3.3) | A temporary tree holding a copy of the SDK dir plus one compile unit per language. **Go:** `docs_snippets_test.go` in package `<pkg>_test`, importing the consumer identity, each snippet wrapped in `func docsSnippet<Op>(ctx context.Context, baseURL, apiKey, token string) error`, then `go vet ./...`. **TypeScript:** `snippets.ts` beside a `tsconfig.json` whose `compilerOptions` are exactly the `tssdk_compile` gate's argv (`crates/gnr8-core/tests/tssdk_compile.rs:101-116`: `noEmit`, `strict`, `noUnusedLocals`, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `target es2022`, `module esnext`, `moduleResolution bundler`, `lib ["es2022","dom"]`) plus `"paths": { "<package.json name>": ["./sdk/index.ts"] }`, so the specifier the page prints resolves to the copied sources without a build or a `node_modules` link. Then `tsc -p tsconfig.json`. **Python:** each snippet's construction line runs for real. Its call then runs against a client built through the opener seam, `Client(BASE_URL, opener=…, **credentials)` (`pysdk/contract.rs:161-162`), whose stub answers every request with a non-success status. The case passes only if the call raises the SDK's typed `ApiError`, which generated clients raise for any non-success status (`verify/mod.rs:50-54`). That proves the method name, every keyword and every model constructor resolved and a request was built. **All languages, in `verify`:** each snippet text must occur verbatim in its page as materialized after post-processors, which catches a user `FormatCommand` that rewrites `.md` (post-processors run after targets, `pipeline/mod.rs:383-399`) | `verify` reports `Failed`. A missing toolchain is `Skipped` with an explicit reason (precedent `CHANGELOG.md:16-17`). A page missing from this run's fresh artifacts is refused, which is what `require_fresh` checks (`crates/gnr8/src/verify/cli_help.rs:229`: presence only, because `verify` always materializes fresh output, `crates/gnr8/src/main.rs:684-700`) |
+| **3 — snippets send the page's request** | Each snippet's **call statement** runs against the language's existing fake transport, and the recorded wire equals the page's HTTP exchange **after substitution** | `gnr8 verify` (P4) and Rust tests | The compile unit is extended into a test. The harness constructs the client the way the contract harness does — Go `contractClient` (`gosdk/contract.rs:166-170`), Python `_contract_client` (`pysdk/contract.rs:161-162`), TypeScript inside `emit_case` (`tssdk/contract.rs:245-250`). It then runs the snippet's `call` against that client and asserts with the contract assertions (`gosdk/contract.rs:299-323`), using the expected values from the page's HTTP exchange. **Substitution:** the page prints credentials and the base URL as variables, so the harness injects the contract constants (`verify/mod.rs:38-48`) and `http://gnr8.test` (`:32-36`), a base URL with no path. Every page's Example section states this, and says that a server URL with a path prefix prepends it to the printed path. The construction line is proved by rung 2, not rung 3 (risk 5) | `verify` reports `Failed` with the operation and the first differing wire field |
+
+*Superseded (findings 4, 5, 6; notes 8, 9, 24).*
+
+- **Rung 0** also claimed *"every snippet in a page is byte-equal to the corresponding entry of the
+  compile unit"*. With one `render_call` feeding both, that check was a tautology, and it ran where
+  the compile unit did not yet exist. The useful check — page text after post-processors — now sits
+  in rung 2, inside `verify`.
+- **TypeScript rung 2** quoted a flag subset from a Makefile comment (`Makefile:53-55`) and could not
+  resolve the import it printed.
+- **Python rung 2** was `py_compile` plus `import`.
+- **`require_fresh`** was described as a staleness check.
+- **Rung 3** claimed exact equality, and cited `fn harness` lines (`gosdk/contract.rs:111`,
+  `pysdk/contract.rs:107`, `tssdk/contract.rs:97`) for client construction.
 
 **Suite type.** In `crates/gnr8-core/src/verify/mod.rs`, beside `CliHelpSuite` (`:151-162`):
 
@@ -394,11 +612,17 @@ pub struct DocsSnippetSuite {
     pub docs_dir: String,
     pub sdk_output_path: String,
     pub package: String,
-    /// The compile unit, rendered by the same calls that rendered the pages.
+    /// The compile unit from `staticdocs::snippets::compile_unit` — the same `render_call`
+    /// output the pages were assembled from. Rendered on every run; see §3.3, warm-path cost.
     pub compile_unit: String,
+    /// Every page path and the snippet texts it must contain verbatim (rung 2, post-process check).
+    pub page_snippets: Vec<(String, Vec<String>)>,
     /// Operations with a sample (rung 3 cases); refused operations are counted, not run.
     pub cases: usize,
     pub refused: usize,
+    /// The consumer import (§4.1). `None` when the sibling emits no package manifest: the suite is
+    /// reported skipped with that typed reason and never run.
+    pub identity: Option<String>,
     pub go_verification: Option<GoVerificationModule>,
 }
 ```
@@ -411,8 +635,7 @@ pub struct DocsSnippetSuite {
 
 `VerifyReport` (`verify.rs:88-94`) gains `docs_suites`, counted in passed/failed/skipped exactly as
 `cli_suites` are (`:109-129`). The dispatch at `crates/gnr8/src/main.rs:705-720` adds
-`verify::run_docs_suites(…)`, and its "nothing to verify" condition (`:705`) includes
-`docs_suites`.
+`verify::run_docs_suites(…)`, and its empty-suite bail (`:705`) also counts `docs_suites`.
 
 ---
 
@@ -449,7 +672,7 @@ case-insensitive file system cannot produce a collision the check missed.
   method — `graph.rs:8-13`);
 - schemas appear in graph order.
 
-**`llms.txt` is the nav manifest, and the only machine-readable index.** It contains:
+**`llms.txt` is an index for agents.** It contains:
 
 - `# <title>`;
 - `> <openapi_metadata.description>`, only when one is declared;
@@ -460,6 +683,18 @@ case-insensitive file system cannot produce a collision the check missed.
 
 The same `NavModel` drives `index.md`, so the two cannot disagree. A unit test parses both and
 compares link order.
+
+**Stability (note 16).** `llms.txt` is written for agents to read, not for scripts to parse. Its
+layout follows the external proposal (<https://llmstxt.org/>) and may change in any release, as
+generated page text may. The P5 docs page says so. Tools that need API facts read the versioned
+graph artifact `generated/gnr8.graph.json` (`crates/gnr8-core/src/graph_artifact.rs:1-5`, `:12`).
+
+One proposal-specific wrinkle is a known limitation. The proposal gives an H2 named `Optional` a
+conventional "may be skipped" meaning, and a group named `Optional` would inherit it. gnr8 prints
+group names verbatim and does not rename one.
+
+*Superseded:* this section used to call `llms.txt` *"the nav manifest, and the only
+machine-readable index"*, inviting scripts to build sidebars from it.
 
 **Determinism requirements**, each covered by a test (§7):
 
@@ -505,21 +740,30 @@ make examples-check GO_BIN=/opt/data/home/.local/go1.27.1/bin
   the same PR as the renderer change that moved it, with the reason in the commit message.
 - **Examples.** Committed `examples/*/generated/docs/` trees are regenerated by the phase PR's
   author:
-  `cargo build --release -p gnr8-cli && (cd examples/<ex> && PATH=$PATH:/opt/data/home/.local/go1.27.1/bin GNR8_RESOURCE_DIR=$PWD/../.. ../../target/release/gnr8 generate)`,
+  `cargo build --release -p gnr8-cli && (cd examples/<ex> && PATH=$PATH:/opt/data/home/.local/go1.27.1/bin GNR8_RESOURCE_DIR=$PWD/../.. ../../target/release/gnr8 generate --force)`,
   then proved by `make examples-check`.
+
+  `--force` is required. The ownership manifest lives in the git-ignored `.gnr8/cache/`
+  (`crates/gnr8-core/src/manifest/mod.rs:7`, `:40`). In a fresh checkout every committed page is
+  therefore "present, unowned, divergent" once the renderer moves (`lifecycle/mod.rs:268-269`), and
+  a plain `generate` skips it with a warning (`crates/gnr8/src/main.rs:526`). The Makefile's own
+  recipe uses `--force` for the same reason (`Makefile:150-154`). *Superseded (finding 7):* the
+  recipe omitted `--force`.
 
 ### P0 — Declaration and plumbing (~300 lines)
 
 **Goal.** `.target(StaticDocs::new().to("generated/docs"))` compiles, round-trips across the frame,
-and reaches `generate_in_plan`. No output is released: P0 and P1 ship together.
+and reaches `staticdocs::generate` through its `generate_target` arm. No output is released: P0 and
+P1 ship together.
 
 **Files.**
 
 - `crates/gnr8-sdk/src/sdk/builtins.rs` — the struct (§3.1).
 - `crates/gnr8-sdk/src/sdk/stage.rs:88-91`, `:178-182` — the variant.
 - `crates/gnr8-sdk/src/sdk/mod.rs:715-723` — the prelude.
-- `crates/gnr8-core/src/sdk/builtins.rs` — `PlanTargets`, `SiblingSdk`, `generate_in_plan`,
-  `impl TargetExec for StaticDocs`, the dispatch arms.
+- `crates/gnr8-core/src/sdk/builtins.rs` — `PlanTargets`, `SiblingSdk`, the `plan` parameter on
+  `generate_target`, and a `StaticDocs` arm in each dispatch function. There is no
+  `impl TargetExec for StaticDocs` (§3.2).
 - `crates/gnr8-core/src/pipeline/mod.rs:494-503` — pass `PlanTargets`.
 - `crates/gnr8-core/src/staticdocs/mod.rs` — a stub `generate` that only validates.
 - `crates/gnr8-core/src/lib.rs` — `pub mod staticdocs;`.
@@ -531,7 +775,6 @@ and reaches `generate_in_plan`. No output is released: P0 and P1 ship together.
 | `static_docs_declaration_round_trips_through_json` (asserts `"stage":"static_docs"`) | `crates/gnr8-sdk/src/sdk/stage.rs` tests (pattern `:327-334`) |
 | `static_docs_to_sets_the_output_dir` | same |
 | `static_docs_without_dir_is_a_config_error` | `crates/gnr8-core/src/sdk/builtins.rs` tests (module at `:4445`) |
-| `static_docs_generate_outside_a_plan_is_refused` | same |
 | `static_docs_dir_inside_an_sdk_dir_is_refused_naming_both` | same |
 | `plan_targets_yields_sibling_sdks_in_plan_order` | same |
 | `memo_key_moves_when_the_static_docs_declaration_moves` | `crates/gnr8-core/src/pipeline/emission.rs` tests (pattern `:418-505`) |
@@ -543,24 +786,35 @@ cargo test -p gnr8 && cargo test -p gnr8-engine --lib
 make examples-check GO_BIN=/opt/data/home/.local/go1.27.1/bin   # must be byte-identical: nothing emitted yet
 ```
 
-### P1 — Vertical slice: bookstore reference with Go snippets (~1.5–2k lines)
+### P1 — Vertical slice: bookstore reference with Go snippets and constraint-valid values (~2–2.5k lines)
 
-**Workstreams.**
+**Workstreams, in commit order.**
 
-- **W1.1 — Required/Nullable source (spike, first).** Locate the per-direction required and
-  nullable decision the OpenAPI lowering applies (`crates/gnr8-core/src/lower`) and the Go emitter
-  shares. If it is one function, call it. If it is not, extract one `pub(crate)` function, and
-  re-point the lowering at it in a byte-identical commit. Exit: `snapshot_openapi` and
-  `snapshot_sdk` unchanged.
+- **W1.0 — Baselines first** (note 10). One commit, before any lift, adds an `insta` snapshot of the
+  Go contract-test text for the goalservice fixture. It goes in `crates/gnr8-core/tests/contract_tests.rs`,
+  through the pipeline helper that file already uses (`generate`, `:96`; `all_targets`, `:123`).
+  Until then no committed "before" exists for goalservice: `fixtures/goalservice/expected/` holds
+  only `diagnostics.txt`, `openapi.yaml` and `sdk/{client,errors,models,operations}.go`. The
+  bookstore and taskflow `contract_test.go` files are already committed and covered by
+  `examples-check`.
+- **W1.1 — Required/Nullable.** Call `SchemaDirections::field_is_required` / `field_is_nullable`
+  (`graph/direction.rs:61`, `:78`), the function the lowering and all three emitters already share
+  (§3.4). There is no spike. *Superseded (note 19):* this was a "locate or extract" spike.
 - **W1.2 — Nav, slugs, pages.** `staticdocs/{nav,page,markdown,links}.rs`: index, group, operation
   and schema pages, and `llms.txt`.
-- **W1.3 — Go call-site lift.** Create `gosdk/callsite.rs` and re-point `gosdk/contract.rs` at it
-  with `InPackage`. Add `sample_operation` and `SampleRefusal` (structure only — the constraint
-  table lands in P2).
-- **W1.4 — Examples on operation pages.** `staticdocs/example.rs`: the HTTP exchange and Go
-  sections.
-- **W1.5 — Bookstore opts in.** Add `.target(StaticDocs::new().to("generated/docs"))` to
-  `examples/bookstore/.gnr8/src/main.rs:26-45`, and commit `examples/bookstore/generated/docs/`.
+- **W1.3 — Go call-site lift.** Create `gosdk/callsite.rs`, introduce `go_type_in` (§4.1), and
+  re-point `gosdk/contract.rs` with `InPackage`. Byte-identity is checked against W1.0, and
+  `snapshot_sdk` stays unchanged.
+- **W1.4 — S1, the sampler (§4.2), complete.** It brings `sample_operation` with its `CoreError`
+  channel, `SampleRefusal`, the per-value candidate order with `satisfies`, and the `format` rule.
+  The contract-test re-baseline it causes is **its own commit**, after W1.3, with a **Fixed** entry.
+  *Superseded (finding 22):* this was "structure only — the constraint table lands in P2".
+- **W1.5 — Examples on operation pages, and the compile-unit producer.** `staticdocs/example.rs`
+  renders the HTTP exchange and Go sections. `staticdocs/snippets.rs` adds `consumer_identity` and
+  `pub fn compile_unit` (§3.3), both built from the one `render_call` output.
+- **W1.6 — Bookstore opts in.** Add `.target(StaticDocs::new().to("generated/docs"))` to
+  `examples/bookstore/.gnr8/src/main.rs:26-45` and commit `examples/bookstore/generated/docs/`. The
+  bookstore `GoSdk` keeps its default package metadata, so it has a consumer identity.
 
 **Red-first tests.**
 
@@ -568,11 +822,13 @@ make examples-check GO_BIN=/opt/data/home/.local/go1.27.1/bin   # must be byte-i
 |---|---|---|
 | `docs_index_matches_hand_written_golden`, `docs_operation_page_matches_hand_written_golden` | `crates/gnr8-core/tests/snapshot_docs.rs` (new) | go |
 | `docs_match_snapshot_for_goalservice` (insta) | same | go |
-| `every_operation_has_exactly_one_page`; `page_title_is_the_operation_id_even_with_a_summary`; `undocumented_operation_has_structure_and_no_prose`; `group_without_describe_renders_its_name_alone`; `ungrouped_operations_are_listed_on_the_index`; `operation_slug_collision_is_an_error_naming_both`; `schema_slug_collision_is_an_error_naming_both`; `servers_are_listed_in_order_and_snippets_use_a_variable`; `declared_examples_render_under_their_status_beside_the_sample`; `schema_field_table_has_no_prose_or_example_column` (D1); `no_sdk_siblings_means_no_sdk_sections`; `two_go_sdks_render_two_sections_in_plan_order`; `llms_txt_and_index_list_pages_in_one_order`; `files_end_with_one_newline_and_no_trailing_space`; `windows_and_posix_module_paths_render_identically` | `crates/gnr8-core/tests/docs_emit.rs` (new; synthetic graphs as serde JSON, the house practice described in `thoughts/research/2026-09-11-cli-generation-plan.md` §10.1) | none |
+| `every_operation_has_exactly_one_page`; `page_title_is_the_operation_id_even_with_a_summary`; `undocumented_operation_has_structure_and_no_prose`; `group_without_describe_renders_its_name_alone`; `ungrouped_operations_are_listed_on_the_index`; `operation_slug_collision_is_an_error_naming_both`; `schema_slug_collision_is_an_error_naming_both`; `servers_are_listed_in_order_and_snippets_use_a_variable`; `declared_examples_render_under_their_status_beside_the_sample`; `schema_field_table_renders_exactly_the_fields_openapi_publishes` (D1 amended: description, example, format, default and constraints present; `x-*` absent); `parameter_table_renders_parameter_prose` (D4); `tags_render_as_code_spans`; `go_sdk_without_package_metadata_prints_the_identity_note_and_no_snippet` (§4.1); `no_sdk_siblings_means_no_sdk_sections`; `two_go_sdks_render_two_sections_in_plan_order`; `llms_txt_and_index_list_pages_in_one_order`; `files_end_with_one_newline_and_no_trailing_space`; `windows_and_posix_module_paths_render_identically` | `crates/gnr8-core/tests/docs_emit.rs` (new; synthetic graphs as serde JSON, the house practice described in `thoughts/research/2026-09-11-cli-generation-plan.md` §10.1) | none |
 | `dangling_link_fails_generation`; `fixed_headings_are_invariant_gate_clean` | `staticdocs/links.rs` / `staticdocs/markdown.rs` unit tests | none |
-| `go_contract_test_text_is_unchanged_by_the_callsite_lift` (goalservice contract test compared before and after) plus the existing `contract_tests.rs` | `crates/gnr8-core/tests/contract_tests.rs` | none |
-| `consumer_mode_qualifies_models_ptr_and_options` | `gosdk/callsite.rs` unit tests | none |
-| `go_docs_snippets_compile_against_the_generated_sdk` (rung 2 in gnr8's own CI; returns early when `go` is absent, the `sdk_compile.rs` practice) | `crates/gnr8-core/tests/docs_snippets_compile.rs` (new) | go |
+| `go_contract_test_text_is_unchanged_by_the_callsite_lift` (against the W1.0 snapshot) plus the existing `contract_tests.rs` | `crates/gnr8-core/tests/contract_tests.rs` | none |
+| `go_type_in_with_empty_qualifier_equals_go_type` (every schema of the fixture graphs); `consumer_mode_qualifies_slices_maps_pointers_ptr_args_and_literals` (`[]sdk.Book`, `map[string]*sdk.Book`, `sdk.Ptr[sdk.Genre]`, `sdk.Genre("…")`, `sdk.Book{…}`, `sdk.ListBooksParams{…}`); `consumer_mode_date_time_is_a_time_date_expression` | `gosdk/callsite.rs` / `gosdk/emit.rs` unit tests | none |
+| `sample_prefers_enum_members_that_satisfy_every_constraint`; `sample_respects_min_and_max_length`; `sample_respects_inclusive_numeric_bounds`; `sample_respects_exclusive_numeric_bounds`; `sample_respects_item_counts`; `sample_respects_property_counts`; `enum_members_all_shorter_than_min_length_is_unsatisfiable`; `contradictory_bounds_are_unsatisfiable`; `pattern_is_a_typed_refusal`; `required_non_json_body_is_no_json_body`; `well_known_format_selects_its_literal`; `unknown_format_is_a_typed_refusal`; `dangling_reference_is_an_error_not_a_refusal`; `every_sample_satisfies_all_its_constraints` (over synthetic graphs that exercise every `Constraints` field, singly and in combination) | `crates/gnr8-core/src/verify/mod.rs` tests | none |
+| `refused_operation_page_prints_the_refusal_reason` | `crates/gnr8-core/tests/docs_emit.rs` | none |
+| `go_docs_snippets_compile_against_the_generated_sdk` — calls `staticdocs::snippets::compile_unit`, writes the temp tree, runs `go vet` (rung 2 in gnr8's own CI; returns early when `go` is absent, the `sdk_compile.rs` practice) | `crates/gnr8-core/tests/docs_snippets_compile.rs` (new) | go |
 | `docs_are_byte_identical_across_two_generations` | `crates/gnr8-core/tests/determinism.rs` | go |
 
 Add `--test snapshot_docs --test docs_emit --test docs_snippets_compile` to the `gates` list at
@@ -583,7 +839,11 @@ Add `--test snapshot_docs --test docs_emit --test docs_snippets_compile` to the 
 - `examples/bookstore/generated/docs/` is committed and contains `index.md`, `llms.txt`,
   `groups/books.md`, five operation pages and the schema pages;
 - each operation page carries an HTTP exchange and a Go snippet;
-- every Go snippet passes `go vet` in `docs_snippets_compile.rs`;
+- every Go snippet passes `go vet` in `docs_snippets_compile.rs`, through the P1-built
+  `compile_unit`;
+- `every_sample_satisfies_all_its_constraints` is green, so no value the first release prints
+  violates a declared constraint;
+- the contract-test re-baseline commit (if any example moves) is separate and named;
 - `make examples-check` is green.
 
 **Verification.**
@@ -595,31 +855,38 @@ make examples-check GO_BIN=/opt/data/home/.local/go1.27.1/bin
 
 Plus the gates.
 
-### P2 — Every language, CLI sections, constraint sampling (~1–1.5k lines)
+### P2 — Every language and CLI sections (~0.8–1.2k lines)
+
+*Superseded (finding 22):* P2 used to carry the constraint table (old W2.3). It now lands in P1
+(W1.4).
 
 **Workstreams.**
 
 - **W2.1** — `pysdk/callsite.rs` and `tssdk/callsite.rs`, with the contract emitters re-pointed
-  (byte-identical).
+  (byte-identical, against the committed `contract_test.py` / `contract.test.ts` of
+  `fastapi-bookstore`, `flask-bookstore` and `nestjs-bookstore` under `examples-check`).
 - **W2.2** — CLI subsections:
   - one per sibling `GoSdk`/`PySdk` with `.cli(…)`;
   - only for operations in `cli_operations` (`emit_common.rs:856-890`);
   - each shows `command_invocation` (`:146-155`) and the declared command examples verbatim
     (`:304`).
-- **W2.3** — The constraint table (§4.2), landed as **its own commit**, which re-baselines any
-  changed contract tests.
-- **W2.4** — `examples/fastapi-bookstore` (Python) and `examples/nestjs-bookstore` (TypeScript) opt
-  in. `examples/bookstore` docs gain the CLI section.
+- **W2.5 — nestjs-bookstore publishes a package**, in its own commit, landing before W2.4 (a fresh id, so it is never confused with the superseded W2.3). Add
+  `.package(SdkPackageMetadata::new().registry_name("@example/bookstore-sdk"))` to
+  `examples/nestjs-bookstore/.gnr8/src/main.rs:36`. This is a user-config change in an example, and
+  it adds `package.json`, `PUBLISHING.md` and `tsconfig.json` to its SDK directory
+  (`builtins.rs:3436-3455`). Without it the TypeScript example would only ever show the
+  no-identity note (§4.1, finding 14).
+- **W2.4** — `examples/fastapi-bookstore` (Python; its `PySdk` already emits `pyproject.toml`) and
+  `examples/nestjs-bookstore` (TypeScript) opt in. `examples/bookstore` docs gain the CLI section.
 
 **Red-first tests.**
 
 | Test | File | Toolchain |
 |---|---|---|
-| `consumer_mode_imports_the_package_and_models` (Python); `consumer_mode_imports_the_registry_name` and `…_relative_dir_without_package_metadata` (TypeScript) | `pysdk/callsite.rs`, `tssdk/callsite.rs` unit tests | none |
-| `python_docs_snippets_compile_and_import`; `typescript_docs_snippets_typecheck` | `crates/gnr8-core/tests/docs_snippets_compile.rs` | python3; node + dev `typescript` (`make tsextract-deps`) |
-| `sample_takes_the_first_enum_value`; `sample_respects_min_and_max_length`; `sample_respects_inclusive_numeric_bounds`; `sample_respects_exclusive_numeric_bounds`; `sample_respects_item_counts`; `sample_respects_property_counts`; `pattern_is_a_typed_refusal`; `empty_interval_is_a_typed_refusal`; `well_known_format_outside_length_bounds_is_refused`; `every_sample_satisfies_its_constraints` (over synthetic graphs that exercise every `Constraints` field) | `crates/gnr8-core/src/verify/mod.rs` tests | none |
-| `refused_operation_page_prints_the_refusal_reason` | `crates/gnr8-core/tests/docs_emit.rs` | none |
-| `cli_section_only_for_operations_in_cli_scope`; `cli_section_prints_declared_examples_verbatim`; `typescript_sdk_has_no_cli_section` | same | none |
+| `consumer_mode_imports_the_listed_package_and_models` (Python); `consumer_mode_imports_the_package_json_name` (TypeScript); `python_and_typescript_without_package_metadata_print_the_identity_note_and_no_snippet` | `pysdk/callsite.rs`, `tssdk/callsite.rs` unit tests; `docs_emit.rs` | none |
+| `python_docs_snippet_calls_raise_api_error_through_the_stub_opener` (rung 2: execution, §5); `python_misspelled_method_or_keyword_fails_rung_two` (a planted `client.create_bok` / bad keyword must fail) | `crates/gnr8-core/tests/docs_snippets_compile.rs` | python3 |
+| `typescript_docs_snippets_typecheck_under_the_gate_options_with_paths` (`tsconfig.json` built from `tssdk_compile.rs:101-116` plus `paths`); `typescript_unresolvable_import_fails_rung_two` | same | node + dev `typescript` (`make tsextract-deps`) |
+| `cli_section_only_for_operations_in_cli_scope`; `cli_section_prints_declared_examples_verbatim`; `typescript_sdk_has_no_cli_section` | `crates/gnr8-core/tests/docs_emit.rs` | none |
 
 **Verification.**
 
@@ -646,7 +913,7 @@ Plus the gates. `pysdk_compile` and `tssdk_compile` must stay green after the li
 | Test | File |
 |---|---|
 | `docs_suites_are_declared_per_sibling_sdk_in_plan_order`; `no_static_docs_means_no_docs_suites` | `crates/gnr8-core/src/pipeline/mod.rs` tests |
-| `stale_docs_artifacts_are_refused`; `missing_toolchain_is_reported_skipped`; `planted_non_compiling_snippet_fails_with_the_operation_named`; `all_docs_suites_skipped_is_not_verified` | `crates/gnr8/src/verify/docs.rs` tests (fake `ProcessRunner`, as `cli_help.rs`) |
+| `missing_fresh_docs_page_is_refused` (presence in this run's fresh artifacts — what `require_fresh` checks; *superseded name:* `stale_docs_artifacts_are_refused`, note 8); `post_process_rewriting_a_snippet_fails_naming_the_page` (rung 2's verbatim check); `sdk_without_consumer_identity_is_reported_skipped_with_the_reason`; `missing_toolchain_is_reported_skipped`; `planted_non_compiling_snippet_fails_with_the_operation_named`; `all_docs_suites_skipped_is_not_verified` | `crates/gnr8/src/verify/docs.rs` tests (fake `ProcessRunner`, as `cli_help.rs`) |
 | `verify_report_counts_docs_suites` | `crates/gnr8/src/verify.rs` tests (pattern `:710-744`) |
 | `verify_runs_the_go_docs_suite_for_bookstore` | `crates/gnr8/tests/verify_e2e.rs` (Go only — the `gnr8-cli` CI job has no Python; see `thoughts/research/2026-09-11-cli-generation-plan.md` §10.2) |
 
@@ -669,7 +936,9 @@ A manual check, `cd examples/bookstore && …/gnr8 verify`, must show the docs s
   (`emit_common.rs:971`), with each language's credential option taken from the lifted
   `client_options` / `client_credentials`.
 - **Per-page diagnostics**, matched by `METHOD path` identity, as `resolve_security_diagnostics`
-  does (`pipeline/mod.rs:330-351`), and filtered by `is_publishable`.
+  does (`pipeline/mod.rs:330-351`), and filtered by `is_publishable`. `is_publishable` is a private
+  `fn` today (`crates/gnr8-core/src/sdk/docs.rs:200`), so P4 makes it `pub(crate)`. That is a
+  byte-neutral visibility change, and `sdk/docs.rs` joins P4's file list (note 13).
 - **Pagination sections.**
 - **Rung 3** in the compile units and the host runner.
 - **`examples/taskflow` opts in**, for richer errors and auth.
@@ -680,7 +949,7 @@ A manual check, `cd examples/bookstore && …/gnr8 verify`, must show the docs s
 |---|---|
 | `error_catalog_keys_by_status_and_schema`; `undeclared_status_guarantee_is_stated_once`; `authentication_page_only_when_security_is_declared`; `diagnostic_attaches_to_its_operation_page`; `unpublishable_diagnostic_is_omitted`; `pagination_section_only_with_a_policy` | `crates/gnr8-core/tests/docs_emit.rs` |
 | `go_snippet_call_sends_the_page_request`; `python_snippet_call_sends_the_page_request`; `typescript_snippet_call_sends_the_page_request` | `crates/gnr8-core/tests/docs_snippets_compile.rs` |
-| `planted_wire_mismatch_fails_rung_three_naming_the_field` | `crates/gnr8/src/verify/docs.rs` tests |
+| `planted_wire_mismatch_fails_rung_three_naming_the_field`; `rung_three_compares_after_substituting_credentials_and_base_url` | `crates/gnr8/src/verify/docs.rs` tests |
 
 Verification is the P2 commands plus the P3 commands, and the gates.
 
@@ -689,13 +958,23 @@ Verification is the P2 commands plus the P3 commands, and the gates.
 **Files.**
 
 - `docs/static-docs/generation.md` (new; sibling of `docs/openapi/generation.md` and
-  `docs/sdk/generation.md`). It covers the one builder call, the page model, where each word comes
-  from (D1: field prose is not rendered, and the page says so), the ladder, and the non-goals.
+  `docs/sdk/generation.md`). It covers:
+  - the one builder call and the page model;
+  - where each word comes from. Operation, parameter and group prose have their documented sources.
+    Field facts are those `openapi.yaml` publishes (D1 amended, D4), and no type or body-field doc
+    comment is read;
+  - the consumer-identity rule (§4.1);
+  - the ladder, including rung 3's substitution (§5);
+  - `llms.txt` stability (§6);
+  - the non-goals.
 - `docs/reference/public-api.md` — `StaticDocs`.
 - `docs/agents/index.md`, `llms.txt`, `llms-full.txt` — one entry each.
 - `CHANGELOG.md` (§8).
 
-The docs page must not advertise `description:"…"` / `example:"…"` (D1; R§4.1).
+The docs page must not present any struct tag as the way to put words or values on a page — not
+`description:"…"` / `example:"…"`, nor `default:` / `format:` / `minLength:` and kin (D1 amended;
+R§4.1). Where a reader asks where a field's value comes from, the page points at
+`docs/extraction/sources.md`, which documents extraction.
 
 **Verification.** `scripts/check-invariants.sh` (the docs are in scope: `scripts/check-invariants.sh:30`),
 plus a link read-through.
@@ -712,43 +991,63 @@ Entries go under `## Unreleased`, in the order the phases merge.
 | Phase | Heading | Entry (summary) |
 |---|---|---|
 | P0+P1 | **Breaking** | `BuiltinTarget` gains `StaticDocs`. Rust code that matches `BuiltinTarget` exhaustively needs an arm. |
-| P0+P1 | **Added** | `StaticDocs::new().to(dir)` writes a deterministic Markdown reference — index, group, operation and schema pages, and `llms.txt` — with an HTTP example and a Go call on every operation page, rendered by the functions that emitted the Go SDK. Generation fails on a missing page or broken internal link. |
-| P2 | **Added** | Python and TypeScript calls on operation pages; CLI invocations for operations a generated CLI wraps. An operation with no sample prints the reason. |
-| P2 | **Fixed** | Contract-test sample values now satisfy declared `enum`, length, range, item-count and property-count constraints. Generated `contract_test.*` files change for operations whose inputs declare them. |
-| P3 | **Added** | `gnr8 verify` compiles every docs code sample against the SDK it documents, and reports skipped toolchains explicitly. |
-| P4 | **Added** | `errors.md`, `authentication.md`, per-page diagnostics and pagination sections. `gnr8 verify` runs each sample's call against a fake transport and asserts it sends the request printed on the page. |
+| P0+P1 | **Added** | `StaticDocs::new().to(dir)` writes a deterministic Markdown reference — index, group, operation and schema pages, and `llms.txt` — with an HTTP example and a Go call on every operation page. Names are spelled by the Go SDK emitter's own functions, and every sample value satisfies the input's declared constraints. An operation or SDK with no sample prints the reason. Generation fails on a missing page or broken internal link. |
+| P0+P1 | **Fixed** | Contract-test sample values now satisfy declared `enum`, length, range, item-count, property-count and `format` constraints, and a constraint no value can satisfy is reported instead of sent. Generated `contract_test.*` files change for operations whose inputs declare them. |
+| P2 | **Added** | Python and TypeScript calls on operation pages, for SDK targets that emit package metadata; CLI invocations for operations a generated CLI wraps. |
+| P3 | **Added** | `gnr8 verify` checks every docs code sample against the SDK it documents. Go and TypeScript samples are compiled, and Python samples are executed against a stub transport. It also checks that each sample appears unchanged in its page, and it reports skipped toolchains explicitly. |
+| P4 | **Added** | `errors.md`, `authentication.md`, per-page diagnostics and pagination sections. `gnr8 verify` runs each sample's call against a fake transport and asserts it sends the request printed on the page, with credentials and base URL substituted. |
+
+*Superseded.* The P0+P1 **Added** row said samples are *"rendered by the functions that emitted the
+Go SDK"* — true for names only (note 1). The **Fixed** row was a P2 entry (finding 22). The P3 row
+claimed Python samples were *"compiled"* (finding 5).
 
 **Release framing.**
 
-- **0.18.0 (minor) = P0 + P1**, plus P5's docs for what shipped. The breaking change lands exactly
-  once.
+- **0.18.0 (minor) = P0 + P1**, including **S1, the constraint-respecting sampler**, plus P5's docs
+  for what shipped. The breaking change lands exactly once. The first release prints no sample value
+  that violates a declared constraint (finding 22).
 - **P2, P3 and P4 are additive.** They ship as 0.18.x patch releases or batch into one, at the
   release owner's choice. A patch is legitimate because no public Rust API changes after P0 — the
-  0.17.1 precedent shipped `verify` CLI-help checks in a patch (`CHANGELOG.md:12-17`). P2's
-  **Fixed** entry changes generated contract-test bytes, which is behaviour gnr8 already owned, not
-  a public API.
+  0.17.1 precedent shipped `verify` CLI-help checks in a patch (`CHANGELOG.md:12-17`).
 
-**Examples churn.** The phase PR's author regenerates and commits, and `examples-check` proves it.
+**Examples churn.** The phase PR's author regenerates and commits, using the `--force` recipe (§7),
+and `examples-check` proves it.
 
 | Phase | Example | What changes |
 |---|---|---|
+| P1 (W1.4) | any example whose graph carries constraints or a field `format` | `generated/sdk*/contract_test.*`, in the separate re-baseline commit. `examples-check` names exactly which. Today none declares length or range bounds, so the expected set is empty or small |
 | P1 | `bookstore` | `.gnr8/src/main.rs` (one `.target` line); new `generated/docs/**` |
 | P2 | `bookstore` | `generated/docs/**`: the CLI section appears |
-| P2 | `fastapi-bookstore`, `nestjs-bookstore` | `.gnr8/src/main.rs` (one line each); new `generated/docs/**` |
-| P2 (W2.3) | any example whose graph carries constraints | `generated/sdk*/contract_test.*`, in the separate re-baseline commit. `examples-check` names exactly which |
+| P2 (W2.5) | `nestjs-bookstore` | `.gnr8/src/main.rs` gains `.package(…)`; its SDK directory gains `package.json`, `PUBLISHING.md` and `tsconfig.json`. This is a user-config change in the example, in its own commit |
+| P2 | `fastapi-bookstore`, `nestjs-bookstore` | `.gnr8/src/main.rs` (one `.target` line each); new `generated/docs/**` |
 | P4 | `bookstore`, `fastapi-bookstore`, `nestjs-bookstore` | `errors.md`, `authentication.md`, diagnostics sections |
 | P4 | `taskflow` | `.gnr8/src/main.rs`; new `generated/docs/**` |
 | — | `flask-bookstore` | **none.** A second Python docs tree adds review volume and no coverage. |
 
-**No SDK directory changes except W2.3** (D2).
+**SDK directories change in exactly two places,** both named above: the S1 contract-test re-baseline
+(W1.4) and nestjs-bookstore's package-metadata opt-in (W2.5). Declaring `StaticDocs` itself changes
+none (D2).
 
 ---
 
 ## 9. Invariant check, phase by phase
 
-- **Rule 0 / 0.1.** Reads: the graph plus sibling declarations (§3.3). Writes: Markdown, `llms.txt`
-  and HTTP messages — no site-generator file and no sidebar manifest (Inputs table). Field prose and
-  examples are not rendered (D1).
+- **Rule 0 / 0.1.**
+  - **Reads:** the graph plus sibling declarations (§3.3).
+  - **Writes:** Markdown, `llms.txt` and HTTP messages — no site-generator file and no sidebar
+    manifest (Inputs table).
+  - **No new prose source:** no type or body-field doc comment is read (D1).
+  - **What the plan does lean on, stated rather than hidden** (finding 15): field facts render at
+    parity with `openapi.yaml`, so on the Go path some of them originate in struct-tag spellings no
+    Go runtime consumes. These are `default:`, `format:`, `minLength:`-style bounds, `enums:`, and the
+    known-inconsistency `description:` / `example:` (`goextract/internal/types/extract.go:177-183`,
+    `:270-322`; `AGENTS.md:82-95`). The S1 sampler also consumes those constraints.
+
+    `StaticDocs` adds no new reading of them. They already reach `openapi.yaml`
+    (`lower/mod.rs:956-982`). But rendering them on pages, and letting them steer sample values,
+    leans on them further. Whether docs should withhold them is an owner-informable default (§11).
+    The docs page never advertises any of them (P5).
+  - **Parameter prose relies on the 0.17.0 category-2 widening** (D4), also owner-informable (§11).
 - **Rule 0.3.** Fixed headings and file names are `const`s, unit-tested against the gate's
   patterns. Committed docs under `examples/` are scanned (`scripts/check-invariants.sh:31`).
 - **Rule 2.** No new dependency: rendering is string building, `serde_json` is already a dependency,
@@ -759,9 +1058,12 @@ Entries go under `## Unreleased`, in the order the phases merge.
   - the sampler never reads examples or defaults;
   - servers are listed, never chosen;
   - `op.group` is the only navigation;
-  - refusals are typed.
+  - refusals are typed, and graph errors stay errors.
 
-  `generate()` outside a plan refuses, so there is one generation path (§3.2).
+  Two more rules hold:
+  - **The consumer import identity has exactly one source**, the sibling's emitted manifest, and its
+    absence is a typed note, never a substitute specifier (§4.1, finding 14).
+  - **`StaticDocs` has one entry point**, its `generate_target` arm (§3.2).
 - **Rule 4.** One builder method. Prose completeness stays with `RequireOperationDocs`
   (`crates/gnr8-sdk/src/sdk/builtins.rs:376-381`); `StaticDocs` never errors for missing prose.
 
@@ -771,27 +1073,38 @@ Entries go under `## Unreleased`, in the order the phases merge.
 
 **Risks.**
 
-1. **Contract-test churn in user projects (P2).** Every user whose API declares constraints sees
-   `contract_test.*` diffs on their next regeneration. Mitigation: a separate commit, a **Fixed**
-   entry, and a test that the new values satisfy the constraints the old ones violated.
+1. **Contract-test churn in user projects (0.18.0, S1).** Every user whose API declares constraints
+   or a field `format` sees `contract_test.*` diffs on their next regeneration. An unsatisfiable
+   combination now drops that operation from the sampled plan, as other refusals already do.
+   Mitigation: a separate commit, a **Fixed** entry, and `every_sample_satisfies_all_its_constraints`.
 2. **Large APIs.** Page count is operations plus schemas plus groups. The memo stores the whole
    built-in block (`pipeline/emission.rs:23-29`), so the record grows by the docs tree. Mitigation:
    measure warm `generate` / `check` on the large consumer the 0.16.2 numbers came from
    (`CHANGELOG.md:149-155`) before 0.18.0. The budget is no regression beyond the cost of writing
-   the extra files.
-3. **The call-site lift moves contract bytes.** Mitigation: re-point the emitters under a
-   byte-identity test (`go_contract_test_text_is_unchanged_by_the_callsite_lift` and its two
-   siblings), *before* any consumer-mode code lands.
+   the extra files. Two further costs are measured before the release that adds P3 (note 3):
+   - `docs_suites`, built after the memoized block on every run (`pipeline/mod.rs:407-408`; §3.3);
+   - a companion `StaticFiles` stage, which disables the memo key for the whole plan
+     (`emission.rs:97-101`).
+3. **The call-site lift moves contract bytes.** Mitigation: commit the W1.0 baseline first, then
+   re-point the emitters under a byte-identity test
+   (`go_contract_test_text_is_unchanged_by_the_callsite_lift`,
+   `go_type_in_with_empty_qualifier_equals_go_type`, and the Python and TypeScript siblings),
+   *before* any consumer-mode code lands. S1's intentional change comes after, in its own commit.
 4. **Markdown renderer variance.** Mitigation: tables use the GFM pipe-table subset only; cells are
    escaped; there is no raw HTML and no heading anchors.
 5. **Rung 3 does not execute the printed construction line.** The harness must inject the fake
    transport. Mitigation: construction is proved at rung 2, and the docs page says rung 3 covers the
    call. Executing the printed construction would need a process-global transport swap, which the
    generated clients do not offer.
-6. **TypeScript import specifier without package metadata.** Mitigation: a relative specifier
-   computed from two declared directories, pinned by its own test (P2).
-7. **W1.1 finds no single Required/Nullable function.** The extraction then grows P1. Mitigation: it
-   is the first task, and it is held to byte-identity against `snapshot_openapi` / `snapshot_sdk`.
+6. **SDK targets without package metadata get no snippets.** TypeScript's default is off
+   (`crates/gnr8-sdk/src/sdk/builtins.rs:2706-2710`), so a default `TsSdk` gets the typed
+   no-identity note. Mitigation: the note names the cause and the one-line fix (`.package(…)`), and
+   the P5 page says so. *Superseded:* this risk was "TypeScript import specifier without package
+   metadata", mitigated by a docs-relative specifier — the rule-3 fallback withdrawn under
+   finding 14.
+
+*Withdrawn:* Risk 7 ("W1.1 finds no single Required/Nullable function") — the function exists
+(note 19).
 
 **Non-goals**, explicit and for v1:
 
@@ -802,7 +1115,8 @@ Entries go under `## Unreleased`, in the order the phases merge.
 - no heading-anchor links;
 - no builder method beyond `.to()` — no theme, layout, section toggles, language filter, base URL or
   operation scope;
-- no prose for named types or body fields (D1);
+- no prose for named types or body fields — no new prose source is read (D1 amended);
+- no `x-*` vendor extensions on pages (D1 amended);
 - no change to `SdkDocs` (D2);
 - no tag filtering (D3);
 - no error-code catalog;
@@ -813,15 +1127,34 @@ Entries go under `## Unreleased`, in the order the phases merge.
 - no snippets for custom targets;
 - the README quick-start fix is deferred to the follow-up issue filed at P2 (D2).
 
+**Known limitations, accepted** (notes 3, 9 and 16):
+- warm-path cost of building `docs_suites` on every run, until measured (Risk 2);
+- rung 3 equality holds after substituting credentials and the base URL (§5);
+- `llms.txt` layout carries no stability promise, and a group literally named `Optional` inherits
+  the proposal's "may be skipped" meaning (§6).
+
 ---
 
 ## 11. Owner-informable decisions, and what overriding each would cost
 
 | Decision | If overridden |
 |---|---|
-| **D1** — no field or type prose in v1 | An `AGENTS.md` amendment first. Then `goextract` reads field and type doc comments (removing the tag grammar is a separate, breaking extractor change), `Schema` gains a prose field, and the schema page gains a Description column. Phases are unchanged; P4 grows. |
-| **D2** — keep `reference.md` unchanged | Retiring it adds a second **Breaking** entry to 0.18.0, regenerates five examples' SDK directories, and edits twelve docs pages plus the README agent workflow (`sdk/docs.rs:58`). Best done in P5, never half-way. |
+| **D1 (amended)** — no new prose source; field facts at parity with `openapi.yaml` | **To add type and body-field prose:** an `AGENTS.md` amendment first. Then `goextract` reads field and type doc comments (removing the tag grammar is a separate, breaking extractor change), and `Schema` gains a prose field. Phases are unchanged; P4 grows. **To withhold tag-derived facts** (question B below): there is no per-fact origin in the graph, so this means either dropping the Description / Example / Default / Constraints columns for all sources, or adding origin to the graph first. |
+| **D2** — keep `reference.md` unchanged | Retiring it adds a second **Breaking** entry to 0.18.0, regenerates five examples' SDK directories, and edits six docs pages, `llms-full.txt:77` and the README agent workflow (`sdk/docs.rs:58`). Best done in P5, never half-way. *Superseded:* this row said "twelve docs pages" (finding 17). |
 | **D3** — docs mirror `openapi.yaml` | Tag-based subtraction would need an `OperationSelector` tag variant (absent today; cli-pre-ship §4 Open 1) and a `StaticDocs::operations(selector)` method. It should be decided together with the same question for `SdkCli::commands`. |
+| **D4** — parameter prose rendered | Drop the parameter Description column. The CLI and `openapi.yaml` keep printing it. |
 
-**New owner-level question:** none. Every remaining choice in this plan was derivable from the
-invariants, the research baseline, or this checkout.
+**Owner-level questions this plan surfaces** — each has a plan default above, and none blocks a
+phase. *Superseded (finding 18):* this section used to say "New owner-level question: none",
+which was wrong.
+
+- **A. Ratify, or reverse, the 0.17.0 category-2 widening in `AGENTS.md`.** `AGENTS.md:68-72` still
+  limits doc-comment prose to a routed handler's summary and description. Since 0.17.0
+  (`CHANGELOG.md:30-33`, after the 2026-09-19 rewrite `f3ae797`), parameter prose comes from the
+  binding field's doc comment. D4 renders it on a third artifact. That does not decide the question,
+  and `AGENTS.md:94` says a pre-existing reading is not a precedent. This is R's OPEN-FOR-EMIL 1,
+  first half.
+- **B. Should generated docs withhold facts that originate in gnr8-invented or foreign struct-tag
+  spellings?** These are `description:` / `example:` / `default:` / `format:` / `minLength:` /
+  `enums:`, which `openapi.yaml` already publishes (finding 15; `AGENTS.md:82-95`). The plan default
+  is to render them at parity and advertise none of them. The alternative costs are in the D1 row.
