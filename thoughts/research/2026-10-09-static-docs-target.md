@@ -56,6 +56,14 @@ notes, in:
 - **§4.4** — field description inherits an extractor fallback this target does not repair;
 - **§5** — the constrained fixture, and the phase that carries the Breaking entry.
 
+**Revision — adversarial review round 3 (2026-10-09).** The third review found one should-fix issue
+in the plan's response sampler: a refused **optional** response field refused the whole reply, and
+the plan misstated which contract-test cases that loses. The plan carries the resolution (plan §4.2,
+§8, §10 Risk 1). This document changes in two places:
+
+- **§3.4** — a refused optional reply field is dropped, and only a required one refuses the reply;
+- **§5** — the claim is scoped: an enum member is printed as declared, even against a mapped format.
+
 Acting on the standard above, **six product facts carried into this work needed correcting**:
 
 | The brief said | This checkout says |
@@ -529,7 +537,11 @@ the candidate order, the single `satisfies` check, and a disposition for every r
 - **`pattern` is never synthesized.** gnr8 carries no regex engine and should not grow one for
   this. An operation whose required input is pattern-constrained gets a **typed refusal reason**
   instead of a sample: *"no sample call: parameter `isbn` declares `pattern`"*. The page prints it.
-  That is not a degraded guess: the reason is a fact, and the page says it.
+  That is not a degraded guess: the reason is a fact, and the page says it. **In the canned reply,
+  a `pattern` (or any other refusal) on an optional field drops that field.** Only a required one
+  refuses the reply, which leaves the request sample and prints *"No sample response body: …"*. The
+  contract-test coverage this still costs is stated in the plan (§10 Risk 1). *Superseded (round 3,
+  C1):* any refused reply field refused the whole reply.
 - **Refusals are typed, and every one is enumerated.** `Candidate::build` changes from `Option` to a
   result carrying the refusal reason (§1.2.5). Every `None` path of today's sampler gets a variant —
   unions and byte strings in request position (`verify/mod.rs:1102-1104`, `:1250-1252`),
@@ -801,7 +813,8 @@ values satisfy every declared constraint**. A slice without snippets would be a 
 `reference.md` and nothing more. The snippet is the thesis, so it ships first, in one language, end
 to end — and only with values this document does not itself call defective (§1.2.4): request
 inputs **and** the canned response body satisfy every declared `Constraints` field and every format
-gnr8 maps to a well-known scalar. Unmapped formats (`hostname`, `int64`, …) are annotations and are
+gnr8 maps to a well-known scalar. The one exception: an enum member is printed as declared, even
+when it contradicts a mapped format (plan §4.2, round 3). Unmapped formats (`hostname`, `int64`, …) are annotations and are
 not honoured (plan §4.2). *Superseded (round 2, B1):* this sentence held for inputs only.
 
 *Superseded (review round 1, finding 22):* the constraint-respecting sampler was scheduled in P2, so
