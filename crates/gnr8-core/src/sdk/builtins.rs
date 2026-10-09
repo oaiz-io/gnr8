@@ -116,6 +116,80 @@ pub trait TargetExec {
     }
 }
 
+/// The built-in target declarations of the plan being run, in plan order.
+///
+/// A target only ever sees its own declaration, except `StaticDocs`: its code samples cover exactly
+/// the SDK targets the same pipeline declares, so it reads their declarations — never their output,
+/// which keeps every built-in a pure function of the frozen graph plus declarations.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanTargets<'a> {
+    targets: &'a [(usize, &'a BuiltinTarget)],
+}
+
+/// A sibling SDK target a docs page can render calls for.
+#[derive(Debug, Clone, Copy)]
+pub enum SiblingSdk<'a> {
+    /// A Go SDK declaration.
+    Go(&'a GoSdk),
+    /// A Python SDK declaration.
+    Python(&'a PySdk),
+    /// A TypeScript SDK declaration.
+    TypeScript(&'a TsSdk),
+}
+
+impl SiblingSdk<'_> {
+    /// The language is a property of the variant, never a second argument.
+    #[must_use]
+    pub fn language(&self) -> ContractTestLanguage {
+        match self {
+            Self::Go(_) => ContractTestLanguage::Go,
+            Self::Python(_) => ContractTestLanguage::Python,
+            Self::TypeScript(_) => ContractTestLanguage::TypeScript,
+        }
+    }
+
+    /// The declaration's output directory, exactly as declared.
+    #[must_use]
+    pub fn dir(&self) -> &str {
+        match self {
+            Self::Go(t) => &t.dir,
+            Self::Python(t) => &t.dir,
+            Self::TypeScript(t) => &t.dir,
+        }
+    }
+
+    /// The declaration's stage name, as host diagnostics spell it.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Go(_) => "GoSdk",
+            Self::Python(_) => "PySdk",
+            Self::TypeScript(_) => "TsSdk",
+        }
+    }
+}
+
+impl<'a> PlanTargets<'a> {
+    /// The built-in targets of one plan, with their plan positions, in plan order.
+    #[must_use]
+    pub fn new(targets: &'a [(usize, &'a BuiltinTarget)]) -> Self {
+        Self { targets }
+    }
+
+    /// Every Go/Python/TypeScript SDK declaration, in plan order.
+    pub fn sdks(&self) -> impl Iterator<Item = SiblingSdk<'a>> + 'a {
+        self.targets.iter().filter_map(|(_, spec)| match *spec {
+            BuiltinTarget::GoSdk(t) => Some(SiblingSdk::Go(t)),
+            BuiltinTarget::PySdk(t) => Some(SiblingSdk::Python(t)),
+            BuiltinTarget::TsSdk(t) => Some(SiblingSdk::TypeScript(t)),
+            BuiltinTarget::OpenApi31(_)
+            | BuiltinTarget::OpenApi31Json(_)
+            | BuiltinTarget::StaticFiles(_)
+            | BuiltinTarget::StaticDocs(_) => None,
+        })
+    }
+}
+
 /// Run a declared post-processor.
 pub trait PostExec {
     /// Rewrite `out` in place.
@@ -4313,6 +4387,9 @@ pub fn apply_transform(
 
 /// Execute a declared target against the frozen `ir`.
 ///
+/// `plan` is every built-in target the same plan declares. Only `StaticDocs` reads it, for the
+/// sibling SDK declarations its code samples cover; every other target sees its own declaration.
+///
 /// # Errors
 ///
 /// Propagates the target's own typed failure.
@@ -4322,11 +4399,13 @@ pub fn generate_target(
     out: &mut Artifacts,
     cx: &Cx,
     store: Option<&Store>,
+    plan: &PlanTargets<'_>,
 ) -> Result<(), CoreError> {
     match spec {
         BuiltinTarget::OpenApi31(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::OpenApi31Json(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::StaticFiles(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::StaticDocs(t) => crate::staticdocs::generate(t, ir, out, plan),
         BuiltinTarget::GoSdk(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::PySdk(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::TsSdk(t) => t.generate(ir, out, cx, store),
@@ -4340,6 +4419,7 @@ pub fn target_output_anchors(spec: &BuiltinTarget) -> Vec<String> {
         BuiltinTarget::OpenApi31(t) => t.output_anchors(),
         BuiltinTarget::OpenApi31Json(t) => t.output_anchors(),
         BuiltinTarget::StaticFiles(t) => t.output_anchors(),
+        BuiltinTarget::StaticDocs(t) => crate::staticdocs::output_anchors(t),
         BuiltinTarget::GoSdk(t) => t.output_anchors(),
         BuiltinTarget::PySdk(t) => t.output_anchors(),
         BuiltinTarget::TsSdk(t) => t.output_anchors(),
@@ -4353,6 +4433,8 @@ pub fn target_readiness_targets(spec: &BuiltinTarget) -> Vec<ReadinessTarget> {
         BuiltinTarget::OpenApi31(t) => t.readiness_targets(),
         BuiltinTarget::OpenApi31Json(t) => t.readiness_targets(),
         BuiltinTarget::StaticFiles(t) => t.readiness_targets(),
+        // `ReadinessKind` is closed, and no readiness check exists for a Markdown tree.
+        BuiltinTarget::StaticDocs(_) => Vec::new(),
         BuiltinTarget::GoSdk(t) => t.readiness_targets(),
         BuiltinTarget::PySdk(t) => t.readiness_targets(),
         BuiltinTarget::TsSdk(t) => t.readiness_targets(),
@@ -4372,6 +4454,7 @@ pub fn target_contract_test_suites(
         BuiltinTarget::OpenApi31(t) => t.contract_test_suites(ir),
         BuiltinTarget::OpenApi31Json(t) => t.contract_test_suites(ir),
         BuiltinTarget::StaticFiles(t) => t.contract_test_suites(ir),
+        BuiltinTarget::StaticDocs(_) => Ok(Vec::new()),
         BuiltinTarget::GoSdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::PySdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::TsSdk(t) => t.contract_test_suites(ir),
@@ -4419,6 +4502,7 @@ pub fn target_cli_help_suites(
         BuiltinTarget::OpenApi31(_)
         | BuiltinTarget::OpenApi31Json(_)
         | BuiltinTarget::StaticFiles(_)
+        | BuiltinTarget::StaticDocs(_)
         | BuiltinTarget::TsSdk(_) => return Ok(Vec::new()),
     };
     let projected = crate::graph::projection::for_generation(ir)?;
@@ -4460,13 +4544,15 @@ mod tests {
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, SourceExec, StaticFiles,
         StaticFilesSources, TargetExec, TransformExec, TsSdk,
     };
+    use super::{PlanTargets, SiblingSdk, StaticDocs};
     use crate::analyze::facts::{Constraints, FieldMeta, LiteralValue};
     use crate::graph::{
         ApiGraph, Diagnostic, DiagnosticCategory, Field, Operation, PaginationMode,
         PaginationTermination, Param, Prim, Response, RuntimeHookKind, Schema, SchemaRef,
         SchemaUse, SourceSpan, Type,
     };
-    use gnr8::sdk::BuiltinSource;
+    use crate::verify::ContractTestLanguage;
+    use gnr8::sdk::{BuiltinSource, BuiltinTarget};
 
     use crate::sdk::layout::SdkFileLayout;
     use crate::sdk::model::SdkModel;
@@ -8425,5 +8511,112 @@ func (s Server) create(c *gin.Context) {
             .run(&mut out, &cx())
             .unwrap_err();
         assert!(err.to_string().contains("undeclared artifact"), "{err}");
+    }
+
+    fn static_docs(dir: &str) -> BuiltinTarget {
+        BuiltinTarget::StaticDocs(StaticDocs::new().to(dir))
+    }
+
+    /// Run a `StaticDocs` declaration through its one entry point, the `generate_target` arm.
+    fn generate_static_docs(
+        docs: &BuiltinTarget,
+        siblings: &[(usize, &BuiltinTarget)],
+    ) -> Result<Artifacts, crate::CoreError> {
+        let mut out = Artifacts::new();
+        super::generate_target(
+            docs,
+            &ApiGraph::default(),
+            &mut out,
+            &cx(),
+            None,
+            &PlanTargets::new(siblings),
+        )?;
+        Ok(out)
+    }
+
+    #[test]
+    fn static_docs_without_dir_is_a_config_error() {
+        let docs = static_docs("");
+        let err = generate_static_docs(&docs, &[(0, &docs)]).unwrap_err();
+        assert!(
+            matches!(err, crate::CoreError::Config { .. }),
+            "an empty dir is a configuration error: {err:?}"
+        );
+        assert!(err.to_string().contains("StaticDocs"), "{err}");
+        assert!(err.to_string().contains(".to("), "{err}");
+    }
+
+    #[test]
+    fn static_docs_dir_inside_an_sdk_dir_is_refused_naming_both() {
+        let go = BuiltinTarget::GoSdk(
+            GoSdk::new()
+                .module("example.com/bookstore/sdk")
+                .to("generated/sdk"),
+        );
+        let py = BuiltinTarget::PySdk(PySdk::new().module("bookstore").to("generated/py/"));
+        for (dir, sdk, sdk_dir) in [
+            ("generated/sdk/docs", &go, "generated/sdk"),
+            ("generated/sdk", &go, "generated/sdk"),
+            ("generated/sdk/", &go, "generated/sdk"),
+            ("generated", &go, "generated/sdk"),
+            ("generated/py/reference", &py, "generated/py"),
+        ] {
+            let docs = static_docs(dir);
+            let err = generate_static_docs(&docs, &[(0, sdk), (1, &docs)]).unwrap_err();
+            let text = err.to_string();
+            assert!(
+                matches!(err, crate::CoreError::Config { .. }),
+                "{dir}: {err:?}"
+            );
+            assert!(text.contains("StaticDocs"), "{dir}: {text}");
+            assert!(text.contains(sdk.label()), "{dir}: {text}");
+            assert!(text.contains(sdk_dir), "{dir}: {text}");
+            assert!(text.contains(dir.trim_end_matches('/')), "{dir}: {text}");
+        }
+
+        // A sibling directory that merely shares a name prefix is not nested.
+        let docs = static_docs("generated/sdk-docs");
+        generate_static_docs(&docs, &[(0, &go), (1, &docs)])
+            .expect("a sibling directory with a shared name prefix is not inside the SDK");
+    }
+
+    #[test]
+    fn plan_targets_yields_sibling_sdks_in_plan_order() {
+        let ts = BuiltinTarget::TsSdk(TsSdk::new().module("bookstore").to("generated/ts"));
+        let openapi = BuiltinTarget::OpenApi31(OpenApi31::new().to("generated/openapi.yaml"));
+        let go_one = BuiltinTarget::GoSdk(GoSdk::new().module("example.com/one").to("gen/one"));
+        let py = BuiltinTarget::PySdk(PySdk::new().module("bookstore").to("generated/py"));
+        let docs = static_docs("generated/docs");
+        let go_two = BuiltinTarget::GoSdk(GoSdk::new().module("example.com/two").to("gen/two"));
+        let targets = [
+            (0, &ts),
+            (1, &openapi),
+            (2, &go_one),
+            (4, &py),
+            (5, &docs),
+            (6, &go_two),
+        ];
+        let plan = PlanTargets::new(&targets);
+        let seen: Vec<(ContractTestLanguage, String)> = plan
+            .sdks()
+            .map(|sdk| {
+                let dir = match sdk {
+                    SiblingSdk::Go(t) => t.dir.clone(),
+                    SiblingSdk::Python(t) => t.dir.clone(),
+                    SiblingSdk::TypeScript(t) => t.dir.clone(),
+                };
+                (sdk.language(), dir)
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (ContractTestLanguage::TypeScript, "generated/ts".to_string()),
+                (ContractTestLanguage::Go, "gen/one".to_string()),
+                (ContractTestLanguage::Python, "generated/py".to_string()),
+                (ContractTestLanguage::Go, "gen/two".to_string()),
+            ]
+        );
+        assert_eq!(PlanTargets::new(&[]).sdks().count(), 0);
     }
 }

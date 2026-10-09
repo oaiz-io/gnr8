@@ -9,6 +9,12 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **`BuiltinTarget` gains `StaticDocs`.** Rust code that matches `BuiltinTarget` exhaustively needs
+  an arm. The host/worker protocol is now version 9, so a worker and CLI cannot silently disagree
+  about the stage-plan shape.
+
 ## 0.17.1 — 2026-10-07
 
 ### Added

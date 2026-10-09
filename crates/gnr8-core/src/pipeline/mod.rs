@@ -472,6 +472,7 @@ fn emit(
     // naming this graph, the declarations, this gnr8, and the `gofmt` any Go would be formatted by.
     // A key it cannot complete is `None`, and the block then runs exactly as it always did.
     let builtin_targets = emission::builtin_targets(&plan.targets);
+    let plan_targets = builtins::PlanTargets::new(&builtin_targets);
     let emission_key = emission::key(generation_ir, &builtin_targets);
     let restored = emission_key
         .as_deref()
@@ -498,7 +499,14 @@ fn emit(
                             move || {
                                 let mut out = Artifacts::new();
                                 out.begin_stage(builtin_target_producer(position, spec));
-                                builtins::generate_target(spec, graph, &mut out, cx, store)?;
+                                builtins::generate_target(
+                                    spec,
+                                    graph,
+                                    &mut out,
+                                    cx,
+                                    store,
+                                    &plan_targets,
+                                )?;
                                 Ok(out.into_files())
                             }
                         })

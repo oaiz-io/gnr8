@@ -37,6 +37,7 @@ pub mod pipeline;
 pub mod pysdk;
 pub mod resource;
 pub mod sdk;
+pub mod staticdocs;
 pub mod store;
 pub mod tssdk;
 pub mod verify;
