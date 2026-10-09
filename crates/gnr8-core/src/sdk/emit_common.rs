@@ -14,7 +14,8 @@ use std::fmt::Write as _;
 use gnr8::facts::LiteralValue;
 use gnr8::sdk::SdkCli;
 
-use crate::graph::{ApiGraph, Operation, Param, Prim, Schema, Type};
+use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
+use crate::graph::{ApiGraph, Field, Operation, Param, Prim, Schema, Type};
 use crate::sdk::layout::SdkFileLayout;
 use crate::CoreError;
 
@@ -261,6 +262,266 @@ fn is_scalar_flag_schema(graph: &ApiGraph, ty: &Type, depth: usize) -> bool {
     }
 }
 
+/// The request body a command's `--body` takes: its schema name and the fields a caller writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BodyHelp {
+    /// The request schema's name.
+    pub schema: String,
+    /// One row per field, top-level fields first and each one's own fields after it.
+    pub fields: Vec<BodyHelpField>,
+}
+
+/// One request-body field, as `--help` and `help --json` list it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BodyHelpField {
+    /// Path from the body root: `table`, `filters[].column`, `owner.name`.
+    pub name: String,
+    /// JSON type: `string`, `array of object`, `map of integer`.
+    pub type_name: String,
+    /// Whether the request schema lists the field as required.
+    pub required: bool,
+    /// Allowed values, for an enum field or an array of one.
+    pub enum_values: Vec<String>,
+    /// The path already listing this field's object shape, when the shape repeats.
+    pub same_shape_as: Option<String>,
+    /// Field prose on one line; empty when the schema states none.
+    pub help: String,
+}
+
+/// Request-body help for `op`, or `None` when the command takes no `--body`.
+///
+/// Fields are listed one level deep: each top-level field, then the fields of a top-level object or
+/// array of objects as `parent.child` or `parent[].child`. A field whose named object shape is
+/// already listed — a recursive filter's `or`, or a second field of the same type — names that path
+/// instead of listing the shape again. Top-level fields the command binds as flags via
+/// `CliCommand::body_fields` are left out: `--help` already lists them under Flags.
+pub(crate) fn body_help(
+    cli: &SdkCli,
+    op: &Operation,
+    graph: &ApiGraph,
+) -> Result<Option<BodyHelp>, CoreError> {
+    let fixed_body = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.fixed_body.as_deref());
+    if fixed_body.is_some() {
+        return Ok(None);
+    }
+    let bodies = request_body_models_of(op, graph)?;
+    let Some(body) = bodies.first() else {
+        return Ok(None);
+    };
+    let flagged: BTreeSet<String> = body_field_flags(cli, op, graph)?
+        .into_iter()
+        .map(|field| field.json_name)
+        .collect();
+    let root = Type::Named(body.schema_id.clone());
+    let mut walk = BodyHelpWalk {
+        graph,
+        directions: schema_directions(graph),
+        visited: BTreeMap::new(),
+        fields: Vec::new(),
+    };
+    if let Some(shape) = walk.object_shape(&root, SchemaDirections::REQUEST)? {
+        let prefix = if shape.arrays.is_empty() {
+            String::new()
+        } else {
+            format!("{}.", shape.arrays)
+        };
+        walk.push_fields(&prefix, shape.fields, shape.directions, &flagged, 0)?;
+    }
+    Ok(Some(BodyHelp {
+        schema: body.model.clone(),
+        fields: walk.fields,
+    }))
+}
+
+/// An object a body field holds, through any arrays and named aliases.
+struct ObjectShape<'a> {
+    /// `[]` once per array between the field and the object.
+    arrays: String,
+    fields: &'a [Field],
+    /// The positions the enclosing named schema is reached from, which decide requiredness.
+    directions: SchemaDirections,
+    /// The named schema the object is, when it is not inline.
+    schema_id: Option<&'a str>,
+}
+
+struct BodyHelpWalk<'a> {
+    graph: &'a ApiGraph,
+    directions: BTreeMap<&'a str, SchemaDirections>,
+    /// Named object schemas already listed, keyed to the path that lists them.
+    visited: BTreeMap<&'a str, String>,
+    fields: Vec<BodyHelpField>,
+}
+
+impl<'a> BodyHelpWalk<'a> {
+    fn schema(&self, id: &str) -> Result<&'a Schema, CoreError> {
+        self.graph
+            .schemas
+            .iter()
+            .find(|schema| schema.id == id)
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!("request body references dangling $ref '{id}'"),
+            })
+    }
+
+    fn push_fields(
+        &mut self,
+        prefix: &str,
+        fields: &'a [Field],
+        directions: SchemaDirections,
+        flagged: &BTreeSet<String>,
+        depth: usize,
+    ) -> Result<(), CoreError> {
+        for field in fields {
+            if depth == 0 && flagged.contains(&field.json_name) {
+                continue;
+            }
+            let name = format!("{prefix}{}", field.json_name);
+            let mut row = BodyHelpField {
+                name: name.clone(),
+                type_name: self.type_name(&field.schema, &mut Vec::new())?,
+                required: directions.field_is_required(field),
+                enum_values: self.enum_values(field)?,
+                same_shape_as: None,
+                help: field
+                    .description
+                    .as_deref()
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default(),
+            };
+            let Some(shape) = self.object_shape(&field.schema, directions)? else {
+                self.fields.push(row);
+                continue;
+            };
+            let path = format!("{name}{}", shape.arrays);
+            if let Some(id) = shape.schema_id {
+                if let Some(listed) = self.visited.get(id) {
+                    row.same_shape_as = Some(listed.clone());
+                    self.fields.push(row);
+                    continue;
+                }
+            }
+            self.fields.push(row);
+            if depth > 0 {
+                continue;
+            }
+            if let Some(id) = shape.schema_id {
+                self.visited.insert(id, path.clone());
+            }
+            self.push_fields(
+                &format!("{path}."),
+                shape.fields,
+                shape.directions,
+                flagged,
+                depth + 1,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The object `ty` holds, through arrays and named aliases, or `None` for any other shape.
+    fn object_shape(
+        &self,
+        ty: &'a Type,
+        directions: SchemaDirections,
+    ) -> Result<Option<ObjectShape<'a>>, CoreError> {
+        let mut arrays = String::new();
+        let mut directions = directions;
+        let mut schema_id = None;
+        let mut seen = BTreeSet::new();
+        let mut current = ty;
+        loop {
+            match current {
+                Type::Array(inner) => {
+                    arrays.push_str("[]");
+                    schema_id = None;
+                    current = inner;
+                }
+                Type::Named(id) => {
+                    if !seen.insert(id.as_str()) {
+                        return Ok(None);
+                    }
+                    let schema = self.schema(id)?;
+                    directions = directions_of(&self.directions, &schema.id);
+                    schema_id = Some(schema.id.as_str());
+                    current = &schema.body;
+                }
+                Type::Object(fields) => {
+                    return Ok(Some(ObjectShape {
+                        arrays,
+                        fields,
+                        directions,
+                        schema_id,
+                    }))
+                }
+                Type::Primitive(_)
+                | Type::WellKnown(_)
+                | Type::Map { .. }
+                | Type::Enum(_)
+                | Type::Union(_)
+                | Type::Any {} => return Ok(None),
+            }
+        }
+    }
+
+    /// The JSON type a caller writes for `ty`, with an array's or map's element type.
+    fn type_name(&self, ty: &'a Type, seen: &mut Vec<&'a str>) -> Result<String, CoreError> {
+        Ok(match ty {
+            Type::Primitive(Prim::Bool) => "boolean".to_string(),
+            Type::Primitive(Prim::Int { .. }) => "integer".to_string(),
+            Type::Primitive(Prim::Float { .. }) => "number".to_string(),
+            Type::Primitive(Prim::String | Prim::Bytes) | Type::WellKnown(_) | Type::Enum(_) => {
+                "string".to_string()
+            }
+            Type::Array(inner) => format!("array of {}", self.type_name(inner, seen)?),
+            Type::Map { value, .. } => format!("map of {}", self.type_name(value, seen)?),
+            Type::Object(_) => "object".to_string(),
+            Type::Any {} => "any".to_string(),
+            Type::Union(variants) => {
+                let mut names: Vec<String> = Vec::new();
+                for variant in variants {
+                    let name = self.type_name(variant, seen)?;
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                names.join(" or ")
+            }
+            Type::Named(id) => {
+                let schema = self.schema(id)?;
+                if seen.contains(&schema.id.as_str()) {
+                    // An alias that holds itself: name its kind without following it again.
+                    return Ok(match &schema.body {
+                        Type::Array(_) => "array",
+                        Type::Map { .. } | Type::Object(_) => "object",
+                        _ => "any",
+                    }
+                    .to_string());
+                }
+                seen.push(schema.id.as_str());
+                let name = self.type_name(&schema.body, seen)?;
+                seen.pop();
+                name
+            }
+        })
+    }
+
+    /// The values `field` allows: its enum type's members, else its validation enum.
+    fn enum_values(&self, field: &Field) -> Result<Vec<String>, CoreError> {
+        let mut current = &field.schema;
+        let mut seen = BTreeSet::new();
+        loop {
+            match current {
+                Type::Enum(members) => return Ok(members.clone()),
+                Type::Array(inner) => current = inner,
+                Type::Named(id) if seen.insert(id.as_str()) => current = &self.schema(id)?.body,
+                _ => return Ok(field.meta.constraints.enum_values.clone()),
+            }
+        }
+    }
+}
+
 /// View declared for this operation's success body, if any.
 pub(crate) fn command_view<'a>(
     cli: &'a SdkCli,
@@ -390,6 +651,9 @@ pub(crate) fn help_spec_json(
             "flags".to_string(),
             serde_json::Value::Array(command_flag_specs(cli, graph, op)?),
         );
+        if let Some(body) = body_help(cli, op, graph)? {
+            object.insert("body".to_string(), body_spec(&body));
+        }
         commands.push(serde_json::Value::Object(object));
     }
     let mut root = serde_json::Map::new();
@@ -498,6 +762,104 @@ fn command_flag_specs(
         ));
     }
     Ok(flags)
+}
+
+/// `{"schema", "fields"}` for `help --json`: the same rows `--help` prints under Body, with the
+/// prose uncut. `enum`, `help` and `sameShapeAs` are left out when empty, as a flag's are.
+fn body_spec(body: &BodyHelp) -> serde_json::Value {
+    let fields = body
+        .fields
+        .iter()
+        .map(|field| {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "name".to_string(),
+                serde_json::Value::String(field.name.clone()),
+            );
+            object.insert(
+                "type".to_string(),
+                serde_json::Value::String(field.type_name.clone()),
+            );
+            object.insert(
+                "required".to_string(),
+                serde_json::Value::Bool(field.required),
+            );
+            if !field.enum_values.is_empty() {
+                object.insert(
+                    "enum".to_string(),
+                    serde_json::Value::Array(
+                        field
+                            .enum_values
+                            .iter()
+                            .map(|member| serde_json::Value::String(member.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(path) = &field.same_shape_as {
+                object.insert(
+                    "sameShapeAs".to_string(),
+                    serde_json::Value::String(path.clone()),
+                );
+            }
+            if !field.help.is_empty() {
+                object.insert(
+                    "help".to_string(),
+                    serde_json::Value::String(field.help.clone()),
+                );
+            }
+            serde_json::Value::Object(object)
+        })
+        .collect();
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "schema".to_string(),
+        serde_json::Value::String(body.schema.clone()),
+    );
+    object.insert("fields".to_string(), serde_json::Value::Array(fields));
+    serde_json::Value::Object(object)
+}
+
+/// The rows `--help` prints under Body: the name padded to the widest, the type, required or
+/// optional, the allowed values, the path of a repeated shape, and the prose cut to 80 characters.
+pub(crate) fn body_help_rows(body: &BodyHelp) -> Vec<String> {
+    let width = body
+        .fields
+        .iter()
+        .map(|field| field.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    body.fields
+        .iter()
+        .map(|field| {
+            let mut row = format!(
+                "  {:<width$}  {}  {}",
+                field.name,
+                field.type_name,
+                if field.required {
+                    "required"
+                } else {
+                    "optional"
+                }
+            );
+            if !field.enum_values.is_empty() {
+                let _ = write!(row, "  one of: {}", field.enum_values.join("|"));
+            }
+            if let Some(path) = &field.same_shape_as {
+                let _ = write!(row, "  same shape as {path}");
+            }
+            if !field.help.is_empty() {
+                row.push_str("  ");
+                if field.help.chars().count() > 80 {
+                    row.extend(field.help.chars().take(79));
+                    row.push('\u{2026}');
+                } else {
+                    row.push_str(&field.help);
+                }
+            }
+            row
+        })
+        .collect()
 }
 
 fn param_flag_spec(graph: &ApiGraph, param: &Param) -> serde_json::Value {

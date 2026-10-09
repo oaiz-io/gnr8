@@ -235,14 +235,32 @@ Commands:
 A declared command spec adds the rest of the page from facts the pipeline already has. `--help` on a
 command prints Arguments for each positional, Flags with that parameter's description and any enum
 values argparse/`flag` already list, then Examples, Output, See also, and Docs when the spec names
-them. `CliCommand::example` is required once a spec is declared: generation fails rather than emit a
+them.
+
+A Go command that takes `--body` also prints Body after Flags: one row per request-body field with
+its name, JSON type, `required` or `optional`, `one of: a|b` for an enum, and the field's description
+cut to 80 characters. The fields of a top-level object, or of each item of an array of objects, follow
+it one level deep as `parent.child` or `parent[].child`. A field whose named object shape is already
+listed — a filter's `or` holding more filters, or a second field of the same type — says
+`same shape as filters[]` instead of listing it again. Fields bound as flags through
+`CliCommand::body_fields` are listed under Flags, not Body, and a `fixed_body` command has no Body.
+
+```text
+Body:
+  filters             array of object  optional  Conditions every returned row meets.
+  filters[].operator  string  optional  one of: eq|gt|gte|lt|lte|neq  Comparison of the column with value.
+  filters[].or        array of object  optional  same shape as filters[]  Group that matches when any matches.
+  table               string  required  Table of the database.
+``` `CliCommand::example` is required once a spec is declared: generation fails rather than emit a
 command that cannot show how to invoke it. Output is generated from the success schema and `view`
 when the command does not override it.
 
 `help` is a root command. `bookstore help` is the program index; `bookstore help books list` is the
 same page as `bookstore books list --help`. `bookstore help --json` prints the command spec as one
 JSON document: each command's invocation, operation id, arguments, flags (name, type, required, help,
-enum, default), examples, see-also, docs URL, and output note. Topic/verb tokens after `--json` are
+enum, default), the request body when the command takes `--body` (`{"schema", "fields"}`, each field
+with name, type, required, enum, help and `sameShapeAs`, the prose uncut), examples, see-also, docs
+URL, and output note. Topic/verb tokens after `--json` are
 not a second encoding of that spec; they still rewrite to `--help` for the human page, and `--json`
 always prints the full document.
 
