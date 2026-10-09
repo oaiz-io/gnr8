@@ -1139,7 +1139,7 @@ fn openapi_primitive_format(prim: &Prim) -> Option<&'static str> {
 
 /// Map a neutral [`WellKnown`] to its canonical `OpenAPI`/`JSON Schema` `format` token (the neutral
 /// wire form, e.g. `uuid`, `date-time`); these are spec format strings, never language type names.
-fn openapi_format(well_known: &WellKnown) -> &'static str {
+pub(crate) fn openapi_format(well_known: &WellKnown) -> &'static str {
     match well_known {
         WellKnown::Uuid => "uuid",
         WellKnown::DateTime => "date-time",

@@ -1,0 +1,713 @@
+//! The index, group, operation and schema pages.
+//!
+//! Every page follows one rule for absent facts: a section whose fact is absent is omitted, never
+//! printed empty, and no sentence is ever derived from a name to stand in for prose the graph does
+//! not carry (AGENTS.md rule 3).
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+use crate::graph::direction::{directions_of, SchemaDirections};
+use crate::graph::{
+    ApiGraph, Field, MediaExample, Operation, OperationDocsPolicy, Param, Prim, Schema, Type,
+};
+use crate::sdk::emit_common::{
+    join_path, operation_auth_alternatives, operation_prose, request_body_models_of,
+    ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
+};
+use crate::CoreError;
+use gnr8::facts::{Constraints, LiteralValue};
+
+use super::links::LinkRegistry;
+use super::markdown::{
+    cell, code_block, code_span, table, AUTHENTICATION, DECLARED_REQUEST_EXAMPLES, EXAMPLE, FIELDS,
+    GROUPS, MEMBERS, OPERATIONS, PARAMETERS, PARAMETER_LOCATIONS, REQUEST_BODY, RESPONSES, SCHEMAS,
+    SERVERS, TYPE, USED_BY,
+};
+use super::nav::{NavGroup, NavModel, INDEX_PAGE};
+
+/// Everything a page reads that is computed once per run.
+pub(crate) struct Site<'g> {
+    pub(crate) graph: &'g ApiGraph,
+    pub(crate) nav: &'g NavModel<'g>,
+    pub(crate) directions: BTreeMap<&'g str, SchemaDirections>,
+    /// Operation indexes that reach each schema id, in graph order.
+    pub(crate) consumers: BTreeMap<&'g str, Vec<usize>>,
+}
+
+/// Render `index.md`.
+pub(crate) fn render_index(site: &Site<'_>, links: &mut LinkRegistry) -> String {
+    let graph = site.graph;
+    let mut out = format!("# {}\n\n", graph.title.trim());
+    if let Some(description) = nonblank(graph.openapi_metadata.description.as_deref()) {
+        let _ = write!(out, "{}\n\n", description.trim_end());
+    }
+    let mut facts = Vec::new();
+    if let Some(version) = nonblank(graph.openapi_metadata.version.as_deref()) {
+        facts.push(format!("- Version: {}", code_span(version.trim())));
+    }
+    if !graph.base_path.is_empty() && graph.base_path != "/" {
+        facts.push(format!("- Base path: {}", code_span(&graph.base_path)));
+    }
+    if !facts.is_empty() {
+        let _ = write!(out, "{}\n\n", facts.join("\n"));
+    }
+    if !graph.openapi_metadata.servers.is_empty() {
+        let _ = write!(out, "## {SERVERS}\n\n");
+        for server in &graph.openapi_metadata.servers {
+            match nonblank(server.description.as_deref()) {
+                Some(description) => {
+                    let _ = writeln!(
+                        out,
+                        "- {} — {}",
+                        code_span(&server.url),
+                        one_line(description)
+                    );
+                }
+                None => {
+                    let _ = writeln!(out, "- {}", code_span(&server.url));
+                }
+            }
+        }
+        out.push('\n');
+    }
+    if !site.nav.groups.is_empty() {
+        let _ = write!(out, "## {GROUPS}\n\n");
+        for group in &site.nav.groups {
+            let _ = write!(
+                out,
+                "### {}\n\n",
+                links.link(INDEX_PAGE, &group.page, group.name)
+            );
+            if let Some(summary) = group.summary {
+                let _ = write!(out, "{}\n\n", one_line(summary));
+            }
+            for op in &group.operations {
+                out.push_str(&operation_entry(site, INDEX_PAGE, op, links));
+            }
+            out.push('\n');
+        }
+    }
+    if !site.nav.ungrouped.is_empty() {
+        let _ = write!(out, "## {OPERATIONS}\n\n");
+        for op in &site.nav.ungrouped {
+            out.push_str(&operation_entry(site, INDEX_PAGE, op, links));
+        }
+        out.push('\n');
+    }
+    if !site.nav.schemas.is_empty() {
+        let _ = write!(out, "## {SCHEMAS}\n\n");
+        for schema in &site.nav.schemas {
+            if let Ok(page) = site.nav.schema_page(&schema.id) {
+                let _ = writeln!(
+                    out,
+                    "- {}",
+                    links.link(INDEX_PAGE, page, &code_span(&schema.name))
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Render one group page.
+pub(crate) fn render_group(
+    site: &Site<'_>,
+    group: &NavGroup<'_>,
+    links: &mut LinkRegistry,
+) -> String {
+    let mut out = format!("# {}\n\n", group.name);
+    if let Some(summary) = group.summary {
+        let _ = write!(out, "{}\n\n", one_line(summary));
+    }
+    let _ = write!(out, "## {OPERATIONS}\n\n");
+    for op in &group.operations {
+        out.push_str(&operation_entry(site, &group.page, op, links));
+    }
+    out
+}
+
+/// One list line naming an operation: its link, its request line and its summary.
+fn operation_entry(
+    site: &Site<'_>,
+    from: &str,
+    op: &Operation,
+    links: &mut LinkRegistry,
+) -> String {
+    let Ok(page) = site.nav.operation_page(&op.id) else {
+        return String::new();
+    };
+    let mut line = format!(
+        "- {} — {}",
+        links.link(from, page, &code_span(&op.id)),
+        code_span(&request_line(site.graph, op))
+    );
+    if let Some(summary) = nonblank(op.summary.as_deref()) {
+        let _ = write!(line, " — {}", one_line(summary));
+    }
+    line.push('\n');
+    line
+}
+
+fn request_line(graph: &ApiGraph, op: &Operation) -> String {
+    format!(
+        "{} {}",
+        op.method.to_ascii_uppercase(),
+        join_path(&graph.base_path, &op.path)
+    )
+}
+
+/// Render one operation page. `example` is the rendered `## Example` section body.
+pub(crate) fn render_operation(
+    site: &Site<'_>,
+    op: &Operation,
+    example: &str,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
+    let graph = site.graph;
+    let page = site.nav.operation_page(&op.id)?.to_string();
+    let policy = graph
+        .operation_docs
+        .iter()
+        .find(|policy| policy.operation_id == op.id);
+    let mut out = format!("# {}\n\n", code_span(&op.id));
+
+    let mut line = vec![code_span(&request_line(graph, op))];
+    if let Some(group_page) = site.nav.group_page(op) {
+        let name = op.group.as_deref().unwrap_or_default();
+        line.push(format!("Group: {}", links.link(&page, group_page, name)));
+    }
+    let tags = crate::graph::effective_operation_tags(graph, op);
+    if !tags.is_empty() {
+        let tags = tags.iter().map(|tag| code_span(tag)).collect::<Vec<_>>();
+        line.push(format!("Tags: {}", tags.join(", ")));
+    }
+    if policy.is_some_and(|policy| policy.deprecated) {
+        line.push("**Deprecated**".to_string());
+    }
+    let _ = write!(out, "{}\n\n", line.join(" · "));
+
+    let prose = operation_prose(op, &[], "");
+    if let Some(summary) = &prose.summary {
+        let _ = write!(out, "{summary}\n\n");
+    }
+    if !prose.description.is_empty() {
+        let _ = write!(out, "{}\n\n", prose.description.join("\n"));
+    }
+
+    out.push_str(&authentication_section(graph, op)?);
+    out.push_str(&parameters_section(site, &page, op, links)?);
+    out.push_str(&request_body_section(site, &page, op, policy, links)?);
+    out.push_str(&responses_section(site, &page, op, policy, links)?);
+    let _ = write!(out, "## {EXAMPLE}\n\n{example}");
+    Ok(out)
+}
+
+fn authentication_section(graph: &ApiGraph, op: &Operation) -> Result<String, CoreError> {
+    let alternatives = operation_auth_alternatives(graph, op)?;
+    if alternatives.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = format!("## {AUTHENTICATION}\n\n");
+    if alternatives.len() > 1 {
+        out.push_str("Any one of:\n\n");
+    }
+    for alternative in &alternatives {
+        if alternative.is_empty() {
+            out.push_str("- no credentials\n");
+            continue;
+        }
+        let schemes = alternative
+            .iter()
+            .map(auth_scheme_line)
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let _ = writeln!(out, "- {schemes}");
+    }
+    out.push('\n');
+    Ok(out)
+}
+
+fn auth_scheme_line(scheme: &OperationAuthScheme) -> String {
+    match scheme {
+        OperationAuthScheme::ApiKey(key) => {
+            let location = match key.location {
+                ApiKeyLocation::Header => "header",
+                ApiKeyLocation::Query => "query parameter",
+            };
+            format!(
+                "{} (API key in {location} {})",
+                code_span(&key.id),
+                code_span(&key.name)
+            )
+        }
+        OperationAuthScheme::Http {
+            id,
+            scheme: HttpAuthScheme::Bearer,
+        } => format!("{} (HTTP bearer token)", code_span(id)),
+        OperationAuthScheme::Http {
+            id,
+            scheme: HttpAuthScheme::Basic,
+        } => format!("{} (HTTP basic credentials)", code_span(id)),
+    }
+}
+
+fn parameters_section(
+    site: &Site<'_>,
+    page: &str,
+    op: &Operation,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
+    if op.params.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = format!("## {PARAMETERS}\n\n");
+    for (location, heading) in PARAMETER_LOCATIONS {
+        let params: Vec<&Param> = op
+            .params
+            .iter()
+            .filter(|param| param.location == location)
+            .collect();
+        if params.is_empty() {
+            continue;
+        }
+        let mut rows = Vec::new();
+        for param in params {
+            let mut constraints = constraint_spans(&param.constraints, "");
+            constraints.extend(constraint_spans(&param.item_constraints, "items."));
+            rows.push(vec![
+                code_span(&param.name),
+                type_label(&param.schema, None, page, site.nav, links)?,
+                yes_no(param.required).to_string(),
+                param.default.as_ref().map(literal).unwrap_or_default(),
+                constraints.join(", "),
+                cell(param.description.as_deref().unwrap_or_default()),
+            ]);
+        }
+        let _ = write!(
+            out,
+            "### {heading}\n\n{}\n",
+            table(
+                &[
+                    "Name",
+                    "Type",
+                    "Required",
+                    "Default",
+                    "Constraints",
+                    "Description"
+                ],
+                &rows
+            )
+        );
+    }
+    // A parameter in a location the table does not list is still a parameter of the contract.
+    let others: Vec<&Param> = op
+        .params
+        .iter()
+        .filter(|param| {
+            !PARAMETER_LOCATIONS
+                .iter()
+                .any(|(location, _)| *location == param.location)
+        })
+        .collect();
+    if !others.is_empty() {
+        return Err(CoreError::SdkGen {
+            message: format!(
+                "StaticDocs cannot place parameter '{}' of operation '{}': location '{}' is not a \
+                 parameter location",
+                others[0].name, op.id, others[0].location
+            ),
+        });
+    }
+    Ok(out)
+}
+
+fn request_body_section(
+    site: &Site<'_>,
+    page: &str,
+    op: &Operation,
+    policy: Option<&OperationDocsPolicy>,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
+    let models = request_body_models_of(op, site.graph)?;
+    let Some(first) = models.first() else {
+        return Ok(String::new());
+    };
+    let mut out = format!(
+        "## {REQUEST_BODY}\n\nRequired: {}\n\n",
+        yes_no(first.required)
+    );
+    let mut rows = Vec::new();
+    for model in &models {
+        let schema_page = site.nav.schema_page(&model.schema_id)?;
+        rows.push(vec![
+            code_span(&model.content_type),
+            links.link(page, schema_page, &code_span(&model.model)),
+        ]);
+    }
+    out.push_str(&table(&["Media type", "Schema"], &rows));
+    out.push('\n');
+    let content_types: Vec<&str> = models
+        .iter()
+        .map(|model| model.content_type.as_str())
+        .collect();
+    let examples = declared_examples(
+        policy.map_or(&[][..], |policy| policy.request_examples.as_slice()),
+        &content_types,
+    );
+    if !examples.is_empty() {
+        let _ = write!(out, "### {DECLARED_REQUEST_EXAMPLES}\n\n");
+        out.push_str(&examples);
+    }
+    Ok(out)
+}
+
+fn responses_section(
+    site: &Site<'_>,
+    page: &str,
+    op: &Operation,
+    policy: Option<&OperationDocsPolicy>,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
+    if op.responses.is_empty() {
+        return Ok(String::new());
+    }
+    let mut rows = Vec::new();
+    let mut examples = String::new();
+    for response in &op.responses {
+        let docs = policy.and_then(|policy| {
+            policy
+                .responses
+                .iter()
+                .find(|docs| docs.status == response.status)
+        });
+        let body = match &response.body {
+            Some(body) => {
+                let schema_page = site.nav.schema_page(&body.ref_id)?;
+                let name = site
+                    .graph
+                    .schemas
+                    .iter()
+                    .find(|schema| schema.id == body.ref_id)
+                    .map_or(body.ref_id.as_str(), |schema| schema.name.as_str());
+                links.link(page, schema_page, &code_span(name))
+            }
+            None => match response.body_kind.as_str() {
+                "binary" => "binary".to_string(),
+                "sse" => "event stream".to_string(),
+                _ => "none".to_string(),
+            },
+        };
+        let mut content_types = response.content_types.clone();
+        content_types.sort();
+        content_types.dedup();
+        let headers = response
+            .headers
+            .iter()
+            .map(|header| {
+                Ok(format!(
+                    "{} ({})",
+                    code_span(&header.name),
+                    type_label(&header.schema, None, page, site.nav, links)?
+                ))
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?;
+        rows.push(vec![
+            code_span(&response.status.to_string()),
+            body,
+            content_types
+                .iter()
+                .map(|content_type| code_span(content_type))
+                .collect::<Vec<_>>()
+                .join(", "),
+            headers.join(", "),
+            cell(
+                docs.and_then(|docs| docs.description.as_deref())
+                    .unwrap_or_default(),
+            ),
+        ]);
+        let declared = declared_examples(
+            docs.map_or(&[][..], |docs| docs.examples.as_slice()),
+            &content_types.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        if !declared.is_empty() {
+            let _ = write!(
+                examples,
+                "### Declared examples for {}\n\n{declared}",
+                code_span(&response.status.to_string())
+            );
+        }
+    }
+    let mut out = format!(
+        "## {RESPONSES}\n\n{}\n",
+        table(
+            &["Status", "Body", "Media types", "Headers", "Description"],
+            &rows
+        )
+    );
+    out.push_str(&examples);
+    Ok(out)
+}
+
+/// The declared examples whose media type the operation declares, as the `OpenAPI` target keeps
+/// them: each labelled with its name and media type, its value printed as JSON.
+fn declared_examples(examples: &[MediaExample], content_types: &[&str]) -> String {
+    let mut out = String::new();
+    for example in examples.iter().filter(|example| {
+        content_types
+            .iter()
+            .any(|content_type| example.content_type.eq_ignore_ascii_case(content_type))
+    }) {
+        let mut label = format!(
+            "**{}** ({})",
+            code_span(&example.name),
+            code_span(&example.content_type)
+        );
+        if let Some(summary) = nonblank(example.summary.as_deref()) {
+            let _ = write!(label, " — {}", one_line(summary));
+        }
+        let _ = write!(out, "{label}\n\n");
+        if let Some(description) = nonblank(example.description.as_deref()) {
+            let _ = write!(out, "{}\n\n", description.trim_end());
+        }
+        let value = serde_json::to_string_pretty(&example.value).unwrap_or_default();
+        out.push_str(&code_block("json", &value));
+        out.push('\n');
+    }
+    out
+}
+
+/// Render one schema page.
+pub(crate) fn render_schema(
+    site: &Site<'_>,
+    schema: &Schema,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
+    let page = site.nav.schema_page(&schema.id)?.to_string();
+    let mut out = format!(
+        "# {}\n\nKind: {}\n\n",
+        code_span(&schema.name),
+        schema_kind(&schema.body)
+    );
+    let consumers = site
+        .consumers
+        .get(schema.id.as_str())
+        .map_or(&[][..], Vec::as_slice);
+    if !consumers.is_empty() {
+        let _ = write!(out, "## {USED_BY}\n\n");
+        for index in consumers {
+            let Some(op) = site.graph.operations.get(*index) else {
+                continue;
+            };
+            let target = site.nav.operation_page(&op.id)?;
+            let _ = writeln!(out, "- {}", links.link(&page, target, &code_span(&op.id)));
+        }
+        out.push('\n');
+    }
+    match &schema.body {
+        Type::Object(fields) => {
+            let directions = directions_of(&site.directions, &schema.id);
+            let rows = fields
+                .iter()
+                .map(|field| field_row(site, &page, field, directions, links))
+                .collect::<Result<Vec<_>, CoreError>>()?;
+            let _ = write!(
+                out,
+                "## {FIELDS}\n\n{}",
+                table(
+                    &[
+                        "Field",
+                        "Type",
+                        "Required",
+                        "Nullable",
+                        "Constraints",
+                        "Default",
+                        "Description",
+                        "Example",
+                    ],
+                    &rows
+                )
+            );
+        }
+        Type::Enum(members) => {
+            let _ = write!(out, "## {MEMBERS}\n\n");
+            for member in members {
+                let _ = writeln!(out, "- {}", code_span(member));
+            }
+        }
+        other => {
+            let _ = writeln!(
+                out,
+                "## {TYPE}\n\n{}",
+                type_label(other, None, &page, site.nav, links)?
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// One field row, with exactly the field facts the `OpenAPI` target publishes for it: type and
+/// format, required, nullable, constraints, default, description and example. Vendor extensions
+/// are machine metadata for other tools and are not rendered.
+fn field_row(
+    site: &Site<'_>,
+    page: &str,
+    field: &Field,
+    directions: SchemaDirections,
+    links: &mut LinkRegistry,
+) -> Result<Vec<String>, CoreError> {
+    Ok(vec![
+        code_span(&field.json_name),
+        type_label(
+            &field.schema,
+            field.meta.format.as_deref(),
+            page,
+            site.nav,
+            links,
+        )?,
+        yes_no(directions.field_is_required(field)).to_string(),
+        yes_no(directions.field_is_nullable(field)).to_string(),
+        constraint_spans(&field.meta.constraints, "").join(", "),
+        field.meta.default.as_ref().map(literal).unwrap_or_default(),
+        cell(field.description.as_deref().unwrap_or_default()),
+        field
+            .example
+            .as_deref()
+            .map(|example| code_span(&cell(example)))
+            .unwrap_or_default(),
+    ])
+}
+
+/// A type as a table cell: `OpenAPI`'s type name and format, a link for a named schema.
+///
+/// `format` is the field's own declared format, which the `OpenAPI` target writes over the type's
+/// own — so the page shows the one the document publishes.
+pub(crate) fn type_label(
+    ty: &Type,
+    format: Option<&str>,
+    from: &str,
+    nav: &NavModel<'_>,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
+    let with_format = |name: &str, own: Option<&str>| {
+        format.or(own).map_or_else(
+            || code_span(name),
+            |f| format!("{} ({})", code_span(name), code_span(f)),
+        )
+    };
+    Ok(match ty {
+        Type::Primitive(Prim::String) => with_format("string", None),
+        Type::Primitive(Prim::Bytes) => with_format("string", Some("binary")),
+        Type::Primitive(Prim::Bool) => with_format("boolean", None),
+        Type::Primitive(Prim::Int { .. }) => with_format("integer", None),
+        Type::Primitive(Prim::Float { .. }) => with_format("number", None),
+        Type::WellKnown(well_known) => {
+            with_format("string", Some(crate::lower::openapi_format(well_known)))
+        }
+        Type::Array(items) => format!("array of {}", type_label(items, None, from, nav, links)?),
+        Type::Map { key, value } => format!(
+            "map of {} to {}",
+            type_label(key, None, from, nav, links)?,
+            type_label(value, None, from, nav, links)?
+        ),
+        Type::Named(id) => {
+            let page = nav.schema_page(id)?;
+            links.link(from, page, &code_span(nav_schema_name(nav, id)))
+        }
+        Type::Object(_) => with_format("object", None),
+        Type::Enum(members) => format!(
+            "one of {}",
+            members
+                .iter()
+                .map(|member| code_span(member))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Union(variants) => format!(
+            "one of {}",
+            variants
+                .iter()
+                .map(|variant| type_label(variant, None, from, nav, links))
+                .collect::<Result<Vec<_>, CoreError>>()?
+                .join(", ")
+        ),
+        Type::Any {} => with_format("any", None),
+    })
+}
+
+fn nav_schema_name<'a>(nav: &'a NavModel<'_>, id: &'a str) -> &'a str {
+    nav.schemas
+        .iter()
+        .find(|schema| schema.id == id)
+        .map_or(id, |schema| schema.name.as_str())
+}
+
+/// Each declared constraint as a code span, keyed by its `OpenAPI` keyword.
+fn constraint_spans(constraints: &Constraints, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push = |key: &str, value: Option<String>| {
+        if let Some(value) = value {
+            out.push(code_span(&format!("{prefix}{key}: {value}")));
+        }
+    };
+    push("minLength", constraints.min_length.map(|v| v.to_string()));
+    push("maxLength", constraints.max_length.map(|v| v.to_string()));
+    push("minimum", constraints.minimum.clone());
+    push("exclusiveMinimum", constraints.exclusive_minimum.clone());
+    push("maximum", constraints.maximum.clone());
+    push("exclusiveMaximum", constraints.exclusive_maximum.clone());
+    push("minItems", constraints.min_items.map(|v| v.to_string()));
+    push("maxItems", constraints.max_items.map(|v| v.to_string()));
+    push(
+        "minProperties",
+        constraints.min_properties.map(|v| v.to_string()),
+    );
+    push(
+        "maxProperties",
+        constraints.max_properties.map(|v| v.to_string()),
+    );
+    push("pattern", constraints.pattern.clone());
+    if !constraints.enum_values.is_empty() {
+        push("enum", serde_json::to_string(&constraints.enum_values).ok());
+    }
+    out
+}
+
+/// A literal as the JSON it stands for, in a code span.
+fn literal(value: &LiteralValue) -> String {
+    code_span(&match value {
+        LiteralValue::String(text) => serde_json::to_string(text).unwrap_or_default(),
+        LiteralValue::Number(number) => number.clone(),
+        LiteralValue::Bool(flag) => flag.to_string(),
+        LiteralValue::Null => "null".to_string(),
+    })
+}
+
+fn schema_kind(body: &Type) -> &'static str {
+    match body {
+        Type::Object(_) => "object",
+        Type::Enum(_) => "enum",
+        Type::Array(_) => "array",
+        Type::Map { .. } => "map",
+        Type::Union(_) => "union",
+        Type::Named(_) => "alias",
+        Type::Primitive(_) | Type::WellKnown(_) => "scalar",
+        Type::Any {} => "any",
+    }
+}
+
+const fn yes_no(flag: bool) -> &'static str {
+    if flag {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn nonblank(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.trim().is_empty())
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
