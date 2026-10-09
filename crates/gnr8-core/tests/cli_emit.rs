@@ -3889,3 +3889,17 @@ fn go_topic_owned_command_may_not_shadow_a_sub_noun() {
         "{message}"
     );
 }
+
+#[test]
+fn go_owned_command_function_must_be_a_go_identifier() {
+    for function in ["os.Exit(0); countBooks", "count books", "func", "9count"] {
+        let topic = go_topic_owned_error(topic_owned_cli(
+            OwnedCommand::new("stats").function(function),
+        ));
+        assert!(topic.contains("Go identifier"), "{function}: {topic}");
+        let root = go_topic_owned_error(
+            spec_cli().owned_command(OwnedCommand::new("stats").function(function)),
+        );
+        assert!(root.contains("Go identifier"), "{function}: {root}");
+    }
+}

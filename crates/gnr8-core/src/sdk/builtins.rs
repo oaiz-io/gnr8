@@ -3857,8 +3857,8 @@ fn validate_gosdk_cli(cli: &gnr8::sdk::SdkCli) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Validate the hand-owned commands of one dispatcher level: usable names, each named once, and
-/// single-line function names and summaries.
+/// Validate the hand-owned commands of one dispatcher level: usable names, each named once,
+/// function names that are Go identifiers, and single-line summaries.
 fn validate_owned_commands(
     target: &str,
     scope: &str,
@@ -3874,6 +3874,14 @@ fn validate_owned_commands(
         }
         if let Some(function) = &command.function {
             validate_metadata_value("owned command function", function)?;
+            if !crate::gosdk::is_go_identifier(function) {
+                return Err(CoreError::Config {
+                    message: format!(
+                        "{target} function {function:?}{scope} is not a Go identifier (need an \
+                         ASCII letter or '_', then letters, digits or '_', and not a keyword)"
+                    ),
+                });
+            }
         }
         if let Some(summary) = &command.summary {
             validate_metadata_value("owned command summary", summary)?;

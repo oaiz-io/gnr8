@@ -3568,6 +3568,16 @@ pub(crate) fn lower_camel(name: &str) -> String {
     out
 }
 
+/// An ASCII Go identifier that is not a keyword, so it can be emitted as a name in Go source.
+pub(crate) fn is_go_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && !is_go_keyword(value)
+}
+
 fn is_go_keyword(value: &str) -> bool {
     matches!(
         value,

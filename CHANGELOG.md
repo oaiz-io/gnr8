@@ -17,6 +17,12 @@ must move the minor version.
   Generation refuses a topic that wraps no operation, a name equal to one of the topic's verbs or
   sub-nouns, and topic owned commands on `PySdk`. Configs without the new field emit identical output.
 
+### Fixed
+
+- **`OwnedCommand::function` must be a Go identifier.** The dispatcher emits the function name as Go
+  source, so generation now refuses a value that is not an ASCII Go identifier or is a keyword, at
+  the root and under a topic. Such a value never produced a `cli.go` that compiles.
+
 ## 0.17.2 — 2026-10-10
 
 ### Added
