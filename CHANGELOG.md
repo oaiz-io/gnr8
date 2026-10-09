@@ -9,6 +9,18 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.17.2 — 2026-10-10
+
+### Added
+
+- Generated Go CLI `--help` prints a Body section after Flags on every command that takes `--body`:
+  one row per request-body field with its JSON type, `required`/`optional`, `one of:` values for an
+  enum, and its description cut to 80 characters. Top-level objects and arrays of objects list their
+  fields one level deep as `parent.child`/`parent[].child`, a repeated or recursive shape names the
+  path that already lists it, and fields bound as flags through `body_fields` are left out.
+- `help --json` carries `body: {schema, fields}` for each command that takes `--body`, in generated
+  Go and Python CLIs.
+
 ## 0.17.1 — 2026-10-07
 
 ### Added
