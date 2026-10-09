@@ -116,6 +116,21 @@ pub(crate) fn go_type(
     nullable: bool,
     graph: &ApiGraph,
 ) -> Result<String, CoreError> {
+    go_type_in(schema, nullable, graph, "")
+}
+
+/// [`go_type`], with every generated SDK symbol spelled `{qualifier}{Name}`.
+///
+/// The one Go type speller: SDK emission calls it through [`go_type`] with an empty qualifier, so its
+/// bytes cannot move, and a consumer's code sample calls it with the package qualifier (`"sdk."`).
+/// Only the `Named` leaf is qualified — composites (`[]T`, `map[K]V`, pointers) reach it by
+/// recursion, and standard-library types (`time.Time`) are never generated symbols.
+pub(crate) fn go_type_in(
+    schema: &Type,
+    nullable: bool,
+    graph: &ApiGraph,
+    qualifier: &str,
+) -> Result<String, CoreError> {
     let base = match schema {
         // A base scalar maps to its Go type. Floating-point width is preserved so an OpenAPI number
         // (64-bit by default) is never silently narrowed.
@@ -125,17 +140,17 @@ pub(crate) fn go_type(
         Type::WellKnown(well_known) => go_well_known(well_known).to_string(),
         Type::Array(items) => {
             // Slice elements are never nullable-pointer-wrapped.
-            return Ok(format!("[]{}", go_type(items, false, graph)?));
+            return Ok(format!("[]{}", go_type_in(items, false, graph, qualifier)?));
         }
         Type::Map { key, value } => {
             let value_type = if matches!(value.as_ref(), Type::Any {}) {
                 "any".to_string()
             } else {
-                go_type(value, false, graph)?
+                go_type_in(value, false, graph, qualifier)?
             };
             return Ok(format!(
                 "map[{}]{}",
-                go_type(key, false, graph)?,
+                go_type_in(key, false, graph, qualifier)?,
                 value_type
             ));
         }
@@ -151,7 +166,7 @@ pub(crate) fn go_type(
             // Both objects and enum newtypes are referenced by their exported Go name; a NULLABLE
             // value ref becomes a pointer.
             return Ok(maybe_pointer(
-                target.name.clone(),
+                format!("{qualifier}{}", target.name),
                 nullable,
                 is_value_ref(target, graph),
             ));

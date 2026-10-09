@@ -7,25 +7,20 @@
 //!
 //! Nothing here decides what to assert. The plan states the contract; this module renders it in Go,
 //! reusing the very naming and typing functions `operations.go` and `models.go` were emitted with, so
-//! the call shape in the test cannot drift from the method it calls.
+//! the call shape in the test cannot drift from the method it calls. The call itself is rendered by
+//! [`super::callsite`], the renderer docs code samples share.
 
 use std::fmt::Write as _;
 
-use serde_json::Value;
-
 use crate::graph::direction::{directions_of, schema_directions};
-use crate::graph::{ApiGraph, Operation, Prim, Type, WellKnown};
-use crate::sdk::emit_common::{quoted_string_literal, request_body_models_of};
-use crate::verify::{
-    CaseOutcome, ContractCase, ContractTestPlan, DecodedField, SampleBody, SampleCredential,
-    SampleParam, CONTRACT_TEST_BASIC_PASSWORD, CONTRACT_TEST_BASIC_USER, CONTRACT_TEST_BEARER,
-    CONTRACT_TEST_CREDENTIAL,
-};
+use crate::graph::{ApiGraph, Operation, Type};
+use crate::sdk::emit_common::{quoted_string_literal, CallInputs, Qualify};
+use crate::verify::{CaseOutcome, ContractCase, ContractTestPlan, DecodedField};
 use crate::CoreError;
 
+use super::callsite::{go_scalar, render_call, TIME_IMPORT};
 use super::emit::{
-    exported, go_field_emissions, go_pointer_depth, go_request_body_variant_names,
-    go_struct_field_type, go_type, operation_method_name, ordered_path_params,
+    exported, go_field_emissions, go_pointer_depth, go_struct_field_type, operation_method_name,
 };
 
 /// The file name the Go SDK's contract test is emitted at.
@@ -242,7 +237,17 @@ fn emit_case(
     needs_time: &mut bool,
 ) -> Result<String, CoreError> {
     let method_name = operation_method_name(op);
-    let call_args = call_arguments(graph, op, case, needs_time)?;
+    let site = render_call(
+        graph,
+        op,
+        &CallInputs {
+            params: &case.params,
+            body: case.body.as_ref(),
+            auth: &case.auth,
+        },
+        &Qualify::InPackage,
+    )?;
+    *needs_time |= site.imports.iter().any(|import| import == TIME_IMPORT);
     let mut out = String::new();
     writeln!(out, "func Test{}(t *testing.T) {{", exported(&case.name)).map_err(sink)?;
     writeln!(
@@ -251,18 +256,8 @@ fn emit_case(
         canned_response(case)
     )
     .map_err(sink)?;
-    writeln!(
-        out,
-        "client := contractClient(transport{})",
-        client_options(case)
-    )
-    .map_err(sink)?;
-    writeln!(
-        out,
-        "out, err := client.{method_name}({})",
-        call_args.join(", ")
-    )
-    .map_err(sink)?;
+    writeln!(out, "{}", site.construct).map_err(sink)?;
+    writeln!(out, "{}", site.call).map_err(sink)?;
 
     match &case.outcome {
         CaseOutcome::Decode { field, .. } => {
@@ -418,35 +413,6 @@ fn canned_response(case: &ContractCase) -> String {
     )
 }
 
-fn client_options(case: &ContractCase) -> String {
-    let mut options = Vec::new();
-    for auth in &case.auth {
-        match &auth.credential {
-            SampleCredential::ApiKeyHeader { .. } | SampleCredential::ApiKeyQuery { .. } => {
-                options.push(format!(
-                    "WithAPIKeyHeader({}, {})",
-                    quoted_string_literal(&auth.scheme_id),
-                    quoted_string_literal(CONTRACT_TEST_CREDENTIAL)
-                ));
-            }
-            SampleCredential::Bearer => options.push(format!(
-                "WithBearerToken({})",
-                quoted_string_literal(CONTRACT_TEST_BEARER)
-            )),
-            SampleCredential::Basic => options.push(format!(
-                "WithBasicAuth({}, {})",
-                quoted_string_literal(CONTRACT_TEST_BASIC_USER),
-                quoted_string_literal(CONTRACT_TEST_BASIC_PASSWORD)
-            )),
-        }
-    }
-    if options.is_empty() {
-        String::new()
-    } else {
-        format!(", {}", options.join(", "))
-    }
-}
-
 fn go_query_values(case: &ContractCase) -> String {
     if case.expected_query.is_empty() {
         return "url.Values{}".to_string();
@@ -481,280 +447,4 @@ fn go_header_map(case: &ContractCase) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("map[string]string{{{entries}}}")
-}
-
-/// Build the positional argument list for one operation call.
-///
-/// The slot order is the one `emit_operation` declares: context, path parameters in path order, the
-/// params struct when the operation takes non-path parameters, then the request body.
-fn call_arguments(
-    graph: &ApiGraph,
-    op: &Operation,
-    case: &ContractCase,
-    needs_time: &mut bool,
-) -> Result<Vec<String>, CoreError> {
-    let mut args = vec!["context.Background()".to_string()];
-    for param in ordered_path_params(op)? {
-        let sample = case
-            .params
-            .iter()
-            .find(|candidate| candidate.name == param.name && candidate.location == "path")
-            .ok_or_else(|| CoreError::SdkGen {
-                message: format!(
-                    "contract case for '{}' has no value for path parameter '{}'",
-                    op.id, param.name
-                ),
-            })?;
-        args.push(go_literal(
-            &sample.schema,
-            &sample.value,
-            graph,
-            needs_time,
-        )?);
-    }
-    let request_params: Vec<&crate::graph::Param> =
-        op.params.iter().filter(|p| p.location != "path").collect();
-    if !request_params.is_empty() {
-        args.push(params_literal(
-            graph,
-            op,
-            &request_params,
-            &case.params,
-            needs_time,
-        )?);
-    }
-    if let Some(body) = &case.body {
-        args.push(body_literal(graph, op, body, needs_time)?);
-    }
-    Ok(args)
-}
-
-fn params_literal(
-    graph: &ApiGraph,
-    op: &Operation,
-    request_params: &[&crate::graph::Param],
-    samples: &[SampleParam],
-    needs_time: &mut bool,
-) -> Result<String, CoreError> {
-    let mut fields = Vec::new();
-    for param in request_params {
-        let Some(sample) = samples
-            .iter()
-            .find(|candidate| candidate.name == param.name && candidate.location != "path")
-        else {
-            continue;
-        };
-        let literal = go_literal(&sample.schema, &sample.value, graph, needs_time)?;
-        let value = if param.required {
-            literal
-        } else {
-            go_pointer_wrap(literal, 1, &go_type(&sample.schema, false, graph)?)
-        };
-        fields.push(format!("{}: {value}", exported(&param.name)));
-    }
-    Ok(format!(
-        "{}Params{{{}}}",
-        operation_method_name(op),
-        fields.join(", ")
-    ))
-}
-
-fn body_literal(
-    graph: &ApiGraph,
-    op: &Operation,
-    body: &SampleBody,
-    needs_time: &mut bool,
-) -> Result<String, CoreError> {
-    let models = request_body_models_of(op, graph)?;
-    let literal = go_literal(
-        &Type::Named(body.schema_id.clone()),
-        &body.value,
-        graph,
-        needs_time,
-    )?;
-    if body.representations > 1 {
-        let names = go_request_body_variant_names(&operation_method_name(op), &models);
-        let variant = names.get(body.selection).ok_or_else(|| CoreError::SdkGen {
-            message: format!(
-                "contract case selects request representation {} of operation '{}', which has {}",
-                body.selection,
-                op.id,
-                names.len()
-            ),
-        })?;
-        return Ok(format!("{variant}{{Value: {literal}}}"));
-    }
-    let required = models.first().is_some_and(|model| model.required);
-    if required {
-        Ok(literal)
-    } else {
-        Ok(format!("&{literal}"))
-    }
-}
-
-/// Wrap a literal in `depth` layers of the generated `Ptr` helper.
-///
-/// The innermost call names its type argument. `Ptr(7)` infers `*int` from the untyped constant,
-/// which does not assign to the `*int64` a generated field declares; `Ptr[int64](7)` does. Outer
-/// layers infer from the pointer the inner call already returned.
-fn go_pointer_wrap(literal: String, depth: usize, value_type: &str) -> String {
-    let mut out = literal;
-    for level in 0..depth {
-        out = if level == 0 {
-            format!("Ptr[{value_type}]({out})")
-        } else {
-            format!("Ptr({out})")
-        };
-    }
-    out
-}
-
-/// Render one sampled value as a Go literal of its neutral type.
-fn go_literal(
-    ty: &Type,
-    value: &Value,
-    graph: &ApiGraph,
-    needs_time: &mut bool,
-) -> Result<String, CoreError> {
-    match ty {
-        Type::Primitive(prim) => go_primitive_literal(prim, value),
-        Type::WellKnown(WellKnown::DateTime) => {
-            *needs_time = true;
-            let text = value.as_str().ok_or_else(|| unrenderable(ty))?;
-            Ok(format!("contractTime({})", quoted_string_literal(text)))
-        }
-        Type::WellKnown(_) | Type::Enum(_) => {
-            let text = value.as_str().ok_or_else(|| unrenderable(ty))?;
-            Ok(quoted_string_literal(text))
-        }
-        Type::Array(items) => {
-            let element_type = go_type(items, false, graph)?;
-            let elements = value
-                .as_array()
-                .ok_or_else(|| unrenderable(ty))?
-                .iter()
-                .map(|item| go_literal(items, item, graph, needs_time))
-                .collect::<Result<Vec<_>, CoreError>>()?;
-            Ok(format!("[]{element_type}{{{}}}", elements.join(", ")))
-        }
-        Type::Map {
-            key: _,
-            value: item,
-        } => {
-            let map_type = go_type(ty, false, graph)?;
-            let entries = value
-                .as_object()
-                .ok_or_else(|| unrenderable(ty))?
-                .iter()
-                .map(|(name, entry)| {
-                    Ok(format!(
-                        "{}: {}",
-                        quoted_string_literal(name),
-                        go_literal(item, entry, graph, needs_time)?
-                    ))
-                })
-                .collect::<Result<Vec<_>, CoreError>>()?;
-            Ok(format!("{map_type}{{{}}}", entries.join(", ")))
-        }
-        Type::Any {} => Ok("map[string]any{}".to_string()),
-        Type::Named(id) => {
-            let schema = graph
-                .schemas
-                .iter()
-                .find(|schema| &schema.id == id)
-                .ok_or_else(|| CoreError::SdkGen {
-                    message: format!("contract test references dangling $ref '{id}'"),
-                })?;
-            match &schema.body {
-                // An enum newtype is a defined type, so the literal needs the conversion; every other
-                // named body is emitted as a Go type alias and takes the underlying literal directly.
-                Type::Enum(_) => {
-                    let text = value.as_str().ok_or_else(|| unrenderable(ty))?;
-                    Ok(format!("{}({})", schema.name, quoted_string_literal(text)))
-                }
-                Type::Object(fields) => {
-                    let object = value.as_object().ok_or_else(|| unrenderable(ty))?;
-                    let directions = directions_of(&schema_directions(graph), &schema.id);
-                    let mut rendered = Vec::new();
-                    for emission in go_field_emissions(fields)? {
-                        let Some(entry) = object.get(&emission.field.json_name) else {
-                            continue;
-                        };
-                        let depth = go_pointer_depth(&go_struct_field_type(
-                            emission.field,
-                            graph,
-                            false,
-                            directions,
-                        )?);
-                        let literal = go_literal(&emission.field.schema, entry, graph, needs_time)?;
-                        let value_type = go_type(&emission.field.schema, false, graph)?;
-                        rendered.push(format!(
-                            "{}: {}",
-                            emission.go_name,
-                            go_pointer_wrap(literal, depth, &value_type)
-                        ));
-                    }
-                    Ok(format!("{}{{{}}}", schema.name, rendered.join(", ")))
-                }
-                other => go_literal(other, value, graph, needs_time),
-            }
-        }
-        Type::Object(_) | Type::Union(_) => Err(unrenderable(ty)),
-    }
-}
-
-fn go_primitive_literal(prim: &Prim, value: &Value) -> Result<String, CoreError> {
-    match prim {
-        Prim::String => value
-            .as_str()
-            .map(quoted_string_literal)
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Bool => value
-            .as_bool()
-            .map(|flag| flag.to_string())
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Int { .. } => value
-            .as_i64()
-            .map(|number| number.to_string())
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Float { .. } => value
-            .as_f64()
-            .map(format_float)
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Bytes => Err(unrenderable(&Type::Primitive(prim.clone()))),
-    }
-}
-
-/// A Go float literal that always carries a decimal point, so `1` is `float64(1)` and not an int.
-fn format_float(number: f64) -> String {
-    let rendered = format!("{number}");
-    if rendered.contains(['.', 'e', 'E']) {
-        rendered
-    } else {
-        format!("{rendered}.0")
-    }
-}
-
-/// The comparison literal and the format verb for one asserted scalar.
-fn go_scalar(value: &Value) -> Result<String, CoreError> {
-    match value {
-        Value::String(text) => Ok(quoted_string_literal(text)),
-        Value::Bool(flag) => Ok(flag.to_string()),
-        Value::Number(number) => number
-            .as_i64()
-            .map(|integer| integer.to_string())
-            .or_else(|| number.as_f64().map(format_float))
-            .ok_or_else(|| CoreError::SdkGen {
-                message: "contract assertion value is not a Go scalar".to_string(),
-            }),
-        _ => Err(CoreError::SdkGen {
-            message: "contract assertion value is not a Go scalar".to_string(),
-        }),
-    }
-}
-
-fn unrenderable(ty: &Type) -> CoreError {
-    CoreError::SdkGen {
-        message: format!("contract test cannot render a Go literal for {ty:?}"),
-    }
 }

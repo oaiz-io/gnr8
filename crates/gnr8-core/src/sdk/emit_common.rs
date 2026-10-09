@@ -2556,6 +2556,56 @@ fn validate_request_body_schema(
     })
 }
 
+/// How a rendered call names the SDK's symbols.
+///
+/// One renderer per language serves two consumers: the generated contract tests, which live inside
+/// the SDK package, and the docs target's code samples, which are written from a consumer's code.
+/// The mode is the only difference between them.
+#[derive(Debug, Clone)]
+// `Consumer` is constructed by the docs target's code samples, which land with the docs examples.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum Qualify<'a> {
+    /// Inside the SDK package — the contract tests (unchanged output).
+    InPackage,
+    /// From a consumer's code. `identity` is the one consumer identity the SDK target's own package
+    /// manifest declares; there is no other way to construct this variant.
+    Consumer {
+        /// What the consumer imports.
+        identity: &'a ConsumerIdentity,
+    },
+}
+
+/// What a consumer imports. Exists only when the SDK target emits a package manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConsumerIdentity {
+    /// The import specifier: the Go module path, the Python import package, the npm package name.
+    pub(crate) import: String,
+    /// The name the consumer's code spells the package's symbols with (Go: the package clause).
+    pub(crate) qualifier: String,
+}
+
+/// The sampled inputs of one call, whichever planner produced them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CallInputs<'a> {
+    /// Sampled parameter values, in graph order.
+    pub(crate) params: &'a [crate::verify::SampleParam],
+    /// The request body the call sends, when it sends one.
+    pub(crate) body: Option<&'a crate::verify::SampleBody>,
+    /// The credentials the client is configured with.
+    pub(crate) auth: &'a [crate::verify::SampleAuth],
+}
+
+/// One rendered call: the import lines it needs, the client construction, and the call statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallSite {
+    /// Import specifiers the two statements need beyond the harness's own.
+    pub(crate) imports: Vec<String>,
+    /// The statement that constructs the client.
+    pub(crate) construct: String,
+    /// The statement that calls the operation and binds its result.
+    pub(crate) call: String,
+}
+
 /// One operation's human prose, normalized into lines ready for comment emission.
 ///
 /// The source is the operation's own `summary`/`description` — the routed handler's doc

@@ -12,6 +12,7 @@
 //! [`write_to_dir`](crate::sdk::bundle::write_to_dir) materializes the same framing for 03-03's compile
 //! test.
 
+pub(crate) mod callsite;
 mod cli;
 mod contract;
 mod emit;
