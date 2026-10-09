@@ -306,7 +306,7 @@ package metadata for `.cli()` — there is no `[project.scripts]` equivalent.
 
 `.cli(...)` also takes an `SdkCli`, which carries the program's other facts — which operations
 become commands, the host it talks to by default, and (Go only) whether `main.go` is generated and
-which root commands are hand-owned:
+which root and topic commands are hand-owned:
 
 ```rust
 .cli(

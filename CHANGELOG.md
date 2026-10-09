@@ -9,6 +9,14 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **Hand-owned commands inside generated topics.** `CliTopic::owned_command` names a Go command
+  under a declared topic whose implementation is hand-owned. The topic's dispatcher calls
+  `run<Topic><Name>` (or `OwnedCommand::function`), and its help page and typo hints list it first.
+  Generation refuses a topic that wraps no operation, a name equal to one of the topic's verbs or
+  sub-nouns, and topic owned commands on `PySdk`. Configs without the new field emit identical output.
+
 ## 0.17.2 — 2026-10-10
 
 ### Added

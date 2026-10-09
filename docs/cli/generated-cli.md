@@ -44,6 +44,12 @@ is written.
 | `rename_error(...)` | a retired invocation that names its replacement and exits 2 |
 | `view(...)` | preview and table fields for the rows of one schema |
 
+`CliTopic::owned_command(...)` names a hand-owned command under a topic (Go only). The topic's
+dispatcher calls `run<Topic><Name>` in `package cli` (`db types` → `runDbTypes`), or the function
+`OwnedCommand::function` names, and the topic's help page and typo hints list it first. The topic
+must wrap at least one operation, and the name must not equal one of its verbs or sub-nouns. Like a
+root owned command, it is absent from `help --json` and shell completion.
+
 `.cli("bookstore")` is still accepted — a program name converts into an `SdkCli` — so a program that
 needs nothing but a name says nothing but a name. `SdkCli` is unrelated to gnr8's own CLI.
 
