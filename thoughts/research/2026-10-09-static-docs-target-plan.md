@@ -66,7 +66,9 @@ place with a *Superseded (round 3, Cn)* note. The release-scope changes:
   class (§4.2, Risk 1). The **Fixed** row now says those operations and cases are skipped silently,
   not "reported".
 - **A refused declared error model no longer reaches the generic error envelope** (C2). Its
-  TypedError case is skipped instead, so the pre-existing fallback keeps exactly today's triggers.
+  TypedError case is skipped instead, so the pre-existing fallback keeps today's trigger kinds and
+  gains none. *Superseded (round 4, N2):* this said "exactly today's triggers"; the complete list,
+  with the empty union and the response-side `MapKey` placed, is in §4.2.
 - **Notes C3–C7 are fixed in place.**
   - C3: `success_sample` returns a typed outcome that separates "no reply to print" from "reply
     refused".
@@ -76,6 +78,19 @@ place with a *Superseded (round 3, Cn)* note. The release-scope changes:
   - C6: the `url` sentence names its source.
   - C7: the format claim is scoped to values not taken from an enum.
 - **C8** confirms the examples-churn table and needs no change.
+
+**Closing polish — review round 4 (`.briefs/09-review-notes.md`; tip `aa3089f`).** Verdict: proceed,
+with no blocking or should-fix issue. One partial fix and three notes are folded in place, each with
+a *Superseded (round 4, Nn)* note:
+
+- N1: `OperationSample` is defined, and every type the gin real-graph test reads — including the
+  sampled reply — is `pub`, so the declared surface is clean under the `-D warnings` gate (§4.2).
+- N2: the error-envelope fallback's trigger list is complete, and `EmptyUnion` and the response-side
+  `MapKey` have stated dispositions (§4.2, §10).
+- N3: the **Fixed** changelog row carries the enum-member exception, and the **Added** row no longer
+  promises a reason for operations that have no reply to show (§8).
+- N4: the optional-body row states every trigger today's sampler already has, and Risk 1 names a
+  fourth, narrow loss (§4.2, §10).
 
 Two rules govern the plan, carried from the research and CLI documents:
 
@@ -503,7 +518,7 @@ pub(crate) struct CallSite { pub imports: Vec<String>, pub construct: String, pu
 
 Each language exposes
 `pub(crate) fn render_call(graph, op, inputs: &CallInputs<'_>, qualify: &Qualify<'_>) -> Result<CallSite, CoreError>`.
-A `ContractCase` (`verify/mod.rs:355-384`) and the new `OperationSample` both lend themselves as
+A `ContractCase` (`verify/mod.rs:355-384`) and the new `OperationSample` (§4.2) both lend themselves as
 `CallInputs`.
 
 **Consumer import identity — one rule for all three languages, with no fallback** (finding 14).
@@ -606,16 +621,41 @@ In `crates/gnr8-core/src/verify/mod.rs`:
 
   ```rust
   pub enum Sampled { Sample(OperationSample), Refused(SampleRefusal) }
+
+  /// Everything one operation's page and its contract cases draw from.
+  pub struct OperationSample {
+      /// Sampled parameter values, in graph order (today's `Candidate.params`, `:481`).
+      pub params: Vec<SampleParam>,
+      /// Every constructible JSON request representation, in the operation's media-type order
+      /// (today's `Candidate.bodies`, `:482-483`). The page and single-body cases use the first,
+      /// as `primary_body` does today (`:541-544`).
+      pub bodies: Vec<SampleBody>,
+      /// The credentials one call configures (today's `Candidate.auth`, `:485`).
+      pub auth: Vec<SampleAuth>,
+      /// The canned success reply the page prints: `success_sample` with `omit_optional = false`.
+      pub reply: SuccessOutcome,
+  }
+
   pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, CoreError>;
   pub fn satisfies(value: &serde_json::Value, constraints: &Constraints) -> Result<(), Violation>;
   ```
 
-  **`Sampled`, `sample_operation`, `satisfies`, `Violation` and `SampleRefusal` are `pub`.** The
-  gin real-graph test (W1.4) is an integration test in `crates/gnr8-core/tests/`, which reaches only
-  `pub` items.
+  **`Sampled`, `OperationSample`, `SuccessOutcome`, `SuccessSample` (with `pub` fields, below),
+  `sample_operation`, `satisfies`, `Violation` and `SampleRefusal` are `pub`.** The gin real-graph
+  test (W1.4) is an integration test in `crates/gnr8-core/tests/`, which reaches only `pub` items.
+  The types they expose are already `pub` with `pub` fields: `SampleParam`, `SampleBody`,
+  `SampleAuth` and `DecodedField` (`verify/mod.rs:249-252`, `:264-266`, `:283-285`, `:322-324`).
+  So no `pub` item exposes a more private type, which rustc's `private_interfaces` lint would reject
+  under the P1 gate's `-D warnings`. `success_sample` itself stays `pub(crate)`: a crate-private
+  function returning a `pub` type raises no lint. `Candidate` keeps its derived fields
+  (`declares_body`, `bodies_complete`, `absolute_path`, `:486-490`) and builds them from an
+  `OperationSample`.
   `verify` is already `pub mod` (`crates/gnr8-core/src/lib.rs:42`), and `gnr8-engine` is
   `publish = false`, so this widens no published API. *Superseded (round 3, C4):* these were
-  `pub(crate)`, which the test could not call.
+  `pub(crate)`, which the test could not call. *Superseded (round 4, N1):* `OperationSample` was
+  named but never defined, and the reply sat behind a `pub(crate)` `SuccessOutcome` wrapping today's
+  private `SuccessSample`, so the test could not read a sampled response value and the declaration
+  tripped `private_interfaces`.
 
   `Err` carries what `Candidate::build` already propagates with `?`:
   `request_body_models_of(op, graph)?` (`:498`) and `sample_auth(op, graph)?` (`:526`). A dangling
@@ -659,7 +699,7 @@ In `crates/gnr8-core/src/verify/mod.rs`:
   |---|---|
   | path parameter; required query / header / cookie parameter; required body field; required body | the **operation** is refused: the page prints the reason in place of every SDK snippet, the HTTP request is not printed, and `plan_contract_tests` skips the operation exactly as `Candidate::build` does today (`:495-497`, `:521-524`) |
   | optional parameter | left out of the sample, as today (`:972-975`); no note |
-  | optional body | Left out of the docs sample, as today (`:521-524`), with no note on the page. **In contract tests the operation then leaves every case class.** Its only body representation is refused, so `bodies` is empty. The `candidate.declares_body && body.is_none()` guard therefore skips it in five selectors (`:725`, `:798`, `:849`, `:892`, `:934`), and `can_select_bodies` (`:547-549`) excludes it from BodySelection. Today only a union, bytes, recursion or depth inside the body triggers this. S1 adds `Pattern` and `Unsatisfiable` on a required inner field (Risk 1). *Superseded (round 3, C1):* this row said only "as today". |
+  | optional body | Left out of the docs sample, as today (`:521-524`), with no note on the page. **In contract tests the operation then leaves every case class.** Its only body representation is refused, so `bodies` is empty. The `candidate.declares_body && body.is_none()` guard therefore skips it in five selectors (`:725`, `:798`, `:849`, `:892`, `:934`), and `can_select_bodies` (`:547-549`) excludes it from BodySelection. Today this already happens when the body declares no JSON representation (`Text`, `FormUrlEncoded`, `Multipart` and `Binary` are skipped at `:502-504`; encodings at `sdk/emit_common.rs:2074-2085`), so an optional upload already leaves all six classes. It also happens when the JSON value hits a union, bytes, recursion, depth, an empty enum (`:1083`) or a map key that is neither string nor enum (`:1075-1077`). S1 adds `Pattern` and `Unsatisfiable` on a required inner field (Risk 1). *Superseded (round 3, C1):* this row said only "as today". *Superseded (round 4, N4):* it said "today only a union, bytes, recursion or depth" triggers this. |
   | optional body field | not sampled — request samples carry required fields only (`:1096`). When `min_properties` needs optional fields, a refused optional field is skipped and the next one in field order is tried; if `min_properties` is still unmet, the object is `Unsatisfiable { constraint: min_properties }` |
   | the canned **response** body | **Fields follow the request rule.** A refused **optional** field is dropped from the reply, and the reply is still printed. Only a refused **required** field (required for the output direction, `SchemaDirections::field_is_required`), or a `min_properties` the surviving fields cannot meet, refuses the reply. **The operation is then not refused.** Its page prints the request and SDK snippets and, in place of the reply, *"No sample response body: …"*. **In contract tests it loses every case that needs a success sample.** Five classes need one (`:739-741`, `:767`, `:801`, `:904`, `:945`), and they lose differently: **RequestShape** (`:728-743`) and **Auth** (`:895-906`) try the next operation with the same key, and **RedirectPolicy** tries any later candidate (`:932-948`), so those three **move**. **ResponseDecode** is keyed `status\|model` (`:807`), and every other operation with that key returns the same refused model, so that model's present and absent cases are **lost**. **BodySelection** has no key (`:765-769`), so the operation's body-selection cases are **lost**. *Superseded (round 3, C1):* this row let any refused field refuse the whole reply, counted four classes, and claimed no class lost coverage. |
 
@@ -689,7 +729,7 @@ In `crates/gnr8-core/src/verify/mod.rs`:
   different situations, and the page must print a note for exactly one of them:
 
   ```rust
-  pub(crate) enum SuccessOutcome {
+  pub enum SuccessOutcome {
       Sample(SuccessSample),
       /// Nothing to print and nothing wrong: a binary success body (`:656-658`), no success status
       /// (`:659-666`), a first success status outside 2xx (`:667-669`), or no optional field to
@@ -697,6 +737,15 @@ In `crates/gnr8-core/src/verify/mod.rs`:
       NoReply,
       /// The reply exists in the contract, but its value is refused (`:691-693` today).
       Refused(SampleRefusal),
+  }
+
+  /// Today's private struct (`verify/mod.rs:643-648`), made `pub` with `pub` fields (round 4, N1).
+  pub struct SuccessSample {
+      pub status: u16,
+      pub model: Option<String>,
+      /// The canned reply as JSON text. The page prints it; the gin test parses it.
+      pub body: String,
+      pub field: Option<DecodedField>,
   }
   ```
 
@@ -711,18 +760,35 @@ In `crates/gnr8-core/src/verify/mod.rs`:
   `error_payload` (`:1290-1305`) uses the same `response_value`, under the same optional-field rule.
   Its canned error bodies are never printed on a page; they exist only inside contract tests.
 
-  - **An S1 refusal skips the case.** When a declared error model's value is refused by an S1 rule
-    (`Pattern` or `Unsatisfiable` on a required field), that operation's TypedError case for the
-    status is **skipped**, and the status is **not claimed**. `typed_error_cases` keys on the status
+  - **An S1 refusal skips the case.** When a declared error model's value is refused as a whole —
+    after the optional-field drop rule — by `Pattern`, `Unsatisfiable` or a response-side `MapKey`,
+    that operation's TypedError case for the status is **skipped**, and the status is **not
+    claimed**. `typed_error_cases` keys on the status
     alone (`:864`), and its `seen.insert` moves after the refusal check, so a later operation that
     declares the status can still supply the case. If none can, that status has no TypedError case
     (Risk 1).
-  - **The fallback keeps exactly today's triggers.** These are: no declared body for the status, and
-    recursion, depth or an empty enum in the model. Only they still reach the generic
-    `message` / `slug` envelope (`:1298-1303`).
+  - **`MapKey` skips; it does not fall back.** A response-side `MapKey` is new in round 3. Today an
+    int-keyed map in an error model is never a fallback trigger: it is sent through the declared
+    model, keyed `"key"` (`:1131-1136`). Placing it in the fallback would widen the trigger set, so
+    it joins the skip set. The narrow coverage cost is in Risk 1.
+  - **The fallback keeps today's trigger kinds — the complete list.** Only these reach the generic
+    `message` / `slug` envelope (`:1298-1303`):
+    1. the status has no declared response — every candidate's `400` (`:862`), or any status the
+       operation does not list — or its response has no body (`:1294-1295`);
+    2. the model is refused as a whole by `Recursive` (`:1139-1141`), `TooDeep` (`:1119-1121`),
+       `EmptyEnum` (`:1156` → `:1083`) or `EmptyUnion` (`:1123-1125`, an empty union's
+       `variants.first()`).
+
+    Today's fifth trigger, a dangling reference (`:1296`), is unreachable. Every SDK target builds
+    `SdkModel` before planning contract tests (`builtins.rs:3041`/`:3057`, `:3169`/`:3212`,
+    `:3429`/`:3465`), and `response_model` rejects a dangling response reference
+    (`model.rs:368-372`, `:533-537`, `:572-581`). Under S1 it is a `CoreError` (errors list above).
+    The optional-field drop rule narrows where the four kinds bite: one inside an optional field now
+    drops that field instead of sending the envelope. It never adds a trigger.
   - That pre-existing fallback is recorded as a known limitation (§10) and is **not extended**.
   - *Superseded (round 3, C2):* refused models reached the fallback, which widened its trigger set
-    while §10 said it was not extended.
+    while §10 said it was not extended. *Superseded (round 4, N2):* the trigger list omitted the
+    empty union, and `EmptyUnion` and the response-side `MapKey` had no disposition here.
 
 **Constraint-respecting is defined per value, not per constraint** (finding 12). Constraints are read
 from four places:
@@ -1099,9 +1165,9 @@ make examples-check GO_BIN=/opt/data/home/.local/go1.27.1/bin   # must be byte-i
 | `every_operation_has_exactly_one_page`; `page_title_is_the_operation_id_even_with_a_summary`; `undocumented_operation_has_structure_and_no_prose`; `group_without_describe_renders_its_name_alone`; `ungrouped_operations_are_listed_on_the_index`; `operation_slug_collision_is_an_error_naming_both`; `schema_slug_collision_is_an_error_naming_both`; `servers_are_listed_in_order_and_snippets_use_a_variable`; `declared_examples_render_under_their_status_beside_the_sample`; `schema_field_table_renders_exactly_the_fields_openapi_publishes` (D1 amended: description, example, format, default and constraints present; `x-*` absent); `parameter_table_renders_parameter_prose` (D4); `tags_render_as_code_spans`; `go_sdk_without_package_metadata_prints_the_identity_note_and_no_snippet` (§4.1); `no_sdk_siblings_means_no_sdk_sections`; `two_go_sdks_render_two_sections_in_plan_order`; `llms_txt_and_index_list_pages_in_one_order`; `files_end_with_one_newline_and_no_trailing_space`; `windows_and_posix_module_paths_render_identically` | `crates/gnr8-core/tests/docs_emit.rs` (new; synthetic graphs as serde JSON, the house practice described in `thoughts/research/2026-09-11-cli-generation-plan.md` §10.1) | none |
 | `dangling_link_fails_generation`; `fixed_headings_are_invariant_gate_clean` | `staticdocs/links.rs` / `staticdocs/markdown.rs` unit tests | none |
 | `go_contract_test_text_is_unchanged_by_the_callsite_lift` (against both W1.0 snapshots) plus the existing `contract_tests.rs` | `crates/gnr8-core/tests/contract_tests.rs` (catalog spec) | none |
-| the same lift check over `go_contract_test_text_snapshot_for_gin_regression`; then, after W1.4, `gin_regression_samples_satisfy_every_declared_constraint`. It runs the `pub` `sample_operation` over every operation of the fixture graph, and asserts the `pub` `satisfies` for every sampled input **and** response value. Its oracle is S1's own predicate, so it cannot catch a misreading of the source's semantics, such as inclusive versus exclusive bounds or how a bound string parses. The only independent check is `generated_sdks_compile`. Binding the sampled requests through the fixture's own handler types would be a real oracle; it is optional and not planned (round 3, C4) and the existing `generated_sdks_compile`, which must stay green with the new values | `crates/gnr8-core/tests/gin_contract_regression.rs` | go |
+| the same lift check over `go_contract_test_text_snapshot_for_gin_regression`; then, after W1.4, `gin_regression_samples_satisfy_every_declared_constraint`. It runs the `pub` `sample_operation` over every operation of the fixture graph, and asserts the `pub` `satisfies` for every sampled input **and** response value. A response value is read from `OperationSample::reply`: on `SuccessOutcome::Sample`, the test parses `SuccessSample::body` with `serde_json` and walks it against the response schema's field constraints (round 4, N1). Its oracle is S1's own predicate, so it cannot catch a misreading of the source's semantics, such as inclusive versus exclusive bounds or how a bound string parses. The only independent check is the existing `generated_sdks_compile`, which must stay green with the new values. Binding the sampled requests through the fixture's own handler types would be a real oracle; it is optional and not planned (round 3, C4) | `crates/gnr8-core/tests/gin_contract_regression.rs` | go |
 | `go_type_in_with_empty_qualifier_equals_go_type` (every schema of the fixture graphs); `consumer_mode_qualifies_all_eight_go_spelling_sites` (`[]sdk.Book`, `map[string]*sdk.Book`, `sdk.Ptr[sdk.Genre]`, `sdk.Genre("…")`, `sdk.Book{…}`, `sdk.ListBooksParams{…}`, `sdk.CreateBookJSONBody{Value: sdk.Book{…}}` for a two-representation body, `sdk.WithAPIKeyHeader(…)` / `sdk.WithBearerToken(…)` / `sdk.WithBasicAuth(…)`, `sdk.NewClient(baseURL, …)`; *superseded name:* `consumer_mode_qualifies_slices_maps_pointers_ptr_args_and_literals`, round 2, B3); `consumer_mode_date_time_is_a_time_date_expression` | `gosdk/callsite.rs` / `gosdk/emit.rs` unit tests | none |
-| `sample_prefers_enum_members_that_satisfy_every_constraint`; `sample_respects_min_and_max_length`; `sample_respects_inclusive_numeric_bounds`; `sample_respects_exclusive_numeric_bounds`; `sample_respects_item_counts`; `sample_respects_property_counts`; `enum_members_all_shorter_than_min_length_is_unsatisfiable`; `contradictory_bounds_are_unsatisfiable`; `pattern_is_a_typed_refusal`; `required_non_json_body_is_no_json_body`; `refused_field_inside_a_required_json_body_propagates_its_own_reason`; one test per remaining `SampleRefusal` variant (`non_scalar_parameter_…`, `empty_enum_…`, `map_key_…`, `recursive_reference_…`, `too_deep_…`, `serialization_style_names_which_rule`); `optional_refused_inputs_are_left_out_without_a_note`; `refused_response_keeps_the_request_sample_and_prints_the_response_note`; `string_with_a_mapped_format_selects_its_literal`; `annotation_only_formats_restrict_nothing` (`integer`+`int64`, `number`+`double`, `string`+`hostname`); `number_with_format_decimal_keeps_a_numeric_literal`; `enum_keyed_map_uses_a_member_as_key`; `response_sample_respects_field_constraints`; `refused_optional_response_field_is_dropped_and_the_reply_kept`; `refused_required_response_field_refuses_the_reply`; `response_min_properties_unmet_after_dropping_is_unsatisfiable`; `refused_declared_error_model_skips_its_typed_error_case_and_frees_the_status`; `success_outcome_separates_no_reply_from_refused` (binary, non-2xx and refused replies); `empty_union_in_a_response_is_a_typed_refusal`; `int_keyed_response_map_is_a_map_key_refusal` (round 3, C1–C3); `response_max_properties_drops_optional_fields`; `dangling_reference_is_an_error_not_a_refusal`; `every_sample_satisfies_all_its_constraints` (over synthetic graphs that exercise every `Constraints` field, singly and in combination, **request and response**). *Withdrawn (round 2, B2):* `unknown_format_is_a_typed_refusal`, `well_known_format_selects_its_literal` | `crates/gnr8-core/src/verify/mod.rs` tests | none |
+| `sample_prefers_enum_members_that_satisfy_every_constraint`; `sample_respects_min_and_max_length`; `sample_respects_inclusive_numeric_bounds`; `sample_respects_exclusive_numeric_bounds`; `sample_respects_item_counts`; `sample_respects_property_counts`; `enum_members_all_shorter_than_min_length_is_unsatisfiable`; `contradictory_bounds_are_unsatisfiable`; `pattern_is_a_typed_refusal`; `required_non_json_body_is_no_json_body`; `refused_field_inside_a_required_json_body_propagates_its_own_reason`; one test per remaining `SampleRefusal` variant (`non_scalar_parameter_…`, `empty_enum_…`, `map_key_…`, `recursive_reference_…`, `too_deep_…`, `serialization_style_names_which_rule`); `optional_refused_inputs_are_left_out_without_a_note`; `refused_response_keeps_the_request_sample_and_prints_the_response_note`; `string_with_a_mapped_format_selects_its_literal`; `annotation_only_formats_restrict_nothing` (`integer`+`int64`, `number`+`double`, `string`+`hostname`); `number_with_format_decimal_keeps_a_numeric_literal`; `enum_keyed_map_uses_a_member_as_key`; `response_sample_respects_field_constraints`; `refused_optional_response_field_is_dropped_and_the_reply_kept`; `refused_required_response_field_refuses_the_reply`; `response_min_properties_unmet_after_dropping_is_unsatisfiable`; `refused_declared_error_model_skips_its_typed_error_case_and_frees_the_status`; `success_outcome_separates_no_reply_from_refused` (binary, non-2xx and refused replies); `empty_union_in_a_response_is_a_typed_refusal`; `int_keyed_response_map_is_a_map_key_refusal` (round 3, C1–C3); `empty_union_error_model_keeps_the_generic_envelope`; `int_keyed_error_map_skips_its_typed_error_case_and_frees_the_status`; `operation_sample_reply_is_readable_from_an_integration_test` (round 4, N1–N2); `response_max_properties_drops_optional_fields`; `dangling_reference_is_an_error_not_a_refusal`; `every_sample_satisfies_all_its_constraints` (over synthetic graphs that exercise every `Constraints` field, singly and in combination, **request and response**). *Withdrawn (round 2, B2):* `unknown_format_is_a_typed_refusal`, `well_known_format_selects_its_literal` | `crates/gnr8-core/src/verify/mod.rs` tests | none |
 | `refused_operation_page_prints_the_refusal_reason` | `crates/gnr8-core/tests/docs_emit.rs` | none |
 | `go_docs_snippets_compile_against_the_generated_sdk` — calls `staticdocs::snippets::compile_unit`, writes the temp tree, runs `go vet` (rung 2 in gnr8's own CI; returns early when `go` is absent, the `sdk_compile.rs` practice) | `crates/gnr8-core/tests/docs_snippets_compile.rs` (new) | go |
 | `docs_are_byte_identical_across_two_generations` | `crates/gnr8-core/tests/determinism.rs` | go |
@@ -1270,8 +1336,8 @@ Entries go under `## Unreleased`, in the order the phases merge.
 | Phase | Heading | Entry (summary) |
 |---|---|---|
 | P0+P1 | **Breaking** | `BuiltinTarget` gains `StaticDocs`. Rust code that matches `BuiltinTarget` exhaustively needs an arm. The host/worker protocol is now version 9, so a worker and CLI cannot silently disagree about the stage-plan shape (the 0.12.0 wording, `CHANGELOG.md:617-619`). |
-| P0+P1 | **Added** | `StaticDocs::new().to(dir)` writes a deterministic Markdown reference — index, group, operation and schema pages, and `llms.txt` — with an HTTP example and a Go call on every operation page. Names are spelled by the Go SDK emitter's own functions, and every sample value — request and canned response — satisfies the declared constraints and any format gnr8 maps to a well-known scalar (an enum member is printed as declared). An operation, SDK or response with no sample prints the reason. Generation fails on a missing page or broken internal link. |
-| P0+P1 | **Fixed** | Contract-test sample values — request inputs and canned success replies — now satisfy declared `enum`, length, range, item-count and property-count constraints, and a string `format` gnr8 maps to a well-known scalar; other formats remain annotations. No value is sent for a `pattern`, which gnr8 never synthesizes and which imported specs carry most often, or for bounds no value can meet. In the generated contract tests, the affected operation or case is skipped, silently. A refused optional reply field is left out of the canned reply instead, so only a refused required field costs a case. Enum-keyed map samples use an enum member as the key. Generated `contract_test.*` files change for operations whose inputs or responses declare constraints, and suites over patterned models can lose cases. |
+| P0+P1 | **Added** | `StaticDocs::new().to(dir)` writes a deterministic Markdown reference — index, group, operation and schema pages, and `llms.txt` — with an HTTP example and a Go call on every operation page. Names are spelled by the Go SDK emitter's own functions, and every sample value — request and canned response — satisfies the declared constraints and any format gnr8 maps to a well-known scalar (an enum member is printed as declared). An operation or SDK with no sample prints the reason, and so does a canned reply that is refused. An operation with no reply to show — a file download, no success status, or a first success status outside 2xx — prints neither a reply nor a note. Generation fails on a missing page or broken internal link. |
+| P0+P1 | **Fixed** | Contract-test sample values — request inputs and canned success replies — now satisfy declared `enum`, length, range, item-count and property-count constraints, and a string `format` gnr8 maps to a well-known scalar, except that an enum member is sent as declared even where it contradicts that format; other formats remain annotations. No value is sent for a `pattern`, which gnr8 never synthesizes and which imported specs carry most often, or for bounds no value can meet. In the generated contract tests, the affected operation or case is skipped, silently. A refused optional reply field is left out of the canned reply instead, so only a refused required field costs a case. Enum-keyed map samples use an enum member as the key. Generated `contract_test.*` files change for operations whose inputs or responses declare constraints, and suites over patterned models can lose cases. |
 | P2 | **Added** | Python and TypeScript calls on operation pages, for SDK targets that emit package metadata; CLI invocations for operations a generated CLI wraps. |
 | P3 | **Added** | `gnr8 verify` checks every docs code sample against the SDK it documents. Go and TypeScript samples are compiled, and Python samples are executed against a stub transport. It also checks that each sample appears unchanged in its page, and it reports skipped toolchains explicitly. |
 | P4 | **Added** | `errors.md`, `authentication.md`, per-page diagnostics and pagination sections. `gnr8 verify` runs each sample's call against a fake transport and asserts it sends the request printed on the page, with credentials and base URL substituted. |
@@ -1281,7 +1347,9 @@ Go SDK"* — true for names only (note 1). The **Fixed** row was a P2 entry (fin
 claimed Python samples were *"compiled"* (finding 5). *Superseded (round 3, C1):* the **Fixed**
 row said such a constraint was *"reported instead of sent"*. `plan_contract_tests` skips the
 operation or case silently (`verify/mod.rs:451-455`, `:739-741`), and the row did not name
-`pattern`.
+`pattern`. *Superseded (round 4, N3):* the **Fixed** row lacked the enum-member exception the
+**Added** row carries (§4.2), and the **Added** row promised a reason for every response with no
+sample, while the `NoReply` arm prints nothing (§4.2).
 
 **Release framing.**
 
@@ -1373,7 +1441,7 @@ none (D2).
      operations).
    - **Coverage loss.** S1 also **removes** coverage, silently: `plan_contract_tests` drops a
      refused operation (`verify/mod.rs:451-455`), and a selector drops a case that has no success
-     sample (`:739-741`). That happens in three ways:
+     sample (`:739-741`). That happens in four ways:
      - **A required input** that is pattern-constrained or unsatisfiable drops the operation from
        every class, as other refusals already do.
      - **An optional request body** whose required inner field is refused leaves `bodies` empty. The
@@ -1382,8 +1450,15 @@ none (D2).
      - **A required response field** that is refused removes the operation's success sample. An
        optional one is dropped and costs nothing. RequestShape, Auth and RedirectPolicy then move to
        another operation, but **ResponseDecode** loses that `status|model` pair's present and absent
-       cases, and **BodySelection** loses the operation's cases. A refused required field in an
-       *error* model skips that status's TypedError case (§4.2).
+       cases, and **BodySelection** loses the operation's cases. A refused required field — or a
+       non-string, non-enum map key — in an *error* model skips that status's TypedError case
+       (§4.2).
+     - **A partly refused multi-representation body** (narrow). If S1 refuses some, but not all, of
+       an operation's JSON request representations, `bodies_complete` is false (`:519`), so
+       `can_select_bodies` is false (`:547-549`) and **BodySelection** loses the operation. The other
+       five classes proceed on the first constructible body (`:542-544`). This holds for a required
+       body too, because only an empty `bodies` refuses one (`:523`). *Superseded (round 4, N4):*
+       this risk said "three ways".
    - **Where it bites.** `pattern` is the refusal that will fire most often, on imported specs,
      where identifier and etag patterns are common. On a spec where most models carry a **required**
      patterned field, the suite shrinks towards request-only and TypedError cases.
@@ -1459,10 +1534,13 @@ none (D2).
   field tagged `format:"url"` (`goextract/internal/types/extract.go:283-289`). An imported
   `format: url` string is unaffected, because the importer already types it `WellKnown::Uri`;
 - an enum member is printed as declared, even when it contradicts a mapped format (§4.2; round 3, C7);
-- an error status with no declared body, or a declared error model that is recursive, too deep or
-  holds an empty enum, keeps the contract tests' pre-existing generic `message` / `slug` envelope
-  (`verify/mod.rs:1298-1303`). These are exactly today's triggers. A model refused by an S1 rule
-  skips its TypedError case instead (§4.2; round 3, C2). Error bodies are never printed on a page,
+- an error status with no declared response or body, or a declared error model refused as a whole
+  as recursive, too deep, holding an empty enum or holding an empty union, keeps the contract tests'
+  pre-existing generic `message` / `slug` envelope (`verify/mod.rs:1298-1303`). These are today's
+  trigger kinds, listed completely in §4.2; today's dangling-reference trigger is unreachable and
+  becomes an error. A model refused by an S1 rule or a response-side `MapKey` skips its TypedError
+  case instead (§4.2; round 3, C2; *superseded, round 4, N2:* this said "exactly today's triggers"
+  and omitted the empty union). Error bodies are never printed on a page,
   and this plan does not extend that fallback;
 - S1 removes some contract-test coverage, silently (Risk 1);
 - Python rung 2 does not catch a misspelled *optional* model keyword (pydantic `extra="ignore"`);
