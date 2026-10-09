@@ -1249,6 +1249,20 @@ fn go_gin_contract_pipeline_generates_expected_sdk_surfaces() {
     }
 }
 
+/// The Go contract test of the richest committed graph — multi-representation bodies, bounds,
+/// `dive` items — byte for byte. Recorded before the call-site renderer was lifted out of the
+/// contract emitter; the constraint-respecting sampler re-accepts it, and says why.
+#[test]
+fn go_contract_test_text_snapshot_for_gin_regression() {
+    let Some(outcome) = run_pipeline() else {
+        return;
+    };
+    insta::assert_snapshot!(
+        "go_contract_test_gin_regression",
+        artifact(&outcome, "generated/go/contract_test.go")
+    );
+}
+
 #[test]
 fn generated_sdks_compile() {
     let Some(outcome) = run_pipeline() else {

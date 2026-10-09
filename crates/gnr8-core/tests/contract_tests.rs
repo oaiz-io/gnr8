@@ -524,3 +524,141 @@ fn go_contract_suites_carry_declared_module_and_version_without_metadata() {
     );
     assert!(generated.files.contains_key("metadata/go.mod"));
 }
+
+/// A spec that reaches every Go spelling site a rendered call has: an enum newtype, a nested model,
+/// a slice of models, a map, a date-time, an optional enum and integer parameter, a header
+/// parameter, a two-representation request body, an optional request body, and bearer and basic
+/// credentials. It is a reference for the call-site renderer, not a fixture of any product.
+const SHAPES_SPEC: &str = r##"openapi: 3.1.0
+info:
+  title: Shapes
+  version: 1.0.0
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+    BasicAuth:
+      type: http
+      scheme: basic
+  schemas:
+    Genre:
+      type: string
+      enum: [fiction, poetry]
+    Author:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        nickname: { type: string }
+    Book:
+      type: object
+      required: [title, genre, author, tags, ratings, published, coauthors]
+      properties:
+        title: { type: string }
+        genre: { $ref: "#/components/schemas/Genre" }
+        author: { $ref: "#/components/schemas/Author" }
+        tags:
+          type: array
+          items: { type: string }
+        ratings:
+          type: object
+          additionalProperties: { type: integer }
+        published: { type: string, format: date-time }
+        coauthors:
+          type: array
+          items: { $ref: "#/components/schemas/Author" }
+        note: { type: string }
+paths:
+  /books:
+    get:
+      operationId: listBooks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: genre
+          in: query
+          schema: { $ref: "#/components/schemas/Genre" }
+        - name: limit
+          in: query
+          schema: { type: integer, format: int32 }
+        - name: X-Trace
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Book" }
+    post:
+      operationId: createBook
+      security:
+        - BasicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Book" }
+          application/vnd.shapes+json:
+            schema: { $ref: "#/components/schemas/Book" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Book" }
+  /authors/{id}:
+    put:
+      operationId: updateAuthor
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Author" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Author" }
+"##;
+
+/// The Go contract test of [`SPEC`], byte for byte. Recorded before the call-site renderer was
+/// lifted out of the contract emitter, so the lift is checked against what the emitter wrote.
+#[test]
+fn go_contract_test_text_snapshot_for_catalog_spec() {
+    let generated = all_targets();
+    insta::assert_snapshot!(
+        "go_contract_test_catalog_spec",
+        file(&generated.files, "go/contract_test.go")
+    );
+}
+
+/// The Go contract test of [`SHAPES_SPEC`], byte for byte: every Go spelling site in-package.
+#[test]
+fn go_contract_test_text_is_unchanged_by_the_callsite_lift() {
+    let root = temp_dir("shapes");
+    std::fs::write(root.join("openapi.yaml"), SHAPES_SPEC).expect("write the spec");
+    let pipeline = Pipeline::new()
+        .source(OpenApi::new().input("openapi.yaml"))
+        .target(GoSdk::new().module("example.com/shapes/sdk").to("go"));
+    let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), None)
+        .expect("pipeline must generate");
+    let _ = std::fs::remove_dir_all(&root);
+    let text = outcome
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == "go/contract_test.go")
+        .map(|artifact| artifact.text.clone())
+        .expect("the Go contract test is emitted");
+    insta::assert_snapshot!("go_contract_test_shapes_spec", text);
+}
