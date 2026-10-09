@@ -1430,3 +1430,176 @@ fn write_artifacts(outcome: &gnr8_engine::pipeline::PipelineOutcome, prefix: &st
         std::fs::write(path, &artifact.text).expect("write artifact");
     }
 }
+
+fn named_constraint_fixture(rank_type: &str, defined_pointer: bool) -> PathBuf {
+    let root = unique_temp_dir("named-bounds");
+    copy_fixture(Path::new(FIXTURE_DIR), &root);
+    let file = root.join("app.go");
+    let mut source = std::fs::read_to_string(&file).unwrap();
+    for (old, new) in [
+        ("Names  []string", "Names  Tags"),
+        ("Slots  [3]int", "Slots  Slots"),
+        ("Labels map[string]string", "Labels Labels"),
+        ("Label  string", "Label  Name"),
+        ("Rank   int", &format!("Rank   {rank_type}")),
+    ] {
+        assert!(source.contains(old), "fixture declaration {old}");
+        source = source.replace(old, new);
+    }
+    source.push_str("\ntype Tags []string\ntype Slots [3]int\ntype Labels map[string]string\ntype Name string\ntype Rank int\ntype RankAlias = Rank\n");
+    if defined_pointer {
+        source.push_str("type RankPtr *Rank\n");
+        source = source.replace(
+            "json:\"rank\" binding:\"min=1,max=9\"",
+            "json:\"rank\" binding:\"gte=1\"",
+        );
+    }
+    std::fs::write(file, source).unwrap();
+    root
+}
+
+fn resolve_all_local_refs(doc: &serde_json::Value, node: &serde_json::Value) {
+    match node {
+        serde_json::Value::Object(obj) => {
+            if let Some(reference) = obj.get("$ref").and_then(serde_json::Value::as_str) {
+                let pointer = reference.strip_prefix('#').expect("local reference");
+                assert!(doc.pointer(pointer).is_some(), "dangling {reference}");
+            }
+            for child in obj.values() {
+                resolve_all_local_refs(doc, child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                resolve_all_local_refs(doc, child);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn named_field_constraints_reach_openapi_beside_refs() {
+    if !go_available() {
+        eprintln!("skipping: go unavailable");
+        return;
+    }
+    for rank_type in ["Rank", "*Rank", "RankAlias"] {
+        let root = named_constraint_fixture(rank_type, false);
+        let store = gnr8_engine::store::Store::at(root.join("cache-store"));
+        let pipeline = Pipeline::new()
+            .source(GoGin::new().inputs(["."]))
+            .transform(ApiOverrides::new().sse_response("GET", "/v1/items/raw-stream"))
+            .target(OpenApi31::new().to("generated/openapi.yaml"));
+        let outcome =
+            gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), Some(&store))
+                .unwrap();
+        let graph = graph_artifact(&outcome).graph;
+        let doc: serde_json::Value =
+            noyalib::from_str(artifact(&outcome, "generated/openapi.yaml")).unwrap();
+        resolve_all_local_refs(&doc, &doc);
+        for schema in graph
+            .schemas
+            .iter()
+            .filter(|s| s.name.starts_with("CollectionRules"))
+        {
+            let Type::Object(fields) = &schema.body else {
+                panic!("object");
+            };
+            for (field_name, kind, bounds) in [
+                ("names", "array", serde_json::json!({"minItems":1})),
+                ("slots", "array", serde_json::json!({"maxItems":100})),
+                (
+                    "labels",
+                    "object",
+                    serde_json::json!({"minProperties":1,"maxProperties":4}),
+                ),
+                (
+                    "label",
+                    "string",
+                    serde_json::json!({"minLength":2,"maxLength":24}),
+                ),
+                (
+                    "rank",
+                    "integer",
+                    serde_json::json!({"minimum":1,"maximum":9}),
+                ),
+            ] {
+                let f = fields.iter().find(|f| f.json_name == field_name).unwrap();
+                let Type::Named(id) = &f.schema else {
+                    panic!("named field {field_name}: {:?}", f.schema);
+                };
+                let component = graph
+                    .schemas
+                    .iter()
+                    .find(|s| &s.id == id)
+                    .expect("graph ref resolves");
+                let prop = &doc["components"]["schemas"][&schema.name]["properties"][field_name];
+                let reference = prop["$ref"]
+                    .as_str()
+                    .or_else(|| prop["oneOf"][0]["$ref"].as_str())
+                    .expect("property reference");
+                let target = doc.pointer(reference.strip_prefix('#').unwrap()).unwrap();
+                assert_eq!(target, &doc["components"]["schemas"][&component.name]);
+                assert_eq!(target["type"], kind, "{rank_type} {field_name}");
+                let expected = match field_name {
+                    "names" => serde_json::json!({"min_items":1}),
+                    "slots" => serde_json::json!({"max_items":100}),
+                    "labels" => serde_json::json!({"min_properties":1,"max_properties":4}),
+                    "label" => serde_json::json!({"min_length":2,"max_length":24}),
+                    "rank" => serde_json::json!({"minimum":"1","maximum":"9"}),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    serde_json::to_value(&f.meta.constraints).unwrap(),
+                    expected,
+                    "graph metadata {field_name}"
+                );
+                for (keyword, value) in bounds.as_object().unwrap() {
+                    assert_eq!(
+                        &prop[keyword], value,
+                        "{rank_type} {}.{field_name}: {prop}",
+                        schema.name
+                    );
+                    assert!(
+                        target.get(keyword).is_none(),
+                        "field bound leaked into component"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            graph
+                .schemas
+                .iter()
+                .filter(|s| s.name.starts_with("CollectionRules"))
+                .count(),
+            2
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn named_defined_pointer_fields_remain_unsupported() {
+    if !go_available() {
+        eprintln!("skipping: go unavailable");
+        return;
+    }
+    let root = named_constraint_fixture("RankPtr", true);
+    let store = gnr8_engine::store::Store::at(root.join("cache-store"));
+    let pipeline = Pipeline::new()
+        .source(GoGin::new().inputs(["."]))
+        .target(OpenApi31::new().to("generated/openapi.yaml"));
+    let error = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), Some(&store))
+        .unwrap_err();
+    assert!(
+        matches!(error, gnr8_engine::CoreError::Lowering { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("dangling $ref") && error.to_string().contains("RankPtr"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

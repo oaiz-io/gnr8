@@ -702,23 +702,26 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
     let diagnostics = run.outcome.diagnostics;
     print_diagnostics(output, &diagnostics);
 
-    if run.outcome.contract_test_suites.is_empty() {
+    if run.outcome.contract_test_suites.is_empty() && run.outcome.cli_help_suites.is_empty() {
         bail!(
-            "no SDK contract tests to run — add a Go, Python or TypeScript SDK target to .gnr8/src/main.rs"
+            "no SDK contract tests or generated CLI help checks to run — add an SDK or CLI target to .gnr8/src/main.rs"
         );
     }
 
-    output.verbose("verify: running contract tests");
+    output.verbose("verify: running SDK contract tests and CLI help checks");
     let run_start = Instant::now();
     let suites = verify::run_suites(
         &root,
         &run.outcome.contract_test_suites,
         &run.outcome.artifacts,
     );
+    let cli_suites =
+        verify::run_cli_help_suites(&root, &run.outcome.cli_help_suites, &run.outcome.artifacts);
     let run_elapsed = run_start.elapsed();
 
     let report = verify::VerifyReport::new(
         suites,
+        cli_suites,
         verify::VerifyTimings {
             pipeline: duration_ms(pipeline_elapsed),
             tests: duration_ms(run_elapsed),
@@ -734,7 +737,10 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
         print!("{}", report.render_human());
         output.verbose(format!("worker: {}", run.worker_origin.label()));
         output.verbose(format!("pipeline: {}", fmt_duration(pipeline_elapsed)));
-        output.verbose(format!("contract tests: {}", fmt_duration(run_elapsed)));
+        output.verbose(format!(
+            "verification checks: {}",
+            fmt_duration(run_elapsed)
+        ));
         output.verbose(format!("total: {}", fmt_duration(total_start.elapsed())));
     }
 
@@ -745,6 +751,12 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
                 suite.label,
                 suite.reason()
             );
+        }
+        for message in report.cli_failure_messages() {
+            eprintln!("error: {message}");
+        }
+        if report.no_checks_executed() {
+            eprintln!("error: no checks executed: all generated CLI help suites were skipped");
         }
         std::io::stdout().flush()?;
         std::io::stderr().flush()?;

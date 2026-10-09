@@ -46,7 +46,14 @@ gnr8 verify
 `gnr8 verify` runs the contract test each SDK target emits beside its sources, with that language's
 own test tool, against a fake transport. It proves the generated client puts the graph's method,
 path, query, headers, body and auth on the wire and makes the right thing of a canned reply — the
-part a compile check cannot answer. It exits `1` when any suite fails.
+part a compile check cannot answer. Generated Go/Python CLIs also get exhaustive root, group and
+selected operation `--help` checks, including after `.without_contract_tests()`. Go builds the
+configured cmd package once per target; Python runs its declared package's CLI module without
+installation. CLI suites skip only when the designated compiler/interpreter probe cannot find its
+executable, and reports list these skips separately. Exit 0 requires a passing suite and no failures;
+any failure or an all-skipped run exits 1. Neither suite family configured is a startup error (exit 2).
+Both Go suite families use the target's declared module/version in temporary copies even when
+package metadata emission is disabled; verification leaves project outputs unchanged.
 
 Before merging API-shape changes, gate them: `gnr8 changes --base <ref>` classifies every graph
 change as `BREAKING`/`ADDITIVE`/`DOC-ONLY` and exits `1` on a checked breaking change. Repeat
@@ -194,7 +201,7 @@ The SDK output is generated. Do not patch generated client files by hand; update
 | Missing source toolchain | Install `go`, `python3`, or `node` plus project `typescript`. |
 | Generated file skipped as user-edited | Inspect the edit; run `gnr8 generate --force` only if overwrite is intended. |
 | `gnr8 check` exits 1 | Run `gnr8 generate`; commit updated generated artifacts. |
-| `gnr8 verify` exits 1 | Read the failing suite's message: the generated client and the graph's wire contract disagree. |
+| `gnr8 verify` exits 1 | Read the failed SDK contract or CLI help check's command and reason; an all-skipped run means no checks executed. |
 | Diagnostics in `doctor` | Prefer typed source/config changes over guessing undocumented behavior. |
 
 ## CI

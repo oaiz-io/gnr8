@@ -38,7 +38,9 @@ use crate::sdk::model::SdkModel;
 use crate::sdk::model_style::PyModelStyle;
 use crate::sdk::resolved_lexically;
 use crate::store::{Namespace, Store};
-use crate::verify::{ContractTestLanguage, ContractTestSuite};
+use crate::verify::{
+    CliHelpSuite, CliHelpTarget, ContractTestLanguage, ContractTestSuite, GoVerificationModule,
+};
 use crate::CoreError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -3126,6 +3128,11 @@ impl TargetExec for GoSdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::gosdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            go_verification: Some(GoVerificationModule {
+                module: self.module.clone(),
+                go_version: self.go_version.clone(),
+                package_metadata: self.package_metadata,
+            }),
         }])
     }
 }
@@ -3267,6 +3274,7 @@ impl TargetExec for PySdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::pysdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            go_verification: None,
         }])
     }
 }
@@ -3517,6 +3525,7 @@ impl TargetExec for TsSdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::tssdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            go_verification: None,
         }])
     }
 }
@@ -4367,6 +4376,58 @@ pub fn target_contract_test_suites(
         BuiltinTarget::PySdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::TsSdk(t) => t.contract_test_suites(ir),
     }
+}
+
+/// Generated CLI help suites declared by built-in targets.
+///
+/// # Errors
+/// Returns the command planner's typed error when a selector matches no operation.
+pub fn target_cli_help_suites(
+    spec: &BuiltinTarget,
+    ir: &ApiGraph,
+) -> Result<Vec<CliHelpSuite>, CoreError> {
+    let (dir, cli, target) = match spec {
+        BuiltinTarget::GoSdk(t) => {
+            let Some(cli) = &t.cli else {
+                return Ok(Vec::new());
+            };
+            (
+                &t.dir,
+                cli,
+                CliHelpTarget::Go {
+                    verification: GoVerificationModule {
+                        module: t.module.clone(),
+                        go_version: t.go_version.clone(),
+                        package_metadata: t.package_metadata,
+                    },
+                    emit_main: cli.emit_main,
+                },
+            )
+        }
+        BuiltinTarget::PySdk(t) => {
+            let Some(cli) = &t.cli else {
+                return Ok(Vec::new());
+            };
+            (
+                &t.dir,
+                cli,
+                CliHelpTarget::Python {
+                    package: sdk_package(&t.module)?,
+                },
+            )
+        }
+        BuiltinTarget::OpenApi31(_)
+        | BuiltinTarget::OpenApi31Json(_)
+        | BuiltinTarget::StaticFiles(_)
+        | BuiltinTarget::TsSdk(_) => return Ok(Vec::new()),
+    };
+    let projected = crate::graph::projection::for_generation(ir)?;
+    Ok(vec![CliHelpSuite {
+        output_path: dir.trim_end_matches('/').to_string(),
+        program: cli.program.clone(),
+        target,
+        plan: crate::verify::plan_cli_help(&projected, cli)?,
+    }])
 }
 
 /// Execute a declared post-processor over `out`.

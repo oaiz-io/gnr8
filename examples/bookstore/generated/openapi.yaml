@@ -172,7 +172,7 @@ components:
         publisher:
           oneOf:
           - $ref: '#/components/schemas/PublisherInput'
-          - type: null
+          - type: 'null'
         subtitle:
           type: [string, 'null']
         tags:
@@ -215,7 +215,7 @@ components:
         genre:
           oneOf:
           - $ref: '#/components/schemas/Genre'
-          - type: null
+          - type: 'null'
         price:
           type: [number, 'null']
         subtitle:

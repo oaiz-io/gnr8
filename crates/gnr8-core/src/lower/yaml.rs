@@ -444,7 +444,7 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
                 flow_type_seq(&[type_name.clone(), "null".to_string()])
             );
         } else {
-            let _ = writeln!(out, "{pad}type: {type_name}");
+            let _ = writeln!(out, "{pad}type: {}", scalar(type_name));
         }
     }
     if let Some(format) = &schema.format {
@@ -542,7 +542,7 @@ fn write_schema_constraints(out: &mut String, schema: &SchemaObject, pad: &str) 
 }
 
 /// Emit one block-sequence item (`- ...`) for a `oneOf` variant. The variant's first key goes on the
-/// dash line (`- $ref: ...` / `- type: null`) and any further keys — a `$ref`'s siblings included —
+/// dash line (`- $ref: ...` / `- type: 'null'`) and any further keys — a `$ref`'s siblings included —
 /// on indented lines under it.
 fn write_schema_seq_item(out: &mut String, schema: &SchemaObject, depth: usize) {
     let pad = INDENT.repeat(depth);
@@ -800,6 +800,90 @@ mod tests {
                 schemas: vec![("Foo".to_string(), foo_schema)],
             },
         }
+    }
+
+    #[test]
+    fn null_schema_type_round_trips_as_a_string() {
+        let mut doc = sample_doc();
+        let null = SchemaObject::primitive("null", None);
+        doc.components.schemas.extend([
+            ("Null".into(), null.clone()),
+            (
+                "NullableRef".into(),
+                SchemaObject {
+                    one_of: vec![SchemaObject::reference("Foo"), null.clone()],
+                    ..SchemaObject::default()
+                },
+            ),
+            (
+                "NullableUnion".into(),
+                SchemaObject {
+                    one_of: vec![
+                        SchemaObject {
+                            one_of: vec![
+                                SchemaObject::primitive("string", None),
+                                SchemaObject::primitive("integer", None),
+                            ],
+                            ..SchemaObject::default()
+                        },
+                        null,
+                    ],
+                    ..SchemaObject::default()
+                },
+            ),
+            (
+                "Primitive".into(),
+                SchemaObject {
+                    default_value: Some(LiteralValue::Null),
+                    ..SchemaObject::primitive("string", None)
+                },
+            ),
+            (
+                "NullablePrimitive".into(),
+                SchemaObject {
+                    nullable: true,
+                    ..SchemaObject::primitive("string", None)
+                },
+            ),
+        ]);
+        let yaml = write(&doc);
+        // Run the independent parser even if our parser accepts a permissive representation.
+        assert_external_yaml_parser(
+            "python3",
+            &[
+                "-c",
+                r#"
+import sys, yaml
+s = yaml.safe_load(sys.stdin.read())["components"]["schemas"]
+for arm in [s["Null"], s["NullableRef"]["oneOf"][1], s["NullableUnion"]["oneOf"][1]]:
+    assert arm == {"type": "null"}, arm
+    assert isinstance(arm["type"], str)
+assert s["Primitive"]["default"] is None
+assert s["Primitive"]["type"] == "string"
+assert s["NullablePrimitive"]["type"] == ["string", "null"]
+"#,
+            ],
+            &yaml,
+        );
+        let parsed =
+            crate::sdk::openapi_source::parse_json_or_yaml(&yaml, Path::new("o.yaml")).unwrap();
+        let json = super::super::json::write(&doc);
+        let schemas = &parsed["components"]["schemas"];
+        for arm in [
+            &schemas["Null"],
+            &schemas["NullableRef"]["oneOf"][1],
+            &schemas["NullableUnion"]["oneOf"][1],
+        ] {
+            assert_eq!(arm, &serde_json::json!({"type": "null"}));
+            assert_eq!(arm["type"].as_str(), Some("null"));
+        }
+        assert_eq!(schemas, &json["components"]["schemas"]);
+        assert!(schemas["Primitive"]["default"].is_null());
+        assert!(yaml.contains("type: string\n"));
+        assert_eq!(
+            schemas["NullablePrimitive"]["type"],
+            serde_json::json!(["string", "null"])
+        );
     }
 
     #[test]

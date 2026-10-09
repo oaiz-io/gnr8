@@ -165,7 +165,7 @@ components:
         assignee:
           oneOf:
           - $ref: '#/components/schemas/AssigneeInput'
-          - type: null
+          - type: 'null'
         dueAt:
           type: [string, 'null']
           format: date-time
@@ -237,6 +237,6 @@ components:
         status:
           oneOf:
           - $ref: '#/components/schemas/Status'
-          - type: null
+          - type: 'null'
         title:
           type: [string, 'null']

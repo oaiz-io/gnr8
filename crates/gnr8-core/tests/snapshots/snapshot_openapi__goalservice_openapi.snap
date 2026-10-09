@@ -142,7 +142,7 @@ components:
         analyticsQuery:
           oneOf:
           - $ref: '#/components/schemas/GoalAnalyticsQueryInput'
-          - type: null
+          - type: 'null'
         description:
           type: [string, 'null']
           description: Longer explanation
@@ -152,7 +152,7 @@ components:
         targetDirection:
           oneOf:
           - $ref: '#/components/schemas/TargetDirection'
-          - type: null
+          - type: 'null'
         targetValue:
           type: [number, 'null']
         workflowChainIds:
@@ -248,7 +248,7 @@ components:
         analyticsQuery:
           oneOf:
           - $ref: '#/components/schemas/GoalAnalyticsQueryInput'
-          - type: null
+          - type: 'null'
         description:
           type: [string, 'null']
           description: Updated explanation
@@ -258,7 +258,7 @@ components:
         targetDirection:
           oneOf:
           - $ref: '#/components/schemas/TargetDirection'
-          - type: null
+          - type: 'null'
         targetValue:
           type: [number, 'null']
         workflowChainIds:

@@ -38,7 +38,7 @@ diagnostics.
 | `generate` | Run the pipeline and reconcile generated files | yes |
 | `watch` | Regenerate after source changes | yes |
 | `check` | Detect generated drift without writing | no |
-| `verify` | Run the generated SDK contract tests with each language's own test tool | no |
+| `verify` | Run generated SDK contract tests and Go/Python CLI help checks | no |
 | `changes` | Classify API changes against a committed graph artifact | no |
 | `inspect` | Explain extracted routes, schemas, or graph | no |
 | `doctor` | Diagnose workspace, output, and pipeline health | no |
@@ -131,12 +131,15 @@ gnr8 verify
 gnr8 --json verify
 ```
 
-Runs the pipeline, then runs every generated SDK contract test with that language's own test tool:
+Runs the pipeline, then runs generated SDK contract tests and every selected Go/Python CLI
+command's `--help`:
 
 ```text
-Go SDK          passed
-Python SDK      passed
-TypeScript SDK  passed
+Go SDK              passed
+Python SDK          passed
+TypeScript SDK      passed
+Go CLI catalog      passed
+Python CLI catalog  passed
 ```
 
 Each SDK target emits a contract test beside its sources — `contract_test.go`, `contract_test.py`,
@@ -149,7 +152,14 @@ than followed. Nothing opens a socket, so a suite runs in milliseconds.
 Cases are sampled per wire-shape class rather than per operation — one representative per distinct
 request shape, success model, error status and security scheme, capped at 24 cases per target — so a
 large API still emits a suite that runs quickly. `.without_contract_tests()` on a target stops the
-file being emitted.
+file being emitted. CLI help checks remain enabled for targets with `.cli(...)`.
+
+Generated CLI checks cover root help, every effective topic and sub-noun prefix, and every selected
+operation command. Command selectors, declared verbs and groups determine the argument vectors;
+these checks are exhaustive and have no sampling cap. Hand-owned commands, completion plumbing and
+retired invocations are outside this suite. A Go hand-owned main must build as the declared program.
+Help passes only on exit 0 with non-whitespace output on stdout or stderr. After one invocation
+fails, the remaining commands are still checked.
 
 `verify` runs the artifacts the pipeline produces right now, materialized into a temporary tree, so a
 stale or hand-edited working tree cannot make a suite pass. The temporary tree starts as a copy of the
@@ -157,20 +167,43 @@ target's output directory and the fresh artifacts are written over that copy, so
 hand-owned helpers beside its generated files — a module the generated `__init__.py` imports, say —
 still imports while every generated file under test is this run's. Caches and installed dependencies
 (`.venv`, `__pycache__`, `node_modules`, `.git`, and the like) are not copied, and nothing is ever
-written back into the project. Exit status is `1` when any suite fails and `2` when the run could not
-start (no `.gnr8/`, a pipeline failure, or no SDK target configured).
+written back into the project. Required generated entries must be present among the fresh artifacts;
+copied stale entries cannot satisfy that requirement.
+
+Both Go suite families use the target's declared module and Go version. With
+`.package_metadata(false)`, verification writes those exact facts into its temporary `go.mod`,
+overwriting any copied module file. With metadata enabled, a fresh generated `go.mod` is required.
+Go CLI verification builds `./cmd/<program>` once, then runs that binary with each command vector
+and `--help`. Python uses one standard-library importlib/runpy harness to bind the declared package
+from its output directory and run `<package>.cli`; installation and matching directory names are
+unnecessary.
+
+A CLI suite skips only when its designated `go version` or `python3 --version` probe cannot find the
+executable. A nonzero probe, permission error, build/import failure, missing entry or failed/empty
+help is a failure. SDK toolchain failures retain their failure policy. A missing Go formatter can
+stop pipeline generation before the CLI probe, with exit 2.
+
+Exit 0 requires at least one passing suite and no failing suite; mixed passing/skipped results list
+the skips and pass. An all-skipped CLI-only run reports `verified: false`, explains that no checks
+executed, and exits 1. Any suite failure exits 1. Startup failures (no `.gnr8/`, a pipeline failure,
+or neither SDK contract tests nor generated CLI help checks) exit 2.
 
 The tools it runs, and the toolchains they need:
 
 | Target | Tool | Requires |
 |---|---|---|
-| Go SDK | `go test ./...` with `GOPROXY=off` | `go` |
+| Go SDK | `go test ./...` with `GOPROXY=off`, `GOFLAGS=-mod=mod`, `GOWORK=off` | `go` |
 | Python SDK | `unittest` through the standard library | `python3` |
+| Go CLI | One `go build` with the same module environment, then binary `--help` per vector | `go` |
+| Python CLI | One importlib/runpy harness, invoked per command vector | `python3` |
 | TypeScript SDK | the project's own `typescript`, then `node --test` | `node` + a resolvable `typescript` |
 
-JSON reports a `verified` verdict plus one entry per suite (language, output path, test file, case
-count, tool, status, duration, and the failure reason when there is one), alongside the same
-`counts`, `timings_ms`, `diagnostics` and `worker` keys the other commands emit.
+JSON retains SDK results in `suites` and adds `cli_suites` with language, program, output path,
+planned case count, tool, duration, status, typed reason and per-command results. Failure reasons
+carry the command arguments, exit code when available and captured output excerpt. Human reports
+label CLI rows separately; repeated labels include the output path. `counts.passed`, `counts.failed`
+and `counts.skipped` count target suites across both arrays. `timings_ms`, `diagnostics` and `worker`
+retain their existing meanings.
 
 ## `changes`
 

@@ -89,11 +89,15 @@ paths:
 struct Generated {
     files: BTreeMap<String, String>,
     suites: Vec<(ContractTestLanguage, String, usize)>,
+    descriptors: Vec<gnr8_engine::verify::ContractTestSuite>,
+    cli_suites: Vec<gnr8_engine::verify::CliHelpSuite>,
 }
 
 fn generate(label: &str, pipeline: Pipeline) -> Generated {
     let root = temp_dir(label);
     std::fs::write(root.join("openapi.yaml"), SPEC).expect("write the spec");
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(root.join("assets/note.txt"), "hello").unwrap();
     let pipeline = pipeline.source(OpenApi::new().input("openapi.yaml"));
     let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), None)
         .expect("pipeline must generate");
@@ -108,7 +112,12 @@ fn generate(label: &str, pipeline: Pipeline) -> Generated {
         .map(|suite| (suite.language, suite.test_file.clone(), suite.cases))
         .collect();
     let _ = std::fs::remove_dir_all(&root);
-    Generated { files, suites }
+    Generated {
+        files,
+        suites,
+        descriptors: outcome.contract_test_suites,
+        cli_suites: outcome.cli_help_suites,
+    }
 }
 
 fn all_targets() -> Generated {
@@ -345,4 +354,173 @@ fn generating_twice_produces_byte_identical_contract_tests() {
             "{path} must be byte-identical across runs"
         );
     }
+}
+
+struct HandOwnedTarget;
+impl Target for HandOwnedTarget {
+    fn generate(
+        &self,
+        _ir: &gnr8::graph::ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+    ) -> Result<(), gnr8::Error> {
+        out.create("custom.txt", "hello")
+    }
+}
+
+#[test]
+fn cli_help_suites_follow_target_declarations_independently_of_contract_tests() {
+    use gnr8_engine::verify::CliHelpTarget;
+    let pipeline = || {
+        Pipeline::new()
+            .target(
+                GoSdk::new()
+                    .module("example.com/catalog/sdk")
+                    .go_version("1.23")
+                    .package_metadata(false)
+                    .cli(SdkCli::new("catalog").hand_owned_main())
+                    .without_contract_tests()
+                    .to("go"),
+            )
+            .target(
+                PySdk::new()
+                    .module("catalog_client")
+                    .dataclasses()
+                    .cli(SdkCli::new("catalog"))
+                    .without_contract_tests()
+                    .to("arbitrary-python"),
+            )
+            .target(GoSdk::new().module("example.com/plain").to("plain"))
+            .target(TsSdk::new().module("@catalog/sdk").to("ts"))
+            .target(OpenApi31::new().to("openapi-out.yaml"))
+            .target(
+                StaticFiles::new()
+                    .from("assets")
+                    .to("static")
+                    .include(["note.txt"]),
+            )
+            .target(Custom(HandOwnedTarget))
+    };
+    let generated = generate("cli-declarations", pipeline());
+    assert_eq!(generated.cli_suites.len(), 2);
+    assert_eq!(generated.cli_suites[0].output_path, "go");
+    assert_eq!(generated.cli_suites[0].program, "catalog");
+    assert!(
+        matches!(&generated.cli_suites[0].target,CliHelpTarget::Go {verification,emit_main:false}
+        if verification.module == "example.com/catalog/sdk" && verification.go_version == "1.23" && !verification.package_metadata)
+    );
+    assert!(
+        matches!(&generated.cli_suites[1].target,CliHelpTarget::Python {package} if package == "catalogclient")
+    );
+    assert_eq!(generated.cli_suites[1].output_path, "arbitrary-python");
+    assert!(!generated.files.contains_key("go/go.mod"));
+    assert!(!generated.files.contains_key("go/cmd/catalog/main.go"));
+    assert!(!generated.files.contains_key("go/contract_test.go"));
+    assert!(!generated.files.keys().any(|p| p.contains("cli_help")));
+    let root = temp_dir("empty-cli");
+    std::fs::write(
+        root.join("openapi.yaml"),
+        "openapi: 3.1.0\ninfo: {title: Empty, version: 1}\npaths: {}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(root.join("assets/note.txt"), "hello").unwrap();
+    let out = gnr8_engine::pipeline::run_in_process(
+        &pipeline().source(OpenApi::new().input("openapi.yaml")),
+        &Cx::new(&root),
+        None,
+    )
+    .unwrap();
+    assert_eq!(out.cli_help_suites.len(), 2);
+    for suite in &out.cli_help_suites {
+        assert_eq!(suite.plan.invocations, vec![Vec::<String>::new()]);
+    }
+    assert!(out.artifacts.iter().any(|a| a.path == "custom.txt"));
+    assert!(out.artifacts.iter().any(|a| a.path == "static/note.txt"));
+    assert!(!out.artifacts.iter().any(|a| a.path.contains("cli_help")));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cli_help_suites_isolate_multiple_targets_and_selected_commands() {
+    let generated =
+        generate(
+            "cli-isolation",
+            Pipeline::new()
+                .target(
+                    GoSdk::new().module("example.com/public").to("public").cli(
+                        SdkCli::new("browse").commands(OperationSelector::operation("listItems")),
+                    ),
+                )
+                .target(
+                    GoSdk::new().module("example.com/admin").to("admin").cli(
+                        SdkCli::new("edit").commands(OperationSelector::operation("createItem")),
+                    ),
+                ),
+        );
+    assert_eq!(generated.cli_suites.len(), 2);
+    for (suite, path, program, command) in [
+        (&generated.cli_suites[0], "public", "browse", "list-items"),
+        (&generated.cli_suites[1], "admin", "edit", "create-item"),
+    ] {
+        assert_eq!(suite.output_path, path);
+        assert_eq!(suite.program, program);
+        assert_eq!(
+            suite.plan.invocations,
+            vec![Vec::<String>::new(), vec![command.to_string()]]
+        );
+    }
+}
+
+#[test]
+fn go_contract_suites_carry_declared_module_and_version_without_metadata() {
+    let generated = generate(
+        "go-module",
+        Pipeline::new()
+            .target(
+                GoSdk::new()
+                    .module("example.com/catalog/sdk")
+                    .go_version("1.23")
+                    .package_metadata(false)
+                    .cli(SdkCli::new("catalog"))
+                    .to("go"),
+            )
+            .target(
+                GoSdk::new()
+                    .module("example.com/plain")
+                    .go_version("1.24")
+                    .package_metadata(false)
+                    .to("plain"),
+            )
+            .target(GoSdk::new().module("example.com/metadata").to("metadata"))
+            .target(PySdk::new().module("catalog_client").dataclasses().to("py"))
+            .target(TsSdk::new().module("@catalog/sdk").to("ts")),
+    );
+    assert_eq!(generated.descriptors.len(), 5);
+    for (i, module, version, metadata) in [
+        (0, "example.com/catalog/sdk", "1.23", false),
+        (1, "example.com/plain", "1.24", false),
+        (2, "example.com/metadata", "1.23", true),
+    ] {
+        let suite = &generated.descriptors[i];
+        assert!(suite.cases > 0);
+        let declared = suite.go_verification.as_ref().expect("declared Go facts");
+        assert_eq!(declared.module, module);
+        assert_eq!(declared.go_version, version);
+        assert_eq!(declared.package_metadata, metadata);
+    }
+    assert!(generated.descriptors[3..]
+        .iter()
+        .all(|s| s.go_verification.is_none()));
+    assert!(!generated.files.contains_key("go/go.mod"));
+    let gnr8_engine::verify::CliHelpTarget::Go { verification, .. } =
+        &generated.cli_suites[0].target
+    else {
+        panic!("Go")
+    };
+    assert_eq!(
+        Some(verification),
+        generated.descriptors[0].go_verification.as_ref()
+    );
+    assert!(generated.files.contains_key("metadata/go.mod"));
 }

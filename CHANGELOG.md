@@ -9,6 +9,18 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- `gnr8 verify` checks root, group, and every selected operation command's `--help` for generated
+  Go and Python CLIs, with explicit skipped-tool reports.
+
+### Fixed
+
+- Go extraction carries supported validation bounds on named scalar and collection fields while
+  preserving their schema references.
+- OpenAPI YAML quotes the schema type name 'null', so nullable reference and union arms remain
+  string-valued schema types when parsed.
+
 ## 0.17.0 — 2026-10-02
 
 ### Added

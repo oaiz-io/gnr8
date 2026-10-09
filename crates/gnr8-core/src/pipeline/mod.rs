@@ -176,6 +176,8 @@ pub struct PipelineOutcome {
     pub readiness_targets: Vec<ReadinessTarget>,
     /// Generated contract-test suites declared by every target.
     pub contract_test_suites: Vec<ContractTestSuite>,
+    /// Generated CLI help suites from built-in target declarations.
+    pub cli_help_suites: Vec<crate::verify::CliHelpSuite>,
     /// How many distinct source files contributed a fact to the graph.
     pub source_files: usize,
 }
@@ -224,6 +226,23 @@ pub fn contract_test_suites(
         // not invent one.
         if let PlanStage::Builtin(spec) = stage {
             suites.extend(builtins::target_contract_test_suites(spec, ir)?);
+        }
+    }
+    Ok(suites)
+}
+
+/// Collect CLI help suites; custom targets declare no engine-owned CLI checks.
+///
+/// # Errors
+/// Returns the built-in target planner's configuration or generation error.
+pub fn cli_help_suites(
+    plan: &StagePlan,
+    ir: &ApiGraph,
+) -> Result<Vec<crate::verify::CliHelpSuite>, CoreError> {
+    let mut suites = Vec::new();
+    for stage in &plan.targets {
+        if let PlanStage::Builtin(spec) = stage {
+            suites.extend(builtins::target_cli_help_suites(spec, ir)?);
         }
     }
     Ok(suites)
@@ -386,6 +405,7 @@ pub fn run(
     // This internal artifact is intentionally created after post-processors. Formatters and banner
     // writers apply to user-configured target output; the versioned graph must remain exact JSON.
     let contract_test_suites = contract_test_suites(plan, &generation_ir)?;
+    let cli_help_suites = cli_help_suites(plan, &generation_ir)?;
 
     artifacts.begin_stage("gnr8:GraphArtifact");
     artifacts.create(crate::graph_artifact::GRAPH_ARTIFACT_PATH, rendered_graph?)?;
@@ -398,6 +418,7 @@ pub fn run(
         output_anchors: output_anchors(plan),
         readiness_targets: readiness_targets(plan),
         contract_test_suites,
+        cli_help_suites,
         source_files,
     })
 }

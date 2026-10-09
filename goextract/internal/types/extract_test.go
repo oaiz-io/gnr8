@@ -2,6 +2,7 @@ package types_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -507,6 +508,9 @@ type Matrix struct {
 	if err != nil {
 		t.Fatalf("load matrix fixture: %v", err)
 	}
+	if len(res.Errors) != 0 {
+		t.Fatalf("load matrix fixture errors: %+v", res.Errors)
+	}
 	diags := diag.New()
 	schemas := types.Extract(res, diags)
 	s, ok := schemaByName(schemas, "Matrix")
@@ -902,4 +906,212 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+const namedConstraintDeclarations = `package bounds
+import ("encoding/json"; "time")
+type Tags []string
+type Slots [3]int
+type Labels map[string]string
+type Name string
+type Rank int
+type Ratio float64
+type Choice string
+const ChoiceA Choice = "a"
+type RankAlias = Rank
+type TagsAlias = Tags
+type RankPtr *Rank
+type RankPtrAlias = RankPtr
+type Flag bool
+`
+
+func extractNamedConstraintSource(t *testing.T, fields string) ([]facts.SchemaFact, []facts.DiagnosticFact) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/bounds\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	source := namedConstraintDeclarations + "type Payload struct {\n" + fields + "\nTime time.Time `json:\"time\"`\nRaw json.RawMessage `json:\"raw\"`\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "models.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := diag.New()
+	schemas := types.Extract(res, d)
+	return schemas, d.Items()
+}
+
+func namedConstraintField(t *testing.T, schemas []facts.SchemaFact, name string) facts.FieldFact {
+	t.Helper()
+	payload, ok := schemaByName(schemas, "Payload")
+	if !ok {
+		t.Fatal("missing Payload")
+	}
+	f, ok := fieldByJSON(payload, name)
+	if !ok {
+		t.Fatalf("missing %s", name)
+	}
+	return f
+}
+
+func constraintJSON(f facts.FieldFact) string {
+	if f.Meta == nil || f.Meta.Constraints == nil {
+		return "{}"
+	}
+	b, _ := json.Marshal(f.Meta.Constraints)
+	return string(b)
+}
+
+func TestNamedFieldConstraintBounds(t *testing.T) {
+	shapes := []struct{ named, plain, component, kind string }{
+		{"Tags", "[]string", "Tags", facts.TypeArray}, {"Slots", "[3]int", "Slots", facts.TypeArray},
+		{"Labels", "map[string]string", "Labels", facts.TypeMap}, {"Name", "string", "Name", facts.TypePrimitive},
+		{"Rank", "int", "Rank", facts.TypePrimitive}, {"Ratio", "float64", "Ratio", facts.TypePrimitive},
+		{"Choice", "string", "Choice", facts.TypeEnum}, {"RankAlias", "int", "Rank", facts.TypePrimitive},
+		{"*Rank", "*int", "Rank", facts.TypePrimitive}, {"***Rank", "***int", "Rank", facts.TypePrimitive},
+		{"**RankAlias", "**int", "Rank", facts.TypePrimitive}, {"*TagsAlias", "*[]string", "Tags", facts.TypeArray},
+	}
+	var fields strings.Builder
+	for i, sh := range shapes {
+		for _, tag := range []string{"binding", "validate"} {
+			for _, rule := range []string{"min=1,max=8", "gte=1,lte=8", "gt=0,lt=9"} {
+				n := fmt.Sprintf("F%d_%s_%d", i, tag, fields.Len())
+				fmt.Fprintf(&fields, "%s %s `json:\"%s\" %s:\"%s\"`\n%sControl %s `json:\"%sControl\" %s:\"%s\"`\n", n, sh.named, n, tag, rule, n, sh.plain, n, tag, rule)
+			}
+		}
+	}
+	schemas, diagnostics := extractNamedConstraintSource(t, fields.String())
+	for _, d := range diagnostics {
+		if d.Code == "schema.metadata.unresolved" {
+			t.Errorf("supported constraint unresolved: %+v", d)
+		}
+	}
+	payload, _ := schemaByName(schemas, "Payload")
+	for _, f := range objectFields(payload) {
+		if !strings.HasPrefix(f.JSONName, "F") || strings.HasSuffix(f.JSONName, "Control") {
+			continue
+		}
+		var i int
+		fmt.Sscanf(f.JSONName, "F%d_", &i)
+		sh := shapes[i]
+		control := namedConstraintField(t, schemas, f.JSONName+"Control")
+		if constraintJSON(f) != constraintJSON(control) {
+			t.Errorf("%s (%s): constraints %s want %s", f.JSONName, sh.named, constraintJSON(f), constraintJSON(control))
+		}
+		if f.Schema.Type != facts.TypeNamed {
+			t.Errorf("%s lost named reference: %+v", f.JSONName, f.Schema)
+		}
+		component, ok := schemaByName(schemas, sh.component)
+		if !ok || component.Body.Type != sh.kind || component.ID != f.Schema.Of {
+			t.Errorf("%s reference/component mismatch: %+v / %+v", f.JSONName, f.Schema, component)
+		}
+	}
+}
+
+func TestNamedFieldConstraintInvalidSizesAreDiagnosed(t *testing.T) {
+	var fields strings.Builder
+	names := map[string]string{}
+	for _, shape := range []string{"Tags", "Labels", "Name"} {
+		for _, tag := range []string{"binding", "validate"} {
+			for _, rule := range []string{"min=-1", "max=1.5", "gte=abc", "lt=0", "gt=18446744073709551615", "gt=2", "lt=9"} {
+				n := fmt.Sprintf("F%d", len(names))
+				names[n] = rule
+				fmt.Fprintf(&fields, "%s %s `json:\"%s\" %s:\"%s\"`\n", n, shape, n, tag, rule)
+			}
+		}
+	}
+	schemas, diagnostics := extractNamedConstraintSource(t, fields.String())
+	for n, rule := range names {
+		f := namedConstraintField(t, schemas, n)
+		c := constraintJSON(f)
+		valid := rule == "gt=2" || rule == "lt=9"
+		if valid {
+			if c == "{}" || strings.Contains(c, "imum") {
+				t.Errorf("%s valid size %s: %s", n, rule, c)
+			}
+			continue
+		}
+		if c != "{}" {
+			t.Errorf("%s invalid size %s emitted %s", n, rule, c)
+		}
+		found := false
+		for _, d := range diagnostics {
+			if d.Code == "schema.metadata.unresolved" && d.Schema == "Payload" && d.Subject == n && strings.Contains(d.Message, rule) && d.Category == "schema" && d.Line > 0 && strings.HasSuffix(d.File, "models.go") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s missing source-aware diagnostic for %s: %+v", n, rule, diagnostics)
+		}
+	}
+}
+
+func TestNamedFieldConstraintUnsupportedNamedKinds(t *testing.T) {
+	var fields strings.Builder
+	names := map[string]string{}
+	for _, shape := range []string{"RankPtr", "RankPtrAlias", "*RankPtr", "**RankPtrAlias", "Flag"} {
+		for _, tag := range []string{"binding", "validate"} {
+			for _, rule := range []string{"min=1", "max=9", "gte=1", "lte=9", "gt=0", "lt=10"} {
+				n := fmt.Sprintf("F%d", len(names))
+				names[n] = rule
+				fmt.Fprintf(&fields, "%s %s `json:\"%s\" %s:\"%s\"`\n", n, shape, n, tag, rule)
+			}
+		}
+	}
+	fields.WriteString("Control *Rank `json:\"control\" binding:\"min=1,max=9\"`\nAlias RankAlias `json:\"alias\" validate:\"gte=1,lte=9\"`\n")
+	schemas, diagnostics := extractNamedConstraintSource(t, fields.String())
+	if _, ok := schemaByName(schemas, "RankPtr"); ok {
+		t.Error("defined pointer must not acquire a component")
+	}
+	for n, rule := range names {
+		f := namedConstraintField(t, schemas, n)
+		if f.Schema.Type != facts.TypeNamed || constraintJSON(f) != "{}" {
+			t.Errorf("%s unsupported named shape: %+v / %s", n, f.Schema, constraintJSON(f))
+		}
+		found := false
+		for _, d := range diagnostics {
+			if d.Code == "schema.metadata.unresolved" && d.Category == "schema" && d.Schema == "Payload" && d.Subject == n && d.Line > 0 && strings.HasSuffix(d.File, "models.go") && strings.Contains(d.Message, rule) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s missing diagnostic for %s", n, rule)
+		}
+	}
+	for _, n := range []string{"control", "alias"} {
+		if constraintJSON(namedConstraintField(t, schemas, n)) != `{"minimum":"1","maximum":"9"}` {
+			t.Errorf("%s missing supported numeric bounds", n)
+		}
+	}
+}
+
+func TestNamedFieldConstraintScopesStayOnField(t *testing.T) {
+	schemas, diagnostics := extractNamedConstraintSource(t, `
+ Values *TagsAlias `+"`json:\"values\" validate:\"min=1,dive,min=2,max=8,unknown,gte=abc\"`"+`
+ Keys Labels `+"`json:\"keys\" binding:\"min=1,dive,keys,min=2,endkeys,max=8\"`"+`
+ Bytes []byte `+"`json:\"bytes\" validate:\"min=1,dive,max=8\"`"+`
+ Free map[string]any `+"`json:\"free\"`"+`
+ `)
+	for n, want := range map[string]string{"values": `{"min_items":1}`, "keys": `{"min_properties":1}`, "bytes": `{"min_items":1}`, "free": "{}"} {
+		if got := constraintJSON(namedConstraintField(t, schemas, n)); got != want {
+			t.Errorf("%s constraints %s want %s", n, got, want)
+		}
+	}
+	for _, token := range []string{"unknown", "gte=abc"} {
+		found := false
+		for _, d := range diagnostics {
+			if d.Code == "schema.metadata.unresolved" && d.Category == "schema" && d.Subject == "Values" && d.Line > 0 && strings.HasSuffix(d.File, "models.go") && strings.Contains(d.Message, token) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing source diagnostic %s", token)
+		}
+	}
+	if len(diagnostics) != 3 {
+		t.Errorf("expected two unresolved tokens plus free-form diagnostic, got %+v", diagnostics)
+	}
 }
