@@ -40,6 +40,22 @@ review corrected this document in eight places. Each correction is made in place
 - **§5 / §6** — the first release now contains the constraint-respecting sampler; Open 1 and
   Open 6 are answered.
 
+**Revision — adversarial review round 2 (2026-10-09).** A second review of the plan found that the
+round-1 corrections left the canned response body constraint-blind, refused ordinary OpenAPI formats,
+missed Go spelling sites and left sampler refusals unenumerated. The plan carries the full
+resolutions (plan §4.1–§4.2, §3.1). This document is corrected in place, with *Superseded (round 2)*
+notes, in:
+
+- **§1.2.4 / §3.2(g) / §3.4 / §5** — S1 covers the canned response body, and the "no defective
+  value" claim is scoped to `Constraints` plus the formats gnr8 maps to a well-known scalar;
+- **§1.3** — the shape to copy has no `TargetExec` impl, and `PROTOCOL_VERSION` moves to 9;
+- **§3.3** — the Required/Nullable reuse point is located;
+- **§3.5** — eight Go spelling sites, not four;
+- **§3.6** — the real reason for refusing an overlapping output directory;
+- **§3.7** — what Python rung 2 does and does not prove;
+- **§4.4** — field description inherits an extractor fallback this target does not repair;
+- **§5** — the constrained fixture, and the phase that carries the Breaking entry.
+
 Acting on the standard above, **six product facts carried into this work needed correcting**:
 
 | The brief said | This checkout says |
@@ -183,7 +199,10 @@ deterministic for free.
    literals — `"gnr8"`, `true`, `7`, `1.5` (`:1244-1254`). So a parameter that declares
    `minLength: 5`, or a `oneof` set (`Constraints.enum_values`, `facts.rs:309-311`), gets a value
    the server would reject. That is harmless behind a contract test's fake transport
-   (`verify/mod.rs:32-36`). It is a defect on a published page.
+   (`verify/mod.rs:32-36`). It is a defect on a published page. The same holds for the canned
+   **response**: `success_sample` (`verify/mod.rs:650-711`) builds the reply with `response_json`,
+   which reads no `FieldMeta` either, so a field declared `max=5` is answered with `7`
+   (*added in round 2, B1:* this item first named only inputs).
 5. **Sampling is capped, by design.** The plan holds at most 24 cases (`verify/mod.rs:30`, applied
    at `:467-470`) so that *"a 400-operation API still emits a suite that runs in milliseconds"*
    (`:13-16`). Docs need one sample per operation. The per-operation logic, `Candidate::build`
@@ -220,7 +239,7 @@ for a fact or a fallback path"*). A new built-in target touches nine places:
 | 6 | Emission memo | the key serializes every built-in declaration in plan order (`crates/gnr8-core/src/pipeline/emission.rs:96-106`) | nothing to add while the target stays pure. Only `StaticFiles` opts out, because it reads the project tree (`:19-21`, `:97-101`) |
 | 7 | Verify-suite collection | `PipelineOutcome.cli_help_suites` (`pipeline/mod.rs:179-180`, `:234-249`, `:408`); host runner `crates/gnr8/src/verify/cli_help.rs` (`run` `:120`, `require_fresh` `:229`, `prepare_target` `:241`, `execute_checks` `:344`) | #106 (`CHANGELOG.md:16-17`) |
 | 8 | Release classification | `BuiltinTarget` is not `#[non_exhaustive]` — the only such enum in the SDK crate is `crates/gnr8-sdk/src/error.rs:13` — and the published crate is `gnr8` (`crates/gnr8-sdk/Cargo.toml:12`). A new variant breaks exhaustive matchers, which means a **minor** bump (`docs/RELEASE.md:90-93`) and a **Breaking** changelog heading. Precedents for a *new variant* on a public non-`#[non_exhaustive]` enum: 0.12.0 (`CHANGELOG.md:613-619`, `OperationSelector` gains `SourcePrefix`) and 0.8.0 (`:892-900`, `CoreError::GoToolchainSkew`). *Superseded:* this row cited 0.16.1 (`:164-170`), which concerns new struct fields, not a new variant. The conclusion is unchanged | |
-| 9 | Protocol | No `PROTOCOL_VERSION` bump is implied. The handshake digest embeds the exact SDK version (`crates/gnr8-sdk/src/protocol/mod.rs:68-79`, compared at `crates/gnr8-core/src/worker/mod.rs:301`). #96 added `SdkCli` to two declarations, and its only bump (7→8) was for `ArtifactChanges.diagnostics` (`git show ea84ef1 -- crates/gnr8-sdk/src/protocol/mod.rs`) | |
+| 9 | Protocol | **Bump 8 → 9.** The handshake digest already embeds the exact SDK version (`crates/gnr8-sdk/src/protocol/mod.rs:68-79`, compared at `crates/gnr8-core/src/worker/mod.rs:301`), so a bump is not strictly needed. But a new variant on a stage-plan enum is the class 0.12.0 bumped for — *"so a worker and CLI cannot silently disagree about the stage-plan shape"* (`CHANGELOG.md:617-619`) — and it yields the protocol-mismatch message that names the fix (`worker/mod.rs:288-291`). #96 added fields, not a variant, and its only bump (7→8) was for `ArtifactChanges.diagnostics` (`git show ea84ef1 -- crates/gnr8-sdk/src/protocol/mod.rs`). *Superseded (round 2, B11):* this row said no bump was implied | 0.12.0 |
 
 **Execution contract.** Built-in targets run in parallel because each is *"a pure function of the
 frozen graph: every one of them only creates files, and not one reads the set it writes into"*
@@ -234,8 +253,11 @@ complete"* (`builtins.rs:2886-2894`). The `Header` post-process stamps only `.go
 language target (`sdk builtins.rs:2401-2414`, `:2571-2579`). Its `--help` verification became a
 *declared* suite (`builtins.rs:4381-4431`), collected beside the contract tests
 (`pipeline/mod.rs:407-408`) and executed by the host (`crates/gnr8/src/verify/cli_help.rs`). For
-docs the shape is **declaration → `TargetExec` → declared verify suite → host runner**. The
-difference is that docs are a separate, language-neutral target.
+docs the shape is **declaration → dispatch arm → declared verify suite → host runner**. The
+difference is that docs are a separate, language-neutral target, and that `StaticDocs` has **no**
+`TargetExec` impl: its arm in `generate_target` calls the renderer directly with the sibling
+declarations (plan §3.2). *Superseded (round 2, B8):* the shape read "declaration → `TargetExec` →
+…".
 
 ### 1.4 `sdk/docs.rs` today: what is reusable, and what is docs-specific
 
@@ -400,7 +422,8 @@ the committed bookstore reference already carries (`examples/bookstore/generated
 A hand-written reference cannot know this, and a spec-driven one never learns it.
 
 **(g) A language-neutral wire example — KEEP.** Every operation page carries the HTTP request (and
-the canned success response) its sample produces. These are rendered from the same fields a
+the canned success response) its sample produces. Both directions come from the constraint-respecting
+sampler (§3.4; round 2, B1), so the printed reply never contradicts the schema page beside it. These are rendered from the same fields a
 `ContractCase` asserts: `method`, `expected_path`, `expected_query`, `expected_headers`,
 `expected_body` (`verify/mod.rs:355-384`). This is an HTTP message, not a tool's syntax. `curl` is
 **not** rendered: it would tie a page to one client's flag surface for no information an HTTP
@@ -459,8 +482,9 @@ File-level links can be checked against the emitted set alone (§3.7, rung 0).
 **Schema page** — `# \`Book\``, its kind, and "Used by" back-references to every operation that
 reads or writes it. Then a field table with columns Field, Type, Required, Nullable, Constraints,
 Default, Description, Example. Required and Nullable must be the **same per-direction decision the
-OpenAPI lowering and SDK emitters make**, reused rather than recomputed (the reuse point is not yet
-located: Open 1). Enum members appear in graph order.
+OpenAPI lowering and SDK emitters make**, reused rather than recomputed: `SchemaDirections::field_is_required`
+/ `field_is_nullable` (`crates/gnr8-core/src/graph/direction.rs:61`, `:78`; Open 1, answered).
+*Superseded (round 2, B8):* this sentence still said the reuse point was "not yet located". Enum members appear in graph order.
 
 **Navigation** is by `op.group` alone. That is the grouping fact the SDK services
 (`model.rs:341`) and CLI topics (`emit_common.rs:120-125`) already use, and for imported specs it is
@@ -498,17 +522,25 @@ benefit. (*Superseded name:* this workstream was called "D2" here, which collide
 decision D2; review round 1, note 21.)
 
 Constraint-respecting is defined **per value, not per constraint**: a sampled value is published
-only if it satisfies *every* constraint on its input at once. Otherwise the input is refused. The
-plan (§4.2) gives the candidate order and the single `satisfies` check. Three rules:
+only if it satisfies *every* constraint on its input at once. Otherwise the input is refused. It
+applies to request inputs **and** to the canned response body (round 2, B1). The plan (§4.2) gives
+the candidate order, the single `satisfies` check, and a disposition for every refusal. Four rules:
 
 - **`pattern` is never synthesized.** gnr8 carries no regex engine and should not grow one for
   this. An operation whose required input is pattern-constrained gets a **typed refusal reason**
   instead of a sample: *"no sample call: parameter `isbn` declares `pattern`"*. The page prints it.
   That is not a degraded guess: the reason is a fact, and the page says it.
-- **Refusals are typed.** `Candidate::build` changes from `Option` to a result carrying the refusal
-  reason (§1.2.5). It already refuses unions in request position and byte strings
-  (`verify/mod.rs:1102-1104`, `:1250-1252`) and non-default serialization styles (`:981-988`); docs
-  print those reasons too.
+- **Refusals are typed, and every one is enumerated.** `Candidate::build` changes from `Option` to a
+  result carrying the refusal reason (§1.2.5). Every `None` path of today's sampler gets a variant —
+  unions and byte strings in request position (`verify/mod.rs:1102-1104`, `:1250-1252`),
+  non-default serialization styles (`:981-988`), non-scalar parameters (`:1240`), empty enums
+  (`:1083`, `:1230`), non-string map keys (`:1075-1077`), recursion (`:1087-1089`, `:1233-1235`) and
+  depth — and a refusal inside a required JSON body propagates its own reason rather than
+  "no JSON body" (plan §4.2, round 2, B4). Docs print those reasons.
+- **`format` restricts only where gnr8 maps it.** A string whose format is one of the seven tokens
+  the lowering writes for a well-known scalar takes that literal; every other (type, format) pair —
+  `int64`, `double`, `hostname` — is an annotation and restricts nothing. Refusing unknown formats
+  would drop every imported `int64` field's operation from the contract tests (round 2, B2).
 - **A graph error is never a refusal.** `Candidate::build` already propagates real errors with `?`
   (`verify/mod.rs:498`, `:526`), and a dangling reference is a `CoreError`, as it already is in
   `SdkModel::build` (`model.rs:572-581`). Printing such an error as a page note would fail open, so
@@ -566,17 +598,26 @@ rule for all three languages is:
 A consumer's import path for an unpublished SDK depends on where they vendor it, which no
 declaration states. The docs therefore print no import for one.
 
-**Go qualification reaches more than a top-level alias** (review round 1, finding 11). The Go literal
-renderer spells model names in four places:
+**Go qualification reaches more than a top-level alias** (review round 1, finding 11; round 2, B3).
+A Go consumer snippet spells exported SDK symbols in eight places:
 
 - inside composite types from `go_type`: `[]T`, `map[K]V`, pointers (`gosdk/emit.rs:143-158` is the
   `Named` leaf);
 - in `Ptr[T]` type arguments (`gosdk/contract.rs:551`, `:600-610`);
-- in enum and struct literals (`:673`, `:697`).
+- in enum and struct literals (`:673`, `:697`);
+- in the `{Method}Params{…}` literal (`:555-559`);
+- in the request-body variant wrapper `{variant}{Value: …}` (`:585`), used whenever an operation has
+  more than one request representation, with names from `go_request_body_variant_names`
+  (`gosdk/emit.rs:1586-1611`);
+- in the option constructors `WithAPIKeyHeader` / `WithBearerToken` / `WithBasicAuth`
+  (`gosdk/contract.rs:421-448`);
+- in `NewClient` (`examples/bookstore/generated/sdk/client.go:214`).
 
 It also renders date-times through `contractTime`, a helper only the test harness defines
-(`:624`, `:229`). The plan (§4.1) designs the qualifier for all four places and for the date-time
-helper.
+(`:624`, `:229`). The plan (§4.1) designs the qualifier for all eight places and for the date-time
+helper. *Superseded (round 2, B3):* this list said "four places" and missed the variant wrapper and
+the client constructors, so a multi-representation operation would have printed a non-compiling Go
+snippet.
 
 ### 3.6 Plumbing: `StaticDocs` reads sibling declarations, never sibling output
 
@@ -604,10 +645,13 @@ order.
 - **The memo stays sound for free.** Its key already serializes every built-in declaration in plan
   order (`emission.rs:96-106`).
 
-**Validation.** An output directory that overlaps an SDK target's directory already fails as
-`artifact.path_collision` (`pipeline/mod.rs:612-619`). `StaticDocs` should reject the overlap
-earlier, with a message naming both targets, like `OpenApi31`'s empty-path error
-(`builtins.rs:2872-2877`).
+**Validation.** `StaticDocs` rejects an output directory that equals, contains or lies inside an SDK
+target's directory, with a message naming both targets, like `OpenApi31`'s empty-path error
+(`builtins.rs:2872-2877`). The reason is that pages would otherwise ship inside the SDK's published
+artifact (a Go module zip carries the whole directory), or the docs tree would carry an SDK package —
+not a path collision: nested directories share no file path, so `artifact.path_collision`
+(`pipeline/mod.rs:612-619`) would never fire. *Superseded (round 2, B13):* this paragraph said the
+overlap "already fails as `artifact.path_collision`".
 
 ### 3.7 The verification ladder
 
@@ -615,7 +659,7 @@ earlier, with a message naming both targets, like `OpenApi31`'s empty-path error
 |---|---|---|---|
 | **0 — structural** | Every operation has exactly one page and every operation page has an operation. Every relative link resolves to a file in this target's own output. No file-name collision. No empty heading. | Generation time, as a hard `CoreError`, plus unit tests | none |
 | **1 — determinism** | Same graph and declarations ⇒ same bytes | `gnr8 check`, `examples-check` (§1.5), and the `determinism` gate test extended to `StaticDocs` (`Makefile:69`) | none |
-| **2 — snippets resolve against the SDK** | Every name and argument in every snippet resolves against the SDK it documents. **Go:** an external `<pkg>_test` package in a temporary copy of the module, then `go vet`. **TypeScript:** a temporary tree whose `tsconfig.json` carries exactly the `tssdk_compile` gate's options (`crates/gnr8-core/tests/tssdk_compile.rs:101-116`: `--noEmit --strict --noUnusedLocals --exactOptionalPropertyTypes --noUncheckedIndexedAccess --target es2022 --module esnext --moduleResolution bundler --lib es2022,dom`), plus a `paths` entry mapping the SDK's published `package.json` name to the copied SDK's `index.ts`, so the import the page prints is the import that resolves. **Python:** the construction line runs for real, and the call runs against a client built through the opener seam (`pysdk/contract.rs:161-162`) whose stub answers every request with a non-success status. The check passes only if the call raises the SDK's typed `ApiError`. That proves the method name, every keyword and every model constructor resolved, and that a request was built. `py_compile` plus `import` would prove none of that, because a function body runs only when called. | `gnr8 verify` docs suite, declared by `StaticDocs` the way `CliHelpSuite` is (`builtins.rs:4381-4431`). It reports skipped toolchains explicitly (`CHANGELOG.md:16-17`) and requires each expected page among this run's fresh artifacts (`require_fresh`, `:229`, checks presence and nothing more). It also checks that every snippet appears verbatim in its page **after** post-processors, so a post-process that rewrites a snippet is caught | per language |
+| **2 — snippets resolve against the SDK** | Every name and argument in every snippet resolves against the SDK it documents. **Go:** an external `<pkg>_test` package in a temporary copy of the module, then `go vet`. **TypeScript:** a temporary tree whose `tsconfig.json` carries exactly the `tssdk_compile` gate's options (`crates/gnr8-core/tests/tssdk_compile.rs:101-116`: `--noEmit --strict --noUnusedLocals --exactOptionalPropertyTypes --noUncheckedIndexedAccess --target es2022 --module esnext --moduleResolution bundler --lib es2022,dom`), plus a `paths` entry mapping the SDK's published `package.json` name to the copied SDK's `index.ts`, so the import the page prints is the import that resolves. **Python:** the construction line runs for real, and the call runs against a client built through the opener seam (`pysdk/contract.rs:161-162`) whose stub answers every request with a non-success status. The check passes only if the call raises the SDK's typed `ApiError`. That proves the method name, every method keyword, every model constructor and every required model field resolved, and that a request was built — but not an optional model keyword, which pydantic's `extra="ignore"` drops silently (`pysdk/emit.rs:1097`); rung 3 catches that one (*superseded, round 2, B9:* "every keyword"). `py_compile` plus `import` would prove none of that, because a function body runs only when called. | `gnr8 verify` docs suite, declared by `StaticDocs` the way `CliHelpSuite` is (`builtins.rs:4381-4431`). It reports skipped toolchains explicitly (`CHANGELOG.md:16-17`) and requires each expected page among this run's fresh artifacts (`require_fresh`, `:229`, checks presence and nothing more). It also checks that every snippet appears verbatim in its page **after** post-processors, so a post-process that rewrites a snippet is caught | per language |
 | **3 — snippets send the page's request** | Each snippet's call runs against its language's existing fake transport (Go `RoundTripper`, `gosdk/contract.rs:3-6`; Python opener seam, `pysdk/contract.rs:7-10`), and the wire is asserted equal to the page's HTTP exchange — the same assertion the contract test makes (`gosdk/contract.rs:299-323`). Equality holds **after substitution**: the page prints credentials and the base URL as variables, and the harness injects the contract constants (`verify/mod.rs:38-48`) and `http://gnr8.test` (`:32-36`), a base URL with no path. A deployment whose server URL carries a path prefix prepends it to every printed path, and the page says so | `gnr8 verify` | per language |
 
 *Superseded (review round 1, findings 4, 5 and 8, and note 9):*
@@ -725,10 +769,15 @@ sentence, which is correct under either answer.
 ### 4.4 Rule 4 — builder methods only, and no new prose source
 
 `StaticDocs` is a declaration with one builder method (§3.8). There is no data file, no template
-override, and no per-endpoint docs config. Every prose source it renders already exists and already
-enforces one-source-per-fact with a hard error on collision: operation prose
-(`check_operation_prose_conflict`, `builtins.rs:2388`), parameter prose
-(`sdk builtins.rs:1654-1665`), group prose (`sdk builtins.rs:1904-1906`). If a future page needs a
+override, and no per-endpoint docs config. Every **operation, parameter and group** prose source it
+renders already exists and already enforces one-source-per-fact with a hard error on collision:
+operation prose (`check_operation_prose_conflict`, `builtins.rs:2388`), parameter prose
+(`sdk builtins.rs:1654-1665`), group prose (`sdk builtins.rs:1904-1906`). **Field** descriptions are
+the exception: rendered at parity with `openapi.yaml` (plan D1), on the Go path they come from
+`description:"…"` with a `schema:"description=…"` fallback (`goextract/internal/types/extract.go:177-179`),
+which `AGENTS.md:82-86` itself calls a rule-3 fallback. `StaticDocs` neither adds nor repairs that
+extractor fallback; its resolution belongs to OPEN-FOR-EMIL 1. *Superseded (round 2, B8):* this
+paragraph said every prose source it renders enforces one source per fact. If a future page needs a
 fact that typed source cannot express, it arrives as a transform on the graph that every target then
 sees — never as a `StaticDocs` option that only the docs see.
 
@@ -750,7 +799,10 @@ sees — never as a `StaticDocs` option that only the docs see.
 **First shippable vertical slice: P0 + P1** — the bookstore reference with Go snippets **whose
 values satisfy every declared constraint**. A slice without snippets would be a better
 `reference.md` and nothing more. The snippet is the thesis, so it ships first, in one language, end
-to end — and only with values this document does not itself call defective (§1.2.4).
+to end — and only with values this document does not itself call defective (§1.2.4): request
+inputs **and** the canned response body satisfy every declared `Constraints` field and every format
+gnr8 maps to a well-known scalar. Unmapped formats (`hostname`, `int64`, …) are annotations and are
+not honoured (plan §4.2). *Superseded (round 2, B1):* this sentence held for inputs only.
 
 *Superseded (review round 1, finding 22):* the constraint-respecting sampler was scheduled in P2, so
 the first release would have printed constraint-blind values (`"gnr8"` for a `minLength: 5` field)
@@ -759,12 +811,12 @@ re-baseline it causes therefore ships in the first release as a **Fixed** entry.
 
 | Phase | Delivers | Red-first tests | Rough size |
 |---|---|---|---|
-| **P0 — declaration and plumbing** | `StaticDocs` with `.to()`; the `BuiltinTarget` variant; prelude export; a `StaticDocs` arm in each dispatch function (plan §3.2 — no `TargetExec` impl, so there is one entry point); sibling-declarations argument | Serde round-trip of `BuiltinTarget::StaticDocs` (pattern: `crates/gnr8-sdk/src/sdk/stage.rs:327-334`); empty `to` ⇒ `Config`; the memo key changes when the declaration changes (pattern: the memo's own tests, `pipeline/emission.rs:418`, `:433`, `:505`) | ~300 lines |
-| **P1 — vertical slice** | `index.md`, `groups/`, `operations/`, `schemas/` and `llms.txt` from graph facts; the Go call-site renderer lifted with `InPackage`/`Consumer`; the HTTP exchange; rung 0 as hard errors; **S1, the constraint-respecting sampler with typed refusals**; `examples/bookstore` opts in and commits `generated/docs/` | (1) Hand-write the expected `index.md` and one operation page for the goalservice fixture **first**, under `fixtures/goalservice/expected/docs/`, then build a `snapshot_docs` test after `snapshot_sdk.rs`. The hand-written expectation is the spec. (2) Go `contract_test.go` stays byte-identical after the lift, against a baseline snapshot committed *before* the lift. (3) A rung-0 unit test per invariant: dangling link, kebab collision, missing page. (4) Extend `determinism`. (5) Every sample satisfies all of its `Constraints` (property-style over synthetic graphs — no example or fixture declares length or range bounds today); the contract tests re-baseline once, deliberately, in their own commit | ~2–2.5k lines, tests included |
+| **P0 — declaration and plumbing** | `StaticDocs` with `.to()`; the `BuiltinTarget` variant; `PROTOCOL_VERSION` 8 → 9 (§1.3 row 9); prelude export; a `StaticDocs` arm in each dispatch function (plan §3.2 — no `TargetExec` impl, so there is one entry point); sibling-declarations argument | Serde round-trip of `BuiltinTarget::StaticDocs` (pattern: `crates/gnr8-sdk/src/sdk/stage.rs:327-334`); empty `to` ⇒ `Config`; the memo key changes when the declaration changes (pattern: the memo's own tests, `pipeline/emission.rs:418`, `:433`, `:505`) | ~300 lines |
+| **P1 — vertical slice** | `index.md`, `groups/`, `operations/`, `schemas/` and `llms.txt` from graph facts; the Go call-site renderer lifted with `InPackage`/`Consumer`; the HTTP exchange; rung 0 as hard errors; **S1, the constraint-respecting sampler with typed refusals, for request inputs and the canned response body**; `examples/bookstore` opts in and commits `generated/docs/` | (1) Hand-write the expected `index.md` and one operation page for the goalservice fixture **first**, under `fixtures/goalservice/expected/docs/`, then build a `snapshot_docs` test after `snapshot_sdk.rs`. The hand-written expectation is the spec. (2) Go `contract_test.go` stays byte-identical after the lift, against reference snapshots committed *before* the lift (plan W1.0: the catalog spec and the gin-contract-regression fixture). (3) A rung-0 unit test per invariant: dangling link, kebab collision, missing page. (4) Extend `determinism`. (5) Every sample — request and response — satisfies all of its `Constraints` (property-style over synthetic graphs), and the one constrained committed fixture, `fixtures/gin-contract-regression/app.go` (`:29-34`, `:126-131`), is S1's real-graph test; no committed **example** carries a constraint. The contract tests change once, deliberately, in their own commit (*superseded, round 2, B5:* "no example or fixture declares length or range bounds") | ~2–2.5k lines, tests included |
 | **P2 — every language** | Python and TypeScript call-site lifts; CLI subsections; `fastapi-bookstore` and `nestjs-bookstore` opt in | Consumer import identity (plan §4.1); Python and TypeScript rung-2 checks in gnr8's own tests | ~0.8–1.2k |
 | **P3 — `gnr8 verify`, rung 2** | Declared docs-snippet suite; host runner beside `crates/gnr8/src/verify/cli_help.rs`; explicit skip reports | Runner tests in the shape of `cli_help.rs` (missing fresh page refused, missing-toolchain skip, a planted non-compiling snippet fails, a post-process that rewrites a snippet fails) | ~800 |
 | **P4 — reference completeness and rung 3** | `errors.md`, `authentication.md`, per-page diagnostics, pagination; snippet execution against the fake transports with the wire asserted | Each page type snapshot-tested; a planted wire mismatch fails rung 3 | ~0.8–1.2k |
-| **P5 — docs and release** | A docs page for the target, `docs/reference/public-api.md`, the repository `llms.txt` index, and a CHANGELOG **Breaking** entry (new `BuiltinTarget` variant ⇒ minor, so 0.18.0) | `make invariants` | ~300 |
+| **P5 — docs and release** | A docs page for the target, `docs/reference/public-api.md`, the repository `llms.txt` index. The CHANGELOG **Breaking** entry (new `BuiltinTarget` variant ⇒ minor, so 0.18.0, plus the protocol bump) belongs to P0+P1, which ship together as 0.18.0 (plan §8) — *superseded (round 2, B8):* this row carried it | `make invariants` | ~300 |
 
 **Snapshot strategy.** There is one committed expected tree per fixture, compared byte for byte, and
 the committed `examples/*/generated/docs/` trees under `examples-check`. Opt examples in only as
