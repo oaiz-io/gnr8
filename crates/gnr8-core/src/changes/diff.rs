@@ -1187,8 +1187,8 @@ fn compare_existing_parameter(
 /// A version 1 artifact kept an imported parameter's keywords in its raw schema and never resolved
 /// a `$ref`, so the bounds of the schema a `$ref` names were never in it. For a base read from one,
 /// a parameter whose base schema (or items schema) is a `$ref` is compared only on the keywords the
-/// base states; a keyword it does not state is unknown, not added. Every other parameter, and every
-/// comparison of two version 2 graphs, compares the constraints whole.
+/// base states ([`stated_by`]); a keyword it does not state is unknown, not added. Every other
+/// parameter, and every comparison of two version 2 graphs, compares the constraints whole.
 fn comparable_parameter_constraints(
     base: &Param,
     current: &Param,
@@ -1230,7 +1230,17 @@ fn comparable_parameter_constraints(
     )
 }
 
-/// `current`'s constraints on exactly the keywords `base` states.
+/// `current`'s constraints on exactly the keywords `base` states, read for a `$ref` parameter of a
+/// version 1 base.
+///
+/// The current graph holds each keyword combined from the two places it may be stated — beside the
+/// `$ref`, which the base held, and in the schema it names, which the base never held — by the
+/// importer's one rule: the tighter bound or count, the enum members both admit, `uniqueItems` from
+/// either side. So a current keyword *tighter* than the base's may come from the referenced schema
+/// alone, and is unknown: it reads as the base's. A current keyword as loose as or looser than the
+/// base's (or gone) can only be the keyword beside the `$ref` changing, and is compared. A
+/// `pattern` or `multipleOf` stated on both sides is carried from beside the `$ref`, so it is
+/// compared as it is.
 fn stated_by(
     current: &crate::analyze::facts::Constraints,
     base: &crate::analyze::facts::Constraints,
@@ -1238,34 +1248,64 @@ fn stated_by(
     fn keep<T: Clone>(current: Option<&T>, base: Option<&T>) -> Option<T> {
         base.and(current).cloned()
     }
+    /// A count the base states: the base's when the current one is tighter.
+    fn count(current: Option<u64>, base: Option<u64>, lower: bool) -> Option<u64> {
+        let base = base?;
+        match current {
+            Some(current) if (lower && current > base) || (!lower && current < base) => Some(base),
+            current => current,
+        }
+    }
+    /// A numeric bound the base states: the base's when the current one is tighter.
+    fn bound(current: Option<&String>, base: Option<&String>, lower: bool) -> Option<String> {
+        let base = base?;
+        let current = current?;
+        let order = match (current.trim().parse::<i128>(), base.trim().parse::<i128>()) {
+            (Ok(current), Ok(base)) => Some(current.cmp(&base)),
+            _ => match (current.trim().parse::<f64>(), base.trim().parse::<f64>()) {
+                (Ok(current), Ok(base)) => current.partial_cmp(&base),
+                _ => None,
+            },
+        };
+        let tighter = match order {
+            Some(std::cmp::Ordering::Greater) => lower,
+            Some(std::cmp::Ordering::Less) => !lower,
+            Some(std::cmp::Ordering::Equal) | None => false,
+        };
+        Some(if tighter { base } else { current }.clone())
+    }
     crate::analyze::facts::Constraints {
-        min_length: keep(current.min_length.as_ref(), base.min_length.as_ref()),
-        max_length: keep(current.max_length.as_ref(), base.max_length.as_ref()),
-        min_items: keep(current.min_items.as_ref(), base.min_items.as_ref()),
-        max_items: keep(current.max_items.as_ref(), base.max_items.as_ref()),
-        min_properties: keep(
-            current.min_properties.as_ref(),
-            base.min_properties.as_ref(),
-        ),
-        max_properties: keep(
-            current.max_properties.as_ref(),
-            base.max_properties.as_ref(),
-        ),
-        minimum: keep(current.minimum.as_ref(), base.minimum.as_ref()),
-        maximum: keep(current.maximum.as_ref(), base.maximum.as_ref()),
-        exclusive_minimum: keep(
+        min_length: count(current.min_length, base.min_length, true),
+        max_length: count(current.max_length, base.max_length, false),
+        min_items: count(current.min_items, base.min_items, true),
+        max_items: count(current.max_items, base.max_items, false),
+        min_properties: count(current.min_properties, base.min_properties, true),
+        max_properties: count(current.max_properties, base.max_properties, false),
+        minimum: bound(current.minimum.as_ref(), base.minimum.as_ref(), true),
+        maximum: bound(current.maximum.as_ref(), base.maximum.as_ref(), false),
+        exclusive_minimum: bound(
             current.exclusive_minimum.as_ref(),
             base.exclusive_minimum.as_ref(),
+            true,
         ),
-        exclusive_maximum: keep(
+        exclusive_maximum: bound(
             current.exclusive_maximum.as_ref(),
             base.exclusive_maximum.as_ref(),
+            false,
         ),
         multiple_of: keep(current.multiple_of.as_ref(), base.multiple_of.as_ref()),
         unique_items: base.unique_items && current.unique_items,
         pattern: keep(current.pattern.as_ref(), base.pattern.as_ref()),
         enum_values: if base.enum_values.is_empty() {
             Vec::new()
+        } else if !current.enum_values.is_empty()
+            && current
+                .enum_values
+                .iter()
+                .all(|member| base.enum_values.contains(member))
+        {
+            // The members both sides admit: narrowed, perhaps, by the referenced schema's enum.
+            base.enum_values.clone()
         } else {
             current.enum_values.clone()
         },

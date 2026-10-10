@@ -5785,33 +5785,58 @@ paths:
       parameters:
         - {{ name: limit, in: query, schema: {{ $ref: "#/components/schemas/Limit", maximum: {maximum} }} }}
         - {{ name: ids, in: query, schema: {{ type: array, items: {{ $ref: "#/components/schemas/Limit" }} }} }}
+        - {{ name: level, in: query, schema: {{ $ref: "#/components/schemas/Lvl", enum: [1, 2, 3] }} }}
       responses: {{ "204": {{ description: none }} }}
 components:
   schemas:
     Limit: {{ type: integer, minimum: 1, maximum: 100 }}
+    Lvl: {{ type: integer, enum: [1, 2] }}
 "##
             )
         };
-        let current = import_yaml(&spec(10));
         // The graph the version 1 importer wrote: every keyword left in the raw schema.
-        let version_1 = |graph: &crate::graph::ApiGraph| {
+        let version_1 = |graph: &crate::graph::ApiGraph, maximum: u32| {
             let mut graph = graph.clone();
             for param in &mut graph.operations[0].params {
                 param.constraints = super::Constraints::default();
                 param.item_constraints = super::Constraints::default();
                 for (field, value) in &mut param.openapi_fields {
                     if field == "schema" && param.name == "limit" {
-                        value["maximum"] = serde_json::json!(10);
+                        value["maximum"] = serde_json::json!(maximum);
+                    }
+                    if field == "schema" && param.name == "level" {
+                        value["enum"] = serde_json::json!([1, 2, 3]);
                     }
                 }
             }
             super::upgrade_graph_from_artifact_v1(&mut graph);
             graph
         };
+        // A keyword the base states but the referenced schema tightens — `maximum: 500` beside a
+        // `$ref` whose schema says `maximum: 100`, an enum the schema's enum narrows — is unknown
+        // too: the current graph holds the combined value, and a version 1 base cannot say which
+        // side set it.
+        let wide = import_yaml(&spec(500));
+        let wide_base = crate::changes::BaseGraph {
+            reference: "main".to_string(),
+            commit: "0".repeat(40),
+            graph: version_1(&wide, 500),
+            upgraded_from_version_1: true,
+        };
+        let report = crate::changes::diff_base_graph(
+            &wide_base,
+            &wide,
+            &std::collections::BTreeSet::new(),
+            &[],
+        )
+        .expect("diff");
+        assert!(report.changes.is_empty(), "{:?}", report.changes);
+
+        let current = import_yaml(&spec(10));
         let base = crate::changes::BaseGraph {
             reference: "main".to_string(),
             commit: "0".repeat(40),
-            graph: version_1(&current),
+            graph: version_1(&current, 10),
             upgraded_from_version_1: true,
         };
         let report = crate::changes::diff_base_graph(

@@ -32,6 +32,10 @@ must move the minor version.
   parameter's example moves into the new typed `Param::example` the same way. `BaseGraph` gains
   `upgraded_from_version_1`, and `gnr8_engine::changes::diff_base_graph` compares a `BaseGraph`
   with that reading.
+- On a version 1 base, a `$ref` parameter's keyword that the current graph holds tighter than the
+  base states is not reported: the referenced schema may have tightened it (`maximum: 500` beside a
+  `$ref` whose schema says `maximum: 100`, or an enum beside it that the schema's enum narrows). A
+  keyword loosened or removed beside the `$ref` is still reported.
 - **Each SDK's `README.md` and `reference.md` are rewritten from the docs model** that `StaticDocs`
   renders its pages from, built for that one SDK. `README.md` replaces the `Package/module` line
   with `Import` (the Go module path, the Python import package, the `package.json` name) and
