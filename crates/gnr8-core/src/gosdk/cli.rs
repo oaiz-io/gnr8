@@ -19,17 +19,18 @@ use crate::graph::{
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    body_field_flags, check_cli_names, cli_next_cursor_field, cli_operations, cli_result_shape,
-    command_docs_url, command_examples, command_invocation, command_output_note, command_see_also,
-    command_sub_noun, command_topic, command_verb, command_view, credential_env_var, debug_env_var,
-    file_stem, flag_name, format_env_var, help_spec_json, helper_env_var, http_auth_features_for,
-    is_positional_param, no_input_env_var, operation_auth_alternatives, operation_prose,
-    output_dir_env_var, pager_env_var, parameter_flag_help, positional_names, positional_usage,
-    quoted_string_literal, reject_duplicate_command_files, reject_sse_operations,
-    request_body_models_of, response_field_names, CliResultShape, OperationAuthScheme,
-    RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP,
-    DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP,
-    OUTPUT_HELP, QUIET_HELP, YES_HELP,
+    body_field_flags, body_help, body_help_rows, check_cli_names, cli_next_cursor_field,
+    cli_operations, cli_result_shape, command_docs_url, command_examples, command_invocation,
+    command_output_note, command_see_also, command_sub_noun, command_topic, command_verb,
+    command_view, credential_env_var, debug_env_var, file_stem, flag_name, format_env_var,
+    help_spec_json, helper_env_var, http_auth_features_for, is_positional_param, no_input_env_var,
+    operation_auth_alternatives, operation_prose, output_dir_env_var, pager_env_var,
+    parameter_flag_help, positional_names, positional_usage, quoted_string_literal,
+    reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
+    response_field_names, CliResultShape, OperationAuthScheme, RequestBodyModel, ALL_HELP,
+    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP,
+    FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP, QUIET_HELP,
+    YES_HELP,
 };
 use crate::CoreError;
 
@@ -2419,6 +2420,20 @@ fn emit_handler(
     }
     writeln!(out, "fmt.Fprintln(fs.Output(), \"\\nFlags:\")").map_err(sink)?;
     writeln!(out, "fs.PrintDefaults()").map_err(sink)?;
+    if let Some(body) = body_help(cli, op, graph)? {
+        let rows = body_help_rows(&body);
+        if !rows.is_empty() {
+            writeln!(out, "fmt.Fprintln(fs.Output(), \"\\nBody:\")").map_err(sink)?;
+            for row in rows {
+                writeln!(
+                    out,
+                    "fmt.Fprintln(fs.Output(), {})",
+                    quoted_string_literal(&row)
+                )
+                .map_err(sink)?;
+            }
+        }
+    }
     emit_help_extras(out, cli, graph, op)?;
     writeln!(out, "}}").map_err(sink)?;
     if cli.base_url.is_some() {

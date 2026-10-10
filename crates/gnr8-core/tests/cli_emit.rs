@@ -3349,3 +3349,396 @@ fn color_pager_and_completion_are_emitted() {
         "missing bashCompletion"
     );
 }
+
+/// One request-body field: required means the decoder refuses the key's absence.
+fn body_field(
+    name: &str,
+    schema: &serde_json::Value,
+    required: bool,
+    description: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "json_name": name,
+        "serializer_may_omit": !required,
+        "deserializer_accepts_absent": !required,
+        "deserializer_accepts_null": !required,
+        "serializer_may_emit_null": false,
+        "validator_requires_presence": required,
+        "validator_rejects_null": required,
+        "schema": schema,
+        "description": description,
+        "example": null
+    })
+}
+
+fn named_schema(id: &str, name: &str, body: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "name": name,
+        "body": body,
+        "provenance": { "file": "http.go", "start_line": 1, "end_line": 1 }
+    })
+}
+
+const SELECT_HELP: &str =
+    "One of: * for every column; column names; alias:column to rename a column; \
+relation(columns) to nest the rows of a related table.";
+
+/// A rows-select body: a recursive filter (`or`/`and` hold filters), an enum operator with ten
+/// members, an array of order objects with a required column, and prose longer than one row.
+fn rows_select_graph() -> ApiGraph {
+    let string = serde_json::json!({ "type": "primitive", "of": { "prim": "string" } });
+    let boolean = serde_json::json!({ "type": "primitive", "of": { "prim": "bool" } });
+    let integer = serde_json::json!({ "type": "primitive", "of": { "prim": "int", "bits": 64, "signed": true } });
+    let filters =
+        serde_json::json!({ "type": "array", "of": { "type": "named", "of": "dto.RowFilter" } });
+    let input = named_schema(
+        "dto.SelectRowsInput",
+        "DtoSelectRowsInput",
+        &serde_json::json!({ "type": "object", "of": [
+            body_field("count", &serde_json::json!({ "type": "named", "of": "dto.RowCount" }), false,
+                Some("exact also returns the number of rows the filters match, beyond the page.")),
+            body_field("filters", &filters, false, Some("Conditions every returned row meets.")),
+            body_field("limit", &integer, false, Some("Most rows returned.")),
+            body_field("offset", &integer, false, Some("Rows skipped before the first returned row.")),
+            body_field("order",
+                &serde_json::json!({ "type": "array", "of": { "type": "named", "of": "dto.RowOrder" } }),
+                false, Some("Sort order.")),
+            body_field("select", &string, false, Some(SELECT_HELP)),
+            body_field("single", &boolean, false, Some("Requires exactly one row.")),
+            body_field("table", &string, true, Some("Table of the database.")),
+        ]}),
+    );
+    let filter = named_schema(
+        "dto.RowFilter",
+        "DtoRowFilter",
+        &serde_json::json!({ "type": "object", "of": [
+            body_field("and", &filters, false, Some("Group that matches when every one of its filters matches.")),
+            body_field("column", &string, false, Some("Column the condition tests.")),
+            body_field("not", &boolean, false, Some("Negates the condition or the group.")),
+            body_field("operator", &serde_json::json!({ "type": "named", "of": "dto.RowFilterOperator" }), false,
+                Some("Comparison of the column with value.")),
+            body_field("or", &filters, false, Some("Group that matches when any of its filters matches.")),
+            body_field("value", &string, false, Some("Operand as text.")),
+            body_field("values", &serde_json::json!({ "type": "array", "of": string }), false, None),
+        ]}),
+    );
+    let order = named_schema(
+        "dto.RowOrder",
+        "DtoRowOrder",
+        &serde_json::json!({ "type": "object", "of": [
+            body_field("ascending", &boolean, false, Some("Sorts from low to high.")),
+            body_field("column", &serde_json::json!({ "type": "primitive", "of": { "prim": "string" } }), true,
+                Some("Column of the table to sort by.")),
+            body_field("nullsFirst", &boolean, false, Some("Puts null values first.")),
+        ]}),
+    );
+    let operator = named_schema(
+        "dto.RowFilterOperator",
+        "DtoRowFilterOperator",
+        &serde_json::json!({ "type": "enum", "of": ["eq", "gt", "gte", "ilike", "in", "is", "like", "lt", "lte", "neq"] }),
+    );
+    let count = named_schema(
+        "dto.RowCount",
+        "DtoRowCount",
+        &serde_json::json!({ "type": "enum", "of": ["exact"] }),
+    );
+    let rows = named_schema(
+        "dto.Rows",
+        "DtoRows",
+        &serde_json::json!({ "type": "object", "of": [
+            body_field("count", &serde_json::json!({ "type": "primitive", "of": { "prim": "int", "bits": 64, "signed": true } }), false, None),
+        ]}),
+    );
+    serde_json::from_value(serde_json::json!({
+        "module": "app",
+        "operations": [
+            {
+                "id": "selectRows",
+                "method": "POST",
+                "path": "/rows/select",
+                "handler": "selectRows",
+                "summary": "Select rows.",
+                "params": [],
+                "request_body": { "ref_id": "dto.SelectRowsInput" },
+                "request_body_required": true,
+                "responses": [ { "status": 200, "body": { "ref_id": "dto.Rows" } } ],
+                "provenance": { "file": "http.go", "start_line": 1, "end_line": 1 }
+            },
+            {
+                "id": "countRows",
+                "method": "GET",
+                "path": "/rows/count",
+                "handler": "countRows",
+                "params": [],
+                "request_body": null,
+                "request_body_required": false,
+                "responses": [ { "status": 200, "body": { "ref_id": "dto.Rows" } } ],
+                "provenance": { "file": "http.go", "start_line": 2, "end_line": 2 }
+            }
+        ],
+        "schemas": [count, filter, operator, order, rows, input],
+        "diagnostics": [],
+        "base_path": "/",
+        "title": "Rows API",
+        "security": []
+    }))
+    .expect("rows graph json")
+}
+
+fn rows_cli(select: CliCommand) -> SdkCli {
+    SdkCli::new("rows").base_url("https://api.test").topic(
+        CliTopic::new("rows")
+            .command(select)
+            .command(CliCommand::operation("countRows", "count").example("rows rows count")),
+    )
+}
+
+fn rows_select_command() -> CliCommand {
+    CliCommand::operation("selectRows", "select")
+        .example("rows rows select --body '{\"table\":\"orders\"}'")
+}
+
+/// The decoded `help --json` document a generated Go CLI embeds.
+fn go_help_spec(go: &str) -> serde_json::Value {
+    let start = go
+        .find("const helpSpecJSON = ")
+        .expect("helpSpecJSON const")
+        + "const helpSpecJSON = ".len();
+    let line = go[start..].lines().next().expect("helpSpecJSON literal");
+    // A Go interpreted string literal with only these escapes is a JSON string literal too.
+    let text: String = serde_json::from_str(line).expect("helpSpecJSON is a quoted string");
+    serde_json::from_str(&text).expect("helpSpecJSON is JSON")
+}
+
+fn help_command<'a>(spec: &'a serde_json::Value, invocation: &str) -> &'a serde_json::Value {
+    spec["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .find(|command| command["invocation"] == invocation)
+        .unwrap_or_else(|| panic!("no {invocation} in {spec}"))
+}
+
+#[test]
+fn go_body_help_lists_fields_one_level_deep_after_flags() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&rows_select_graph(), rows_cli(rows_select_command()));
+    let handler = go_func(&go, "cmdSelectRows");
+    let rows = [
+        "  count               string  optional  one of: exact  exact also returns the number of rows the filters match, beyond the page.",
+        "  filters             array of object  optional  Conditions every returned row meets.",
+        "  filters[].and       array of object  optional  same shape as filters[]  Group that matches when every one of its filters matches.",
+        "  filters[].column    string  optional  Column the condition tests.",
+        "  filters[].not       boolean  optional  Negates the condition or the group.",
+        "  filters[].operator  string  optional  one of: eq|gt|gte|ilike|in|is|like|lt|lte|neq  Comparison of the column with value.",
+        "  filters[].or        array of object  optional  same shape as filters[]  Group that matches when any of its filters matches.",
+        "  filters[].value     string  optional  Operand as text.",
+        "  filters[].values    array of string  optional",
+        "  limit               integer  optional  Most rows returned.",
+        "  offset              integer  optional  Rows skipped before the first returned row.",
+        "  order               array of object  optional  Sort order.",
+        "  order[].ascending   boolean  optional  Sorts from low to high.",
+        "  order[].column      string  required  Column of the table to sort by.",
+        "  order[].nullsFirst  boolean  optional  Puts null values first.",
+        "  select              string  optional  One of: * for every column; column names; alias:column to rename a column; rela\u{2026}",
+        "  single              boolean  optional  Requires exactly one row.",
+        "  table               string  required  Table of the database.",
+    ];
+    let lines: Vec<&str> = handler.lines().map(str::trim).collect();
+    let line = |text: &str| {
+        lines
+            .iter()
+            .position(|line| *line == text)
+            .unwrap_or_else(|| panic!("missing {text}:\n{handler}"))
+    };
+    let flags = line("fs.PrintDefaults()");
+    let body = line("fmt.Fprintln(fs.Output(), \"\\nBody:\")");
+    let examples = line("fmt.Fprintln(fs.Output(), \"\\nExamples:\")");
+    assert_eq!(flags + 1, body, "Body follows Flags:\n{handler}");
+    let printed: Vec<String> = rows
+        .iter()
+        .map(|row| format!("fmt.Fprintln(fs.Output(), {row:?})"))
+        .collect();
+    assert_eq!(&lines[body + 1..examples], printed.as_slice(), "{handler}");
+    assert!(
+        !go_func(&go, "cmdCountRows").contains("Body:"),
+        "a command without a request body has no Body section"
+    );
+}
+
+#[test]
+fn go_body_help_cuts_prose_to_eighty_characters() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&rows_select_graph(), rows_cli(rows_select_command()));
+    let row = go
+        .lines()
+        .find(|line| line.contains("\"  select "))
+        .expect("select row");
+    let prose = row
+        .split("optional  ")
+        .nth(1)
+        .expect("prose")
+        .trim_end_matches(')')
+        .trim_end_matches('"');
+    assert_eq!(prose.chars().count(), 80, "{prose}");
+    assert!(prose.ends_with('\u{2026}'), "{prose}");
+    assert!(
+        SELECT_HELP.starts_with(prose.trim_end_matches('\u{2026}')),
+        "{prose}"
+    );
+}
+
+#[test]
+fn go_body_help_leaves_out_fields_bound_as_flags() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(
+        &rows_select_graph(),
+        rows_cli(rows_select_command().body_fields()),
+    );
+    let handler = go_func(&go, "cmdSelectRows");
+    assert!(handler.contains("fs.String(\"table\""), "{handler}");
+    assert!(handler.contains("\\nBody:"), "{handler}");
+    for flagged in [
+        "\"  table ",
+        "\"  limit ",
+        "\"  select ",
+        "\"  count ",
+        "\"  single ",
+        "\"  offset ",
+    ] {
+        assert!(
+            !handler.contains(flagged),
+            "{flagged} is a flag, not a Body row:\n{handler}"
+        );
+    }
+    assert!(
+        handler.contains("\"  filters[].or        array of object"),
+        "{handler}"
+    );
+    assert!(
+        handler.contains("\"  order[].column      string  required"),
+        "{handler}"
+    );
+    let spec = go_help_spec(&go);
+    let names: Vec<&str> = help_command(&spec, "rows select")["body"]["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .map(|field| field["name"].as_str().expect("name"))
+        .collect();
+    assert!(
+        !names.contains(&"table") && names.contains(&"filters[].column"),
+        "{names:?}"
+    );
+
+    // Every field a flag: no Body section, and help --json still names the schema.
+    let go = generate_go_cli_with(
+        &bookstore_graph(),
+        SdkCli::new("bookstore").topic(
+            CliTopic::new("books").command(
+                CliCommand::operation("createBook", "create")
+                    .body_fields()
+                    .example("bookstore books create --title Dune"),
+            ),
+        ),
+    );
+    assert!(!go.contains("\\nBody:"), "{go}");
+    let spec = go_help_spec(&go);
+    assert_eq!(
+        help_command(&spec, "books create")["body"],
+        serde_json::json!({ "schema": "Book", "fields": [] })
+    );
+}
+
+#[test]
+fn go_help_json_carries_each_body_command_s_body() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&rows_select_graph(), rows_cli(rows_select_command()));
+    let spec = go_help_spec(&go);
+    let body = &help_command(&spec, "rows select")["body"];
+    assert_eq!(body["schema"], "DtoSelectRowsInput");
+    let fields = body["fields"].as_array().expect("fields");
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|field| field["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {body}"))
+    };
+    assert_eq!(
+        field("filters[].operator"),
+        &serde_json::json!({
+            "name": "filters[].operator",
+            "type": "string",
+            "required": false,
+            "enum": ["eq", "gt", "gte", "ilike", "in", "is", "like", "lt", "lte", "neq"],
+            "help": "Comparison of the column with value."
+        })
+    );
+    assert_eq!(field("filters[].or")["sameShapeAs"], "filters[]");
+    assert_eq!(field("table")["required"], true);
+    assert_eq!(
+        field("filters[].values"),
+        &serde_json::json!({
+            "name": "filters[].values", "type": "array of string", "required": false
+        })
+    );
+    assert_eq!(
+        field("select")["help"],
+        SELECT_HELP,
+        "help --json keeps the prose uncut"
+    );
+    assert!(
+        help_command(&spec, "rows count").get("body").is_none(),
+        "a command without a request body has no body entry"
+    );
+
+    // A fixed body is not the caller's to write.
+    let go = generate_go_cli_with(
+        &rows_select_graph(),
+        rows_cli(rows_select_command().fixed_body("{\"table\":\"orders\"}")),
+    );
+    assert!(!go.contains("\\nBody:"), "{go}");
+    assert!(help_command(&go_help_spec(&go), "rows select")
+        .get("body")
+        .is_none());
+}
+
+/// A shape listed once is named, not listed again: a second field of the same type, and a type that
+/// holds itself directly under the body.
+#[test]
+fn go_body_help_names_a_repeated_shape_by_its_first_path() {
+    if skip_go() {
+        return;
+    }
+    let mut graph = rows_select_graph();
+    let input = graph
+        .schemas
+        .iter_mut()
+        .find(|schema| schema.id == "dto.SelectRowsInput")
+        .expect("input");
+    let gnr8_engine::graph::Type::Object(fields) = &mut input.body else {
+        panic!("input is an object");
+    };
+    let mut having = fields[1].clone();
+    having.json_name = "having".to_string();
+    having.description = None;
+    fields.insert(2, having);
+    let go = generate_go_cli_with(&graph, rows_cli(rows_select_command()));
+    let handler = go_func(&go, "cmdSelectRows");
+    assert!(
+        handler.contains(
+            "\"  having              array of object  optional  same shape as filters[]\""
+        ),
+        "{handler}"
+    );
+    assert!(!handler.contains("having[]."), "{handler}");
+}

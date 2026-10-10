@@ -2785,3 +2785,114 @@ fn generated_cli_go_command_spec_builds_vets_and_behaves() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A shelf of books whose books hold related books: a body with an array of a recursive object.
+fn shelf_graph() -> gnr8_engine::graph::ApiGraph {
+    let provenance = serde_json::json!({ "file": "http.go", "start_line": 1, "end_line": 1 });
+    let string = serde_json::json!({ "type": "primitive", "of": { "prim": "string" } });
+    let field =
+        |name: &str, schema: serde_json::Value, required: bool, description: Option<&str>| {
+            serde_json::json!({
+                "json_name": name,
+                "serializer_may_omit": !required,
+                "deserializer_accepts_absent": !required,
+                "deserializer_accepts_null": false,
+                "serializer_may_emit_null": false,
+                "validator_requires_presence": required,
+                "validator_rejects_null": false,
+                "schema": schema,
+                "description": description,
+                "example": null
+            })
+        };
+    let books = serde_json::json!({ "type": "array", "of": { "type": "named", "of": "Book" } });
+    serde_json::from_value(serde_json::json!({
+        "module": "app",
+        "operations": [{
+            "id": "createShelf", "method": "POST", "path": "/shelves", "handler": "createShelf",
+            "params": [],
+            "request_body": { "ref_id": "Shelf" }, "request_body_required": true,
+            "responses": [{ "status": 204, "body": null }],
+            "provenance": provenance
+        }],
+        "schemas": [
+            {
+                "id": "Book", "name": "Book",
+                "body": { "type": "object", "of": [
+                    field("format", serde_json::json!({ "type": "enum", "of": ["ebook", "print"] }), false, None),
+                    field("related", books.clone(), false, Some("Books shelved beside it.")),
+                    field("title", string.clone(), true, Some("The book's title."))
+                ]},
+                "provenance": provenance
+            },
+            {
+                "id": "Shelf", "name": "Shelf",
+                "body": { "type": "object", "of": [
+                    field("books", books, false, Some("Books on the shelf.")),
+                    field("name", string, true, Some("The shelf's \"name\" — shown on its label."))
+                ]},
+                "provenance": provenance
+            }
+        ],
+        "diagnostics": [],
+        "base_path": "/",
+        "title": "Bookstore API",
+        "security": []
+    }))
+    .expect("shelf graph")
+}
+
+/// A built program prints the request body under Body, between Flags and the next section, and
+/// `help --json` carries the same rows.
+#[test]
+fn generated_cli_go_help_lists_the_request_body() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI body help: go toolchain unavailable");
+        return;
+    }
+    let dir = materialize_go_cli_with(
+        "cli-body-help",
+        &shelf_graph(),
+        SdkCli::new("bookstore").base_url("http://127.0.0.1:1"),
+    );
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed");
+    let (code, stdout, stderr) = run_cli(&dir, "bookstore", &["create-shelf", "--help"], &[]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let body = stdout
+        .split("\nBody:\n")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no Body section: {stdout}"));
+    assert!(
+        stdout.find("\nFlags:\n") < stdout.find("\nBody:\n"),
+        "Body follows Flags: {stdout}"
+    );
+    let rows: Vec<&str> = body.lines().take_while(|line| !line.is_empty()).collect();
+    assert_eq!(
+        rows,
+        [
+            "  books            array of object  optional  Books on the shelf.",
+            "  books[].format   string  optional  one of: ebook|print",
+            "  books[].related  array of object  optional  same shape as books[]  Books shelved beside it.",
+            "  books[].title    string  required  The book's title.",
+            "  name             string  required  The shelf's \"name\" \u{2014} shown on its label.",
+        ],
+        "{stdout}"
+    );
+    let (code, help, stderr) = run_cli(&dir, "bookstore", &["help", "--json"], &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let help: serde_json::Value = serde_json::from_str(&help).expect("help must be JSON");
+    let body = &help["commands"][0]["body"];
+    assert_eq!(body["schema"], "Shelf", "{help}");
+    assert_eq!(
+        body["fields"][2],
+        serde_json::json!({
+            "name": "books[].related",
+            "type": "array of object",
+            "required": false,
+            "sameShapeAs": "books[]",
+            "help": "Books shelved beside it."
+        })
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
