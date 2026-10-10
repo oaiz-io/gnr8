@@ -351,7 +351,8 @@ These overrides mutate the graph before OpenAPI or SDK targets render, so all ge
 
 OpenAPI targets support narrow document presentation patches. `enum_values(...)` sorts values
 deterministically; `enum_values_in_order(...)` preserves caller order. A patch edits only that
-document, not the graph. A pipeline that also declares `StaticDocs` therefore refuses a patch that
+document, not the graph. A pipeline that also declares `StaticDocs`, or an SDK target that writes
+its `reference.md` (the default; `.without_docs()` turns it off), therefore refuses a patch that
 sets anything other than `x-*` extensions
 ([OpenAPI generation](openapi/generation.md#complete-example)).
 

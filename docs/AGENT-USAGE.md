@@ -183,8 +183,9 @@ OpenApi31::new()
     );
 ```
 
-A patch edits only that document. With `StaticDocs` in the same pipeline, only `x-*` extensions may
-be patched; set other field facts in the source or with a graph `Transform`.
+A patch edits only that document. With `StaticDocs`, or an SDK target that writes its
+`reference.md` (the default), in the same pipeline, only `x-*` extensions may be patched; set other
+field facts in the source or with a graph `Transform`.
 
 ## Generated SDKs
 

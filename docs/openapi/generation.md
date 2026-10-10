@@ -49,11 +49,13 @@ A patch names a **published component**, not a source type, so a type whose inpu
 contracts differ is patched as `TypeInput` or `TypeOutput` — one patch per direction, since the two
 components are two contracts. A patch left on the un-split name fails and names both.
 
-A patch edits only the document its target writes. SDKs and `StaticDocs` pages read the graph. A
-pipeline that also declares `StaticDocs` therefore refuses a patch that sets a fact a docs page
+A patch edits only the document its target writes. SDKs, their `reference.md` and `StaticDocs`
+pages read the graph. A pipeline that also declares `StaticDocs`, or an SDK target that writes its
+`README.md` and `reference.md` (the default), therefore refuses a patch that sets a fact a docs page
 prints: constraints, enum, description, default or example. Otherwise the docs would disagree with
 the published spec. Set those facts in the source, or with a `Transform` that edits the field in
-the graph. Extension-only patches are unaffected.
+the graph; an SDK declared `.without_docs()` prints no field fact. Extension-only patches are
+unaffected.
 
 ## What is emitted
 

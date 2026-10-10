@@ -202,8 +202,8 @@ impl<'a> PlanTargets<'a> {
     }
 
     /// Every schema patch an OpenAPI target declares, with that target's stage name, in plan
-    /// order. `StaticDocs` reads these only to refuse a patch that would make the published
-    /// document disagree with the docs pages; it never applies one.
+    /// order. A docs output (`StaticDocs`, an SDK's `reference.md`) reads these only to refuse a
+    /// patch that would make the published document disagree with it; it never applies one.
     pub fn openapi_schema_patches(
         &self,
     ) -> impl Iterator<Item = (&'static str, &'a OpenApiSchemaPatch)> + 'a {
@@ -4444,8 +4444,10 @@ pub fn apply_transform(
 
 /// Execute a declared target against the frozen `ir`.
 ///
-/// `plan` is every built-in target the same plan declares. Only `StaticDocs` reads it, for the
-/// sibling SDK declarations its code samples cover; every other target sees its own declaration.
+/// `plan` is every built-in target the same plan declares. `StaticDocs` reads it for the sibling
+/// SDK declarations its code samples cover, and every docs output — `StaticDocs` and an SDK that
+/// writes `reference.md` — for the OpenAPI schema patches it refuses; otherwise a target sees only
+/// its own declaration.
 ///
 /// # Errors
 ///
@@ -4463,9 +4465,18 @@ pub fn generate_target(
         BuiltinTarget::OpenApi31Json(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::StaticFiles(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::StaticDocs(t) => crate::staticdocs::generate(t, ir, out, plan),
-        BuiltinTarget::GoSdk(t) => t.generate(ir, out, cx, store),
-        BuiltinTarget::PySdk(t) => t.generate(ir, out, cx, store),
-        BuiltinTarget::TsSdk(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::GoSdk(t) => {
+            crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::Go(t), plan)?;
+            t.generate(ir, out, cx, store)
+        }
+        BuiltinTarget::PySdk(t) => {
+            crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::Python(t), plan)?;
+            t.generate(ir, out, cx, store)
+        }
+        BuiltinTarget::TsSdk(t) => {
+            crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::TypeScript(t), plan)?;
+            t.generate(ir, out, cx, store)
+        }
     }
 }
 
@@ -8807,6 +8818,64 @@ func (s Server) create(c *gin.Context) {
         );
         generate_static_docs(&docs, &[(0, &extensions_only), (1, &docs)])
             .expect("an extension-only patch changes nothing a docs page prints");
+    }
+
+    /// An SDK's `reference.md` prints the same field facts a `StaticDocs` page prints, from the
+    /// same docs model, so an SDK that writes its docs refuses the same patch even with no
+    /// `StaticDocs` in the plan; one declared `without_docs()` prints no field fact and is left
+    /// alone.
+    #[test]
+    fn sdk_docs_refuse_a_schema_patch_that_changes_a_documented_field_fact() {
+        let mut field = OpenApiFieldPatch::new("title");
+        field.constraints.multiple_of = Some("2".to_string());
+        field.constraints.unique_items = true;
+        let openapi = BuiltinTarget::OpenApi31(
+            OpenApi31::new()
+                .to("generated/openapi.yaml")
+                .schema_patch(OpenApiSchemaPatch::new("Book").field(field)),
+        );
+        for sdk in [
+            BuiltinTarget::PySdk(PySdk::new().module("bookstore").to("generated/py")),
+            BuiltinTarget::TsSdk(TsSdk::new().module("bookstore").to("generated/ts")),
+        ] {
+            let mut out = Artifacts::new();
+            let err = super::generate_target(
+                &sdk,
+                &ApiGraph::default(),
+                &mut out,
+                &cx(),
+                None,
+                &PlanTargets::new(&[(0, &openapi), (1, &sdk)]),
+            )
+            .unwrap_err();
+            let text = err.to_string();
+            assert!(matches!(err, crate::CoreError::Config { .. }), "{err:?}");
+            assert!(text.contains(sdk.label()), "{text}");
+            assert!(text.contains("reference.md"), "{text}");
+            assert!(text.contains("Book.title"), "{text}");
+            assert!(text.contains("`multipleOf`, `uniqueItems`"), "{text}");
+            assert!(text.contains("without_docs()"), "{text}");
+            assert!(
+                out.files().is_empty(),
+                "nothing is emitted before the refusal"
+            );
+        }
+        let quiet = BuiltinTarget::PySdk(
+            PySdk::new()
+                .module("bookstore")
+                .to("generated/py")
+                .without_docs(),
+        );
+        let mut out = Artifacts::new();
+        super::generate_target(
+            &quiet,
+            &ApiGraph::default(),
+            &mut out,
+            &cx(),
+            None,
+            &PlanTargets::new(&[(0, &openapi), (1, &quiet)]),
+        )
+        .expect("an SDK that writes no docs prints no field fact");
     }
 
     #[test]

@@ -78,9 +78,10 @@ empty cell in the others.
   required, nullable, constraints, default, description and example. Required and nullable are the
   same per-direction decision the OpenAPI lowering and the SDK emitters make. Vendor extensions
   (`x-*`) are not rendered. Pages read these facts from the graph. An `OpenApiSchemaPatch` edits
-  only the document its target writes. So in a pipeline that declares `StaticDocs`, a patch that
-  sets a field's constraints, enum, description, default or example is a configuration error that
-  names the field. State the fact in the source, or with a `Transform` in `.gnr8/` that edits the
+  only the document its target writes. So in a pipeline that declares `StaticDocs` — or an SDK
+  target that writes `reference.md`, which prints the same field facts — a patch that sets a
+  field's constraints, enum, description, default or example is a configuration error that names
+  the field. State the fact in the source, or with a `Transform` in `.gnr8/` that edits the
   field, and every artifact carries it. A patch that only adds `x-*` extensions is allowed.
 
 No doc comment of a named type or of a body field is read. Where a field's facts come from is a

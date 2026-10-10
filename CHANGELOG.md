@@ -45,8 +45,9 @@ must move the minor version.
   gone; it links only `README.md`, and a diagnostic is printed under its operation, or under the
   index section when it names none. Writing these files now builds the docs model, so with docs on
   (the default) an SDK target fails generation on what `StaticDocs` fails on: an invalid declared
-  example, a blank API title or group name, or prose that breaks `reference.md`'s structure. Tools
-  that parse either file must follow the new layout.
+  example, a blank API title or group name, prose that breaks `reference.md`'s structure, or an
+  `OpenApiSchemaPatch` that changes a field fact `reference.md` prints (see Added). Tools that
+  parse either file must follow the new layout.
 - **`gnr8 verify` checks the samples an SDK's `README.md` and `reference.md` print**, whether or
   not the pipeline declares `StaticDocs`: an SDK target that writes docs and has a package manifest
   gains a docs suite (`<Language> docs samples`), which compiles and runs each sample and fails when
@@ -123,12 +124,15 @@ must move the minor version.
   - `errors.md` names each declared SDK's own typed error; `authentication.md` shows how each SDK
     configures each scheme and which operations require it, together with which other schemes;
     `index.md` prints the diagnostics that name no operation.
-- **A pipeline that declares `StaticDocs` refuses an `OpenApiSchemaPatch` that changes a documented
-  field fact.** A patch edits only the OpenAPI document. Docs pages and their samples read the graph,
-  so a patched constraint, enum, description, default or example would make the docs disagree with
-  the published spec. The configuration error names the target, the field and the facts. Set them
-  in the source or with a `Transform` that edits the field. Patches that only add `x-*` extensions
-  are unaffected.
+- **A pipeline whose docs print field facts refuses an `OpenApiSchemaPatch` that changes one.** Docs
+  print field facts wherever the docs model is rendered: a `StaticDocs` target, and an SDK target
+  that writes its `README.md` and `reference.md` — the default, so a pipeline with any SDK target
+  and no `StaticDocs` refuses these patches too. A patch edits only the OpenAPI document. Docs pages
+  and their samples read the graph, so a patched constraint (`multipleOf` and `uniqueItems`
+  included), enum, description, default or example would make the docs disagree with the published
+  spec. The configuration error names the docs output, the target, the field and the facts. Set
+  them in the source or with a `Transform` that edits the field, or declare the SDK
+  `.without_docs()`. Patches that only add `x-*` extensions are unaffected.
 - **`gnr8 verify` checks every docs sample against the SDK it documents.** Rung 2 compiles Go
   (`go vet`) and TypeScript (`tsc`, strict) samples and executes Python ones against a stub
   transport, and holds every block a sample relies on to its page, `reference.md` and the README

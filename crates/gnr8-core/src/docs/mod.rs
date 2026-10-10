@@ -9,5 +9,6 @@ pub(crate) mod build;
 pub mod identity;
 pub(crate) mod markdown;
 pub(crate) mod model;
+pub(crate) mod patches;
 pub(crate) mod sample;
 pub mod verify;
