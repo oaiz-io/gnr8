@@ -1501,3 +1501,27 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
         assert!(!entry.embeds[0].block.contains("/decoy"));
     }
 }
+
+/// The Example note is true whichever source chose a value: `createBook` sends its declared request
+/// example, so the note cannot claim every value was sampled from the schema.
+#[test]
+fn the_example_note_holds_when_a_declared_example_is_the_value() {
+    let pages = render(&bookstore(), &[]);
+    let text = page(&pages, "operations/create-book.md");
+    assert!(
+        text.contains("The call under Example sends this body."),
+        "{text}"
+    );
+    let example = section(text, "Example");
+    assert!(
+        example.contains(
+            "Each value is the example the API declares for it, or else one sampled from the \
+             schema, and satisfies every declared constraint."
+        ),
+        "{example}"
+    );
+    assert!(
+        !example.contains("Values are sampled from the schema"),
+        "{example}"
+    );
+}
