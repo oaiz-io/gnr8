@@ -442,33 +442,8 @@ fn fit(
         let schema = schema_by_id(graph, id)?;
         return fit(graph, side, &schema.body, value, constraints, subject);
     }
-    // A number in an integer or float32 input must be a value of that width: a Go literal outside
-    // it does not compile. An integral number (`5.0`) is an integer, stated as one (`5`) so every
-    // SDK decodes it into its integer type.
-    match (ty, &*value) {
-        (Type::Primitive(Prim::Int { bits, signed }), Value::Number(number)) => {
-            let Some(integer) = integral(number) else {
-                return Ok(mismatch("is not an integer"));
-            };
-            let (low, high) = integer_range(*bits, *signed);
-            if !(low..=high).contains(&integer) {
-                return Ok(mismatch(&format!(
-                    "is outside the range of {}",
-                    integer_phrase(*bits, *signed)
-                )));
-            }
-            if !number.is_i64() && !number.is_u64() {
-                *value = integer_value(integer);
-            }
-        }
-        (Type::Primitive(Prim::Float { bits: 32 }), Value::Number(number))
-            if number
-                .as_f64()
-                .is_some_and(|x| x.abs() > f64::from(f32::MAX)) =>
-        {
-            return Ok(mismatch("is outside the range of a 32-bit float"));
-        }
-        _ => {}
+    if let Err(reason) = fit_number_width(ty, value) {
+        return Ok(mismatch(&reason));
     }
     // The JSON kind first, so a constraint is only ever read against a value of its type.
     let kind = match ty {
@@ -537,6 +512,36 @@ fn fit(
             Ok(declared(DeclaredLimit::DateTime, value))
         }
         _ => fit_parts(graph, side, ty, value, constraints, subject),
+    }
+}
+
+/// A number in an integer or float32 input must be a value of that width: a Go literal outside it
+/// does not compile. An integral number (`5.0`) is an integer, restated in `value` as one (`5`) so
+/// every SDK decodes it into its integer type. `Err` is the reason the number is no value of `ty`.
+fn fit_number_width(ty: &Type, value: &mut Value) -> Result<(), String> {
+    match (ty, &*value) {
+        (Type::Primitive(Prim::Int { bits, signed }), Value::Number(number)) => {
+            let integer = integral(number).ok_or_else(|| "is not an integer".to_string())?;
+            let (low, high) = integer_range(*bits, *signed);
+            if !(low..=high).contains(&integer) {
+                return Err(format!(
+                    "is outside the range of {}",
+                    integer_phrase(*bits, *signed)
+                ));
+            }
+            if !number.is_i64() && !number.is_u64() {
+                *value = integer_value(integer);
+            }
+            Ok(())
+        }
+        (Type::Primitive(Prim::Float { bits: 32 }), Value::Number(number))
+            if number
+                .as_f64()
+                .is_some_and(|x| x.abs() > f64::from(f32::MAX)) =>
+        {
+            Err("is outside the range of a 32-bit float".to_string())
+        }
+        _ => Ok(()),
     }
 }
 

@@ -2871,10 +2871,10 @@ assert repr(UNSET) == "UNSET"
 "#;
 
 /// Pydantic style: an unset field reads `None`; `model_fields_set` says whether it was set.
-const OPTIONAL_NULLABLE_PYDANTIC_DRIVER: &str = r#"
+const OPTIONAL_NULLABLE_PYDANTIC_DRIVER: &str = r"
 assert P().name is None
 assert P.from_dict({}).name is None
-"#;
+";
 
 /// An optional nullable field can be left out or sent as an explicit `null` — the PATCH that clears
 /// a value — in both model styles, and every payload reads back as itself.

@@ -2312,12 +2312,12 @@ fn only_a_request_float_must_print_alike_and_only_a_float32_narrows() {
     let float32 = json!({"type": "primitive", "of": {"prim": "float", "bits": 32}});
     let precise = |schema: &Value| {
         let mut param = query("q", schema, true, &json!({}));
-        param["example"] = json!("3.14159265");
+        param["example"] = json!("1.23456789");
         probe(&[param], None, None, &[])
     };
     assert_eq!(
         sample(&precise(&float())).params[0].value,
-        json!(3.14159265)
+        json!(1.234_567_89)
     );
     assert!(matches!(
         refusal(&precise(&float32)),

@@ -336,7 +336,7 @@ must move the minor version.
 - A declared reply example is the reply however its numbers print: a reply is decoded, never
   spelled by a generated language, so only a request float has to print alike in Go, Python and
   TypeScript. A float is held to the 32-bit narrowing only in a `float32` field, so a `float64`
-  sample or example such as `3.14159265` is no longer refused.
+  sample or example such as `1.23456789` is no longer refused.
 - A request date-time enum member is the sample only when it is spelled the way Go sends it, as a
   declared request date-time example is. A member such as `…05.120Z` is skipped for a canonical
   one, or refused with the same `No sample call: …` reason when no member is canonical, instead of

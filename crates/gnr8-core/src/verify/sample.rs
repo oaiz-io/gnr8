@@ -2042,49 +2042,7 @@ fn integer_candidate(
     if let Err(keyword) = numeric_interval(constraints) {
         return unsatisfiable(subject, keyword);
     }
-    // Each declared side as `(integer, keyword)`; an exclusive edge at the edge of `i128` has no
-    // integer past it, so no integer meets it.
-    let side = |inclusive: Option<&str>,
-                exclusive: Option<&str>,
-                lower: bool|
-     -> Result<Option<(i128, &'static str)>, &'static str> {
-        let (inclusive_keyword, exclusive_keyword) = if lower {
-            ("minimum", "exclusiveMinimum")
-        } else {
-            ("maximum", "exclusiveMaximum")
-        };
-        let mut edge: Option<(i128, &'static str)> = None;
-        let candidates = [
-            inclusive
-                .and_then(|text| integer_bound(text, lower))
-                .map(|bound| (Some(bound), inclusive_keyword)),
-            exclusive
-                .and_then(|text| integer_bound(text, !lower))
-                .map(|bound| {
-                    let past = if lower {
-                        bound.checked_add(1)
-                    } else {
-                        bound.checked_sub(1)
-                    };
-                    (past, exclusive_keyword)
-                }),
-        ];
-        for (bound, keyword) in candidates.into_iter().flatten() {
-            let bound = bound.ok_or(keyword)?;
-            let tighter = edge.is_none_or(|(current, _)| {
-                if lower {
-                    bound > current
-                } else {
-                    bound < current
-                }
-            });
-            if tighter {
-                edge = Some((bound, keyword));
-            }
-        }
-        Ok(edge)
-    };
-    let lower = match side(
+    let lower = match integer_edge(
         constraints.minimum.as_deref(),
         constraints.exclusive_minimum.as_deref(),
         true,
@@ -2092,7 +2050,7 @@ fn integer_candidate(
         Ok(lower) => lower,
         Err(keyword) => return unsatisfiable(subject, keyword),
     };
-    let upper = match side(
+    let upper = match integer_edge(
         constraints.maximum.as_deref(),
         constraints.exclusive_maximum.as_deref(),
         false,
@@ -2152,6 +2110,51 @@ fn integer_candidate(
         });
     }
     Ok(value)
+}
+
+/// One declared side of an integer interval as `(integer, keyword)`: the tighter of the inclusive
+/// and the exclusive bound, each moved onto the admissible integer (`lower` rounds up). `Err` names
+/// an exclusive bound at the edge of `i128`, which has no integer past it, so no integer meets it.
+fn integer_edge(
+    inclusive: Option<&str>,
+    exclusive: Option<&str>,
+    lower: bool,
+) -> Result<Option<(i128, &'static str)>, &'static str> {
+    let (inclusive_keyword, exclusive_keyword) = if lower {
+        ("minimum", "exclusiveMinimum")
+    } else {
+        ("maximum", "exclusiveMaximum")
+    };
+    let candidates = [
+        inclusive
+            .and_then(|text| integer_bound(text, lower))
+            .map(|bound| (Some(bound), inclusive_keyword)),
+        exclusive
+            .and_then(|text| integer_bound(text, !lower))
+            .map(|bound| {
+                let past = if lower {
+                    bound.checked_add(1)
+                } else {
+                    bound.checked_sub(1)
+                };
+                (past, exclusive_keyword)
+            }),
+    ];
+    let mut edge: Option<(i128, &'static str)> = None;
+    for (bound, keyword) in candidates.into_iter().flatten() {
+        let bound = bound.ok_or(keyword)?;
+        let tighter = edge.is_none_or(|(current, _)| {
+            if lower {
+                bound > current
+            } else {
+                bound < current
+            }
+        });
+        if tighter {
+            edge = Some((bound, keyword));
+        }
+    }
+    Ok(edge)
 }
 
 /// The smallest positive integer that is a multiple of the `multipleOf` text `of` — `of` itself

@@ -829,6 +829,31 @@ fn lower_responses(
     Ok(responses)
 }
 
+/// One response's headers, lowered and sorted by name.
+fn lower_response_headers(
+    resp: &crate::graph::Response,
+    ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
+) -> Result<Vec<model::ResponseHeader>, crate::CoreError> {
+    let mut headers = resp
+        .headers
+        .iter()
+        .map(|header| {
+            Ok(model::ResponseHeader {
+                name: header.name.clone(),
+                schema: lower_schema_type(
+                    &header.schema,
+                    ref_to_name,
+                    schemas,
+                    SchemaDirections::RESPONSE,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, crate::CoreError>>()?;
+    headers.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(headers)
+}
+
 fn lower_response(
     op: &GraphOp,
     resp: &crate::graph::Response,
@@ -906,22 +931,7 @@ fn lower_response(
                 });
             }
         };
-    let mut headers = resp
-        .headers
-        .iter()
-        .map(|header| {
-            Ok(model::ResponseHeader {
-                name: header.name.clone(),
-                schema: lower_schema_type(
-                    &header.schema,
-                    ref_to_name,
-                    schemas,
-                    SchemaDirections::RESPONSE,
-                )?,
-            })
-        })
-        .collect::<Result<Vec<_>, crate::CoreError>>()?;
-    headers.sort_by(|left, right| left.name.cmp(&right.name));
+    let headers = lower_response_headers(resp, ref_to_name, schemas)?;
     Ok((
         resp.status.to_string(),
         ResponseObj {
