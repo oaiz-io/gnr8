@@ -786,7 +786,7 @@ fn run_typescript_contract_test(run: &DocsRun, ts: &TsSdk) {
     )
     .unwrap();
     let output = Command::new("node")
-        .args(["--test", "contract.cjs"])
+        .args(["--test", "--test-reporter=tap", "contract.cjs"])
         .current_dir(dir.join("out"))
         .output()
         .unwrap();
