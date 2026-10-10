@@ -1760,4 +1760,42 @@ mod tests {
             "docs alone should still build suites"
         );
     }
+
+    /// Without `StaticDocs` no page file is written, so a name `StaticDocs` would refuse — a
+    /// reserved device name, a name with no ASCII letter, two subjects on one slug — never stops the
+    /// SDK-only docs suites (and with them `gnr8 verify`).
+    #[test]
+    fn sdk_only_docs_suites_never_refuse_a_page_name() {
+        let mut graph = docs_graph();
+        graph.operations[0].id = "con".to_string();
+        graph.operations[1].id = "注释".to_string();
+        let mut twin = graph.operations[0].clone();
+        twin.id = "Con".to_string();
+        twin.path = "/con".to_string();
+        graph.operations.push(twin);
+        let plan = Pipeline::new()
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go"),
+            )
+            .plan();
+        let suites = super::docs_suites(&plan, &graph).expect("SDK-only suites build");
+        assert_eq!(suites.len(), 1);
+        let unit = suites[0].compile_unit.as_ref().unwrap();
+        assert!(unit
+            .entries
+            .iter()
+            .all(|entry| entry.page == crate::docs::verify::SDK_REFERENCE));
+        let with_site = Pipeline::new()
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go"),
+            )
+            .target(decl::StaticDocs::new().to("gen/docs"))
+            .plan();
+        let err = super::docs_suites(&with_site, &graph).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+    }
 }

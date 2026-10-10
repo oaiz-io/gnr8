@@ -278,9 +278,10 @@ pub(crate) struct PlanUnits {
     pub(crate) units: Vec<Option<CompileUnit>>,
 }
 
-/// Build the docs model for `ir` once, exactly as the `StaticDocs` target builds it for its pages,
-/// and read every sibling's compile unit from it. With `site`, every sample's blocks must be on its
-/// `StaticDocs` page; an SDK that writes `README.md` and `reference.md` must print them there too.
+/// Build the docs model for `ir` once, exactly as the pages it checks were built — the `StaticDocs`
+/// view with `site`, the SDK view without — and read every sibling's compile unit from it. With
+/// `site`, every sample's blocks must be on its `StaticDocs` page; an SDK that writes `README.md`
+/// and `reference.md` must print them there too.
 ///
 /// # Errors
 ///
@@ -292,7 +293,10 @@ pub(crate) fn plan_units(
     site: bool,
 ) -> Result<PlanUnits, CoreError> {
     let projected = crate::graph::projection::for_generation(ir)?;
-    let model = DocsModel::build(&projected, sdks, View::Site)?;
+    // Without `StaticDocs` no page file is written, so no page name may be refused: the model is
+    // built as the SDK's own `reference.md` builds it.
+    let view = if site { View::Site } else { View::Sdk };
+    let model = DocsModel::build(&projected, sdks, view)?;
     let cases = model
         .operations
         .iter()
