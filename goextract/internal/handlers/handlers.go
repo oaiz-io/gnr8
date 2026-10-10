@@ -8282,11 +8282,11 @@ func renderFormatRules(rules []parameterFormatRule) string {
 	return strings.Join(spellings, ", ")
 }
 
-// parameterEnumRules reads every enum a bound parameter's tag states. `binding` and
-// `validate` are one validation vocabulary written under two keys and the `enums`
-// tag states the same fact a third way, so all three are read as peers: none of them
-// outranks another, and stating the enum in two of them is a contradiction rather
-// than a preference.
+// parameterEnumRules reads every enum a bound parameter's tag states. A `oneof` rule
+// under `binding` or `validate` is the one source: they are one validation vocabulary
+// written under two keys, read by the validator that enforces the constraint, so both
+// are read as peers — neither outranks the other, and stating the enum in both is a
+// contradiction rather than a preference.
 func parameterEnumRules(tag reflect.StructTag) []parameterEnumRule {
 	rules := []parameterEnumRule{}
 	for _, key := range []string{"binding", "validate"} {
@@ -8298,16 +8298,6 @@ func parameterEnumRules(tag reflect.StructTag) []parameterEnumRule {
 			if values := strings.Fields(strings.ReplaceAll(value, "|", " ")); len(values) > 0 {
 				rules = append(rules, parameterEnumRule{scope: token.Scope, nested: token.Nested, values: values, text: quoteTagRule(key, token.Text)})
 			}
-		}
-	}
-	for _, key := range []string{"enums", "enum"} {
-		value := tag.Get(key)
-		if value == "" {
-			continue
-		}
-		values := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '|' || r == ' ' })
-		if len(values) > 0 {
-			rules = append(rules, parameterEnumRule{scope: tags.ScopeField, values: values, text: quoteTagRule(key, value)})
 		}
 	}
 	return rules

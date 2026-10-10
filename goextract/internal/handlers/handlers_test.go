@@ -4925,7 +4925,8 @@ type Server struct{ R *gin.Engine }
 
 type Query struct {
 	State    string            `+"`"+`form:"state" binding:"oneof=active paused"`+"`"+`
-	Listed   string            `+"`"+`form:"listed" enums:"private,public"`+"`"+`
+	Listed   string            `+"`"+`form:"listed" validate:"oneof=private public"`+"`"+`
+	Foreign  string            `+"`"+`form:"foreign" enums:"eu,us" enum:"eu,us"`+"`"+`
 	Tags     []string          `+"`"+`form:"tags" binding:"oneof=red green"`+"`"+`
 	Kinds    []string          `+"`"+`form:"kinds" binding:"dive,oneof=alpha beta"`+"`"+`
 	Filters  map[string]string `+"`"+`form:"filters" binding:"dive,oneof=red green"`+"`"+`
@@ -4962,6 +4963,11 @@ func (s Server) search(c *gin.Context) {
 
 	assertEnum(t, paramSchema(t, code, "state"), "active", "paused")
 	assertEnum(t, paramSchema(t, code, "listed"), "private", "public")
+	// `enums:`/`enum:` are another generator's spelling of an enum; no Go runtime
+	// consumes them, so they state nothing and the parameter stays a plain string.
+	if foreign := paramSchema(t, code, "foreign"); primName(foreign) != facts.PrimString {
+		t.Fatalf("a foreign enum tag must state no enum, got %+v", foreign)
+	}
 	assertEnum(t, arrayElement(t, paramSchema(t, code, "tags")), "red", "green")
 	assertEnum(t, arrayElement(t, paramSchema(t, code, "kinds")), "alpha", "beta")
 

@@ -9,6 +9,14 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **Go extraction no longer reads `enums:"…"` / `enum:"…"` struct tags.** That spelling belongs to
+  another generator, and no Go runtime consumes it. A field or bound parameter that stated its enum
+  only that way now publishes a plain string, with no enum and no diagnostic. State the enum with
+  the validator's own rule instead: `binding:"oneof=a b"` or `validate:"oneof=a b"`. Separate the
+  members with spaces. That rule is the one source of an enum constraint.
+
 ## 0.17.2 — 2026-10-10
 
 ### Added

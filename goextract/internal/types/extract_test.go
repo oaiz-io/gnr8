@@ -723,7 +723,8 @@ import "mime/multipart"
 type UploadForm struct {
 	File        *multipart.FileHeader `+"`form:\"file\" binding:\"required\" description:\"CSV upload\"`"+`
 	Title       string                `+"`form:\"title\" validate:\"required,min=3\" schema:\"example=June report,format=slug\"`"+`
-	Visibility  string                `+"`form:\"visibility\" enums:\"private,public\" default:\"private\"`"+`
+	Visibility  string                `+"`form:\"visibility\" binding:\"oneof=private public\" default:\"private\"`"+`
+	Region      string                `+"`form:\"region\" enums:\"eu,us\" enum:\"eu,us\"`"+`
 	Attachments []*multipart.FileHeader `+"`form:\"attachments,omitempty\"`"+`
 }
 `),
@@ -781,7 +782,16 @@ type UploadForm struct {
 		t.Fatal("field 'visibility' not found")
 	}
 	if visibility.Meta == nil || visibility.Meta.Constraints == nil || len(visibility.Meta.Constraints.EnumValues) != 2 {
-		t.Fatalf("enums tag not preserved: %+v", visibility)
+		t.Fatalf("binding oneof not preserved: %+v", visibility)
+	}
+	// `enums:`/`enum:` are another generator's spelling of an enum; no Go runtime
+	// consumes them, so they state nothing and the field stays a plain string.
+	region, ok := fieldByJSON(s, "region")
+	if !ok {
+		t.Fatal("field 'region' not found")
+	}
+	if region.Meta != nil && region.Meta.Constraints != nil && len(region.Meta.Constraints.EnumValues) != 0 {
+		t.Fatalf("a foreign enum tag must state no enum, got %+v", region.Meta.Constraints.EnumValues)
 	}
 	if visibility.Meta.Default == nil || visibility.Meta.Default.Type != "string" || visibility.Meta.Default.Value != "private" {
 		t.Fatalf("default tag not preserved: %#v", visibility.Meta.Default)
