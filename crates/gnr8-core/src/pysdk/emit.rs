@@ -958,19 +958,42 @@ enum NestedModels<'g> {
 }
 
 /// The models `schema` holds, or `None` when it holds none the style's `from_dict` rebuilds.
+///
+/// A named schema that is not an object is a type alias, and the walk reads it as its body: an
+/// alias of a list of models holds models exactly as the list it names does.
 fn nested_models<'g>(
     schema: &Type,
     graph: &'g ApiGraph,
     model_style: PyModelStyle,
 ) -> Option<NestedModels<'g>> {
+    nested_models_within(schema, graph, model_style, &mut Vec::new())
+}
+
+/// `aliases` is the chain of aliases being read, so an alias that reaches itself without passing
+/// through a model holds no model rather than recursing forever.
+fn nested_models_within<'g>(
+    schema: &Type,
+    graph: &'g ApiGraph,
+    model_style: PyModelStyle,
+    aliases: &mut Vec<&'g str>,
+) -> Option<NestedModels<'g>> {
     match schema {
         Type::Named(_) => {
             let target = resolve_named(schema, graph)?;
-            matches!(target.body, Type::Object(_)).then_some(NestedModels::Model(&target.name))
+            if matches!(target.body, Type::Object(_)) {
+                return Some(NestedModels::Model(&target.name));
+            }
+            if aliases.contains(&target.id.as_str()) {
+                return None;
+            }
+            aliases.push(&target.id);
+            let shape = nested_models_within(&target.body, graph, model_style, aliases);
+            aliases.pop();
+            shape
         }
-        Type::Array(items) => nested_models(items, graph, model_style)
+        Type::Array(items) => nested_models_within(items, graph, model_style, aliases)
             .map(|items| NestedModels::List(Box::new(items))),
-        Type::Map { value, .. } => nested_models(value, graph, model_style)
+        Type::Map { value, .. } => nested_models_within(value, graph, model_style, aliases)
             .map(|values| NestedModels::Map(Box::new(values))),
         // Every model-bearing variant has to BE a model: a container variant would need its own
         // comprehension, which no single expression can select between, so a union carrying one is
@@ -980,7 +1003,9 @@ fn nested_models<'g>(
             PyModelStyle::Pydantic => {
                 let shapes: Vec<NestedModels<'g>> = variants
                     .iter()
-                    .filter_map(|variant| nested_models(variant, graph, model_style))
+                    .filter_map(|variant| {
+                        nested_models_within(variant, graph, model_style, aliases)
+                    })
                     .collect();
                 (!shapes.is_empty()
                     && shapes

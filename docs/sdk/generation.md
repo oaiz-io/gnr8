@@ -225,8 +225,8 @@ no-dependency consumers. `PyModelStyle` exposes the same choice when a reusable 
 
 Every model has a `from_dict` and a `to_dict`, and both follow one walk of each field's type, so
 each reads back what the other writes. A dataclass's `from_dict` rebuilds a nested model wherever
-the field's type names one: the field itself, list items and map values, at any depth. `to_dict`
-encodes exactly those positions back. A union is not walked: nothing in its type says which variant
+the field's type names one: the field itself, list items and map values, at any depth, with a
+named alias read as the type it names. `to_dict` encodes exactly those positions back. A union is not walked: nothing in its type says which variant
 a JSON object is, so a dataclass union field holds its JSON value both ways. `from_dict` keeps the
 decoded value, and `to_dict` sends what the field holds, so set it to the wire value (a `dict`), not
 a model. A Pydantic model's `from_dict` is `model_validate`, which also builds a union's model

@@ -2614,24 +2614,30 @@ fn generated_cli_python_command_spec_keeps_the_output_contract() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A model nested in every shape a field's type can carry it in: inside a list, a list of lists
-/// and a map, and as one variant of a union.
+/// A model nested in every shape a field's type can carry it in: through a named alias of a list
+/// and of a map, inside a list of lists and a map, and as one variant of a union. `note` is a
+/// required nullable key, which `model_dump` drops unless the nested model's own `to_dict` puts
+/// it back.
 const NESTED_MODELS_SPEC: &str = r##"openapi: 3.1.0
 info: { title: Nested, version: 1.0.0 }
 components:
   schemas:
     Inner:
       type: object
-      required: [label]
+      required: [label, note]
       properties:
         label: { type: string }
+        note: { type: [string, "null"] }
+    Inners: { type: array, items: { $ref: "#/components/schemas/Inner" } }
+    InnerMap: { type: object, additionalProperties: { $ref: "#/components/schemas/Inner" } }
     Holder:
       type: object
       required: [list]
       properties:
-        list: { type: array, items: { $ref: "#/components/schemas/Inner" } }
+        list: { $ref: "#/components/schemas/Inners" }
         nested: { type: array, items: { type: array, items: { $ref: "#/components/schemas/Inner" } } }
         by_key: { type: object, additionalProperties: { $ref: "#/components/schemas/Inner" } }
+        alias_map: { $ref: "#/components/schemas/InnerMap" }
         choice:
           oneOf:
             - { $ref: "#/components/schemas/Inner" }
@@ -2687,16 +2693,22 @@ const NESTED_PAYLOAD: &str = r#"
 import json
 import bookstore
 
+def inner(label):
+    return {"label": label, "note": None}
+
+
 payload = {
-    "list": [{"label": "a"}],
-    "nested": [[{"label": "b"}]],
-    "by_key": {"k": {"label": "c"}},
-    "choice": {"label": "e"},
+    "list": [inner("a")],
+    "nested": [[inner("b")]],
+    "by_key": {"k": inner("c")},
+    "alias_map": {"m": inner("d")},
+    "choice": inner("e"),
 }
 decoded = bookstore.Holder.from_dict(payload)
 assert isinstance(decoded.list_[0], bookstore.Inner), decoded.list_
 assert isinstance(decoded.nested[0][0], bookstore.Inner), decoded.nested
 assert isinstance(decoded.by_key["k"], bookstore.Inner), decoded.by_key
+assert isinstance(decoded.alias_map["m"], bookstore.Inner), decoded.alias_map
 assert decoded.to_dict() == payload, decoded.to_dict()
 json.dumps(decoded.to_dict())
 "#;
@@ -2705,13 +2717,14 @@ json.dumps(decoded.to_dict())
 /// named alias, list items and map values — and `to_dict` encodes exactly those positions back. A
 /// union holds its JSON value in both directions.
 const NESTED_DATACLASS_DRIVER: &str = r#"
-assert decoded.choice == {"label": "e"}, decoded.choice
+assert decoded.choice == inner("e"), decoded.choice
 
 built = bookstore.Holder(
-    list_=[bookstore.Inner(label="a")],
-    nested=[[bookstore.Inner(label="b")]],
-    by_key={"k": bookstore.Inner(label="c")},
-    choice={"label": "e"},
+    list_=[bookstore.Inner(label="a", note=None)],
+    nested=[[bookstore.Inner(label="b", note=None)]],
+    by_key={"k": bookstore.Inner(label="c", note=None)},
+    alias_map={"m": bookstore.Inner(label="d", note=None)},
+    choice=inner("e"),
 )
 assert built.to_dict() == payload, built.to_dict()
 json.dumps(built.to_dict())
@@ -2723,10 +2736,11 @@ const NESTED_PYDANTIC_DRIVER: &str = r#"
 assert isinstance(decoded.choice, bookstore.Inner), decoded.choice
 
 built = bookstore.Holder(
-    list=[bookstore.Inner(label="a")],
-    nested=[[bookstore.Inner(label="b")]],
-    by_key={"k": bookstore.Inner(label="c")},
-    choice=bookstore.Inner(label="e"),
+    list=[bookstore.Inner(label="a", note=None)],
+    nested=[[bookstore.Inner(label="b", note=None)]],
+    by_key={"k": bookstore.Inner(label="c", note=None)},
+    alias_map={"m": bookstore.Inner(label="d", note=None)},
+    choice=bookstore.Inner(label="e", note=None),
 )
 assert built.to_dict() == payload, built.to_dict()
 json.dumps(built.to_dict())
