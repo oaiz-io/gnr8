@@ -698,22 +698,20 @@ fn complete_tag(text: &str) -> Option<(&str, &str)> {
                 let value = skip_spaces(at);
                 if bytes.get(value) == Some(&b'=') {
                     at = skip_spaces(value + 1);
-                    at = match bytes.get(at)? {
-                        quote @ (b'"' | b'\'') => {
-                            let close = text[at + 1..].find(char::from(*quote))?;
-                            at + 1 + close + 1
+                    let quote = *bytes.get(at)?;
+                    at = if matches!(quote, b'"' | b'\'') {
+                        let close = text[at + 1..].find(char::from(quote))?;
+                        at + 1 + close + 1
+                    } else {
+                        let unquoted = text[at..]
+                            .find(|ch: char| {
+                                matches!(ch, ' ' | '\t' | '"' | '\'' | '=' | '<' | '>' | '`')
+                            })
+                            .unwrap_or(text.len() - at);
+                        if unquoted == 0 {
+                            return None;
                         }
-                        _ => {
-                            let unquoted = text[at..]
-                                .find(|ch: char| {
-                                    matches!(ch, ' ' | '\t' | '"' | '\'' | '=' | '<' | '>' | '`')
-                                })
-                                .unwrap_or(text.len() - at);
-                            if unquoted == 0 {
-                                return None;
-                            }
-                            at + unquoted
-                        }
+                        at + unquoted
                     };
                 }
             }
