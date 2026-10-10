@@ -12,7 +12,12 @@ use crate::graph::{ApiGraph, Type};
 pub const GRAPH_ARTIFACT_PATH: &str = "generated/gnr8.graph.json";
 
 /// Current on-disk graph artifact schema.
-pub const GRAPH_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+///
+/// Bumped whenever the same API is represented differently, so `gnr8 changes` refuses to compare
+/// across representations instead of reporting the difference as API changes. Version 2: an
+/// imported parameter's validation keywords live in its typed constraints, no longer in the raw
+/// schema the graph keeps for it.
+pub const GRAPH_ARTIFACT_SCHEMA_VERSION: u32 = 2;
 
 /// Stable on-disk envelope for one projected [`ApiGraph`].
 ///

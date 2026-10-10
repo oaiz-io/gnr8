@@ -269,7 +269,10 @@ pub enum CoreError {
 
     /// The committed base graph artifact uses a different on-disk schema.
     #[error(
-        "base graph artifact at '{reference}:{path}' has schema version {found}; expected {expected}"
+        "base graph artifact at '{reference}:{path}' has schema version {found}; expected \
+         {expected}: it represents the graph differently, so comparing it would report changes \
+         the API did not make. Compare against a revision whose `{path}` this gnr8 wrote (run \
+         `gnr8 generate` and commit it first)"
     )]
     BaseGraphSchemaVersion {
         /// User-provided revision expression.

@@ -16,6 +16,12 @@ must move the minor version.
   only that way now publishes a plain string, with no enum and no diagnostic. State the enum with
   the validator's own rule instead: `binding:"oneof=a b"` or `validate:"oneof=a b"`. Separate the
   members with spaces. That rule is the one source of an enum constraint.
+- **`generated/gnr8.graph.json` is schema version 2.** An imported parameter's validation keywords
+  now live in its typed constraints instead of the raw schema the graph keeps, so comparing against
+  a version 1 artifact would report `request.parameter.constraints.changed` and
+  `request.parameter.serialization.changed` as breaking changes the API never made. `gnr8 changes
+  --base <ref>` refuses a version 1 base and says how to fix it: run `gnr8 generate` with this
+  version, commit the artifact, and compare against that revision.
 - `gnr8_engine::verify`: `ContractTestSuite` gains `refused` and `ContractTestPlan` gains `refused`
   (each refused sample, with its operation, scope and reason); `SampleParam` gains `required` and
   `unmet`, and `SampleBody` gains `unmet`. Code that builds these structs literally needs the new

@@ -224,7 +224,9 @@ mod tests {
     use crate::graph::{
         ApiGraph, Field, Operation, Prim, Response, Schema, SchemaRef, SourceSpan, Type,
     };
-    use crate::graph_artifact::{GraphArtifact, GRAPH_ARTIFACT_PATH};
+    use crate::graph_artifact::{
+        GraphArtifact, GRAPH_ARTIFACT_PATH, GRAPH_ARTIFACT_SCHEMA_VERSION,
+    };
     use crate::CoreError;
 
     const FIXTURE_ARTIFACT_PATH: &str = "examples/bookstore/generated/gnr8.graph.json";
@@ -337,20 +339,43 @@ mod tests {
         let corrupt = parse_base_artifact("main", GRAPH_ARTIFACT_PATH, b"{not json").unwrap_err();
         assert!(matches!(corrupt, CoreError::BaseGraphCorrupt { .. }));
 
+        let current = format!("\"schema_version\": {GRAPH_ARTIFACT_SCHEMA_VERSION}");
         let text = GraphArtifact::new(crate::graph::ApiGraph::default())
             .to_json()
             .expect("serialize current artifact")
-            .replace("\"schema_version\": 1", "\"schema_version\": 99");
+            .replace(&current, "\"schema_version\": 99");
         let mismatch =
             parse_base_artifact("main", GRAPH_ARTIFACT_PATH, text.as_bytes()).unwrap_err();
         assert!(matches!(
             mismatch,
             CoreError::BaseGraphSchemaVersion {
-                expected: 1,
+                expected: GRAPH_ARTIFACT_SCHEMA_VERSION,
                 ref found,
                 ..
             } if found == "99"
         ));
+    }
+
+    /// A base artifact written before imported parameter constraints became typed facts (schema
+    /// version 1) would diff as `request.parameter.constraints.changed` and
+    /// `request.parameter.serialization.changed` — Breaking changes the API never made. It is
+    /// refused, naming the remedy, instead.
+    #[test]
+    fn a_version_1_base_artifact_is_refused_with_the_remedy() {
+        assert_eq!(GRAPH_ARTIFACT_SCHEMA_VERSION, 2);
+        let current = format!("\"schema_version\": {GRAPH_ARTIFACT_SCHEMA_VERSION}");
+        let text = GraphArtifact::new(crate::graph::ApiGraph::default())
+            .to_json()
+            .expect("serialize current artifact")
+            .replace(&current, "\"schema_version\": 1");
+        let refused =
+            parse_base_artifact("origin/main", GRAPH_ARTIFACT_PATH, text.as_bytes()).unwrap_err();
+        let message = refused.to_string();
+        assert!(
+            message.contains("has schema version 1; expected 2")
+                && message.contains("run `gnr8 generate` and commit it first"),
+            "{message}"
+        );
     }
 
     #[test]
