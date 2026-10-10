@@ -454,7 +454,7 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
         let _ = writeln!(out, "{pad}description: {}", scalar(description));
     }
     if let Some(members) = &schema.enum_values {
-        let mut values: Vec<String> = members.iter().map(|member| scalar(member)).collect();
+        let mut values: Vec<String> = members.iter().map(|member| flow_scalar(member)).collect();
         if schema.nullable {
             values.push("null".to_string());
         }
@@ -577,8 +577,19 @@ fn ref_pointer(name: &str) -> String {
 
 /// Render a flow-style sequence `[a, b, c]`. Each item is scalar-escaped.
 fn flow_seq(items: &[String]) -> String {
-    let rendered: Vec<String> = items.iter().map(|item| scalar(item)).collect();
+    let rendered: Vec<String> = items.iter().map(|item| flow_scalar(item)).collect();
     format!("[{}]", rendered.join(", "))
+}
+
+/// Render one item of a flow sequence. Inside `[...]` a `,` ends the item, `]` ends the sequence,
+/// and `[`/`{`/`}` open or close a nested collection, so those characters force quoting anywhere
+/// in the value, not only where they would lead a block scalar.
+fn flow_scalar(value: &str) -> String {
+    if needs_key_quoting(value) {
+        quote(value)
+    } else {
+        value.to_string()
+    }
 }
 
 fn flow_type_seq(items: &[String]) -> String {
@@ -1099,6 +1110,10 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             "2026-07-16",
             "value # comment",
             "key: value",
+            "a, b",
+            "x]",
+            "{y}",
+            "c[d",
         ];
         let mut doc = sample_doc();
         let schema = &mut doc.components.schemas[0].1;

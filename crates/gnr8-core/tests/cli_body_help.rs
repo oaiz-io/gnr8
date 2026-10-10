@@ -44,6 +44,20 @@ fn graph() -> ApiGraph {
     .unwrap()
 }
 
+/// The Go target formats through `gofmt`; without it these cases cannot generate.
+fn skip_go() -> bool {
+    let available = Command::new("gofmt")
+        .arg("-h")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok();
+    if !available {
+        eprintln!("skipping Go CLI body help test: gofmt unavailable");
+    }
+    !available
+}
+
 fn go_cli(graph: &ApiGraph) -> Artifacts {
     let mut out = Artifacts::new();
     GoSdk::new()
@@ -129,6 +143,9 @@ fn body_field<'a>(help: &'a serde_json::Value, name: &str) -> &'a serde_json::Va
 
 #[test]
 fn help_preserves_inline_enum_restrictions() {
+    if skip_go() {
+        return;
+    }
     let graph = graph();
     let spec: serde_json::Value = serde_json::from_str(
         &gnr8_engine::lower::to_openapi_json(&graph, "Review", "/", &[]).unwrap(),
@@ -136,15 +153,14 @@ fn help_preserves_inline_enum_restrictions() {
     .unwrap();
     let help = go_help_spec(&graph);
     let published = &spec["components"]["schemas"]["Input"]["properties"]["mode"]["enum"];
-    eprintln!(
-        "OpenAPI mode enum: {published}; help mode: {}",
-        body_field(&help, "mode")
-    );
     assert_eq!(&body_field(&help, "mode")["enum"], published);
 }
 
 #[test]
 fn help_preserves_named_enum_restrictions() {
+    if skip_go() {
+        return;
+    }
     let graph = graph();
     let spec: serde_json::Value = serde_json::from_str(
         &gnr8_engine::lower::to_openapi_json(&graph, "Review", "/", &[]).unwrap(),
@@ -152,15 +168,14 @@ fn help_preserves_named_enum_restrictions() {
     .unwrap();
     let help = go_help_spec(&graph);
     let published = &spec["components"]["schemas"]["Input"]["properties"]["status"]["enum"];
-    eprintln!(
-        "OpenAPI status enum: {published}; help status: {}",
-        body_field(&help, "status")
-    );
     assert_eq!(&body_field(&help, "status")["enum"], published);
 }
 
 #[test]
 fn help_preserves_nullable_required_type() {
+    if skip_go() {
+        return;
+    }
     let graph = graph();
     let spec: serde_json::Value = serde_json::from_str(
         &gnr8_engine::lower::to_openapi_json(&graph, "Review", "/", &[]).unwrap(),
@@ -168,10 +183,6 @@ fn help_preserves_nullable_required_type() {
     .unwrap();
     let help = go_help_spec(&graph);
     let published = &spec["components"]["schemas"]["Input"]["properties"]["title"]["type"];
-    eprintln!(
-        "OpenAPI title type: {published}; help title: {}",
-        body_field(&help, "title")
-    );
     assert_eq!(published, &serde_json::json!(["string", "null"]));
     assert!(body_field(&help, "title")["type"]
         .as_str()
@@ -181,6 +192,9 @@ fn help_preserves_nullable_required_type() {
 
 #[test]
 fn shared_schema_help_uses_the_input_projection() {
+    if skip_go() {
+        return;
+    }
     let mut graph = graph();
     graph.operations[0].responses[0].body_kind = "json".to_string();
     graph.operations[0].responses[0].content_type = Some("application/json".to_string());
@@ -192,13 +206,15 @@ fn shared_schema_help_uses_the_input_projection() {
     };
     fields[0].serializer_may_omit = true;
     let help = go_help_spec(&graph);
-    eprintln!("Projected body: {}", help["commands"][0]["body"]);
     assert_eq!(help["commands"][0]["body"]["schema"], "InputInput");
     assert_eq!(body_field(&help, "mode")["required"], true);
 }
 
 #[test]
 fn body_array_lists_each_item_field() {
+    if skip_go() {
+        return;
+    }
     let mut graph = graph();
     let mut array = graph.schemas[0].clone();
     array.id = "Inputs".to_string();
@@ -215,6 +231,9 @@ fn body_array_lists_each_item_field() {
 
 #[test]
 fn field_constraints_cannot_add_values_to_an_inline_enum() {
+    if skip_go() {
+        return;
+    }
     let mut graph = graph();
     input_fields(&mut graph)[0].meta.constraints.enum_values = vec![
         "unknown".to_string(),
@@ -235,6 +254,9 @@ fn field_constraints_cannot_add_values_to_an_inline_enum() {
 
 #[test]
 fn disjoint_and_empty_enums_stay_closed() {
+    if skip_go() {
+        return;
+    }
     let mut graph = graph();
     input_fields(&mut graph)[0].meta.constraints.enum_values = vec!["unknown".to_string()];
     input_fields(&mut graph)[1].schema = Type::Enum(Vec::new());
@@ -264,6 +286,9 @@ fn disjoint_and_empty_enums_stay_closed() {
 
 #[test]
 fn nullable_inline_and_named_enums_allow_null_in_openapi() {
+    if skip_go() {
+        return;
+    }
     let mut graph = graph();
     for field in &mut input_fields(&mut graph)[..2] {
         field.deserializer_accepts_null = true;
@@ -285,6 +310,9 @@ fn nullable_inline_and_named_enums_allow_null_in_openapi() {
 
 #[test]
 fn nested_nullable_containers_keep_their_input_contract() {
+    if skip_go() {
+        return;
+    }
     let mut graph = graph();
     let mut nested = graph.schemas[0].clone();
     nested.id = "Nested".to_string();
@@ -340,6 +368,9 @@ fn python_machine_help_preserves_constraints_and_container_unions() {
 
 #[test]
 fn enum_labels_preserve_empty_values_and_delimiters_on_one_line() {
+    if skip_go() {
+        return;
+    }
     let mut graph = graph();
     input_fields(&mut graph)[0].schema = Type::Enum(vec![
         String::new(),
