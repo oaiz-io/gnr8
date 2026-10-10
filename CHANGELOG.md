@@ -15,6 +15,19 @@ must move the minor version.
   an arm. The host/worker protocol is now version 9, so a worker and CLI cannot silently disagree
   about the stage-plan shape.
 
+### Fixed
+
+- Contract-test sample values — request inputs and canned success replies — now satisfy declared
+  `enum`, length, range, item-count and property-count constraints, and a string `format` gnr8 maps
+  to a well-known scalar, except that an enum member is sent as declared even where it contradicts
+  that format; other formats remain annotations. No value is sent for a `pattern`, which gnr8 never
+  synthesizes and which imported specs carry most often, or for bounds no value can meet. In the
+  generated contract tests, the affected operation or case is skipped, silently. A refused optional
+  reply field is left out of the canned reply instead, so only a refused required field costs a
+  case. Enum-keyed map samples use an enum member as the key. Generated `contract_test.*` files
+  change for operations whose inputs or responses declare constraints, and suites over patterned
+  models can lose cases.
+
 ## 0.17.1 — 2026-10-07
 
 ### Added
