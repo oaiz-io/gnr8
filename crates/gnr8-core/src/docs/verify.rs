@@ -59,7 +59,8 @@ pub struct CompileEntry {
     /// answers with — the success reply for a call or an iterator, the error reply for a
     /// typed-error sample — when the page prints one.
     pub embeds: Vec<PageEmbed>,
-    /// The request the sample's call must send — the one the embedded HTTP block prints.
+    /// The request the sample's call must send: the one the embedded HTTP block prints, or, for an
+    /// iterator that leaves the cursor parameter out, that request without it.
     pub request: HttpRequest,
 }
 
@@ -248,7 +249,7 @@ fn unit_of(
                     SDK_REFERENCE.to_string()
                 },
                 snippet: sample.body.clone(),
-                request: (**request).clone(),
+                request: sample.wire.request.clone(),
             };
             samples.push(UnitSample {
                 operation: op.id.as_str(),

@@ -1268,6 +1268,19 @@ fn typed_error_and_iterator_samples_follow_the_call() {
     ] {
         assert!(listed.contains(iterate), "{iterate} in:\n{listed}");
     }
+    // The call passes the sampled cursor; the iterator leaves it out, so it starts at the first
+    // page as the lead-in says.
+    for iterator in listed
+        .split("Iterating over every item of every page:\n\n")
+        .skip(1)
+    {
+        let block = &iterator[..iterator[3..].find("```\n").unwrap() + 3];
+        assert!(!block.to_ascii_lowercase().contains("cursor"), "{block}");
+    }
+    assert_eq!(
+        listed.matches("ursor: ").count() + listed.matches("cursor=").count(),
+        4
+    );
 
     // An error body the sampler refuses stands in for every typed-error sample.
     let mut value = bookstore_json();
@@ -1279,6 +1292,38 @@ fn typed_error_and_iterator_samples_follow_the_call() {
         "{created}"
     );
     assert!(!created.contains("Handling the"), "{created}");
+}
+
+/// A page number is the position every generated iterator starts from, so the iterator passes it
+/// as sampled, and its lead-in says it starts there rather than at the first page.
+#[test]
+fn a_page_numbered_iterator_starts_from_the_sampled_page() {
+    let mut value = bookstore_json();
+    for name in ["page", "page_size"] {
+        value["operations"][0]["params"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": name, "location": "query", "required": false,
+                         "schema": integer(), "provenance": span()}));
+    }
+    value["pagination"] = json!([{
+        "operation_id": "listBooks", "mode": "page", "items_field": "books",
+        "page_param": "page", "page_size_param": "page_size", "termination": "empty_items"
+    }]);
+    let pages = render(&graph_of(value), &[go_sdk(), py_sdk()]);
+    let listed = section(page(&pages, "operations/list-books.md"), "Example");
+    assert_eq!(
+        listed
+            .matches("Iterating over every item from the sampled page on:")
+            .count(),
+        2,
+        "{listed}"
+    );
+    assert!(!listed.contains("of every page"), "{listed}");
+    assert!(
+        listed.contains("page=7, page_size=7):\n    print(item)"),
+        "{listed}"
+    );
 }
 
 /// A request the docs model says a sample sends.
@@ -1813,6 +1858,21 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
             entry.operation_id
         );
     }
+    // The iterator leaves the sampled cursor out, so rung 3 holds it to the printed request
+    // without that one query parameter.
+    let request_of = |kind: EntryKind| {
+        &unit
+            .entries
+            .iter()
+            .find(|entry| entry.operation_id == "listBooks" && entry.kind == kind)
+            .unwrap()
+            .request
+    };
+    let (call, iterate) = (request_of(EntryKind::Call), request_of(EntryKind::Iterate));
+    let mut without_cursor = call.clone();
+    without_cursor.query.retain(|(name, _)| name != "cursor");
+    assert_ne!(call, &without_cursor, "the call sends the sampled cursor");
+    assert_eq!(iterate, &without_cursor);
     // Every call whose page prints a success reply relies on it, and so does every iterator.
     for (operation, kind) in [
         ("getBook", EntryKind::Call),

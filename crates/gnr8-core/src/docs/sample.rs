@@ -322,11 +322,13 @@ pub(crate) fn terminating_reply(
     })
 }
 
-/// One SDK's call site for one sample, and the client a rung-3 harness builds in its place.
+/// One SDK's call site for one sample, the request it sends, and the client a rung-3 harness
+/// builds in its place.
 struct Rendered<'a> {
     sdk: SiblingSdk<'a>,
     identity: &'a ConsumerIdentity,
     call_site: CallSite,
+    request: HttpRequest,
     client: String,
 }
 
@@ -389,6 +391,7 @@ impl<'a> Rendered<'a> {
             sdk,
             identity,
             call_site: site,
+            request: http_request(graph, op, sample),
             client,
         })
     }
@@ -418,6 +421,7 @@ impl<'a> Rendered<'a> {
             text,
             wire: WireHarness {
                 client: self.client.clone(),
+                request: self.request.clone(),
                 reply,
             },
         }
@@ -488,15 +492,46 @@ pub(crate) fn sdk_samples(
         }
         Some(ErrorReplyDoc::Refused { .. }) | None => None,
     };
+    let (from, iterates_from_first_page) = iteration_inputs(graph, op, sample);
     let iterate = match terminating_reply(graph, op, reply) {
-        Some(terminating) => iterate_sample(graph, op, &site, terminating)?,
+        Some(terminating) => {
+            let site = Rendered::render(graph, op, &from, sdk, identity)?;
+            iterate_sample(graph, op, &site, terminating)?
+        }
         None => None,
     };
     Ok(SdkSamples::Code(Box::new(CodeSamples {
         call,
         typed_error,
         iterate,
+        iterates_from_first_page,
     })))
+}
+
+/// The inputs the iterator sample is called with: the call's, without an optional cursor
+/// parameter, so the iteration starts at the first page — the sampled cursor names no page the
+/// API ever returned. A required cursor, a page number or an offset is the position every
+/// generated iterator starts from, so it stays as sampled. Returns whether the cursor was left out.
+fn iteration_inputs(
+    graph: &ApiGraph,
+    op: &Operation,
+    sample: &OperationSample,
+) -> (OperationSample, bool) {
+    let mut inputs = sample.clone();
+    let cursor = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)
+        .and_then(|policy| policy.cursor_param.as_deref());
+    let Some(cursor) = cursor else {
+        return (inputs, false);
+    };
+    let before = inputs.params.len();
+    inputs
+        .params
+        .retain(|param| param.required || param.location != "query" || param.name != cursor);
+    let omitted = inputs.params.len() < before;
+    (inputs, omitted)
 }
 
 /// The sampled call: construction, call and one use of the result.

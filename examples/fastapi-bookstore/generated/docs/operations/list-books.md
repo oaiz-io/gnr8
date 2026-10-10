@@ -75,7 +75,7 @@ Iterating over every item of every page:
 from sdk import Client
 
 client = Client(base_url)
-for item in client.iter_list_books(cursor="gnr8", genre="gnr8", sort="gnr8"):
+for item in client.iter_list_books(genre="gnr8", sort="gnr8"):
     print(item)
 ```
 

@@ -406,6 +406,10 @@ pub(crate) struct CodeSamples {
     /// The pagination iterator, when the operation declares pagination and its page prints a JSON
     /// reply.
     pub(crate) iterate: Option<CodeSample>,
+    /// Whether the iterator starts at the first page: it leaves an optional cursor parameter out.
+    /// A required cursor, a page number or an offset is passed as sampled, so the iterator starts
+    /// at the sampled position.
+    pub(crate) iterates_from_first_page: bool,
 }
 
 /// What a code sample shows.
@@ -443,6 +447,9 @@ pub(crate) struct WireHarness {
     /// The client it builds instead of the printed one: the contract base URL and credentials, on
     /// the recording transport, the way the contract harness builds its client.
     pub(crate) client: String,
+    /// The request the call must send: the request the page prints, or, for an iterator that
+    /// leaves the cursor parameter out, that request without it.
+    pub(crate) request: HttpRequest,
     /// What it answers the call with, and what the call must make of it.
     pub(crate) reply: CannedReply,
 }

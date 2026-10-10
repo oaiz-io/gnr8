@@ -104,7 +104,11 @@ identity every sample under it imports, and carries up to three samples:
   the reply and of every typed-error sample;
 - **the iterator**, when a `ConfigurePagination` transform declares pagination and the page prints
   a JSON reply: the SDK's own iterator (`IterateListItems`, `iter_list_items`,
-  `iterateListItems`) called with the operation's arguments, over every item of every page.
+  `iterateListItems`) called with the call's arguments, over every item of every page. An optional
+  cursor parameter is left out, so the iteration starts at the first page (*Iterating over every
+  item of every page:*). A required cursor, a page number or an offset is the position every
+  generated iterator starts from, so it is passed as sampled (*Iterating over every item from the
+  sampled page on:*).
 
 - **Declared examples come first.** An input that declares an example takes it, and an input that
   declares none is built from its type. A field declares one with its `example`. A request body or
@@ -229,8 +233,9 @@ typed error carrying that status, its body decoded into the status's model (Go: 
 assertion; Python: `isinstance`; TypeScript has no runtime model) and equal to the printed body as
 JSON. An iterator is answered with the page's reply with the iteration ended — the next cursor set
 to `""`, which every generated iterator stops on and a required or nullable cursor field still
-decodes, or the items field emptied, as the policy's termination rule says — so it sends the page's
-one request and stops.
+decodes, or the items field emptied, as the policy's termination rule says — so it sends exactly
+one request and stops. That request is the page's, without the cursor parameter the iterator leaves
+out.
 
 A page, a contract test and every generated client encode a path segment, a query name or value,
 and a cookie name or value with one rule: every byte but an RFC 3986 unreserved one

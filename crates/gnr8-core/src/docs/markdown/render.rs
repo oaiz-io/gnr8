@@ -619,7 +619,11 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
                             w.block(&sample_block(sample));
                         }
                         if let Some(sample) = &samples.iterate {
-                            w.paragraph(&Inline::text("Iterating over every item of every page:"));
+                            w.paragraph(&Inline::text(if samples.iterates_from_first_page {
+                                "Iterating over every item of every page:"
+                            } else {
+                                "Iterating over every item from the sampled page on:"
+                            }));
                             w.block(&sample_block(sample));
                         }
                     }
