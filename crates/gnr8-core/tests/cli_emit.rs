@@ -3742,3 +3742,347 @@ fn go_body_help_names_a_repeated_shape_by_its_first_path() {
     );
     assert!(!handler.contains("having[]."), "{handler}");
 }
+
+fn topic_owned_cli(command: impl Into<OwnedCommand>) -> SdkCli {
+    let mut cli = spec_cli();
+    cli.topics[0] = cli.topics[0].clone().owned_command(command);
+    cli
+}
+
+fn go_topic_owned_error(cli: SdkCli) -> String {
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(cli)
+        .generate(&grouped_graph(""), &mut out, &cx(), None)
+        .expect_err("an invalid topic owned command is a configuration error")
+        .to_string()
+}
+
+#[test]
+fn go_topic_owned_command_is_dispatched_and_listed_under_its_topic() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(
+        &grouped_graph(""),
+        topic_owned_cli(OwnedCommand::new("stats").summary("Count books per genre")),
+    );
+    let dispatch = go_func(&go, "dispatchBooks");
+    let arm = dispatch
+        .find("case \"stats\":\n\t\treturn runBooksStats(args[1:], active)")
+        .unwrap_or_else(|| panic!("missing owned arm in dispatchBooks:\n{dispatch}"));
+    let first_generated = dispatch.find("case \"list\":").expect("generated arm");
+    assert!(arm < first_generated, "owned arm goes first:\n{dispatch}");
+    assert!(
+        !go_func(&go, "Run").contains("runBooksStats"),
+        "a topic owned command is not a root arm"
+    );
+
+    let groups_start = go.find("var cliGroups").expect("cliGroups table");
+    let groups = &go[groups_start..];
+    let books = groups.find("name:    \"books\"").expect("books group");
+    let entry = groups
+        .find("{name: \"stats\", summary: \"Count books per genre\"}")
+        .unwrap_or_else(|| panic!("missing owned entry in cliGroups:\n{groups}"));
+    let list = groups[books..].find("{name: \"list\"").expect("list entry") + books;
+    assert!(
+        books < entry && entry < list,
+        "owned entry leads its topic:\n{groups}"
+    );
+    if let Some(root_start) = go.find("var cliRootCommands") {
+        assert!(
+            !go[root_start..groups_start].contains("\"stats\""),
+            "a topic owned command is not in cliRootCommands"
+        );
+    }
+}
+
+#[test]
+fn go_topic_owned_command_calls_its_declared_function() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(
+        &grouped_graph(""),
+        topic_owned_cli(OwnedCommand::new("stats").function("countBooks")),
+    );
+    let dispatch = go_func(&go, "dispatchBooks");
+    assert!(
+        dispatch.contains("return countBooks(args[1:], active)"),
+        "{dispatch}"
+    );
+    assert!(!go.contains("runBooksStats"), "{go}");
+}
+
+#[test]
+fn python_cli_rejects_topic_owned_commands() {
+    let err = generate_cli_result(&grouped_graph(""), topic_owned_cli("stats")).unwrap_err();
+    assert!(err.to_string().contains("Go CLI library seam"), "{err}");
+}
+
+#[test]
+fn go_topic_owned_command_name_must_be_a_command_name() {
+    let message = go_topic_owned_error(topic_owned_cli("bad name"));
+    assert!(message.contains("CliTopic::owned_command"), "{message}");
+    assert!(message.contains("not a usable command name"), "{message}");
+}
+
+#[test]
+fn go_topic_owned_command_named_twice_is_refused() {
+    let mut cli = topic_owned_cli("stats");
+    cli.topics[0] = cli.topics[0].clone().owned_command("stats");
+    let message = go_topic_owned_error(cli);
+    assert!(
+        message.contains("names \"stats\" twice in topic \"books\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn go_topic_owned_command_summary_and_function_are_single_line() {
+    let summary = go_topic_owned_error(topic_owned_cli(
+        OwnedCommand::new("stats").summary("one\ntwo"),
+    ));
+    assert!(summary.contains("owned command summary"), "{summary}");
+    let function = go_topic_owned_error(topic_owned_cli(
+        OwnedCommand::new("stats").function("count\nBooks"),
+    ));
+    assert!(function.contains("owned command function"), "{function}");
+}
+
+#[test]
+fn go_topic_owned_command_needs_a_topic_with_a_generated_command() {
+    let cli = spec_cli().topic(CliTopic::new("db").owned_command("types"));
+    let message = go_topic_owned_error(cli);
+    assert!(message.contains("topic \"db\""), "{message}");
+    assert!(message.contains("has no generated command"), "{message}");
+}
+
+/// A topic that declares no command still has a dispatcher when operations sit in a group of the
+/// same name, so a hand-owned command can join it.
+#[test]
+fn go_topic_owned_command_joins_a_group_named_by_its_operations() {
+    if skip_go() {
+        return;
+    }
+    let cli = SdkCli::new("bookstore").topic(CliTopic::new("books").owned_command("stats"));
+    let go = generate_go_cli_with(&grouped_graph(""), cli);
+    let dispatch = go_func(&go, "dispatchBooks");
+    assert!(
+        dispatch.contains("case \"stats\":\n\t\treturn runBooksStats(args[1:], active)"),
+        "{dispatch}"
+    );
+}
+
+#[test]
+fn go_owned_commands_may_not_derive_one_function() {
+    let message = go_topic_owned_error(topic_owned_cli("stats").owned_command("books-stats"));
+    assert!(
+        message.contains(
+            "owned commands \"books-stats\" and \"books stats\" both call Go function \"runBooksStats\""
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn go_owned_commands_may_not_name_one_function() {
+    let message = go_topic_owned_error(
+        topic_owned_cli(OwnedCommand::new("stats").function("countBooks"))
+            .owned_command(OwnedCommand::new("count").function("countBooks")),
+    );
+    assert!(
+        message.contains("both call Go function \"countBooks\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn go_topic_owned_command_may_not_shadow_a_verb() {
+    let message = go_topic_owned_error(topic_owned_cli("list"));
+    assert!(
+        message.contains("collides with operation command \"list\" under topic \"books\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn go_topic_owned_command_may_not_shadow_a_sub_noun() {
+    let cli = SdkCli::new("bookstore").topic(
+        CliTopic::new("books")
+            .command(CliCommand::operation("listBooks", "list").example("bookstore books list"))
+            .command(
+                CliCommand::operation("getBook", "get")
+                    .sub_noun("copy")
+                    .positional("id")
+                    .example("bookstore books copy get 1"),
+            )
+            .owned_command("copy"),
+    );
+    let message = go_topic_owned_error(cli);
+    assert!(
+        message.contains("collides with sub-noun \"copy\" under topic \"books\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn go_owned_command_function_must_be_a_go_identifier() {
+    for function in ["os.Exit(0); countBooks", "count books", "func", "9count"] {
+        let topic = go_topic_owned_error(topic_owned_cli(
+            OwnedCommand::new("stats").function(function),
+        ));
+        assert!(topic.contains("Go identifier"), "{function}: {topic}");
+        let root = go_topic_owned_error(
+            spec_cli().owned_command(OwnedCommand::new("stats").function(function)),
+        );
+        assert!(root.contains("Go identifier"), "{function}: {root}");
+    }
+}
+
+#[test]
+fn go_owned_command_function_may_not_be_a_generated_name() {
+    if skip_go() {
+        return;
+    }
+    for function in [
+        "complete",
+        "Run",
+        "active",
+        "dispatchBooks",
+        "cliGroups",
+        "strings",
+        "json",
+        "len",
+        "copy",
+        "string",
+        "_",
+        "init",
+    ] {
+        let topic = go_topic_owned_error(topic_owned_cli(
+            OwnedCommand::new("stats").function(function),
+        ));
+        assert!(
+            topic.contains(&format!(
+                "owned command \"books stats\" calls Go function {function:?}, a name the generated CLI already uses"
+            )),
+            "{function}: {topic}"
+        );
+        let root = go_topic_owned_error(
+            spec_cli().owned_command(OwnedCommand::new("stats").function(function)),
+        );
+        assert!(root.contains("already uses"), "{function}: {root}");
+    }
+}
+
+/// `names` is only ever a local inside generated functions, so the user may declare it.
+#[test]
+fn go_owned_command_function_may_reuse_a_generated_local_name() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(
+        &grouped_graph(""),
+        topic_owned_cli(OwnedCommand::new("stats").function("names")),
+    );
+    assert!(go.contains("var names []string"), "{go}");
+    assert!(go.contains("return names(args[1:], active)"), "{go}");
+}
+
+fn rename_error_message(cli: SdkCli) -> String {
+    generate_cli_result(&grouped_graph(""), cli)
+        .expect_err("a rename error that reaches a live command is a configuration error")
+        .to_string()
+}
+
+#[test]
+fn rename_error_may_not_shadow_a_live_command() {
+    for retired in [vec!["books"], vec!["books", "list"], vec!["help"]] {
+        let message = rename_error_message(
+            spec_cli().rename_error(CliRenameError::new(retired.clone(), "books list")),
+        );
+        assert!(
+            message.contains(&format!(
+                "retired path {:?} matches live command",
+                retired.join(" ")
+            )),
+            "{retired:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn rename_error_may_not_capture_a_live_commands_arguments() {
+    let message = rename_error_message(
+        spec_cli().rename_error(CliRenameError::new(["books", "get", "old"], "books list")),
+    );
+    assert!(
+        message.contains("retired path \"books get old\" extends live command \"books get\""),
+        "{message}"
+    );
+    let message = rename_error_message(
+        spec_cli().rename_error(CliRenameError::new(["completion", "old"], "books list")),
+    );
+    assert!(
+        message.contains("extends live command \"completion\""),
+        "{message}"
+    );
+}
+
+/// `books list` takes no arguments, so `books list all` reaches nothing that runs today.
+#[test]
+fn rename_error_may_extend_a_command_without_arguments() {
+    let py = generate_cli_with(
+        &grouped_graph(""),
+        spec_cli().rename_error(CliRenameError::new(["books", "list", "all"], "books list")),
+    );
+    assert!(py.contains("\"all\""), "{py}");
+}
+
+#[test]
+fn rename_error_behind_an_earlier_one_is_refused() {
+    let message = rename_error_message(
+        spec_cli()
+            .rename_error(CliRenameError::new(["books", "old"], "books list"))
+            .rename_error(CliRenameError::new(["books", "old", "all"], "books list")),
+    );
+    assert!(
+        message.contains(
+            "retired path \"books old all\" is unreachable: the earlier retired path \"books old\" matches it first"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn go_rename_error_may_not_shadow_an_owned_command() {
+    let message = go_topic_owned_error(
+        topic_owned_cli("stats")
+            .rename_error(CliRenameError::new(["books", "stats"], "books list")),
+    );
+    assert!(
+        message.contains("retired path \"books stats\" matches live command \"books stats\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn rename_error_may_not_name_a_flag() {
+    for retired in [
+        vec!["--help"],
+        vec!["--version"],
+        vec!["books", "--help"],
+        vec!["books", ""],
+    ] {
+        let message = rename_error_message(
+            spec_cli().rename_error(CliRenameError::new(retired.clone(), "books list")),
+        );
+        assert!(
+            message.contains("a retired path names commands"),
+            "{retired:?}: {message}"
+        );
+    }
+}

@@ -1959,13 +1959,7 @@ fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<
             }
         }
     }
-    for error in &cli.rename_errors {
-        if error.from.is_empty() {
-            return Err(CoreError::SdkGen {
-                message: format!("CLI {program:?} rename error has an empty retired path"),
-            });
-        }
-    }
+    check_cli_rename_errors(ops, cli)?;
     for view in &cli.views {
         let known = graph
             .schemas
@@ -1976,6 +1970,110 @@ fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<
                 message: format!(
                     "CLI {program:?} view names unknown schema '{}'",
                     view.schema
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// One invocation the generated CLI runs, and whether it takes arguments after its path.
+struct LiveCommand {
+    path: Vec<String>,
+    takes_arguments: bool,
+}
+
+/// Every invocation the generated CLI runs: operation commands, hand-owned commands, and the
+/// reserved `help`, `completion` and `__complete`.
+fn live_commands(ops: &[&Operation], cli: &SdkCli) -> Vec<LiveCommand> {
+    let reserved = ["help", "completion", "__complete"].map(|name| LiveCommand {
+        path: vec![name.to_string()],
+        takes_arguments: true,
+    });
+    let operations = ops.iter().copied().map(|op| LiveCommand {
+        path: command_invocation(cli, op)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        takes_arguments: !positional_names(cli, op).is_empty(),
+    });
+    let root_owned = cli.owned_commands.iter().map(|command| LiveCommand {
+        path: vec![command.name.clone()],
+        takes_arguments: true,
+    });
+    let topic_owned = cli.topics.iter().flat_map(|topic| {
+        topic.owned_commands.iter().map(|command| LiveCommand {
+            path: vec![topic.name.clone(), command.name.clone()],
+            takes_arguments: true,
+        })
+    });
+    reserved
+        .into_iter()
+        .chain(operations)
+        .chain(root_owned)
+        .chain(topic_owned)
+        .collect()
+}
+
+/// A retired path is matched as a prefix of the arguments before anything is dispatched, so it
+/// must not reach a live command: not through a flag token (`--help` is handled after the check),
+/// not as a prefix of a command (that command could never run), not as an extension of one that
+/// takes arguments (that command could not take those arguments), and not behind an earlier
+/// retired path that already matches it.
+fn check_cli_rename_errors(ops: &[&Operation], cli: &SdkCli) -> Result<(), CoreError> {
+    let program = cli.program.as_str();
+    let live = live_commands(ops, cli);
+    for (index, error) in cli.rename_errors.iter().enumerate() {
+        let retired = error.from.as_slice();
+        if retired.is_empty() {
+            return Err(CoreError::SdkGen {
+                message: format!("CLI {program:?} rename error has an empty retired path"),
+            });
+        }
+        if let Some(token) = retired
+            .iter()
+            .find(|token| token.is_empty() || token.starts_with('-'))
+        {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} retired path {:?} has token {token:?}; a retired path names \
+                     commands, and `--help`, `--version` and other flags stay live",
+                    retired.join(" ")
+                ),
+            });
+        }
+        for command in &live {
+            if command.path.starts_with(retired) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} retired path {:?} matches live command {:?}, which could \
+                         never run; retire a path the CLI no longer uses",
+                        retired.join(" "),
+                        command.path.join(" ")
+                    ),
+                });
+            }
+            if command.takes_arguments && retired.starts_with(&command.path) {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} retired path {:?} extends live command {:?}, which takes \
+                         arguments, so it would capture them; retire a path the CLI no longer uses",
+                        retired.join(" "),
+                        command.path.join(" ")
+                    ),
+                });
+            }
+        }
+        if let Some(earlier) = cli.rename_errors[..index]
+            .iter()
+            .find(|earlier| retired.starts_with(&earlier.from))
+        {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} retired path {:?} is unreachable: the earlier retired path \
+                     {:?} matches it first",
+                    retired.join(" "),
+                    earlier.from.join(" ")
                 ),
             });
         }

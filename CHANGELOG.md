@@ -9,6 +9,42 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **`CliTopic` gains `owned_commands`.** Older serialized configs remain readable because the field
+  defaults to empty, but Rust code that constructs `CliTopic` with a struct literal, or matches it
+  exhaustively, must account for it.
+- **Generation refuses CLI configs that produced a broken CLI.** Two owned commands that call one
+  Go function, an `OwnedCommand::function` the generated CLI already uses, and a `rename_error` that
+  reaches a live command are now generation errors (see Fixed). A config that generated with any of
+  them must change.
+
+### Added
+
+- **Hand-owned commands inside generated topics.** `CliTopic::owned_command` names a Go command
+  under a declared topic whose implementation is hand-owned. The topic's dispatcher calls
+  `run<Topic><Name>` (or `OwnedCommand::function`), and its help page and typo hints list it first.
+  Generation refuses a topic with no generated command, a name equal to one of the topic's verbs or
+  sub-nouns, and topic owned commands on `PySdk`. Configs without the new field emit identical
+  output.
+
+### Fixed
+
+- **`OwnedCommand::function` must be an ASCII Go identifier.** The dispatcher emits the function
+  name as Go source, so generation now refuses a value that is not an identifier, is a keyword, or
+  uses non-ASCII letters (gnr8 emits ASCII identifiers only), at the root and under a topic.
+- **`OwnedCommand::function` must not be a name the generated CLI already uses.** A declared name
+  (`complete`, `Run`), an imported package (`strings`, `json`), a Go predeclared name (`len`,
+  `string`), `_` or `init` called gnr8's own code, shadowed it, or was not callable, so `cli.go` did
+  not compile; generation now refuses it.
+- **Two owned commands may not call one Go function.** Root `db-types` and topic `db` command `types`
+  both derive `runDbTypes`; generation now refuses that and an explicit shared function.
+- **`rename_error` must not reach a live command.** A retired path is matched before dispatch, so a
+  path that was a live command or a prefix of one (`books`, `help`) made that command unreachable, a
+  flag token (`--help`) hid help or version output, and one that extended a command taking arguments
+  captured them. Generation now refuses these, and a retired path that an earlier one already
+  matches, in the Go and Python CLIs.
+
 ## 0.17.2 — 2026-10-10
 
 ### Added

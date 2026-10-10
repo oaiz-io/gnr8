@@ -40,6 +40,12 @@ pub struct CliTopic {
     /// Commands under this topic, in declaration order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<CliCommand>,
+    /// Hand-owned commands under this topic, listed and dispatched before the generated ones.
+    ///
+    /// Each entry becomes an arm in this topic's dispatcher that calls a function in `package cli`.
+    /// gnr8 never writes that function. Go only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_commands: Vec<crate::sdk::OwnedCommand>,
 }
 
 impl CliTopic {
@@ -51,6 +57,7 @@ impl CliTopic {
             concept: None,
             section: None,
             commands: Vec::new(),
+            owned_commands: Vec::new(),
         }
     }
 
@@ -72,6 +79,16 @@ impl CliTopic {
     #[must_use]
     pub fn command(mut self, command: CliCommand) -> Self {
         self.commands.push(command);
+        self
+    }
+
+    /// Name a command under this topic whose implementation is hand-owned and never generated.
+    ///
+    /// The dispatcher calls `run<Topic><Name>` (`db types` → `runDbTypes`) unless
+    /// [`OwnedCommand::function`](crate::sdk::OwnedCommand::function) names another function.
+    #[must_use]
+    pub fn owned_command(mut self, command: impl Into<crate::sdk::OwnedCommand>) -> Self {
+        self.owned_commands.push(command.into());
         self
     }
 }
