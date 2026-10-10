@@ -467,36 +467,43 @@ fn is_setext_underline(text: &str) -> bool {
 }
 
 /// The end conditions of an HTML block of type 1–5 starting at `text`; `None` for any other line.
+///
+/// Every opener is ASCII, so it is compared byte for byte: the text after it may be anything.
 fn html_start(text: &str) -> Option<&'static [&'static str]> {
     const RAW: &[&str] = &["</script>", "</pre>", "</style>", "</textarea>"];
-    let lower = text.get(..text.len().min(11))?.to_ascii_lowercase();
-    if !lower.starts_with('<') {
+    if !text.starts_with('<') {
         return None;
     }
     for tag in ["<script", "<pre", "<style", "<textarea"] {
-        if let Some(after) = lower.strip_prefix(tag) {
-            if after.is_empty() || after.starts_with([' ', '>', '\t']) {
-                return Some(RAW);
-            }
+        if starts_with_ignore_case(text, tag)
+            && matches!(
+                text.as_bytes().get(tag.len()),
+                None | Some(b' ' | b'>' | b'\t')
+            )
+        {
+            return Some(RAW);
         }
     }
-    if lower.starts_with("<!--") {
+    if text.starts_with("<!--") {
         return Some(&["-->"]);
     }
-    if lower.starts_with("<?") {
+    if text.starts_with("<?") {
         return Some(&["?>"]);
     }
     if text.starts_with("<![CDATA[") {
         return Some(&["]]>"]);
     }
-    if lower
-        .strip_prefix("<!")
-        .and_then(|after| after.chars().next())
-        .is_some_and(|ch| ch.is_ascii_alphabetic())
-    {
+    if text.starts_with("<!") && text.as_bytes().get(2).is_some_and(u8::is_ascii_alphabetic) {
         return Some(&[">"]);
     }
     None
+}
+
+/// Whether `text` starts with the ASCII `prefix`, ignoring ASCII case.
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 fn contains_ignore_case(text: &str, needle: &str) -> bool {
@@ -580,6 +587,24 @@ mod tests {
         assert!(fails("<script>\nlet x;").contains("an HTML block"));
         assert!(fails("````\n```").contains("fenced code block"));
         assert!(fails("~~~\n```").contains("fenced code block"));
+    }
+
+    /// An opener is recognised by its ASCII bytes, wherever the first multibyte character after it
+    /// falls.
+    #[test]
+    fn html_openers_followed_by_multibyte_text_are_recognised() {
+        for prose in [
+            "<!--注释说明",
+            "<!--éééé x",
+            "<script> 日本",
+            "<SCRIPT>日本語のテキスト",
+            "<?php 日本語",
+            "<!DOCTYPE日本",
+        ] {
+            assert!(fails(prose).contains("an HTML block"), "{prose:?}");
+        }
+        passes("<!--注释说明-->\nText.");
+        passes("<scripté is no tag");
     }
 
     #[test]
