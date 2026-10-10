@@ -2949,3 +2949,246 @@ fn generated_cli_go_topic_owned_command_runs_and_is_listed() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Hand-owned code the retired-invocation test compiles beside the generated CLI: a root topic
+/// whose dispatcher and a topic command whose flag parser resolve retired invocations through the
+/// generated seam.
+const GO_RETIRED_OWNED_STUB: &str = r#"package cli
+
+import (
+	"flag"
+	"fmt"
+	"strings"
+)
+
+func runShelf(args []string, opts Options) int {
+	_ = opts
+	if len(args) > 0 && args[0] == "list" {
+		fmt.Println("shelf list ran")
+		return 0
+	}
+	if len(args) > 0 && args[0] == "get" {
+		fs := flag.NewFlagSet("get", flag.ContinueOnError)
+		parsed, code := parseFlags(fs, args[1:])
+		if !parsed {
+			return code
+		}
+		fmt.Println("shelf get ran")
+		return 0
+	}
+	if code := checkRetired([]string{"shelf"}, args); code != 0 {
+		return code
+	}
+	errorMessage(2, "unknown command %q under shelf", strings.Join(args, " "))
+	return 2
+}
+
+func runBooksStats(args []string, opts Options) int {
+	_ = opts
+	fs := flag.NewFlagSet("books stats", flag.ContinueOnError)
+	genre := fs.String("genre", "", "genre to count")
+	parsed, code := parseFlags(fs, args)
+	if !parsed {
+		return code
+	}
+	fmt.Printf("stats ran with %s %s\n", *genre, strings.Join(flagArgs, ","))
+	return 0
+}
+"#;
+
+/// Retired invocations resolve only where the CLI would otherwise fail: an unknown command under a
+/// generated topic or a hand-owned one, and an unknown flag on a generated or hand-owned command.
+/// Each exits 2 naming its replacement without a request, and every live command, help and
+/// version still run.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one generated program, built once, exercised end to end"
+)]
+fn generated_cli_go_retired_invocations_resolve_on_the_error_path() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI retired invocations: go toolchain unavailable");
+        return;
+    }
+    let mut cli = cli_spec()
+        .owned_command(OwnedCommand::new("shelf").summary("Shelves, hand-owned"))
+        .rename_error(CliRenameError::new(
+            ["books", "get", "--book-id"],
+            "books get <id>",
+        ))
+        .rename_error(CliRenameError::new(
+            ["books", "stats", "--genre-id"],
+            "books stats --genre <genre>",
+        ))
+        .rename_error(CliRenameError::new(["shelf", "update"], "shelf list"))
+        .rename_error(CliRenameError::new(["get"], "books get <id>"))
+        .rename_error(CliRenameError::new(["get", "old"], "books get <id>"))
+        .rename_error(CliRenameError::new(
+            ["books", "get", "--isbn"],
+            "books get <id>",
+        ))
+        .rename_error(CliRenameError::new(["job"], "books list"))
+        .rename_error(CliRenameError::new(["job", "get"], "books get <id>"))
+        .rename_error(CliRenameError::new(
+            ["job", "get", "--job-uuid"],
+            "books get <id>",
+        ));
+    cli.topics[0] = cli.topics[0]
+        .clone()
+        .owned_command(OwnedCommand::new("stats").summary("Count books per genre"));
+    let dir = materialize_go_cli_with("cli-retired", &cli_spec_graph(), cli);
+    std::fs::write(
+        dir.join("cmd/bookstore/internal/cli/owned.go"),
+        GO_RETIRED_OWNED_STUB,
+    )
+    .expect("write hand-owned stub");
+    run_go(&["vet", "./..."], &dir).expect("go vet with retired invocations must be clean");
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed with retired invocations");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+
+    for (args, message) in [
+        (
+            vec!["books", "list-books"],
+            "books list-books is now bookstore books list",
+        ),
+        (
+            vec!["books", "get", "--book-id", "1"],
+            "books get --book-id is now bookstore books get <id>",
+        ),
+        (
+            vec!["books", "get", "--book-id=1"],
+            "books get --book-id is now bookstore books get <id>",
+        ),
+        (
+            vec!["books", "get", "1", "--book-id", "1"],
+            "books get --book-id is now bookstore books get <id>",
+        ),
+        (
+            vec!["books", "stats", "--genre-id", "7"],
+            "books stats --genre-id is now bookstore books stats --genre <genre>",
+        ),
+        (
+            vec!["shelf", "update", "1"],
+            "shelf update is now bookstore shelf list",
+        ),
+        (vec!["job", "list"], "job is now bookstore books list"),
+        (
+            vec!["job", "get", "1"],
+            "job get is now bookstore books get <id>",
+        ),
+        (
+            vec!["books", "get", "1", "--isbn", "2", "--book-id", "3"],
+            "books get --isbn is now bookstore books get <id>",
+        ),
+        (
+            vec!["job", "get", "--job-uuid", "1"],
+            "job get --job-uuid is now bookstore books get <id>",
+        ),
+    ] {
+        let mut argv = args.clone();
+        argv.extend(["--base-url", &base]);
+        let (code, stdout, stderr) = run_cli(&dir, "bookstore", &argv, &[]);
+        assert_eq!(code, 2, "{args:?}: {stderr}");
+        assert!(stdout.is_empty(), "{args:?}: {stdout}");
+        assert!(
+            stderr.starts_with(&format!("error: {message}")),
+            "{args:?}: {stderr}"
+        );
+        argv.insert(0, "--json");
+        let (code, _, stderr) = run_cli(&dir, "bookstore", &argv, &[]);
+        assert_eq!(code, 2, "{args:?}: {stderr}");
+        let error: serde_json::Value = serde_json::from_str(&stderr).expect("--json error");
+        assert_eq!(error["error"]["exitCode"], 2, "{stderr}");
+        assert_eq!(error["error"]["message"], message, "{stderr}");
+    }
+    listener.set_nonblocking(true).expect("nonblocking");
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "a retired invocation must not send a request"
+    );
+
+    // Live commands still run, including those that share a prefix with a retired invocation.
+    let (port, server) = serve_once("200 OK", r#"{"id":"1","title":"Dune"}"#.to_string());
+    let live = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "get", "1", "--json", "--base-url", &live],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(server.join().unwrap().starts_with("GET /books/1"));
+    let (port, server) = serve_once("200 OK", r#"{"books":[],"next_cursor":""}"#.to_string());
+    let live = format!("http://127.0.0.1:{port}");
+    let (code, _, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "list", "--json", "--base-url", &live],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(server.join().unwrap().starts_with("GET /books"));
+    let (code, stdout, stderr) = run_cli(&dir, "bookstore", &["shelf", "list"], &[]);
+    assert_eq!((code, stdout.as_str()), (0, "shelf list ran\n"), "{stderr}");
+    let (code, stdout, stderr) = run_cli(
+        &dir,
+        "bookstore",
+        &["books", "stats", "--genre", "scifi", "a"],
+        &[],
+    );
+    assert_eq!(
+        (code, stdout.as_str()),
+        (0, "stats ran with scifi a\n"),
+        "{stderr}"
+    );
+
+    // Unknown invocations that are not retired keep their own errors.
+    let (code, _, stderr) = run_cli(&dir, "bookstore", &["books", "nope"], &[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("unknown command \"nope\" under books"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run_cli(&dir, "bookstore", &["books", "get", "1", "--nope"], &[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("flag provided but not defined: -nope"),
+        "{stderr}"
+    );
+    // A hand-owned FlagSet named for its leaf (`get`) is not the retired root path `get`.
+    for args in [
+        vec!["shelf", "get", "--nope"],
+        vec!["shelf", "get", "old", "--nope"],
+    ] {
+        let (code, _, stderr) = run_cli(&dir, "bookstore", &args, &[]);
+        assert_eq!(code, 2, "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("flag provided but not defined: -nope"),
+            "{args:?}: {stderr}"
+        );
+    }
+    let (code, _, stderr) = run_cli(&dir, "bookstore", &["shelf", "nope"], &[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("unknown command \"nope\" under shelf"),
+        "{stderr}"
+    );
+
+    // Help and version are unaffected, even beside a retired flag.
+    for args in [
+        vec!["--help"],
+        vec!["--version"],
+        vec!["books", "--help"],
+        vec!["books", "get", "--help"],
+        vec!["books", "get", "--book-id", "1", "--help"],
+        vec!["help", "books", "get"],
+    ] {
+        let (code, stdout, stderr) = run_cli(&dir, "bookstore", &args, &[]);
+        assert_eq!(code, 0, "{args:?}: {stderr}");
+        assert!(!stdout.is_empty(), "{args:?}");
+        assert!(!stderr.contains("is now"), "{args:?}: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

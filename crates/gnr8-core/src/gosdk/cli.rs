@@ -27,10 +27,10 @@ use crate::sdk::emit_common::{
     operation_auth_alternatives, operation_prose, output_dir_env_var, pager_env_var,
     parameter_flag_help, positional_names, positional_usage, quoted_string_literal,
     reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
-    response_field_names, CliResultShape, OperationAuthScheme, RequestBodyModel, ALL_HELP,
-    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP,
-    FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP, QUIET_HELP,
-    YES_HELP,
+    response_field_names, retired_parts, CliResultShape, OperationAuthScheme, RequestBodyModel,
+    ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP, DEBUG_HELP,
+    FIELDS_HELP, FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP,
+    QUIET_HELP, YES_HELP,
 };
 use crate::CoreError;
 
@@ -1165,6 +1165,13 @@ fn emit_shared_helpers(
     writeln!(out, "if err := fs.Parse(flags); err != nil {{").map_err(sink)?;
     writeln!(out, "if errors.Is(err, flag.ErrHelp) {{").map_err(sink)?;
     writeln!(out, "return false, 0").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    writeln!(
+        out,
+        "if code := checkRetired(strings.Fields(fs.Name()), flags); code != 0 {{"
+    )
+    .map_err(sink)?;
+    writeln!(out, "return false, code").map_err(sink)?;
     writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "errorMessage(2, \"%v\", err)").map_err(sink)?;
     writeln!(out, "return false, 2").map_err(sink)?;
@@ -2550,15 +2557,16 @@ fn emit_handler(
     let selector = spec.and_then(|command| command.selector.as_ref());
     let severity = spec.map(|command| command.severity).unwrap_or_default();
 
+    let invocation = command_invocation(cli, op);
     writeln!(out, "func cmd{method}(args []string) int {{").map_err(sink)?;
+    // `parseFlags` reads the command path from the FlagSet's name to resolve a retired flag.
     writeln!(
         out,
         "fs := flag.NewFlagSet({}, flag.ContinueOnError)",
-        quoted_string_literal(&command)
+        quoted_string_literal(&invocation)
     )
     .map_err(sink)?;
     writeln!(out, "fs.Usage = func() {{").map_err(sink)?;
-    let invocation = command_invocation(cli, op);
     let positional_tokens = positional_usage(cli, op);
     let usage = if positional_tokens.is_empty() {
         format!("\nUsage: %s {} [flags]\n", invocation.replace('%', "%%"))
@@ -2941,6 +2949,16 @@ fn emit_handler(
         }
     }
     writeln!(out, "if len(flagArgs) > 0 {{").map_err(sink)?;
+    if positionals.is_empty() {
+        writeln!(
+            out,
+            "if code := checkRetired({}, args); code != 0 {{",
+            go_string_slice(invocation.split_whitespace())
+        )
+        .map_err(sink)?;
+        writeln!(out, "return code").map_err(sink)?;
+        writeln!(out, "}}").map_err(sink)?;
+    }
     writeln!(
         out,
         "errorMessage(2, \"unexpected argument %q\", flagArgs[0])"
@@ -4206,7 +4224,7 @@ fn emit_main(
         emit_group_dispatch(out, group, index, ops, cli)?;
     }
 
-    emit_rename_checker(out, cli)?;
+    emit_retired_checker(out, cli)?;
 
     writeln!(
         out,
@@ -4222,9 +4240,6 @@ fn emit_main(
     writeln!(out, "args = rest").map_err(sink)?;
     writeln!(out, "resolveFormat()").map_err(sink)?;
     writeln!(out, "resolveEnv()").map_err(sink)?;
-    writeln!(out, "if code := checkRename(args); code != 0 {{").map_err(sink)?;
-    writeln!(out, "return code").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
     writeln!(out, "if len(args) == 0 {{").map_err(sink)?;
     writeln!(out, "if !machineOutput() {{ printRootUsage(os.Stderr) }}").map_err(sink)?;
     writeln!(out, "return 2").map_err(sink)?;
@@ -4265,6 +4280,7 @@ fn emit_main(
         writeln!(out, "return dispatch{}(args[1:])", exported(group)).map_err(sink)?;
     }
     writeln!(out, "default:").map_err(sink)?;
+    emit_retired_call(out, &[])?;
     writeln!(out, "errorMessage(2, \"unknown command %q\", args[0])").map_err(sink)?;
     if has_root || has_groups {
         writeln!(
@@ -4794,6 +4810,7 @@ fn emit_group_dispatch(
         .map_err(sink)?;
     }
     writeln!(out, "default:").map_err(sink)?;
+    emit_retired_call(out, &[group])?;
     writeln!(
         out,
         "errorMessage(2, \"unknown command %q under %s\", args[0], group.name)"
@@ -4871,6 +4888,7 @@ fn emit_sub_noun_dispatch(
         writeln!(out, "return cmd{}(args[1:])", operation_method_name(op)).map_err(sink)?;
     }
     writeln!(out, "default:").map_err(sink)?;
+    emit_retired_call(out, &[group, sub])?;
     writeln!(
         out,
         "errorMessage(2, \"unknown command %q under %s %s\", args[0], {}, {})",
@@ -4885,53 +4903,121 @@ fn emit_sub_noun_dispatch(
     Ok(())
 }
 
-fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> {
-    writeln!(out, "func checkRename(args []string) int {{").map_err(sink)?;
+/// A Go `[]string` literal holding `tokens`, or `nil` when there are none.
+fn go_string_slice<'a>(tokens: impl IntoIterator<Item = &'a str>) -> String {
+    let tokens: Vec<String> = tokens.into_iter().map(quoted_string_literal).collect();
+    if tokens.is_empty() {
+        "nil".to_string()
+    } else {
+        format!("[]string{{{}}}", tokens.join(", "))
+    }
+}
+
+/// The unknown-command arm of the dispatcher at `path` resolves a retired invocation first.
+fn emit_retired_call(out: &mut String, path: &[&str]) -> Result<(), CoreError> {
+    writeln!(
+        out,
+        "if code := checkRetired({}, args); code != 0 {{",
+        go_string_slice(path.iter().copied())
+    )
+    .map_err(sink)?;
+    writeln!(out, "return code").map_err(sink)?;
+    writeln!(out, "}}").map_err(sink)?;
+    Ok(())
+}
+
+/// `checkRetired` is the one place a retired invocation is resolved. Generated dispatchers and
+/// flag parsers call it on their unknown-command, unknown-flag and unexpected-argument paths, and
+/// hand-owned commands call it on theirs, so a retired invocation never shadows a live one. It is
+/// emitted with an empty table too, so hand-owned code that calls it always compiles.
+fn emit_retired_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> {
+    out.push_str(
+        "// checkRetired prints the replacement and returns 2 when path followed by args is a\n\
+         // retired invocation, and returns 0 otherwise. path is the live command the failure\n\
+         // happened under, so only a retired invocation beyond it matches. Call it only where the\n\
+         // invocation already failed: an unknown command under path, or an unknown flag or\n\
+         // argument of command path.\n",
+    );
+    writeln!(
+        out,
+        "func checkRetired(path []string, args []string) int {{"
+    )
+    .map_err(sink)?;
     if cli.rename_errors.is_empty() {
         writeln!(out, "return 0").map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
         writeln!(out).map_err(sink)?;
         return Ok(());
     }
-    writeln!(out, "renames := []struct{{ from []string; to string }}{{").map_err(sink)?;
+    writeln!(
+        out,
+        "retired := []struct{{ from []string; flag string; to string }}{{"
+    )
+    .map_err(sink)?;
     for error in &cli.rename_errors {
-        let from = error
-            .from
-            .iter()
-            .map(|token| quoted_string_literal(token))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let (path, flag) = retired_parts(error);
         writeln!(
             out,
-            "{{[]string{{{from}}}, {}}},",
+            "{{{}, {}, {}}},",
+            go_string_slice(path.iter().map(String::as_str)),
+            quoted_string_literal(flag.unwrap_or_default()),
             quoted_string_literal(&error.to)
         )
         .map_err(sink)?;
     }
     writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "for _, rename := range renames {{").map_err(sink)?;
-    writeln!(out, "if len(args) < len(rename.from) {{").map_err(sink)?;
-    writeln!(out, "continue").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "match := true").map_err(sink)?;
-    writeln!(out, "for i, token := range rename.from {{").map_err(sink)?;
-    writeln!(out, "if args[i] != token {{").map_err(sink)?;
-    writeln!(out, "match = false").map_err(sink)?;
-    writeln!(out, "break").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "if match {{").map_err(sink)?;
-    writeln!(
-        out,
-        "errorMessage(2, \"%s is now %s %s\", strings.Join(rename.from, \" \"), program, rename.to)"
-    )
-    .map_err(sink)?;
-    writeln!(out, "return 2").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out, "return 0").map_err(sink)?;
-    writeln!(out, "}}").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
+    // `path` is live, so an entry matches only beyond it: a retired path strictly, a retired flag
+    // at it or beyond. The most specific entry wins: the longest command path, then a retired flag
+    // over the path, then the retired flag typed first.
+    out.push_str(
+        r#"tokens := append(append([]string{}, path...), args...)
+best, bestAt := -1, 0
+for i, entry := range retired {
+if len(entry.from) < len(path) || len(entry.from) == len(path) && entry.flag == "" || len(tokens) < len(entry.from) {
+continue
+}
+match := true
+for j, token := range entry.from {
+if tokens[j] != token {
+match = false
+break
+}
+}
+if !match {
+continue
+}
+at := len(tokens)
+if entry.flag != "" {
+at = -1
+for k := len(entry.from); k < len(tokens) && tokens[k] != "--"; k++ {
+name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(tokens[k], "-"), "-"), "=")
+if strings.HasPrefix(tokens[k], "-") && name == entry.flag {
+at = k
+break
+}
+}
+if at < 0 {
+continue
+}
+}
+if best < 0 || len(entry.from) > len(retired[best].from) || len(entry.from) == len(retired[best].from) && at < bestAt {
+best, bestAt = i, at
+}
+}
+if best < 0 {
+return 0
+}
+entry := retired[best]
+invocation := strings.Join(entry.from, " ")
+if entry.flag != "" {
+invocation += " --" + entry.flag
+}
+errorMessage(2, "%s is now %s %s", invocation, program, entry.to)
+return 2
+}
+
+"#,
+    );
     Ok(())
 }
 

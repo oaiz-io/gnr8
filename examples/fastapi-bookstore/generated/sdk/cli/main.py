@@ -16,20 +16,37 @@ from . import output
 from .body import InputError
 from .complete import complete, print_completion
 from .config import HELP_SPEC, PROGRAM
-from .parser import build_parser
+from .parser import UsageError, build_parser
 
 
-def _check_rename(argv: list[str]) -> int:
-    tokens = argv
-    renames = [
-        (("books", "list-books",), "books list"),
+def _check_retired(argv: list[str]) -> int:
+    retired = [
+        (("books", "list-books"), "", "books list"),
     ]
-    for retired, replacement in renames:
-        if tokens[: len(retired)] == list(retired):
-            return output.print_error(
-                f"{' '.join(retired)} is now {PROGRAM} {replacement}", code=2
-            )
-    return 0
+    best = None
+    for source, flag, replacement in retired:
+        if tuple(argv[: len(source)]) != source:
+            continue
+        at = len(argv)
+        if flag:
+            at = -1
+            for index in range(len(source), len(argv)):
+                arg = argv[index]
+                if arg == "--":
+                    break
+                name = (arg[2:] if arg.startswith("--") else arg[1:]).split("=", 1)[0]
+                if arg.startswith("-") and name == flag:
+                    at = index
+                    break
+            if at < 0:
+                continue
+        if best is None or (len(source), -at) > (len(best[0]), -best[3]):
+            best = (source, flag, replacement, at)
+    if best is None:
+        return 0
+    source, flag, replacement, _ = best
+    invocation = " ".join((*source, f"--{flag}") if flag else source)
+    return output.print_error(f"{invocation} is now {PROGRAM} {replacement}", code=2)
 
 
 def _print_help(argv: list[str]) -> int:
@@ -49,6 +66,8 @@ def _print_help(argv: list[str]) -> int:
         return 0
     try:
         parser.parse_args([*rest, "--help"])
+    except UsageError as exc:
+        return output.print_error(exc.message, code=2)
     except SystemExit as exc:
         if exc.code in (0, None):
             return 0
@@ -117,9 +136,6 @@ def _main(argv: Optional[list[str]]) -> int:
             prefix.append(argv[start])
             start += 1
     argv = [*argv[start:], *prefix]
-    code = _check_rename(argv)
-    if code:
-        return code
     if argv and argv[0] == "help":
         return _print_help(argv[1:])
     if argv and argv[0] == "completion":
@@ -127,7 +143,10 @@ def _main(argv: Optional[list[str]]) -> int:
     if argv and argv[0] == "__complete":
         return complete(argv[1:])
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except UsageError as exc:
+        return _check_retired(argv) or output.print_error(exc.message, code=2)
     output.apply_globals(args)
     if getattr(args, "fields", None) == "help":
         return output.print_fields_help(getattr(args, "_fields", ()))

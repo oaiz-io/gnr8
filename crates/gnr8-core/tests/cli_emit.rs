@@ -3092,18 +3092,18 @@ fn spec_renames_verbs_and_takes_positional_ids() {
 }
 
 #[test]
-fn spec_rename_error_exits_without_dispatch() {
+fn spec_rename_error_resolves_on_the_error_path() {
     let graph = grouped_graph("");
     let cli = spec_cli().rename_error(CliRenameError::new(["books", "list-books"], "books list"));
     let py = generate_cli_with(&graph, cli.clone());
     assert!(py.contains("list-books"), "{py}");
     assert!(py.contains("books list"), "{py}");
-    assert!(py.contains("_check_rename"), "{py}");
+    assert!(py.contains("_check_retired"), "{py}");
     if skip_go() {
         return;
     }
     let go = generate_go_cli_with(&graph, cli);
-    assert!(go.contains("checkRename"), "{go}");
+    assert!(go.contains("checkRetired"), "{go}");
     assert!(go.contains("list-books"), "{go}");
     assert!(go.contains("books list"), "{go}");
 }
@@ -3994,19 +3994,33 @@ fn go_owned_command_function_may_reuse_a_generated_local_name() {
 
 fn rename_error_message(cli: SdkCli) -> String {
     generate_cli_result(&grouped_graph(""), cli)
-        .expect_err("a rename error that reaches a live command is a configuration error")
+        .expect_err("an unreachable retired invocation is a configuration error")
         .to_string()
 }
 
+fn go_rename_error_result(cli: SdkCli) -> Result<String, String> {
+    let program = cli.program.clone();
+    let mut out = Artifacts::new();
+    GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk-go")
+        .without_contract_tests()
+        .cli(cli)
+        .generate(&grouped_graph(""), &mut out, &cx(), None)
+        .map(|()| go_cli_source(&out, "generated/sdk-go", &program))
+        .map_err(|error| error.to_string())
+}
+
+/// A live path is never an unknown command, so retiring it could never print anything.
 #[test]
-fn rename_error_may_not_shadow_a_live_command() {
+fn rename_error_may_not_name_a_live_path() {
     for retired in [vec!["books"], vec!["books", "list"], vec!["help"]] {
         let message = rename_error_message(
             spec_cli().rename_error(CliRenameError::new(retired.clone(), "books list")),
         );
         assert!(
             message.contains(&format!(
-                "retired path {:?} matches live command",
+                "retired path {:?} is a live command path",
                 retired.join(" ")
             )),
             "{retired:?}: {message}"
@@ -4015,7 +4029,7 @@ fn rename_error_may_not_shadow_a_live_command() {
 }
 
 #[test]
-fn rename_error_may_not_capture_a_live_commands_arguments() {
+fn rename_error_may_not_extend_a_command_that_takes_arguments() {
     let message = rename_error_message(
         spec_cli().rename_error(CliRenameError::new(["books", "get", "old"], "books list")),
     );
@@ -4032,7 +4046,7 @@ fn rename_error_may_not_capture_a_live_commands_arguments() {
     );
 }
 
-/// `books list` takes no arguments, so `books list all` reaches nothing that runs today.
+/// `books list` takes no arguments, so `books list all` is an unexpected argument today.
 #[test]
 fn rename_error_may_extend_a_command_without_arguments() {
     let py = generate_cli_with(
@@ -4042,47 +4056,230 @@ fn rename_error_may_extend_a_command_without_arguments() {
     assert!(py.contains("\"all\""), "{py}");
 }
 
+/// The most specific retired invocation wins, so declaration order does not decide reachability.
 #[test]
-fn rename_error_behind_an_earlier_one_is_refused() {
+fn rename_error_under_a_shorter_one_is_reachable_in_either_order() {
+    for cli in [
+        spec_cli()
+            .rename_error(CliRenameError::new(["shelf"], "books list"))
+            .rename_error(CliRenameError::new(
+                ["shelf", "get", "--shelf-id"],
+                "books get <id>",
+            )),
+        spec_cli()
+            .rename_error(CliRenameError::new(
+                ["shelf", "get", "--shelf-id"],
+                "books get <id>",
+            ))
+            .rename_error(CliRenameError::new(["shelf"], "books list")),
+    ] {
+        let py = generate_cli_with(&grouped_graph(""), cli);
+        assert!(py.contains("\"shelf-id\""), "{py}");
+    }
+}
+
+#[test]
+fn rename_error_declared_twice_is_refused() {
     let message = rename_error_message(
         spec_cli()
             .rename_error(CliRenameError::new(["books", "old"], "books list"))
-            .rename_error(CliRenameError::new(["books", "old", "all"], "books list")),
+            .rename_error(CliRenameError::new(["books", "old"], "books get <id>")),
     );
     assert!(
-        message.contains(
-            "retired path \"books old all\" is unreachable: the earlier retired path \"books old\" matches it first"
-        ),
+        message.contains("retired invocation \"books old\" is declared twice"),
         "{message}"
     );
 }
 
 #[test]
-fn go_rename_error_may_not_shadow_an_owned_command() {
+fn go_rename_error_may_not_name_an_owned_command() {
     let message = go_topic_owned_error(
         topic_owned_cli("stats")
             .rename_error(CliRenameError::new(["books", "stats"], "books list")),
     );
     assert!(
-        message.contains("retired path \"books stats\" matches live command \"books stats\""),
+        message.contains("retired path \"books stats\" is a live command path"),
         "{message}"
     );
 }
 
+/// A hand-owned command resolves its own unknown commands and flags through `checkRetired`, so
+/// gnr8 accepts any retired invocation under it.
 #[test]
-fn rename_error_may_not_name_a_flag() {
-    for retired in [
-        vec!["--help"],
-        vec!["--version"],
-        vec!["books", "--help"],
-        vec!["books", ""],
+fn go_rename_error_may_extend_an_owned_command() {
+    if skip_go() {
+        return;
+    }
+    let cli = topic_owned_cli("stats")
+        .owned_command(OwnedCommand::new("shelf"))
+        .rename_error(CliRenameError::new(["books", "stats", "old"], "books list"))
+        .rename_error(CliRenameError::new(
+            ["books", "stats", "--genre-id"],
+            "books list",
+        ))
+        .rename_error(CliRenameError::new(["shelf", "update"], "books list"))
+        .rename_error(CliRenameError::new(
+            ["shelf", "get", "--shelf-id"],
+            "books get <id>",
+        ));
+    let go = go_rename_error_result(cli).expect("retired invocations under owned commands");
+    for entry in [
+        "{[]string{\"books\", \"stats\", \"old\"}, \"\", \"books list\"}",
+        "{[]string{\"books\", \"stats\"}, \"genre-id\", \"books list\"}",
+        "{[]string{\"shelf\", \"update\"}, \"\", \"books list\"}",
+        "{[]string{\"shelf\", \"get\"}, \"shelf-id\", \"books get <id>\"}",
+    ] {
+        assert!(go.contains(entry), "missing {entry}:\n{go}");
+    }
+}
+
+#[test]
+fn retired_flag_must_be_one_trailing_long_flag_after_a_command() {
+    for (retired, expected) in [
+        (
+            vec!["--help"],
+            "a retired flag follows the command it belonged to",
+        ),
+        (
+            vec!["--old"],
+            "a retired flag follows the command it belonged to",
+        ),
+        (
+            vec!["books", "--old"],
+            "\"books\" is a topic, not a command",
+        ),
+        (
+            vec!["books", "get", "--help"],
+            "--help, -h and --version stay live",
+        ),
+        (
+            vec!["books", "get", "--version"],
+            "--help, -h and --version stay live",
+        ),
+        (vec!["books", "get", "-id"], "spell a retired flag --name"),
+        (vec!["books", "get", "--"], "spell a retired flag --name"),
+        (
+            vec!["books", "get", "--Old_id"],
+            "spell a retired flag --name",
+        ),
+        (
+            vec!["books", "--old", "get"],
+            "only the last token may be a flag",
+        ),
+        (vec!["books", ""], "has an empty token"),
     ] {
         let message = rename_error_message(
             spec_cli().rename_error(CliRenameError::new(retired.clone(), "books list")),
         );
+        assert!(message.contains(expected), "{retired:?}: {message}");
+    }
+}
+
+/// `books list` parses `old --x` as its own arguments and fails on `--x` first, so a retired flag
+/// belongs on the command itself, never after a path that extends it.
+#[test]
+fn retired_flag_may_not_follow_an_extension_of_a_generated_command() {
+    let message = rename_error_message(spec_cli().rename_error(CliRenameError::new(
+        ["books", "list", "old", "--old-flag"],
+        "books list",
+    )));
+    assert!(
+        message.contains(
+            "retired flag \"books list old --old-flag\" follows a path that extends generated command \"books list\""
+        ),
+        "{message}"
+    );
+}
+
+/// A flag the command binds is parsed, never unknown, so retiring it could never print anything.
+#[test]
+fn retired_flag_may_not_be_a_flag_the_command_binds() {
+    for flag in ["--base-url", "--json", "--no-pager", "--o"] {
+        let message = rename_error_message(
+            spec_cli().rename_error(CliRenameError::new(["books", "get", flag], "books list")),
+        );
         assert!(
-            message.contains("a retired path names commands"),
-            "{retired:?}: {message}"
+            message.contains(&format!(
+                "retired flag \"books get {flag}\" is a flag \"books get\" binds"
+            )),
+            "{flag}: {message}"
         );
     }
+}
+
+/// argparse reads `--deb` as `--debug`, so the Python CLI could never reach the retired flag.
+#[test]
+fn python_retired_flag_may_not_abbreviate_a_bound_flag() {
+    let cli = spec_cli().rename_error(CliRenameError::new(["books", "get", "--deb"], "books list"));
+    let message = rename_error_message(cli.clone());
+    assert!(
+        message.contains("retired flag \"books get --deb\" abbreviates \"--debug\""),
+        "{message}"
+    );
+    if skip_go() {
+        return;
+    }
+    go_rename_error_result(cli).expect("Go's flag package does not expand abbreviations");
+}
+
+#[test]
+fn retired_flag_on_a_generated_command_is_emitted_on_its_error_paths() {
+    let cli = spec_cli()
+        .rename_error(CliRenameError::new(["books", "list-books"], "books list"))
+        .rename_error(CliRenameError::new(
+            ["books", "get", "--book-id"],
+            "books get <id>",
+        ));
+    let py = generate_cli_with(&grouped_graph(""), cli.clone());
+    assert!(
+        py.contains("((\"books\", \"get\"), \"book-id\", \"books get <id>\")"),
+        "{py}"
+    );
+    assert!(
+        py.contains("((\"books\", \"list-books\"), \"\", \"books list\")"),
+        "{py}"
+    );
+    assert!(!py.contains("_check_rename"), "{py}");
+    if skip_go() {
+        return;
+    }
+    let go = go_rename_error_result(cli).expect("retired flag on a generated command");
+    assert!(!go.contains("checkRename"), "{go}");
+    assert!(
+        go.contains("{[]string{\"books\", \"get\"}, \"book-id\", \"books get <id>\"}"),
+        "{go}"
+    );
+    let run = go_func(&go, "Run");
+    assert!(
+        !run[..run.find("switch args[0]").expect("root switch")].contains("checkRetired"),
+        "a retired invocation is not matched before dispatch:\n{run}"
+    );
+    assert!(run.contains("checkRetired(nil, args)"), "{run}");
+    let books = go_func(&go, "dispatchBooks");
+    assert!(
+        books.contains("checkRetired([]string{\"books\"}, args)"),
+        "{books}"
+    );
+    assert!(
+        go_func(&go, "parseFlags").contains("checkRetired(strings.Fields(fs.Name()), flags)"),
+        "{go}"
+    );
+    assert!(
+        go.contains("flag.NewFlagSet(\"books get\", flag.ContinueOnError)"),
+        "{go}"
+    );
+}
+
+/// The seam exists with an empty table, so hand-owned code that calls it always compiles.
+#[test]
+fn go_check_retired_is_emitted_without_rename_errors() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(&grouped_graph(""), spec_cli());
+    let seam = go_func(&go, "checkRetired");
+    assert!(
+        seam.contains("func checkRetired(path []string, args []string) int"),
+        "{seam}"
+    );
 }

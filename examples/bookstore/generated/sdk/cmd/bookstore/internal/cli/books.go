@@ -11,7 +11,7 @@ import (
 )
 
 func cmdListBooks(args []string) int {
-	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs := flag.NewFlagSet("books list", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books list — Returns every book in the catalogue.\n", program)
 		fmt.Fprintln(fs.Output(), "\nPass a genre to narrow the results to one genre; omit it to list everything.")
@@ -86,6 +86,9 @@ func cmdListBooks(args []string) int {
 	}
 	seen := visited(fs)
 	if len(flagArgs) > 0 {
+		if code := checkRetired([]string{"books", "list"}, args); code != 0 {
+			return code
+		}
 		errorMessage(2, "unexpected argument %q", flagArgs[0])
 		return 2
 	}
@@ -111,7 +114,7 @@ func cmdListBooks(args []string) int {
 }
 
 func cmdCreateBook(args []string) int {
-	fs := flag.NewFlagSet("create", flag.ContinueOnError)
+	fs := flag.NewFlagSet("books create", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books create — Adds a book to the catalogue.\n", program)
 		fmt.Fprintln(fs.Output(), "\nThe book is stored immediately and returned with its generated identifier.")
@@ -195,6 +198,9 @@ func cmdCreateBook(args []string) int {
 	}
 	seen := visited(fs)
 	if len(flagArgs) > 0 {
+		if code := checkRetired([]string{"books", "create"}, args); code != 0 {
+			return code
+		}
 		errorMessage(2, "unexpected argument %q", flagArgs[0])
 		return 2
 	}
@@ -261,7 +267,7 @@ func cmdCreateBook(args []string) int {
 }
 
 func cmdDeleteBook(args []string) int {
-	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
+	fs := flag.NewFlagSet("books delete", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books delete — Permanently removes one book from the catalogue.\n", program)
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books delete <id> [flags]\n", program)
@@ -365,7 +371,7 @@ func cmdDeleteBook(args []string) int {
 }
 
 func cmdGetBook(args []string) int {
-	fs := flag.NewFlagSet("get", flag.ContinueOnError)
+	fs := flag.NewFlagSet("books get", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books get — Returns one book by its identifier.\n", program)
 		fmt.Fprintf(fs.Output(), "\nUsage: %s books get <id> [flags]\n", program)
@@ -482,7 +488,7 @@ func cmdGetBook(args []string) int {
 }
 
 func cmdUpdateBook(args []string) int {
-	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	fs := flag.NewFlagSet("books update", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s books update — Replaces the mutable fields of one book.\n", program)
 		fmt.Fprintln(fs.Output(), "\nFields omitted from the payload keep their current values.")

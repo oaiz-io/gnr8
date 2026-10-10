@@ -8,12 +8,17 @@ from .commands import books
 from .config import DESCRIPTION, PROGRAM, VERSION
 
 
+class UsageError(SystemExit):
+    """Arguments argparse rejected; main names a retired invocation or prints this."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(2)
+        self.message = message
+
+
 class OutputParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
-        from . import output
-
-        output.print_error(message, code=2)
-        raise SystemExit(2)
+        raise UsageError(message)
 
 
 def build_parser() -> argparse.ArgumentParser:
