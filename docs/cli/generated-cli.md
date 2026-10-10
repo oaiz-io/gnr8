@@ -49,11 +49,12 @@ dispatcher calls `run<Topic><Name>` in `package cli` (`db types` → `runDbTypes
 `OwnedCommand::function` names, and the topic's help page and typo hints list it first. The topic
 must have at least one generated command (a declared command, or an operation in a group of the same
 name), and the name must not equal one of its verbs or sub-nouns. Each owned command, at the root or
-under a topic, calls its own function, and the generated `package cli` must not already declare that
-name. Like a root owned command, it is absent from `help --json` and shell completion.
+under a topic, calls its own function, and that name must not be one the generated `package cli`
+already uses: a declaration, an import, a Go predeclared name, `_` or `init`. Like a root owned command, it is absent from `help --json` and shell completion.
 
 A `rename_error(...)` path is matched before any command is dispatched, so it must name a path the
-CLI no longer runs. Generation refuses a retired path that is a live command or a prefix of one
+CLI no longer runs. Generation refuses a retired path with a flag token (`--help`), one that is a
+live command or a prefix of one
 (`books` while `books list` exists), one that extends a live command which takes arguments (`books
 get old` while `books get <id>` exists), and one that an earlier retired path already matches.
 

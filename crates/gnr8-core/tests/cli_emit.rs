@@ -3948,20 +3948,33 @@ fn go_owned_command_function_may_not_be_a_generated_name() {
     if skip_go() {
         return;
     }
-    for function in ["complete", "Run", "active", "dispatchBooks", "cliGroups"] {
+    for function in [
+        "complete",
+        "Run",
+        "active",
+        "dispatchBooks",
+        "cliGroups",
+        "strings",
+        "json",
+        "len",
+        "copy",
+        "string",
+        "_",
+        "init",
+    ] {
         let topic = go_topic_owned_error(topic_owned_cli(
             OwnedCommand::new("stats").function(function),
         ));
         assert!(
             topic.contains(&format!(
-                "owned command \"books stats\" calls Go function {function:?}, which the generated CLI already declares"
+                "owned command \"books stats\" calls Go function {function:?}, a name the generated CLI already uses"
             )),
             "{function}: {topic}"
         );
         let root = go_topic_owned_error(
             spec_cli().owned_command(OwnedCommand::new("stats").function(function)),
         );
-        assert!(root.contains("already declares"), "{function}: {root}");
+        assert!(root.contains("already uses"), "{function}: {root}");
     }
 }
 
@@ -4054,4 +4067,22 @@ fn go_rename_error_may_not_shadow_an_owned_command() {
         message.contains("retired path \"books stats\" matches live command \"books stats\""),
         "{message}"
     );
+}
+
+#[test]
+fn rename_error_may_not_name_a_flag() {
+    for retired in [
+        vec!["--help"],
+        vec!["--version"],
+        vec!["books", "--help"],
+        vec!["books", ""],
+    ] {
+        let message = rename_error_message(
+            spec_cli().rename_error(CliRenameError::new(retired.clone(), "books list")),
+        );
+        assert!(
+            message.contains("a retired path names commands"),
+            "{retired:?}: {message}"
+        );
+    }
 }

@@ -245,22 +245,82 @@ fn owned_functions(cli: &SdkCli) -> Vec<(String, String)> {
     root.chain(topics).collect()
 }
 
+/// Go's predeclared identifiers. Generated code calls `len`, `copy`, `append` and names `string`
+/// and `error`, so a package-level function that shadows one breaks it.
+const GO_PREDECLARED: &[&str] = &[
+    "any",
+    "append",
+    "bool",
+    "byte",
+    "cap",
+    "clear",
+    "close",
+    "comparable",
+    "complex",
+    "complex128",
+    "complex64",
+    "copy",
+    "delete",
+    "error",
+    "false",
+    "float32",
+    "float64",
+    "imag",
+    "int",
+    "int16",
+    "int32",
+    "int64",
+    "int8",
+    "iota",
+    "len",
+    "make",
+    "max",
+    "min",
+    "new",
+    "nil",
+    "panic",
+    "print",
+    "println",
+    "real",
+    "recover",
+    "rune",
+    "string",
+    "true",
+    "uint",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint8",
+    "uintptr",
+];
+
 /// A hand-owned command's function is written by the user, so the generated package must not
-/// declare that name: `function("complete")` would call the completion handler, and a name the
-/// user does write would be declared twice.
-fn check_owned_functions_not_generated(cli: &SdkCli, files: &[SdkFile]) -> Result<(), CoreError> {
+/// already use that name: `function("complete")` would call the completion handler, an imported
+/// package name or a predeclared one would be shadowed, and `_` or `init` is not callable.
+fn check_owned_functions_not_generated(
+    cli: &SdkCli,
+    package: &str,
+    files: &[SdkFile],
+) -> Result<(), CoreError> {
     let main = main_file(&cli.program);
-    let declared: BTreeSet<String> = files
+    let mut used: BTreeSet<String> = files
         .iter()
         .filter(|file| file.name != main)
         .flat_map(|file| super::decls::package_names(&file.contents))
         .collect();
+    used.extend(
+        GO_PREDECLARED
+            .iter()
+            .chain(&["_", "init", package])
+            .map(|name| (*name).to_string()),
+    );
     for (invocation, function) in owned_functions(cli) {
-        if declared.contains(&function) {
+        if used.contains(&function) {
             return Err(CoreError::SdkGen {
                 message: format!(
-                    "CLI {:?} owned command {invocation:?} calls Go function {function:?}, which \
-                     the generated CLI already declares; give it another OwnedCommand::function",
+                    "CLI {:?} owned command {invocation:?} calls Go function {function:?}, a name \
+                     the generated CLI already uses (a declaration, an import, a Go predeclared \
+                     name, `_` or `init`); give it another OwnedCommand::function",
                     cli.program
                 ),
             });
@@ -414,7 +474,7 @@ pub(crate) fn emit_cli(
         })?);
     }
     files.sort_by(|left, right| left.name.cmp(&right.name));
-    check_owned_functions_not_generated(cli, &files)?;
+    check_owned_functions_not_generated(cli, package, &files)?;
     Ok(files)
 }
 

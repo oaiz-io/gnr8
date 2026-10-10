@@ -2016,9 +2016,10 @@ fn live_commands(ops: &[&Operation], cli: &SdkCli) -> Vec<LiveCommand> {
 }
 
 /// A retired path is matched as a prefix of the arguments before anything is dispatched, so it
-/// must not reach a live command: not as a prefix of one (that command could never run), not as an
-/// extension of one that takes arguments (that command could not take those arguments), and not
-/// behind an earlier retired path that already matches it.
+/// must not reach a live command: not through a flag token (`--help` is handled after the check),
+/// not as a prefix of a command (that command could never run), not as an extension of one that
+/// takes arguments (that command could not take those arguments), and not behind an earlier
+/// retired path that already matches it.
 fn check_cli_rename_errors(ops: &[&Operation], cli: &SdkCli) -> Result<(), CoreError> {
     let program = cli.program.as_str();
     let live = live_commands(ops, cli);
@@ -2027,6 +2028,18 @@ fn check_cli_rename_errors(ops: &[&Operation], cli: &SdkCli) -> Result<(), CoreE
         if retired.is_empty() {
             return Err(CoreError::SdkGen {
                 message: format!("CLI {program:?} rename error has an empty retired path"),
+            });
+        }
+        if let Some(token) = retired
+            .iter()
+            .find(|token| token.is_empty() || token.starts_with('-'))
+        {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} retired path {:?} has token {token:?}; a retired path names \
+                     commands, and `--help`, `--version` and other flags stay live",
+                    retired.join(" ")
+                ),
             });
         }
         for command in &live {

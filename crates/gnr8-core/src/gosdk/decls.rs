@@ -1,15 +1,17 @@
-//! The package-level names one Go file declares.
+//! The file-scope names one Go file declares or imports.
 //!
 //! The emitter writes Go as text, so a name it declares is only known once that text exists. This
-//! reads it back with a lexer just large enough for that: it skips comments, string and rune
-//! literals, tracks bracket depth, and collects the names `func`, `var`, `const` and `type` declare
-//! at depth zero. Methods are skipped, because a method name is not a package-level name.
+//! reads it back with a lexer just large enough for that: it skips comments and literals, tracks
+//! bracket depth, and collects the names `func`, `var`, `const` and `type` declare at depth zero,
+//! plus the name each `import` binds. Methods are skipped, because a method name is not a
+//! package-level name.
 
 use std::collections::BTreeSet;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Token {
     Ident(String),
+    Str(String),
     Open,
     Close,
     Comma,
@@ -17,7 +19,7 @@ enum Token {
     Other,
 }
 
-/// The package-level names `source` declares.
+/// The package-level names `source` declares and the names its imports bind.
 pub(crate) fn package_names(source: &str) -> BTreeSet<String> {
     let tokens = tokenize(source);
     let mut names = BTreeSet::new();
@@ -32,6 +34,10 @@ pub(crate) fn package_names(source: &str) -> BTreeSet<String> {
                     if let Some(Token::Ident(name)) = tokens.get(index + 1) {
                         names.insert(name.clone());
                     }
+                }
+                "import" => {
+                    index = import_names(&tokens, index + 1, &mut names);
+                    continue;
                 }
                 "var" | "const" | "type" => {
                     if tokens.get(index + 1) == Some(&Token::Open) {
@@ -80,6 +86,47 @@ fn group_names(tokens: &[Token], start: usize, names: &mut BTreeSet<String>) -> 
     index
 }
 
+/// Collect the names an `import` declaration whose specs start at `start` binds, and return the
+/// index after it: the alias when there is one, otherwise the package name the path implies (its
+/// last element, or the one before a `/vN` major-version suffix). `_` and `.` bind no name.
+fn import_names(tokens: &[Token], start: usize, names: &mut BTreeSet<String>) -> usize {
+    let grouped = tokens.get(start) == Some(&Token::Open);
+    let mut index = if grouped { start + 1 } else { start };
+    let mut alias: Option<&str> = None;
+    while let Some(token) = tokens.get(index) {
+        index += 1;
+        match token {
+            Token::Close if grouped => break,
+            Token::Ident(name) => alias = Some(name),
+            // `.` merges the package's names into this file; none of them is known here.
+            Token::Other => alias = Some("_"),
+            Token::Str(path) => {
+                let name = alias.take().or_else(|| import_path_name(path));
+                if let Some(name) = name.filter(|name| *name != "_") {
+                    names.insert(name.to_string());
+                }
+                if !grouped {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    index
+}
+
+fn import_path_name(path: &str) -> Option<&str> {
+    let mut elements = path.rsplit('/');
+    let last = elements.next()?;
+    let versioned =
+        last.len() > 1 && last.starts_with('v') && last[1..].chars().all(|ch| ch.is_ascii_digit());
+    if versioned {
+        elements.next()
+    } else {
+        Some(last)
+    }
+}
+
 /// Collect the comma-separated names a spec starting at `start` declares, and return the index
 /// after the last one.
 fn spec_names(tokens: &[Token], start: usize, names: &mut BTreeSet<String>) -> usize {
@@ -124,6 +171,7 @@ fn tokenize(source: &str) -> Vec<Token> {
             }
             '"' | '\'' => {
                 index += 1;
+                let start = index;
                 while let Some(&c) = chars.get(index) {
                     index += 1;
                     if c == '\\' {
@@ -132,16 +180,27 @@ fn tokenize(source: &str) -> Vec<Token> {
                         break;
                     }
                 }
-                tokens.push(Token::Other);
+                tokens.push(if ch == '"' {
+                    Token::Str(
+                        chars[start..index.saturating_sub(1).max(start)]
+                            .iter()
+                            .collect(),
+                    )
+                } else {
+                    Token::Other
+                });
                 continue;
             }
             '`' => {
                 index += 1;
+                let start = index;
                 while chars.get(index).is_some_and(|&c| c != '`') {
                     index += 1;
                 }
+                tokens.push(Token::Str(
+                    chars[start..index.min(chars.len())].iter().collect(),
+                ));
                 index += 1;
-                tokens.push(Token::Other);
                 continue;
             }
             '{' | '(' | '[' => tokens.push(Token::Open),
@@ -223,11 +282,27 @@ var handler = func() {}
                 "cliGroups",
                 "complete",
                 "first",
+                "fmt",
                 "handler",
                 "program",
                 "second"
             ]
         );
+    }
+
+    #[test]
+    fn collects_the_names_imports_bind() {
+        let source = "package cli\n\
+            import \"strings\"\n\
+            import (\n\
+            \t\"encoding/json\"\n\
+            \tsdk \"example.com/bookstore/sdk-go\"\n\
+            \t_ \"embed\"\n\
+            \t. \"math\"\n\
+            \t\"math/rand/v2\"\n\
+            )\n\
+            func run() {}\n";
+        assert_eq!(names(source), ["json", "rand", "run", "sdk", "strings"]);
     }
 
     #[test]
