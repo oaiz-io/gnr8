@@ -2945,6 +2945,12 @@ fn apply_openapi_field_patch(
     if let Some(value) = &patch.constraints.exclusive_maximum {
         prop.exclusive_maximum = Some(value.clone());
     }
+    if let Some(value) = &patch.constraints.multiple_of {
+        prop.multiple_of = Some(value.clone());
+    }
+    if patch.constraints.unique_items {
+        prop.unique_items = true;
+    }
     if let Some(value) = &patch.constraints.pattern {
         prop.pattern = Some(value.clone());
     }
@@ -7374,6 +7380,56 @@ mod tests {
             panic!("expected inline enum");
         };
         assert_eq!(sort, &vec!["desc".to_string(), "asc".to_string()]);
+    }
+
+    /// Every constraint a field patch carries is applied, `multipleOf` and `uniqueItems` included.
+    #[test]
+    fn an_openapi_field_patch_applies_multiple_of_and_unique_items() {
+        let field = |name: &str, schema: Type| Field {
+            json_name: name.to_string(),
+            serializer_may_omit: false,
+            deserializer_accepts_absent: false,
+            deserializer_accepts_null: false,
+            serializer_may_emit_null: false,
+            validator_requires_presence: true,
+            validator_rejects_null: false,
+            schema,
+            description: None,
+            example: None,
+            meta: FieldMeta::default(),
+        };
+        let ir = ApiGraph {
+            schemas: vec![Schema {
+                id: "app.Order".to_string(),
+                name: "Order".to_string(),
+                body: Type::Object(vec![
+                    field(
+                        "count",
+                        Type::Primitive(Prim::Int {
+                            bits: 64,
+                            signed: true,
+                        }),
+                    ),
+                    field("tags", Type::Array(Box::new(Type::Primitive(Prim::String)))),
+                ]),
+                enum_source_order: Vec::new(),
+                provenance: span(),
+            }],
+            ..ApiGraph::default()
+        };
+        let mut count = OpenApiFieldPatch::new("count");
+        count.constraints.multiple_of = Some("5".to_string());
+        let mut tags = OpenApiFieldPatch::new("tags");
+        tags.constraints.unique_items = true;
+        let mut out = Artifacts::new();
+        OpenApi31::new()
+            .to("openapi.yaml")
+            .schema_patch(OpenApiSchemaPatch::new("Order").field(count).field(tags))
+            .generate(&ir, &mut out, &cx(), None)
+            .unwrap();
+        let yaml = &out.files()[0].text;
+        assert!(yaml.contains("multipleOf: 5"), "{yaml}");
+        assert!(yaml.contains("uniqueItems: true"), "{yaml}");
     }
 
     #[test]

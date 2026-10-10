@@ -331,6 +331,8 @@ must move the minor version.
   declared request date-time example is. A member such as `…05.120Z` is skipped for a canonical
   one, or refused with the same `No sample call: …` reason when no member is canonical, instead of
   a sample Go would send in different bytes.
+- An `OpenApiFieldPatch` whose `constraints` set `multiple_of` or `unique_items` now writes them to
+  the published field. Both were ignored.
 
 ## 0.18.0 — 2026-10-10
 
