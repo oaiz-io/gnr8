@@ -59,7 +59,7 @@ content-type: application/json
 }
 ```
 
-### Python — `example.com/bookstore/sdk`
+### Python — `sdk`
 
 ```python
 from sdk import Client

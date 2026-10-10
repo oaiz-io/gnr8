@@ -607,7 +607,7 @@ fn go_sdk_without_package_metadata_prints_the_identity_note_and_no_snippet() {
     let example = section(text, "Example");
     assert!(
         example.contains(
-            "### Go — `example.com/bookstore/sdk`\n\nNo sample call: this SDK target emits no package metadata, so it has no published import name.\n"
+            "### Go\n\nNo sample call: this SDK target emits no package metadata, so it has no published import name.\n"
         ),
         "{example}"
     );
@@ -789,7 +789,7 @@ fn consumer_mode_imports_the_listed_package_and_models() {
     let example = section(page(&pages, "operations/create-book.md"), "Example");
     assert!(
         example.contains(
-            "### Python — `example.com/bookstore/sdk`\n\n```python\nfrom sdk import Client, CreateBookRequest, Genre\n\nclient = Client(base_url, api_keys={\"ApiKeyAuth\": api_key})\nresult = client.create_book(body=CreateBookRequest("
+            "### Python — `sdk`\n\n```python\nfrom sdk import Client, CreateBookRequest, Genre\n\nclient = Client(base_url, api_keys={\"ApiKeyAuth\": api_key})\nresult = client.create_book(body=CreateBookRequest("
         ),
         "{example}"
     );
@@ -802,7 +802,7 @@ fn consumer_mode_imports_the_package_json_name() {
     let example = section(page(&pages, "operations/get-book.md"), "Example");
     assert!(
         example.contains(
-            "### TypeScript — `bookstore`\n\n```ts\nimport { Client } from \"@example/bookstore-sdk\";\n\nconst client = new Client({ baseUrl, apiKeys: { \"ApiKeyAuth\": apiKey } });\nconst result = await client.getBook(\"gnr8\");\nconsole.log(result);\n```"
+            "### TypeScript — `@example/bookstore-sdk`\n\n```ts\nimport { Client } from \"@example/bookstore-sdk\";\n\nconst client = new Client({ baseUrl, apiKeys: { \"ApiKeyAuth\": apiKey } });\nconst result = await client.getBook(\"gnr8\");\nconsole.log(result);\n```"
         ),
         "{example}"
     );
@@ -820,13 +820,11 @@ fn python_and_typescript_without_package_metadata_print_the_identity_note_and_no
     let example = section(page(&pages, "operations/create-book.md"), "Example");
     let note = "No sample call: this SDK target emits no package metadata, so it has no published import name.";
     assert!(
-        example.contains(&format!(
-            "### Python — `example.com/bookstore/sdk`\n\n{note}\n"
-        )),
+        example.contains(&format!("### Python\n\n{note}\n")),
         "{example}"
     );
     assert!(
-        example.contains(&format!("### TypeScript — `bookstore`\n\n{note}\n")),
+        example.contains(&format!("### TypeScript\n\n{note}\n")),
         "{example}"
     );
     assert!(!example.contains("```python"), "{example}");
@@ -965,6 +963,14 @@ fn authentication_page_only_when_security_is_declared() {
         "apiKeys: { \"ApiKeyAuth\": apiKey }",
     ] {
         assert!(auth.contains(option), "{option} in:\n{auth}");
+    }
+    // Each SDK row names the package a consumer imports, as the sample headings do.
+    for row in [
+        "| Go — `example.com/bookstore/sdk` |",
+        "| Python — `sdk` |",
+        "| TypeScript — `@example/bookstore-sdk` |",
+    ] {
+        assert!(auth.contains(row), "{row} in:\n{auth}");
     }
     assert!(
         auth.contains("[`createBook`](operations/create-book.md)"),

@@ -192,10 +192,24 @@ pub(crate) struct ServerDoc {
 #[derive(Debug, Clone)]
 pub(crate) struct SdkDoc {
     pub(crate) language: ContractTestLanguage,
-    /// The module or package the declaration names.
-    pub(crate) label: String,
     /// What a consumer imports and installs; `None` when the target emits no package manifest.
     pub(crate) identity: Option<ConsumerIdentity>,
+}
+
+impl SdkDoc {
+    /// How a page names the SDK: its language, then the package a consumer imports — the one
+    /// consumer identity, as every sample under the name imports it. An SDK with no identity has no
+    /// import to name, so it is named by its language alone.
+    pub(crate) fn heading(&self) -> Inline {
+        let language = crate::docs::build::language_name(self.language);
+        match &self.identity {
+            Some(identity) => Inline::Seq(vec![
+                Inline::text(format!("{language} — ")),
+                Inline::code(identity.import.clone()),
+            ]),
+            None => Inline::text(language),
+        }
+    }
 }
 
 /// One operation group.

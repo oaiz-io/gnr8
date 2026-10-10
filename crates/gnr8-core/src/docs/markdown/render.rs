@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use crate::docs::build::language_name;
 use crate::docs::identity::NO_IDENTITY_NOTE;
 use crate::docs::model::{
     CodeSample, DeclaredExample, DocsModel, ExampleDoc, ExampleValue, HttpRequest, Inline,
@@ -466,13 +465,7 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
                 ReplyDoc::Absent => {}
             }
             for (sdk, samples) in model.sdks.iter().zip(per_sdk) {
-                w.heading(
-                    3,
-                    &Inline::Seq(vec![
-                        Inline::text(format!("{} — ", language_name(sdk.language))),
-                        Inline::code(sdk.label.clone()),
-                    ]),
-                );
+                w.heading(3, &sdk.heading());
                 match samples {
                     SdkSamples::NoIdentity => w.paragraph(&Inline::text(NO_IDENTITY_NOTE)),
                     SdkSamples::Code { call } => {

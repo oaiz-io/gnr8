@@ -54,7 +54,7 @@ content-type: application/json
 }
 ```
 
-### TypeScript — `example.com/bookstore/sdk`
+### TypeScript — `@example/bookstore-sdk`
 
 ```ts
 import { Client } from "@example/bookstore-sdk";

@@ -221,15 +221,6 @@ pub(crate) fn go_sdk_import(identity: &ConsumerIdentity) -> Result<String, CoreE
     })
 }
 
-/// The module or package a section is labelled with: what the declaration names.
-pub(crate) fn sdk_label(sdk: SiblingSdk<'_>) -> &str {
-    match sdk {
-        SiblingSdk::Go(t) => &t.module,
-        SiblingSdk::Python(t) => &t.module,
-        SiblingSdk::TypeScript(t) => &t.module,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::docs::identity::sdk_label;
 use crate::docs::markdown::escape::one_line;
 use crate::docs::model::{
     ApiDoc, AuthDoc, AuthSchemeDoc, ErrorCatalog, GroupDoc, Inline, PageRef, Prose, SdkDoc,
@@ -219,10 +218,7 @@ fn credential_options(
             SiblingSdk::TypeScript(_) => crate::tssdk::callsite::client_credentials(auth, true),
         };
         rows.push(vec![
-            Inline::Seq(vec![
-                Inline::text(format!("{} — ", language_name(doc.language))),
-                Inline::code(sdk_label(*sdk)),
-            ]),
+            doc.heading(),
             Inline::code(option.trim_start_matches(", ")),
         ]);
     }

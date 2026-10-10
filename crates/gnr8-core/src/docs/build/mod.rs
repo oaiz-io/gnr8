@@ -1,6 +1,6 @@
 //! The one derivation of the docs model from a projected graph and the plan's sibling SDKs.
 
-use crate::docs::identity::{consumer_identity, sdk_label};
+use crate::docs::identity::consumer_identity;
 use crate::docs::model::{DocsModel, SdkDoc};
 use crate::graph::direction::{schema_consumers, schema_directions};
 use crate::graph::ApiGraph;
@@ -71,7 +71,6 @@ impl DocsModel {
                     *sdk,
                     SdkDoc {
                         language: sdk.language(),
-                        label: sdk_label(*sdk).to_string(),
                         identity: consumer_identity(*sdk)?,
                     },
                 ))
