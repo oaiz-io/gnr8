@@ -17,8 +17,8 @@ use crate::sdk::emit_common::{
 use crate::tssdk::ERROR_TYPE as TS_ERROR_TYPE;
 use crate::verify::{
     absolute_path, percent_encode, request_header_values, request_query_values,
-    ContractTestLanguage, OperationSample, SampleParam, SampleRefusal, SuccessOutcome,
-    SuccessSample, WireCredentials, WireValue, CONTRACT_TEST_BASE_URL,
+    ContractTestLanguage, CredentialSlot, OperationSample, SampleParam, SampleRefusal,
+    SuccessOutcome, SuccessSample, WireCredentials, WireValue, CONTRACT_TEST_BASE_URL,
 };
 use crate::CoreError;
 
@@ -64,6 +64,25 @@ pub(crate) fn http_request(
 }
 
 impl HttpRequest {
+    /// The credential placeholders the request prints, each once, in the order API key, bearer
+    /// token, basic credentials.
+    pub(crate) fn credential_placeholders(&self) -> Vec<String> {
+        let printed = placeholders();
+        [
+            CredentialSlot::ApiKey,
+            CredentialSlot::Bearer,
+            CredentialSlot::Basic,
+        ]
+        .into_iter()
+        .filter(|wanted| {
+            self.query.iter().chain(&self.headers).any(
+                |(_, value)| matches!(value, WireValue::Credential { slot, .. } if slot == wanted),
+            )
+        })
+        .map(|slot| printed.slot(slot).to_string())
+        .collect()
+    }
+
     /// The request target as sent with `credentials`: the path, then the query, each name and
     /// literal value percent-encoded with the one rule every generated client uses.
     pub(crate) fn query_text(&self, credentials: &WireCredentials, page: bool) -> String {

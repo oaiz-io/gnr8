@@ -158,8 +158,10 @@ identity every sample under it imports, and carries up to three samples:
 - **A union reply is its first variant.** A reply whose schema is a union is sampled as the first
   variant the schema lists; a union in a request has no sample.
 - **Credentials and the base URL are placeholders.** The HTTP exchange prints `{apiKey}`, `{token}`
-  and `{base64(username:password)}`; the code takes them and the base URL as variables. No server is
-  chosen for you. Paths start at the server root; a server URL with a path prefix prepends it.
+  or `{base64(username:password)}` for each credential the operation requires; the code takes them
+  and the base URL as variables. The Example note names exactly the placeholders its exchange
+  prints, and an operation that requires no credential is told it takes the base URL alone. No
+  server is chosen for you. Paths start at the server root; a server URL with a path prefix prepends it.
 - **The exchange is the whole request.** Cookie parameters print as a `cookie:` line, and the reply
   carries the media type the response declares (`application/hal+json`, not a stand-in) in that
   media type's wire form: JSON for a JSON type, the text itself (never quoted) for a `text/*` type.

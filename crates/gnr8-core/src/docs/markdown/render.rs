@@ -71,11 +71,32 @@ const RECEIVED_BY_THE_CALL: &str = "The call under Example receives this reply."
 /// The docs-relative path of the agent index.
 pub(crate) const LLMS_TXT: &str = "llms.txt";
 
-/// What every Example section says once, before the exchange.
-const EXAMPLE_NOTE: &str = "Each value is the example the API declares for it, or else one \
-sampled from the schema, and satisfies every declared constraint. Credentials are placeholders — `{apiKey}`, `{token}`, `{base64(username:password)}` — and the \
-code samples take them and the base URL as variables. Paths start at the server root; a server URL \
-with a path prefix prepends it to every path.";
+/// What every Example section says once, before the exchange: where the values come from, then
+/// (see [`example_note`]) the credential placeholders, then where paths start.
+const EXAMPLE_VALUES: &str = "Each value is the example the API declares for it, or else one \
+sampled from the schema, and satisfies every declared constraint.";
+const EXAMPLE_PATHS: &str = "Paths start at the server root; a server URL with a path prefix \
+prepends it to every path.";
+
+/// The Example section's note for `request`: it names exactly the credential placeholders the
+/// request prints, so an operation that requires none is told it takes the base URL alone.
+fn example_note(request: &HttpRequest) -> String {
+    let placeholders = request.credential_placeholders();
+    let variables = if placeholders.is_empty() {
+        "The code samples take the base URL as a variable.".to_string()
+    } else {
+        let names = placeholders
+            .iter()
+            .map(|placeholder| code_span(placeholder))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "Credentials are placeholders — {names} — and the code samples take them and the \
+             base URL as variables."
+        )
+    };
+    format!("{EXAMPLE_VALUES} {variables} {EXAMPLE_PATHS}")
+}
 
 /// The one guarantee the error catalog states, once, before the declared SDKs' error types: for
 /// several SDKs, and for the one SDK a `reference.md` documents.
@@ -589,7 +610,7 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
             error_reply,
             per_sdk,
         } => {
-            w.paragraph(&Inline::text(EXAMPLE_NOTE));
+            w.paragraph(&Inline::text(example_note(request)));
             w.heading(3, &Inline::text(HTTP));
             w.block(&request_block(request)?);
             match reply {

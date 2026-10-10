@@ -1886,6 +1886,31 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
     }
 }
 
+/// The Example note names only the credential placeholders the page's request prints: an
+/// operation that requires no credential is told it takes the base URL alone.
+#[test]
+fn the_example_note_names_only_the_placeholders_the_request_prints() {
+    let pages = render(&bookstore(), &[go_sdk()]);
+    let secured = section(page(&pages, "operations/get-book.md"), "Example");
+    assert!(
+        secured.contains(
+            "Credentials are placeholders — `{apiKey}` — and the code samples take them and the \
+             base URL as variables."
+        ),
+        "{secured}"
+    );
+    assert!(!secured.contains("{token}"), "{secured}");
+    let mut value = bookstore_json();
+    value["security"] = json!([]);
+    let pages = render(&graph_of(value), &[go_sdk()]);
+    let open = section(page(&pages, "operations/health.md"), "Example");
+    assert!(
+        open.contains("constraint. The code samples take the base URL as a variable. Paths"),
+        "{open}"
+    );
+    assert!(!open.contains("placeholder"), "{open}");
+}
+
 /// The Example note is true whichever source chose a value: `createBook` sends its declared request
 /// example, so the note cannot claim every value was sampled from the schema.
 #[test]
