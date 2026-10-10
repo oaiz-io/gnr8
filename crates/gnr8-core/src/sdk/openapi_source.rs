@@ -5291,6 +5291,98 @@ components:
         assert_eq!(version_1, current);
     }
 
+    /// A version 1 artifact never held the bounds of the schema a parameter names with `$ref`, so
+    /// the first comparison after upgrading compares such a parameter only on the keywords the base
+    /// states: the referenced bounds the current graph resolves are not a change the API made.
+    #[test]
+    fn a_referenced_parameter_reports_no_change_after_the_version_1_upgrade() {
+        let spec = |maximum: u32| {
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: P, version: "1" }}
+servers: [{{ url: "https://api.example.com" }}]
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - {{ name: limit, in: query, schema: {{ $ref: "#/components/schemas/Limit", maximum: {maximum} }} }}
+        - {{ name: ids, in: query, schema: {{ type: array, items: {{ $ref: "#/components/schemas/Limit" }} }} }}
+      responses: {{ "204": {{ description: none }} }}
+components:
+  schemas:
+    Limit: {{ type: integer, minimum: 1, maximum: 100 }}
+"##
+            )
+        };
+        let current = import_yaml(&spec(10));
+        // The graph the version 1 importer wrote: every keyword left in the raw schema.
+        let version_1 = |graph: &crate::graph::ApiGraph| {
+            let mut graph = graph.clone();
+            for param in &mut graph.operations[0].params {
+                param.constraints = super::Constraints::default();
+                param.item_constraints = super::Constraints::default();
+                for (field, value) in &mut param.openapi_fields {
+                    if field == "schema" && param.name == "limit" {
+                        value["maximum"] = serde_json::json!(10);
+                    }
+                }
+            }
+            super::upgrade_graph_from_artifact_v1(&mut graph);
+            graph
+        };
+        let base = crate::changes::BaseGraph {
+            reference: "main".to_string(),
+            commit: "0".repeat(40),
+            graph: version_1(&current),
+            upgraded_from_version_1: true,
+        };
+        let report = crate::changes::diff_base_graph(
+            &base,
+            &current,
+            &std::collections::BTreeSet::new(),
+            &[],
+        )
+        .expect("diff");
+        assert!(report.changes.is_empty(), "{:?}", report.changes);
+        // Read as a version 2 base, the same graph lacks the referenced bounds: that is the false
+        // report the partial reading prevents.
+        let as_version_2 = crate::changes::BaseGraph {
+            upgraded_from_version_1: false,
+            ..base.clone()
+        };
+        let report = crate::changes::diff_base_graph(
+            &as_version_2,
+            &current,
+            &std::collections::BTreeSet::new(),
+            &[],
+        )
+        .expect("diff");
+        assert!(
+            !report.changes.is_empty(),
+            "a version 2 reading reports the referenced bounds"
+        );
+
+        // A keyword the base does state is still compared.
+        let loosened = import_yaml(&spec(20));
+        let report = crate::changes::diff_base_graph(
+            &base,
+            &loosened,
+            &std::collections::BTreeSet::new(),
+            &[],
+        )
+        .expect("diff");
+        assert_eq!(
+            report
+                .changes
+                .iter()
+                .map(|change| change.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["request.parameter.constraints.changed"]
+        );
+    }
+
     /// The version 1 importer kept the base path on the servers it imported; a server set in
     /// configuration was never touched, by either version. So the upgrade strips the base path only
     /// from a graph the importer wrote — never from a `SetBasePath` + `OpenApiMetadata::server`

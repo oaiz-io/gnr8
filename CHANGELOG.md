@@ -26,9 +26,12 @@ must move the minor version.
   so the first comparison after upgrading reports no change the API did not make. The base path is
   taken off a version 1 server only when the importer wrote the graph (its operations carry the
   imported document's provenance), so a server set with `OpenApiMetadata::server` beside
-  `SetBasePath` keeps its URL and reports no change. The one
-  exception is the bounds of a schema an imported parameter names with `$ref`, which a version 1
-  artifact never held; they show as added constraints once.
+  `SetBasePath` keeps its URL and reports no change. A version 1 artifact never held the bounds of
+  a schema an imported parameter names with `$ref`, so such a parameter is compared only on the
+  constraint keywords the base states: the referenced bounds are not reported as added. A
+  parameter's example moves into the new typed `Param::example` the same way. `BaseGraph` gains
+  `upgraded_from_version_1`, and `gnr8_engine::changes::diff_base_graph` compares a `BaseGraph`
+  with that reading.
 - `gnr8_engine::verify`: `ContractTestSuite` gains `refused` and `ContractTestPlan` gains `refused`
   (each refused sample, with its operation, scope and reason); `SampleParam` gains `required` and
   `unmet`, and `SampleBody` gains `unmet`. Code that builds these structs literally needs the new

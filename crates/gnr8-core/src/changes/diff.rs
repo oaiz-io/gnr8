@@ -333,6 +333,9 @@ impl<'a> GraphIndex<'a> {
 
 struct Collector {
     changes: Vec<Change>,
+    /// Whether the base was read from a version 1 artifact, which never held the bounds of the
+    /// schema a parameter names with `$ref` ([`comparable_parameter_constraints`]).
+    base_from_version_1: bool,
 }
 
 impl Collector {
@@ -371,7 +374,31 @@ pub fn diff_graphs(
     current: &ApiGraph,
     exempt_tags: &BTreeSet<String>,
 ) -> ChangeReport {
-    diff_graphs_inner(base, current, exempt_tags, &[], Vec::new())
+    diff_graphs_inner(base, current, exempt_tags, &[], Vec::new(), false)
+}
+
+/// Compare a committed base graph with the current one, as [`diff_graphs_with_gate_operations`]
+/// does, reading a base upgraded from a version 1 artifact for what it held: a parameter whose base
+/// schema is a `$ref` is compared only on the constraint keywords the base states.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when a gate selector matches neither graph side.
+pub fn diff_base_graph(
+    base: &super::BaseGraph,
+    current: &ApiGraph,
+    exempt_tags: &BTreeSet<String>,
+    gate_operations: &[GateOperation],
+) -> Result<ChangeReport, CoreError> {
+    let labels = gate_operation_labels(&base.graph, current, gate_operations)?;
+    Ok(diff_graphs_inner(
+        &base.graph,
+        current,
+        exempt_tags,
+        gate_operations,
+        labels,
+        base.upgraded_from_version_1,
+    ))
 }
 
 /// Compare two projected graphs while limiting the gate to exact effective-route selectors.
@@ -389,6 +416,24 @@ pub fn diff_graphs_with_gate_operations(
     exempt_tags: &BTreeSet<String>,
     gate_operations: &[GateOperation],
 ) -> Result<ChangeReport, CoreError> {
+    let labels = gate_operation_labels(base, current, gate_operations)?;
+    Ok(diff_graphs_inner(
+        base,
+        current,
+        exempt_tags,
+        gate_operations,
+        labels,
+        false,
+    ))
+}
+
+/// The sorted, deduplicated labels of the gate selectors, each of which must match an operation on
+/// one side.
+fn gate_operation_labels(
+    base: &ApiGraph,
+    current: &ApiGraph,
+    gate_operations: &[GateOperation],
+) -> Result<Vec<String>, CoreError> {
     let mut labels = Vec::with_capacity(gate_operations.len());
     for selector in gate_operations {
         let matched = base
@@ -410,13 +455,7 @@ pub fn diff_graphs_with_gate_operations(
     }
     labels.sort();
     labels.dedup();
-    Ok(diff_graphs_inner(
-        base,
-        current,
-        exempt_tags,
-        gate_operations,
-        labels,
-    ))
+    Ok(labels)
 }
 
 fn diff_graphs_inner(
@@ -425,11 +464,13 @@ fn diff_graphs_inner(
     exempt_tags: &BTreeSet<String>,
     gate_operations: &[GateOperation],
     gate_operation_labels: Vec<String>,
+    base_from_version_1: bool,
 ) -> ChangeReport {
     let base_index = GraphIndex::new(base, exempt_tags, gate_operations);
     let current_index = GraphIndex::new(current, exempt_tags, gate_operations);
     let mut collector = Collector {
         changes: Vec::new(),
+        base_from_version_1,
     };
 
     compare_document(&base_index, &current_index, &mut collector);
@@ -1101,8 +1142,9 @@ fn compare_existing_parameter(
     }
     // The validation bounds a bound parameter carries are part of what callers must satisfy, the
     // same public fact `*.property.constraints.changed` reports for a schema field.
-    if base.constraints != current.constraints || base.item_constraints != current.item_constraints
-    {
+    let (current_constraints, current_items) =
+        comparable_parameter_constraints(base, current, out.base_from_version_1);
+    if base.constraints != current_constraints || base.item_constraints != current_items {
         out.push(
             scope,
             ChangeKind::Breaking,
@@ -1137,6 +1179,94 @@ fn compare_existing_parameter(
             Some(subject.to_string()),
             format!("parameter `{}` documentation changed", base.name),
         );
+    }
+}
+
+/// The current parameter's constraints and item constraints as the base can be compared with them.
+///
+/// A version 1 artifact kept an imported parameter's keywords in its raw schema and never resolved
+/// a `$ref`, so the bounds of the schema a `$ref` names were never in it. For a base read from one,
+/// a parameter whose base schema (or items schema) is a `$ref` is compared only on the keywords the
+/// base states; a keyword it does not state is unknown, not added. Every other parameter, and every
+/// comparison of two version 2 graphs, compares the constraints whole.
+fn comparable_parameter_constraints(
+    base: &Param,
+    current: &Param,
+    base_from_version_1: bool,
+) -> (
+    crate::analyze::facts::Constraints,
+    crate::analyze::facts::Constraints,
+) {
+    let raw = base
+        .openapi_fields
+        .iter()
+        .find(|(name, _)| name == "schema")
+        .map(|(_, raw)| raw);
+    let names_ref = |schema: Option<&serde_json::Value>| {
+        base_from_version_1 && schema.is_some_and(|schema| schema.get("$ref").is_some())
+    };
+    let items = raw.and_then(|raw| {
+        raw.get("items").or_else(|| {
+            raw.get("additionalProperties")
+                .filter(|value| value.is_object())
+        })
+    });
+    let project = |current: &crate::analyze::facts::Constraints,
+                   base: &crate::analyze::facts::Constraints,
+                   partial: bool| {
+        if partial {
+            stated_by(current, base)
+        } else {
+            current.clone()
+        }
+    };
+    (
+        project(&current.constraints, &base.constraints, names_ref(raw)),
+        project(
+            &current.item_constraints,
+            &base.item_constraints,
+            names_ref(raw) || names_ref(items),
+        ),
+    )
+}
+
+/// `current`'s constraints on exactly the keywords `base` states.
+fn stated_by(
+    current: &crate::analyze::facts::Constraints,
+    base: &crate::analyze::facts::Constraints,
+) -> crate::analyze::facts::Constraints {
+    fn keep<T: Clone>(current: Option<&T>, base: Option<&T>) -> Option<T> {
+        base.and(current).cloned()
+    }
+    crate::analyze::facts::Constraints {
+        min_length: keep(current.min_length.as_ref(), base.min_length.as_ref()),
+        max_length: keep(current.max_length.as_ref(), base.max_length.as_ref()),
+        min_items: keep(current.min_items.as_ref(), base.min_items.as_ref()),
+        max_items: keep(current.max_items.as_ref(), base.max_items.as_ref()),
+        min_properties: keep(
+            current.min_properties.as_ref(),
+            base.min_properties.as_ref(),
+        ),
+        max_properties: keep(
+            current.max_properties.as_ref(),
+            base.max_properties.as_ref(),
+        ),
+        minimum: keep(current.minimum.as_ref(), base.minimum.as_ref()),
+        maximum: keep(current.maximum.as_ref(), base.maximum.as_ref()),
+        exclusive_minimum: keep(
+            current.exclusive_minimum.as_ref(),
+            base.exclusive_minimum.as_ref(),
+        ),
+        exclusive_maximum: keep(
+            current.exclusive_maximum.as_ref(),
+            base.exclusive_maximum.as_ref(),
+        ),
+        pattern: keep(current.pattern.as_ref(), base.pattern.as_ref()),
+        enum_values: if base.enum_values.is_empty() {
+            Vec::new()
+        } else {
+            current.enum_values.clone()
+        },
     }
 }
 

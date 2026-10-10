@@ -17,6 +17,12 @@ pub struct BaseGraph {
     pub commit: String,
     /// Projected graph committed by that revision.
     pub graph: ApiGraph,
+    /// Whether the committed artifact was schema version 1, read through the one upgrade step.
+    ///
+    /// A version 1 artifact never held the bounds of the schema an imported parameter names with
+    /// `$ref`, so the comparison reads such a parameter's base constraints as partial
+    /// ([`crate::changes::diff_base_graph`]).
+    pub upgraded_from_version_1: bool,
 }
 
 /// Load the projected graph committed at `reference`.
@@ -57,11 +63,13 @@ fn load_base_graph_with(
             path: artifact_path.to_string(),
         });
     }
-    let graph = parse_base_artifact(reference, artifact_path, &output.stdout)?;
+    let (graph, upgraded_from_version_1) =
+        parse_base_artifact(reference, artifact_path, &output.stdout)?;
     Ok(BaseGraph {
         reference: reference.to_string(),
         commit,
         graph,
+        upgraded_from_version_1,
     })
 }
 
@@ -117,7 +125,7 @@ fn parse_base_artifact(
     reference: &str,
     artifact_path: &str,
     bytes: &[u8],
-) -> Result<ApiGraph, CoreError> {
+) -> Result<(ApiGraph, bool), CoreError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|error| CoreError::BaseGraphCorrupt {
             reference: reference.to_string(),
@@ -182,7 +190,7 @@ fn parse_base_artifact(
             });
         }
     }
-    Ok(artifact.graph)
+    Ok((artifact.graph, from_v1))
 }
 
 fn run_git<I, S>(project_root: &Path, git: &OsStr, args: I) -> Result<Output, CoreError>
@@ -372,9 +380,11 @@ mod tests {
             .to_json()
             .expect("serialize current artifact")
             .replace(&current, "\"schema_version\": 1");
-        let graph = parse_base_artifact("origin/main", GRAPH_ARTIFACT_PATH, text.as_bytes())
-            .expect("a version 1 artifact is read");
+        let (graph, upgraded) =
+            parse_base_artifact("origin/main", GRAPH_ARTIFACT_PATH, text.as_bytes())
+                .expect("a version 1 artifact is read");
         assert_eq!(graph, crate::graph::ApiGraph::default());
+        assert!(upgraded, "the reader says the base was upgraded");
     }
 
     #[test]

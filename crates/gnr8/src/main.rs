@@ -110,8 +110,8 @@ fn run_changes(
     }
 
     let exempt_tags: std::collections::BTreeSet<String> = exempt_tags.iter().cloned().collect();
-    let report = gnr8_engine::changes::diff_graphs_with_gate_operations(
-        &base.graph,
+    let report = gnr8_engine::changes::diff_base_graph(
+        &base,
         &current.graph,
         &exempt_tags,
         gate_operations,
