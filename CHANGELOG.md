@@ -82,6 +82,20 @@ must move the minor version.
   `refused` in `--json`.
 - Integer samples stay within ±(2^53 − 1). Bounds such as `minimum: 9007199254740993` used to yield
   a sample the TypeScript SDK sent as `…992`; they are now a typed refusal naming the input.
+- An imported parameter's validation keywords (`minimum`, `maxLength`, `pattern`, a non-string
+  `enum`, …) are held once, as typed constraints: the graph's kept copy of the parameter's raw schema
+  no longer repeats them, and `openapi.yaml` writes them back from the typed facts. A `Transform` that
+  edits a parameter's constraints now changes `openapi.yaml` exactly as it changes the docs and the
+  samples. The published schema is unchanged except that an OpenAPI 3.0 / Swagger 2 boolean
+  `exclusiveMinimum: true` / `exclusiveMaximum: true` is published in the 3.1 spelling
+  (`exclusiveMinimum: 5`), and members of a parameter enum that can never validate (another kind than
+  the declared `type`, or `null`) are left out.
+- A non-string parameter enum (`type: integer, enum: [1, 2, 3]`) imports as a constraint, so samples
+  and docs pick a member; a mixed enum keeps its members of the declared type instead of losing all
+  of them. A string enum stays the parameter's type.
+- A `$ref`'d parameter schema keeps the referenced schema's bounds together with any keyword beside
+  the `$ref` (the tighter bound wins), and a reference that does not resolve is a
+  `request.parameter.unresolved` diagnostic instead of silently importing no constraints.
 
 ## 0.17.2 — 2026-10-10
 

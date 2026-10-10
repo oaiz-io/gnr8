@@ -354,6 +354,7 @@ fn build_paths(
         let tags = effective_tags.resolve(op);
         let operation = lower_operation(
             op,
+            &graph.schemas,
             operation_docs_policy(graph, &op.id),
             operation_security_policy(graph, &op.id),
             tags,
@@ -416,6 +417,7 @@ fn place_operation(
 /// stable default since the graph carries none.
 fn lower_operation(
     op: &GraphOp,
+    schemas: &[crate::graph::Schema],
     docs: Option<&OperationDocsPolicy>,
     exact_security: Option<&crate::graph::OperationSecurityPolicy>,
     tags: &[String],
@@ -425,7 +427,7 @@ fn lower_operation(
     let parameters = op
         .params
         .iter()
-        .map(|param| lower_parameter(param, ref_to_name))
+        .map(|param| lower_parameter(param, ref_to_name, schemas))
         .collect::<Result<Vec<_>, crate::CoreError>>()?;
 
     let request_body = lower_request_body(op, docs, ref_to_name)?;
@@ -576,6 +578,7 @@ fn lower_request_body(
 fn lower_parameter(
     param: &crate::graph::Param,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[crate::graph::Schema],
 ) -> Result<Parameter, crate::CoreError> {
     let mut schema = lower_schema_type(&param.schema, ref_to_name, SchemaDirections::REQUEST)?;
     apply_constraints(&param.constraints, &mut schema);
@@ -592,6 +595,28 @@ fn lower_parameter(
     let mut openapi_fields = param.openapi_fields.clone();
     for (_, value) in &mut openapi_fields {
         rewrite_parameter_local_refs(value, ref_to_name);
+    }
+    // A kept raw schema (an imported parameter's) holds no validation keyword: the importer moved
+    // them into the typed constraints, the one copy, and they are written back here — so a
+    // Transform that edits a parameter's constraints edits what `openapi.yaml` publishes.
+    if param.openapi_content.is_none() {
+        if let Some((_, raw)) = openapi_fields.iter_mut().find(|(name, _)| name == "schema") {
+            write_raw_constraints(raw, &param.constraints, &param.schema, schemas);
+            let items = match &param.schema {
+                Type::Array(items) => Some((items.as_ref(), "items")),
+                Type::Map { value, .. } => Some((value.as_ref(), "additionalProperties")),
+                _ => None,
+            };
+            if let Some((item_type, key)) = items {
+                if let Some(item_raw) = raw
+                    .as_object_mut()
+                    .and_then(|object| object.get_mut(key))
+                    .filter(|value| value.is_object())
+                {
+                    write_raw_constraints(item_raw, &param.item_constraints, item_type, schemas);
+                }
+            }
+        }
     }
     // The typed prose is emitted at the position the Parameter Object's sorted fields give it, so a
     // parameter documented from its source and one imported with a `description` render alike.
@@ -619,6 +644,76 @@ fn lower_parameter(
         openapi_fields,
         schema,
     })
+}
+
+/// Write typed constraints into a raw JSON Schema object as their `OpenAPI` 3.1 keywords. An enum
+/// member is written as the JSON kind of the value's type: a number for an integer or float, a
+/// boolean for a bool, a string otherwise.
+fn write_raw_constraints(
+    raw: &mut serde_json::Value,
+    constraints: &Constraints,
+    ty: &Type,
+    schemas: &[crate::graph::Schema],
+) {
+    use serde_json::Value;
+    let Some(object) = raw.as_object_mut() else {
+        return;
+    };
+    for (key, count) in [
+        ("minLength", constraints.min_length),
+        ("maxLength", constraints.max_length),
+        ("minItems", constraints.min_items),
+        ("maxItems", constraints.max_items),
+        ("minProperties", constraints.min_properties),
+        ("maxProperties", constraints.max_properties),
+    ] {
+        if let Some(count) = count {
+            object.insert(key.to_string(), Value::from(count));
+        }
+    }
+    for (key, bound) in [
+        ("minimum", &constraints.minimum),
+        ("maximum", &constraints.maximum),
+        ("exclusiveMinimum", &constraints.exclusive_minimum),
+        ("exclusiveMaximum", &constraints.exclusive_maximum),
+    ] {
+        if let Some(bound) = bound {
+            object.insert(key.to_string(), json::number_or_string(bound));
+        }
+    }
+    if let Some(pattern) = &constraints.pattern {
+        object.insert("pattern".to_string(), Value::String(pattern.clone()));
+    }
+    if !constraints.enum_values.is_empty() {
+        let kind = scalar_kind(ty, schemas);
+        let members = constraints
+            .enum_values
+            .iter()
+            .map(|member| match kind {
+                Some(Prim::Int { .. } | Prim::Float { .. }) => json::number_or_string(member),
+                Some(Prim::Bool) if member == "true" || member == "false" => {
+                    Value::Bool(member == "true")
+                }
+                _ => Value::String(member.clone()),
+            })
+            .collect();
+        object.insert("enum".to_string(), Value::Array(members));
+    }
+}
+
+/// The primitive a parameter type is, through named aliases; `None` for anything else.
+fn scalar_kind<'a>(ty: &'a Type, schemas: &'a [crate::graph::Schema]) -> Option<&'a Prim> {
+    let mut ty = ty;
+    let mut seen = BTreeSet::new();
+    loop {
+        match ty {
+            Type::Primitive(prim) => return Some(prim),
+            Type::Named(id) if seen.insert(id.as_str()) => {
+                ty = &schemas.iter().find(|schema| &schema.id == id)?.body;
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn rewrite_parameter_local_refs(value: &mut serde_json::Value, refs: &BTreeMap<&str, &str>) {

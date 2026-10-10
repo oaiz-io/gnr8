@@ -530,7 +530,7 @@ fn literal(value: &LiteralValue) -> Value {
     }
 }
 
-fn number_or_string(value: &str) -> Value {
+pub(crate) fn number_or_string(value: &str) -> Value {
     if let Ok(value) = value.parse::<i64>() {
         return Value::Number(value.into());
     }

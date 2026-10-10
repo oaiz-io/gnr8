@@ -1039,6 +1039,19 @@ impl Importer {
             .unwrap_or(location == "path");
         let (schema, openapi_content) = self.parameter_schema(parameter, operation_id, &name);
         let mut openapi_fields = self.parameter_openapi_fields(parameter);
+        // The validation keywords move out of the kept raw schema into typed constraints, so the
+        // graph holds one copy: the sampler and the docs read it, and the OpenAPI lowering writes
+        // it back. A `content`-encoded parameter's schema describes a media document, not a wire
+        // scalar, and is kept verbatim with its keywords.
+        let (constraints, item_constraints) = match (
+            &openapi_content,
+            openapi_fields
+                .iter_mut()
+                .find(|(field, _)| field == "schema"),
+        ) {
+            (None, Some((_, raw))) => self.take_parameter_constraints(raw, operation_id, &name),
+            _ => (Constraints::default(), Constraints::default()),
+        };
         // A string `description` is the parameter's prose, which the graph carries as a typed fact;
         // anything else is kept verbatim as an exact OpenAPI field rather than reinterpreted.
         let description = match openapi_fields
@@ -1053,7 +1066,6 @@ impl Importer {
             None => None,
         };
         let default = schema.get("default").and_then(literal_value);
-        let (constraints, item_constraints) = self.parameter_constraints(schema);
         let imported = self.type_from_schema(schema);
         let (style, explode) =
             self.import_parameter_serialization(parameter, &location, &imported.ty, operation_id);
@@ -1078,34 +1090,90 @@ impl Importer {
         })
     }
 
-    /// A parameter's own constraints and, for an array or map, its items' — read from the schema
-    /// the parameter's type is read from, so the sampler and the docs see the bounds the imported
-    /// document states (a local `$ref` is followed to the schema it names).
-    fn parameter_constraints(&mut self, schema: &Value) -> (Constraints, Constraints) {
-        let resolved = schema
+    /// A parameter's constraints and, for an array or map, its items' — moved out of the raw
+    /// schema the graph keeps for it.
+    ///
+    /// The keywords the raw schema states are taken from it (`take_constraints`), so they exist
+    /// once, as typed facts; the OpenAPI lowering writes them back. A `$ref` is followed to the
+    /// schema it names, whose constraints the referenced component's graph schema cannot carry, and
+    /// they apply together with any keyword stated beside the `$ref` (the tighter bound wins). A
+    /// reference that does not resolve is reported, never read as "no constraints".
+    fn take_parameter_constraints(
+        &mut self,
+        raw: &mut Value,
+        operation_id: &str,
+        name: &str,
+    ) -> (Constraints, Constraints) {
+        let own = self.take_schema_constraints(raw, operation_id, name, "parameter");
+        let items = raw.as_object_mut().and_then(|object| {
+            if object.contains_key("items") {
+                object.get_mut("items")
+            } else {
+                object
+                    .get_mut("additionalProperties")
+                    .filter(|value| value.is_object())
+            }
+        });
+        let items = match items {
+            Some(items) => self.take_schema_constraints(items, operation_id, name, "item"),
+            None => Constraints::default(),
+        };
+        (own, items)
+    }
+
+    /// One raw schema object's constraints: the keywords it states, taken out of it, together with
+    /// those of the schema its `$ref` names.
+    fn take_schema_constraints(
+        &mut self,
+        raw: &mut Value,
+        operation_id: &str,
+        name: &str,
+        what: &str,
+    ) -> Constraints {
+        let Some(object) = raw.as_object_mut() else {
+            return Constraints::default();
+        };
+        let own = take_constraints(object);
+        let Some(reference) = object
             .get("$ref")
             .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .and_then(|reference| self.resolve_ref_value(&reference));
-        let schema = resolved.as_ref().unwrap_or(schema);
-        let items = schema.get("items").or_else(|| {
-            schema
-                .get("additionalProperties")
-                .filter(|value| value.is_object())
-        });
-        let items = items
-            .and_then(|items| {
-                items
-                    .get("$ref")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-                    .and_then(|reference| self.resolve_ref_value(&reference))
-                    .or_else(|| Some(items.clone()))
-            })
-            .map_or_else(Constraints::default, |items| {
-                constraints_from_schema(&items)
-            });
-        (constraints_from_schema(schema), items)
+            .map(str::to_string)
+        else {
+            return own;
+        };
+        let Some(mut target) = self.resolve_schema_chain(&reference) else {
+            self.warn_request_parameter(
+                operation_id,
+                name,
+                &format!(
+                    "the {what} schema reference '{reference}' could not be resolved, so its \
+                     constraints are unknown"
+                ),
+            );
+            return own;
+        };
+        let named = target
+            .as_object_mut()
+            .map(take_constraints)
+            .unwrap_or_default();
+        tighter_constraints(own, named)
+    }
+
+    /// The schema a `$ref` names, following a reference to a reference; `None` when one does not
+    /// resolve or the chain loops.
+    fn resolve_schema_chain(&mut self, reference: &str) -> Option<Value> {
+        let mut seen = BTreeSet::new();
+        let mut reference = reference.to_string();
+        loop {
+            if !seen.insert(reference.clone()) {
+                return None;
+            }
+            let resolved = self.resolve_ref_value(&reference)?;
+            match resolved.get("$ref").and_then(Value::as_str) {
+                Some(next) => reference = next.to_string(),
+                None => return Some(resolved),
+            }
+        }
     }
 
     fn parameter_openapi_fields(&self, parameter: &Value) -> Vec<(String, Value)> {
@@ -2596,6 +2664,169 @@ fn numeric_bound(
     }
 }
 
+/// Move a raw parameter schema object's validation keywords into typed constraints.
+///
+/// A keyword is removed exactly when it became a typed fact, so the raw object never repeats one;
+/// a keyword the graph cannot type (a non-integer `minLength`, a bare `exclusiveMinimum: true`)
+/// stays as declared. The numeric bounds are read as [`constraints_from_schema`] reads them.
+fn take_constraints(object: &mut serde_json::Map<String, Value>) -> Constraints {
+    let mut take_count = |key: &str| -> Option<u64> {
+        let count = object.get(key)?.as_u64()?;
+        object.remove(key);
+        Some(count)
+    };
+    let min_length = take_count("minLength");
+    let max_length = take_count("maxLength");
+    let min_items = take_count("minItems");
+    let max_items = take_count("maxItems");
+    let min_properties = take_count("minProperties");
+    let max_properties = take_count("maxProperties");
+    let (minimum, exclusive_minimum) = take_bound(object, "minimum", "exclusiveMinimum");
+    let (maximum, exclusive_maximum) = take_bound(object, "maximum", "exclusiveMaximum");
+    let pattern = object
+        .get("pattern")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    if pattern.is_some() {
+        object.remove("pattern");
+    }
+    let enum_values = take_enum(object);
+    Constraints {
+        min_length,
+        max_length,
+        min_items,
+        max_items,
+        min_properties,
+        max_properties,
+        minimum,
+        maximum,
+        exclusive_minimum,
+        exclusive_maximum,
+        pattern,
+        enum_values,
+    }
+}
+
+/// One side's `(inclusive, exclusive)` bound taken out of `object`, read as [`numeric_bound`]
+/// reads it. A boolean flag with no bound beside it states nothing and is left in place.
+fn take_bound(
+    object: &mut serde_json::Map<String, Value>,
+    inclusive: &str,
+    exclusive: &str,
+) -> (Option<String>, Option<String>) {
+    let schema = Value::Object(object.clone());
+    let read = numeric_bound(&schema, inclusive, exclusive);
+    let flag_only =
+        matches!(object.get(exclusive), Some(Value::Bool(_))) && object.get(inclusive).is_none();
+    if !flag_only {
+        object.remove(inclusive);
+        object.remove(exclusive);
+    }
+    read
+}
+
+/// A parameter enum's members, as the typed constraint holds them, taken out of `object`.
+///
+/// An enum of strings is the parameter's *type* (`Type::Enum`), not a constraint, and stays where
+/// the type is read from. Otherwise the members are those of the declared scalar `type` — integers
+/// for `integer`, numbers for `number`, booleans for `boolean`, strings for `string` — in declared
+/// order, once each: a member of another kind can never validate, and `null` is no wire value. With
+/// no declared scalar type, or no member of its kind, nothing is typed and the enum stays as declared.
+fn take_enum(object: &mut serde_json::Map<String, Value>) -> Vec<String> {
+    let schema = Value::Object(object.clone());
+    let Some(members) = schema.get("enum").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    if string_enum_values(&schema).is_some() {
+        return Vec::new();
+    }
+    let kind = schema_type(&schema).0;
+    let member_text = |member: &Value| -> Option<String> {
+        match kind.as_deref()? {
+            "string" => member.as_str().map(ToString::to_string),
+            "integer" if member.is_i64() || member.is_u64() => Some(member.to_string()),
+            "number" if member.is_number() => Some(member.to_string()),
+            "boolean" => member.as_bool().map(|flag| flag.to_string()),
+            _ => None,
+        }
+    };
+    let mut values: Vec<String> = Vec::new();
+    for text in members.iter().filter_map(member_text) {
+        if !values.contains(&text) {
+            values.push(text);
+        }
+    }
+    if !values.is_empty() {
+        object.remove("enum");
+    }
+    values
+}
+
+/// The constraints of a schema stated in two places that both apply — keywords beside a `$ref` and
+/// the schema it names: per keyword the tighter bound, the enum members both admit, and the
+/// `pattern` stated beside the `$ref` when both state one (one pattern is carried).
+fn tighter_constraints(beside: Constraints, named: Constraints) -> Constraints {
+    let count = |a: Option<u64>, b: Option<u64>, lower: bool| match (a, b) {
+        (Some(a), Some(b)) => Some(if lower { a.max(b) } else { a.min(b) }),
+        (a, b) => a.or(b),
+    };
+    let enum_values = match (beside.enum_values.is_empty(), named.enum_values.is_empty()) {
+        (false, false) => beside
+            .enum_values
+            .iter()
+            .filter(|member| named.enum_values.contains(member))
+            .cloned()
+            .collect(),
+        (false, true) => beside.enum_values,
+        (true, _) => named.enum_values,
+    };
+    Constraints {
+        min_length: count(beside.min_length, named.min_length, true),
+        max_length: count(beside.max_length, named.max_length, false),
+        min_items: count(beside.min_items, named.min_items, true),
+        max_items: count(beside.max_items, named.max_items, false),
+        min_properties: count(beside.min_properties, named.min_properties, true),
+        max_properties: count(beside.max_properties, named.max_properties, false),
+        minimum: tighter_bound(beside.minimum, named.minimum, true),
+        maximum: tighter_bound(beside.maximum, named.maximum, false),
+        exclusive_minimum: tighter_bound(beside.exclusive_minimum, named.exclusive_minimum, true),
+        exclusive_maximum: tighter_bound(beside.exclusive_maximum, named.exclusive_maximum, false),
+        pattern: beside.pattern.or(named.pattern),
+        enum_values,
+    }
+}
+
+/// The tighter of two numeric bounds of one keyword: the larger lower bound, the smaller upper
+/// one. Integers compare exactly; a bound that is not a number never wins over one that is.
+fn tighter_bound(a: Option<String>, b: Option<String>, lower: bool) -> Option<String> {
+    let (Some(a), Some(b)) = (&a, &b) else {
+        return a.or(b);
+    };
+    let order = match (a.trim().parse::<i128>(), b.trim().parse::<i128>()) {
+        (Ok(a), Ok(b)) => Some(a.cmp(&b)),
+        _ => match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
+            (Ok(x), Ok(y)) => x.partial_cmp(&y),
+            (Ok(_), Err(_)) => Some(if lower {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            }),
+            (Err(_), Ok(_)) => Some(if lower {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }),
+            (Err(_), Err(_)) => None,
+        },
+    };
+    let a_wins = match order {
+        Some(std::cmp::Ordering::Greater) => lower,
+        Some(std::cmp::Ordering::Less) => !lower,
+        Some(std::cmp::Ordering::Equal) | None => true,
+    };
+    Some(if a_wins { a.clone() } else { b.clone() })
+}
+
 fn json_number_or_string(value: &Value) -> String {
     value
         .as_str()
@@ -3473,14 +3704,19 @@ paths:
 
         let parameter = &graph.operations[0].params[0];
         assert!(matches!(parameter.schema, Type::Array(_)));
+        // The kept raw schema is the source's, less the validation keyword the graph now holds as
+        // a typed constraint — one copy, which the lowering writes back.
+        let mut kept = source_parameter.get("schema").unwrap().clone();
+        kept.as_object_mut().unwrap().remove("minItems");
         assert_eq!(
             parameter
                 .openapi_fields
                 .iter()
                 .find(|(name, _)| name == "schema")
                 .map(|(_, value)| value),
-            source_parameter.get("schema")
+            Some(&kept)
         );
+        assert_eq!(parameter.constraints.min_items, Some(2));
 
         let yaml = to_openapi(&graph, "Search API", "/", &graph.security).unwrap();
         let emitted = parse_json_or_yaml(&yaml, std::path::Path::new("generated.yaml")).unwrap();
@@ -4813,5 +5049,257 @@ components:
         let ids = params.iter().find(|p| p.name == "ids").unwrap();
         assert_eq!(ids.constraints.max_items, Some(3));
         assert_eq!(ids.item_constraints.minimum.as_deref(), Some("0"));
+    }
+
+    fn import_yaml(text: &str) -> crate::graph::ApiGraph {
+        import_openapi_document(
+            std::path::Path::new("."),
+            std::path::PathBuf::from("openapi.yaml"),
+            text,
+        )
+        .expect("imports")
+    }
+
+    /// The schema `openapi.yaml` publishes for the `GET /items` parameter called `name`.
+    fn emitted_parameter_schema(graph: &crate::graph::ApiGraph, name: &str) -> Value {
+        let yaml = to_openapi(graph, "P", "/", &graph.security).unwrap();
+        let emitted = parse_json_or_yaml(&yaml, std::path::Path::new("generated.yaml")).unwrap();
+        emitted
+            .pointer("/paths/~1items/get/parameters")
+            .and_then(Value::as_array)
+            .and_then(|params| params.iter().find(|p| p["name"] == name))
+            .and_then(|param| param.get("schema"))
+            .cloned()
+            .unwrap_or_else(|| panic!("parameter {name} has a schema:\n{yaml}"))
+    }
+
+    const CONSTRAINED_PARAMETERS: &str = r#"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, exclusiveMaximum: 50, x-unit: rows }
+        - name: code
+          in: query
+          schema: { type: string, minLength: 2, maxLength: 8, pattern: "^[A-Z]+$" }
+        - name: ids
+          in: query
+          schema: { type: array, maxItems: 3, items: { type: integer, minimum: 0, enum: [3, 1, 2] } }
+        - name: level
+          in: query
+          schema: { type: integer, enum: [3, 1, 2] }
+      responses: { "204": { description: none } }
+"#;
+
+    /// Rule 3: an imported parameter's validation keywords live once, as typed constraints. The raw
+    /// schema the graph keeps for it no longer repeats them, the lowering writes them back — so the
+    /// emitted schema is the source's, byte for byte — and a Transform that edits the constraints
+    /// edits `openapi.yaml` exactly as it edits the docs and the sampler.
+    #[test]
+    fn imported_parameter_constraints_have_one_copy_that_openapi_output_follows() {
+        let source =
+            parse_json_or_yaml(CONSTRAINED_PARAMETERS, std::path::Path::new("o.yaml")).unwrap();
+        let mut graph = import_yaml(CONSTRAINED_PARAMETERS);
+        let params = graph.operations[0].params.clone();
+        for param in &params {
+            let raw = param
+                .openapi_fields
+                .iter()
+                .find(|(name, _)| name == "schema")
+                .map(|(_, raw)| raw.to_string())
+                .unwrap();
+            for keyword in [
+                "minimum",
+                "exclusiveMaximum",
+                "minLength",
+                "maxLength",
+                "pattern",
+                "maxItems",
+                "enum",
+            ] {
+                assert!(
+                    !raw.contains(&format!("\"{keyword}\"")),
+                    "{} keeps {keyword}: {raw}",
+                    param.name
+                );
+            }
+        }
+        for (index, name) in ["limit", "code", "ids", "level"].iter().enumerate() {
+            let source_schema = source
+                .pointer(&format!("/paths/~1items/get/parameters/{index}/schema"))
+                .unwrap();
+            assert_eq!(
+                &emitted_parameter_schema(&graph, name),
+                source_schema,
+                "{name} drifted"
+            );
+        }
+        let level = params.iter().find(|p| p.name == "level").unwrap();
+        assert_eq!(level.constraints.enum_values, vec!["3", "1", "2"]);
+
+        // A Transform edits the one copy; the published schema follows it.
+        let limit = graph.operations[0]
+            .params
+            .iter_mut()
+            .find(|p| p.name == "limit")
+            .unwrap();
+        limit.constraints.maximum = Some("10".to_string());
+        limit.constraints.exclusive_maximum = None;
+        assert_eq!(
+            emitted_parameter_schema(&graph, "limit"),
+            serde_json::json!({"type": "integer", "minimum": 1, "maximum": 10, "x-unit": "rows"})
+        );
+    }
+
+    /// OpenAPI 3.0 spells an exclusive bound as a boolean flag; the typed fact is the bound, and the
+    /// 3.1 document gnr8 publishes spells it the 3.1 way.
+    #[test]
+    fn a_boolean_exclusive_parameter_bound_is_published_in_the_3_1_spelling() {
+        let graph = import_yaml(
+            r#"
+openapi: 3.0.3
+info: { title: P, version: "1" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 5, exclusiveMinimum: true }
+      responses: { "204": { description: none } }
+"#,
+        );
+        assert_eq!(
+            graph.operations[0].params[0]
+                .constraints
+                .exclusive_minimum
+                .as_deref(),
+            Some("5")
+        );
+        assert_eq!(
+            emitted_parameter_schema(&graph, "limit"),
+            serde_json::json!({"type": "integer", "exclusiveMinimum": 5})
+        );
+    }
+
+    /// A non-string enum is a constraint the sampler reads; members of another kind can never
+    /// validate and `null` is no wire value, so a mixed enum keeps exactly its members of the
+    /// declared type. A string enum is the parameter's type, as before.
+    #[test]
+    fn non_string_parameter_enums_import_as_constraints() {
+        let graph = import_yaml(
+            r#"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - { name: n, in: query, schema: { type: integer, enum: [1, 2, 3] } }
+        - { name: ratio, in: query, schema: { type: number, enum: [0.5, 1.5] } }
+        - { name: flag, in: query, schema: { type: boolean, enum: [true] } }
+        - { name: mixed, in: query, schema: { type: string, enum: ["a", 1, null, "b"] } }
+        - { name: kind, in: query, schema: { type: string, enum: ["x", "y"] } }
+      responses: { "204": { description: none } }
+"#,
+        );
+        let param = |name: &str| {
+            graph.operations[0]
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+        };
+        assert_eq!(param("n").constraints.enum_values, vec!["1", "2", "3"]);
+        assert_eq!(param("ratio").constraints.enum_values, vec!["0.5", "1.5"]);
+        assert_eq!(param("flag").constraints.enum_values, vec!["true"]);
+        assert_eq!(param("mixed").constraints.enum_values, vec!["a", "b"]);
+        assert!(param("kind").constraints.enum_values.is_empty());
+        assert!(matches!(param("kind").schema, Type::Enum(_)));
+        assert_eq!(
+            emitted_parameter_schema(&graph, "n"),
+            serde_json::json!({"type": "integer", "enum": [1, 2, 3]})
+        );
+        assert_eq!(
+            emitted_parameter_schema(&graph, "flag"),
+            serde_json::json!({"type": "boolean", "enum": [true]})
+        );
+        // The sampler takes a member, so the page's value is one the API accepts.
+        let op = &graph.operations[0];
+        let crate::verify::Sampled::Sample(sample) = crate::verify::sample_operation(op, &graph)
+            .unwrap()
+            .for_docs()
+        else {
+            panic!("the operation samples");
+        };
+        let value = |name: &str| {
+            sample
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.value.clone())
+        };
+        assert_eq!(value("n"), Some(serde_json::json!(1)));
+        assert_eq!(value("mixed"), Some(serde_json::json!("a")));
+    }
+
+    /// A `$ref`'d parameter schema's constraints are the referenced schema's together with any
+    /// keyword beside the `$ref` (the tighter bound wins); a reference that does not resolve is a
+    /// diagnostic naming the parameter, never a silent "no constraints".
+    #[test]
+    fn parameter_schema_references_keep_their_constraints_or_say_why_not() {
+        let graph = import_yaml(
+            r##"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - name: limit
+          in: query
+          schema: { $ref: "#/components/schemas/Limit", maximum: 10 }
+        - name: page
+          in: query
+          schema: { $ref: "#/components/schemas/Page" }
+        - name: lost
+          in: query
+          schema: { $ref: "#/components/schemas/Missing" }
+      responses: { "204": { description: none } }
+components:
+  schemas:
+    Limit: { type: integer, minimum: 1, maximum: 100 }
+    Page: { $ref: "#/components/schemas/Limit" }
+"##,
+        );
+        let param = |name: &str| {
+            graph.operations[0]
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+        };
+        assert_eq!(param("limit").constraints.minimum.as_deref(), Some("1"));
+        assert_eq!(param("limit").constraints.maximum.as_deref(), Some("10"));
+        assert_eq!(param("page").constraints.maximum.as_deref(), Some("100"));
+        assert!(param("lost").constraints.is_empty());
+        assert!(
+            graph.diagnostics.iter().any(|diagnostic| diagnostic.code
+                == "request.parameter.unresolved"
+                && diagnostic
+                    .message
+                    .contains("'#/components/schemas/Missing'")
+                && diagnostic.message.contains("constraints are unknown")),
+            "{:?}",
+            graph.diagnostics
+        );
     }
 }
