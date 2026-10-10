@@ -754,12 +754,23 @@ fn sample_param(
     param: &Param,
     graph: &ApiGraph,
 ) -> Result<Result<SampleParam, SampleRefusal>, CoreError> {
+    // A serialization stated as its location's default is the default: `simple` for a path or
+    // header parameter, `form` for a query or cookie one, with `explode` true only for `form`.
+    let default_style = match param.location.as_str() {
+        "path" | "header" => "simple",
+        _ => "form",
+    };
+    let default_explode = default_style == "form";
     let which = if param.allow_reserved {
         Some("`allowReserved`".to_string())
-    } else if let Some(style) = param.style.as_deref().filter(|style| *style != "form") {
+    } else if let Some(style) = param
+        .style
+        .as_deref()
+        .filter(|style| *style != default_style)
+    {
         Some(format!("style `{style}`"))
-    } else if param.explode == Some(false) {
-        Some("`explode: false`".to_string())
+    } else if let Some(explode) = param.explode.filter(|explode| *explode != default_explode) {
+        Some(format!("`explode: {explode}`"))
     } else if param.openapi_content.is_some() {
         Some("a `content` encoding".to_string())
     } else {

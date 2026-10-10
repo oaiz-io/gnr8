@@ -236,6 +236,12 @@ must move the minor version.
   error reply from the model even when the operation declared an example for that status, though
   the example was already checked against the model. An error reply now follows the rule every
   reply follows, and generated `contract_test.*` files change for operations that declare one.
+- **A parameter that spells out its default serialization is sampled.** The sampler refused every
+  style but `form`, so a path parameter declaring `style: simple` (the path default, common in
+  imported specs) had no sample, and its operation no page call or contract case. A style or
+  `explode` equal to its location's default — `simple` for a path or header parameter, `form` with
+  `explode: true` for a query or cookie one — is now the default. Any other is still refused and
+  named; `explode: true` on a path parameter is one of them.
 - Integer samples stay within ±(2^53 − 1). Bounds such as `minimum: 9007199254740993` used to yield
   a sample the TypeScript SDK sent as `…992`; they are now a typed refusal naming the input.
 - An imported parameter's validation keywords (`minimum`, `maxLength`, `pattern`, a non-string

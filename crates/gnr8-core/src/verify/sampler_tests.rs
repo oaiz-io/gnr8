@@ -633,6 +633,52 @@ fn serialization_style_names_which_rule() {
     }
 }
 
+/// A serialization stated explicitly as its location's default is the default: `style: simple` on
+/// a path or header parameter (`explode: false` beside it), `style: form` on a query or cookie
+/// parameter (`explode: true` beside it). Imported specs often spell the default out.
+#[test]
+fn an_explicit_default_serialization_is_the_default() {
+    for (location, style, explode) in [
+        ("path", "simple", false),
+        ("header", "simple", false),
+        ("query", "form", true),
+        ("cookie", "form", true),
+    ] {
+        let mut param = query("q", &string(), true, &json!({}));
+        param["location"] = json!(location);
+        param["style"] = json!(style);
+        param["explode"] = json!(explode);
+        let graph = probe(&[param], None, None, &[]);
+        assert_eq!(
+            sample(&graph).params[0].value,
+            json!("gnr8"),
+            "{location} {style}"
+        );
+    }
+    // The other location's default is not this one's.
+    for (location, style, which) in [
+        ("query", json!("simple"), "style `simple`"),
+        ("path", json!("form"), "style `form`"),
+    ] {
+        let mut param = query("q", &string(), true, &json!({}));
+        param["location"] = json!(location);
+        param["style"] = style;
+        let graph = probe(&[param], None, None, &[]);
+        assert_eq!(
+            refusal(&graph).to_string(),
+            format!("parameter `q` uses {which}")
+        );
+    }
+    let mut param = query("q", &string(), true, &json!({}));
+    param["location"] = json!("path");
+    param["explode"] = json!(true);
+    let graph = probe(&[param], None, None, &[]);
+    assert_eq!(
+        refusal(&graph).to_string(),
+        "parameter `q` uses `explode: true`"
+    );
+}
+
 #[test]
 fn optional_refused_inputs_are_left_out_without_a_note() {
     let graph = probe(
