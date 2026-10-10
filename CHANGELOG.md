@@ -32,6 +32,26 @@ must move the minor version.
   parameter's example moves into the new typed `Param::example` the same way. `BaseGraph` gains
   `upgraded_from_version_1`, and `gnr8_engine::changes::diff_base_graph` compares a `BaseGraph`
   with that reading.
+- **Each SDK's `README.md` and `reference.md` are rewritten from the docs model** that `StaticDocs`
+  renders its pages from, built for that one SDK. `README.md` replaces the `Package/module` line
+  with `Import` (the Go module path, the Python import package, the `package.json` name) and
+  `Install` (`go get`, `pip install` with the distribution name `pyproject.toml` lists, `npm
+  install`), and its `<Language> quick start` placeholder with `## Quick start`: the first sampled
+  operation's call, byte for byte as `reference.md` prints it. An SDK with no package metadata says
+  why it has no import and no quick start. `reference.md` is one file holding every docs page as a
+  section, one heading level down: the index, each operation (parameters, bodies, responses, the
+  call, typed-error and iterator samples for this SDK, the CLI invocation), each schema, the error
+  catalog and authentication. Its `Operations`, `Operation Documentation` and `Schemas` tables are
+  gone; it links only `README.md`, and a diagnostic is printed under its operation, or under the
+  index section when it names none. Writing these files now builds the docs model, so with docs on
+  (the default) an SDK target fails generation on what `StaticDocs` fails on: an invalid declared
+  example, a blank API title or group name, or prose that breaks `reference.md`'s structure. Tools
+  that parse either file must follow the new layout.
+- **`gnr8 verify` checks the samples an SDK's `README.md` and `reference.md` print**, whether or
+  not the pipeline declares `StaticDocs`: an SDK target that writes docs and has a package manifest
+  gains a docs suite (`<Language> docs samples`), which compiles and runs each sample and fails when
+  either file no longer prints it. A target with neither contract tests nor docs leaves `verify`
+  nothing to check, as before.
 - `gnr8_engine::verify`: `ContractTestSuite` gains `refused` and `ContractTestPlan` gains `refused`
   (each refused sample, with its operation, scope and reason); `SampleParam` gains `required` and
   `unmet`, and `SampleBody` gains `unmet`. Code that builds these structs literally needs the new
@@ -52,9 +72,9 @@ must move the minor version.
   state, such as a `null` in a request, a whole number in a float field, or a request date-time not
   spelled the way Go sends it (`…05.120Z`, `+00:00`), prints `No sample call: …` and names the
   value. An operation page prints a declared example's value once, in the Example section. Where
-  the example is declared, the page keeps its name and prose. `SampleBody` and
-  `SuccessSample` gain `example`, `SampleRefusal` gains `Declared`, and `CoreError` gains
-  `InvalidExample`.
+  the example is declared, the page keeps its name and prose. An example an imported OpenAPI
+  document declares is checked the same way, so a document whose example breaks its schema now
+  fails generation. `SampleBody` gains `example` and `CoreError` gains `InvalidExample`.
 - **An SDK target refuses a path parameter that is not one scalar segment.** A path parameter
   that is an array, map, object or free-form value, or that declares the `label` or `matrix` style,
   is now a generation error naming it. The three SDKs sent three different segments for a list
@@ -62,37 +82,69 @@ must move the minor version.
   Send a list in the query instead.
 - **A generated SDK method whose success reply has a schema but a non-JSON media type changes its
   return type**: a `text/*` reply returns `string` / `str`, any other returns bytes, instead of the
-  schema's model (see Fixed). Code that used the model type there must use the new one.
+  schema's model (see Fixed). A media range is classified by what it admits: `*/*` and
+  `application/*` admit JSON and keep returning the model, and `text/*` returns text. Code that
+  used the model type there must use the new one.
+- **New warnings can fail a `DiagnosticPolicy` that denies them.** An imported `$ref` parameter
+  schema that does not resolve is now `request.parameter.unresolved`, two incompatible constraints
+  on one parameter are `request.parameter.constraints.conflict`, and an imported server whose path
+  cannot sit beside the base path, or whose path variable has no default, is
+  `source.openapi.unrepresentable`. Each used to pass silently.
 
 ### Added
 
-- `StaticDocs::new().to(dir)` writes a deterministic Markdown reference — index, group, operation and
-  schema pages, and `llms.txt` — with an HTTP example and a Go call on every operation page. Names
-  are spelled by the Go SDK emitter's own functions, and every sample value — request and canned
-  response — satisfies the declared constraints and any format gnr8 maps to a well-known scalar (an
-  enum member is printed as declared). An operation or SDK with no sample prints the reason, and so
-  does a canned reply that is refused. An operation with no reply to show — a file download, no
-  success status, or a first success status outside 2xx — prints neither a reply nor a note.
-  Generation fails on a missing page or broken internal link.
-- Python and TypeScript calls on operation pages, for SDK targets that emit package metadata; CLI
-  invocations for operations a generated CLI wraps.
-- `gnr8 verify` checks every docs code sample against the SDK it documents. Go and TypeScript
-  samples are compiled, and Python samples are executed against a stub transport. It also checks
-  that each sample appears unchanged in its page, and it reports skipped toolchains explicitly.
-- `errors.md`, `authentication.md`, per-page diagnostics and pagination sections. `gnr8 verify` runs
-  each sample's call against a fake transport and asserts it sends the request printed on the page,
-  with credentials and base URL substituted. The transport answers with the reply the page prints,
-  and the call must succeed on it; an operation whose page prints no reply is answered with an empty
-  `400`, and the call must raise the SDK's typed error with that status.
-
-### Changed
-
+- **`StaticDocs::new().to(dir)`** writes a deterministic Markdown reference: `index.md`, a page per
+  group, operation and schema, `errors.md`, `authentication.md` and `llms.txt`. Every page is
+  rendered from one docs model built from the same final graph as `openapi.yaml` and the SDKs.
+  Generation fails before writing anything on a missing page, a broken link, a page name that
+  collides or cannot be written, an empty heading, or user prose that leaves a code fence or HTML
+  block open over the sections after it. Prose is printed verbatim and never rewritten.
+  - An operation page carries its request line, group, tags and deprecation, its prose,
+    authentication, parameter, request-body and response tables, declared examples, the
+    **Example** section, pagination and diagnostics. A table prints only the columns some row
+    fills. A parameter row prints its declared example and every constraint, as a field row does.
+  - The **Example** section prints the HTTP exchange its sample produces — credentials as
+    placeholders, the reply in its declared media type's wire form (JSON, or the text itself for
+    `text/*`) — then, per sibling SDK target that emits package metadata, a section headed by the
+    language and the package a consumer imports, with the call; a typed-error sample, when the
+    operation declares a JSON error body, that handles its lowest such status, whose reply the
+    exchange prints; and the SDK's pagination iterator, when the operation is paginated. A
+    generated CLI's invocation and declared examples follow. Every call is spelled by the SDK's own
+    call-site renderer, the one its contract test uses. A Go SDK whose package name collides with
+    a name a sample binds is imported under an alias.
+  - Every sample value satisfies every constraint declared on its input — enum, length, range,
+    `multipleOf`, item and property counts — and a format gnr8 maps to a well-known scalar; a
+    declared example is the value. A float sample prints alike in Go, Python and TypeScript, an
+    integer sample stays within ±(2^53 − 1), and a parameter's serialization is sampled only when
+    it is its location's default, spelled out or not. `pattern` is never synthesized. An input or
+    reply with no sample prints `No sample call: …` or `No sample response body: …` with the
+    reason: an unmet `pattern` or `uniqueItems`, bounds no value meets, a valid declared example
+    no call can state, or a `text/*` reply whose sample is not a string.
+  - `errors.md` names each declared SDK's own typed error; `authentication.md` shows how each SDK
+    configures each scheme and which operations require it, together with which other schemes;
+    `index.md` prints the diagnostics that name no operation.
 - **A pipeline that declares `StaticDocs` refuses an `OpenApiSchemaPatch` that changes a documented
   field fact.** A patch edits only the OpenAPI document. Docs pages and their samples read the graph,
   so a patched constraint, enum, description, default or example would make the docs disagree with
   the published spec. The configuration error names the target, the field and the facts. Set them
   in the source or with a `Transform` that edits the field. Patches that only add `x-*` extensions
   are unaffected.
+- **`gnr8 verify` checks every docs sample against the SDK it documents.** Rung 2 compiles Go
+  (`go vet`) and TypeScript (`tsc`, strict) samples and executes Python ones against a stub
+  transport, and holds every block a sample relies on to its page, `reference.md` and the README
+  quick start, byte for byte as whole lines, after post-processors. Rung 3 runs each call against
+  a recording transport and compares the one request it sends with the page's exchange, field by
+  field and the query string as encoded text; the call must succeed on the printed reply, a
+  typed-error sample must raise the typed error carrying the printed status and body, and an
+  iterator must stop after one page. A missing toolchain, an SDK with no package metadata, or a
+  suite whose every operation is refused is reported `skipped` with the reason.
+- **Contract suites and docs suites count what they cannot sample.** Every refused sample — a
+  required input, an optional body, a request representation, a success reply, a declared error
+  model — is counted with its operation, scope and reason; `gnr8 verify` prints `N cases, M refused
+  samples counted, not run` under the suite and carries `refused` in `--json`.
+
+### Changed
+
 - **Generated Go `client.go` carries `wireEscape` and `encodeWireQuery`**, and imports `net/url`,
   `sort` and `strings`. The shared wire helpers no longer define `encodeWireQuery` or
   `wireCookieEscape`. Generated TypeScript operation files define `wireEscape` and
@@ -101,8 +153,6 @@ must move the minor version.
   `"invalid_text"`. A `switch` over `ResponseDecodeFailure` that is checked for exhaustiveness
   needs the new case. Generated Go operation files that return a text reply import `fmt` and
   `unicode/utf8`.
-- **The Python docs compile unit is `docs_snippets.py`** (was `snippets.py`), and imports each
-  sample's models inside the function that runs it.
 
 ### Fixed
 
@@ -115,10 +165,20 @@ must move the minor version.
   whole number), so a contract test no longer compares `1.0` with the `1` a Go or TypeScript client
   sends. A date-time sample carries a fraction (`2024-01-02T03:04:05.123Z`), so every contract test
   and docs page checks that sub-second precision survives the trip.
-- Parameters imported from an OpenAPI document keep their `minimum`, `maxLength` and other
-  constraints as typed facts, and OpenAPI 3.0 / Swagger 2
-  `exclusiveMinimum: true` / `exclusiveMaximum: true` import as the exclusive bound instead of the
-  string `"true"`.
+  A `pattern` is never synthesized: a case sends a sample drawn from the input's other
+  constraints, which no generated SDK checks against the pattern, so a pattern costs no case. An
+  integer sample stays within ±(2^53 − 1), the range a TypeScript `number` carries exactly; bounds
+  that admit no such integer are a refused sample, counted.
+- **Parameters imported from an OpenAPI document keep their validation keywords as typed
+  constraints** (`minimum`, `maxLength`, `pattern`, a non-string `enum`, …), held once: the graph's
+  kept copy of the parameter's raw schema no longer repeats them, and `openapi.yaml` writes them
+  back from the typed facts. Samples honour them, and a `Transform` that edits a parameter's
+  constraints changes `openapi.yaml` exactly as it changes the docs and the samples. OpenAPI 3.0 /
+  Swagger 2 `exclusiveMinimum: true` / `exclusiveMaximum: true` import as the exclusive bound
+  instead of the string `"true"` and are published in the 3.1 spelling (`exclusiveMinimum: 5`). The
+  published parameter schemas change in two more ways: members of a parameter enum that can never
+  validate (another kind than the declared `type`, or `null`) are left out, and a parameter whose
+  schema is a `$ref` publishes the referenced schema's bounds beside the `$ref` (below).
 - **The generated TypeScript contract test compiles under `--strict` when the method may return
   `undefined`** (a JSON model beside a bodyless success, a redirect, or a reply the method does not
   return). A case that read a decoded field off the result failed with TS18048; it now asserts the
@@ -168,11 +228,6 @@ must move the minor version.
 - **A TypeScript JSON request body that is a string is sent JSON-encoded** (`"hello"`, not `hello`):
   each operation encodes its JSON body with `JSON.stringify`. Generated TypeScript operations with a
   JSON body change.
-- **Rung 3 compares the raw query string**, so a `+` where the page prints `%20` is a finding, and
-  fails a sample whose call sent no request or more than one.
-- **An SDK package or model name can no longer break a docs compile unit**: a Go package named
-  `errors` or `outcome` is imported under an alias, a Python model named after the unit's own test
-  classes no longer replaces one, and a Python package named `snippets` no longer shadows the unit.
 - **A generated client returns a `text/*` success reply as the text.** Go, Python and TypeScript
   decoded it as JSON, so a `text/plain` reply of `gnr8` failed the call (TypeScript refused the
   media type outright). The method now reads the body as UTF-8 text and returns `string` (Go,
@@ -191,25 +246,12 @@ must move the minor version.
   a status the method does not return, read from a response hook, and opaque bytes beside a text
   reply are too. Contract tests answer a text reply with the text under its declared media type
   (`content-type: text/plain`, body `gnr8`), and a text reply whose sample is not a string drives
-  no case, as its docs page prints no body. Generated operations and `contract_test.*` files
+  no case and is counted as a refused sample. Generated operations and `contract_test.*` files
   change for every operation with a non-JSON schema-backed success reply.
-
-- A `pattern` no longer costs contract-test coverage. gnr8 still never synthesizes a value for one:
-  the sample is drawn from the input's other constraints and records the pattern as unmet. A contract
-  case sends that sample (no generated SDK validates `pattern`), so a pattern on a path parameter or
-  a response field drops no case, and generated `contract_test.*` files regain the cases patterned
-  models had lost. A docs page still promises schema-satisfying values, so it prints the refusal
-  ("parameter `isbn` declares `pattern`, which gnr8 never synthesizes") instead of the call or the
-  reply; an optional patterned parameter is left out of the printed call.
-- Contract suites no longer skip cases silently: every refused sample — a required input, an optional
-  body with no JSON representation, a success reply, or a declared error model — is counted, and
-  `gnr8 verify` prints `N cases, M refused samples counted, not run` under the suite and carries
-  `refused` in `--json`.
 - An operation with several request representations no longer loses its body-selection cases when
   one representation cannot be sampled. Each representation with a sample gets its case, and each
   without one (a refused JSON body, or a representation that is not JSON) is counted as a refused
-  sample naming its media type. `OperationSample` gains `refused_bodies`, `RefusedScope` gains
-  `BodyRepresentation` and `SampleRefusal` gains `NotJson`.
+  sample naming its media type.
 - **An imported example of any scalar JSON type is imported.** A property `example: 7` on an integer
   was dropped while `example: "7"` was kept; a string, number or boolean `example` is now read by one
   rule (its text, read back as a value of the field's type), and an array, object or `null` field
@@ -236,26 +278,6 @@ must move the minor version.
   error reply from the model even when the operation declared an example for that status, though
   the example was already checked against the model. An error reply now follows the rule every
   reply follows, and generated `contract_test.*` files change for operations that declare one.
-- **A parameter that spells out its default serialization is sampled.** The sampler refused every
-  style but `form`, so a path parameter declaring `style: simple` (the path default, common in
-  imported specs) had no sample, and its operation no page call or contract case. A style or
-  `explode` equal to its location's default — `simple` for a path or header parameter, `form` with
-  `explode: true` for a query or cookie one — is now the default. Any other is still refused and
-  named; `explode: true` on a path parameter is one of them.
-- Integer samples stay within ±(2^53 − 1). Bounds such as `minimum: 9007199254740993` used to yield
-  a sample the TypeScript SDK sent as `…992`; they are now a typed refusal naming the input.
-- An imported parameter's validation keywords (`minimum`, `maxLength`, `pattern`, a non-string
-  `enum`, …) are held once, as typed constraints: the graph's kept copy of the parameter's raw schema
-  no longer repeats them, and `openapi.yaml` writes them back from the typed facts. A `Transform` that
-  edits a parameter's constraints now changes `openapi.yaml` exactly as it changes the docs and the
-  samples. The published schema is unchanged except that an OpenAPI 3.0 / Swagger 2 boolean
-  `exclusiveMinimum: true` / `exclusiveMaximum: true` is published in the 3.1 spelling
-  (`exclusiveMinimum: 5`), and members of a parameter enum that can never validate (another kind than
-  the declared `type`, or `null`) are left out.
-- A docs page prints a reply in its declared media type's wire form, and the `gnr8 verify` docs check
-  answers the call with exactly that: a `text/plain` reply is the text itself (`gnr8`, not the JSON
-  string `"gnr8"`), and a reply in a media type that is neither JSON nor text prints no body, as a
-  file download already did.
 - An imported document's base path is no longer stated twice. The first server's path (or Swagger
   2's `basePath`) becomes the graph's base path, which every generated path, the SDKs and the docs
   request line already carry; the imported servers now drop it (`https://api.example.com/v1` is
