@@ -2276,9 +2276,16 @@ impl StaticFiles {
 /// The output is one directory of plain Markdown pages — an index, one page per group, operation and
 /// schema — plus an `llms.txt` index for agents. Every fact on a page comes from the graph, and every
 /// code sample is spelled with the names the sibling SDK target emits.
+///
+/// The declaration's one fact is private: [`StaticDocs::to`] sets it and [`StaticDocs::dir`] reads
+/// it, so no caller can build a declaration the builder could not.
+///
+/// ```compile_fail
+/// let docs = gnr8::sdk::builtins::StaticDocs { dir: "generated/docs".to_string() };
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StaticDocs {
-    pub dir: String,
+    dir: String,
 }
 
 impl StaticDocs {
@@ -2293,6 +2300,12 @@ impl StaticDocs {
     pub fn to(mut self, dir: impl Into<String>) -> Self {
         self.dir = dir.into();
         self
+    }
+
+    /// The project-relative output directory [`StaticDocs::to`] set; empty until it is set.
+    #[must_use]
+    pub fn dir(&self) -> &str {
+        &self.dir
     }
 }
 

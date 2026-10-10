@@ -385,7 +385,10 @@ mod tests {
 
     #[test]
     fn static_docs_to_sets_the_output_dir() {
-        assert_eq!(StaticDocs::new().dir, "");
-        assert_eq!(StaticDocs::new().to("generated/docs").dir, "generated/docs");
+        assert_eq!(StaticDocs::new().dir(), "");
+        assert_eq!(
+            StaticDocs::new().to("generated/docs").dir(),
+            "generated/docs"
+        );
     }
 }

@@ -29,7 +29,7 @@ use links::LinkRegistry;
 use nav::{NavModel, INDEX_PAGE, LLMS_TXT};
 use page::Site;
 
-/// Generate the docs tree for `ir` under `decl.dir`.
+/// Generate the docs tree for `ir` under `decl.dir()`.
 ///
 /// Every page is rendered into memory first, so rung 0 — one page per operation, every link
 /// naming an emitted page, no empty heading — is checked against the complete set before a single
@@ -60,7 +60,7 @@ pub(crate) fn generate(
         })
         .collect::<Result<Vec<_>, CoreError>>()?;
     let pages = render(graph, &sdks)?;
-    let dir = decl.dir.trim_end_matches('/');
+    let dir = decl.dir().trim_end_matches('/');
     for (path, text) in pages {
         out.create(format!("{dir}/{path}"), text)?;
     }
@@ -215,22 +215,22 @@ fn credential_options(
 
 /// The loop-safety anchor: the one directory this target writes.
 pub(crate) fn output_anchors(decl: &StaticDocs) -> Vec<String> {
-    if decl.dir.is_empty() {
+    if decl.dir().is_empty() {
         Vec::new()
     } else {
-        vec![decl.dir.clone()]
+        vec![decl.dir().to_string()]
     }
 }
 
 /// Refuse a declaration the target cannot honour, before anything is rendered.
 fn validate(decl: &StaticDocs, plan: &PlanTargets<'_>) -> Result<(), CoreError> {
-    if decl.dir.is_empty() {
+    if decl.dir().is_empty() {
         return Err(CoreError::Config {
             message: "StaticDocs target has no output directory — call .to(\"generated/docs\")"
                 .to_string(),
         });
     }
-    let docs = components(&decl.dir);
+    let docs = components(decl.dir());
     for sdk in plan.sdks() {
         let sdk_dir = components(sdk.dir());
         let relation = if docs == sdk_dir {
@@ -250,7 +250,7 @@ fn validate(decl: &StaticDocs, plan: &PlanTargets<'_>) -> Result<(), CoreError> 
                 "StaticDocs target directory `{}` {relation} the {} target directory `{}`: docs \
                  pages would ship inside the SDK package, or the SDK inside the docs — give \
                  StaticDocs a directory of its own",
-                decl.dir.trim_end_matches('/'),
+                decl.dir().trim_end_matches('/'),
                 sdk.label(),
                 sdk.dir().trim_end_matches('/'),
             ),
