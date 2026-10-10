@@ -155,6 +155,14 @@ request shape, success model, error status and security scheme, capped at 24 cas
 large API still emits a suite that runs quickly. `.without_contract_tests()` on a target stops the
 file being emitted. CLI help checks remain enabled for targets with `.cli(...)`.
 
+A case sends the same constraint-respecting sample a docs page prints. An input the sampler refuses —
+a required parameter or body it cannot construct, a success reply or a declared error model with no
+satisfying value — skips the cases that need it, and the suite counts every such refused sample: the
+human report prints `N cases, M refused samples counted, not run` under the suite, and JSON carries
+`refused` beside `cases`. A `pattern` refuses nothing here: gnr8 never synthesizes a value for one,
+and no generated SDK validates one, so the case sends the sample with the pattern unmet (a docs page,
+which promises schema-satisfying values, prints the refusal instead).
+
 Generated CLI checks cover root help, every effective topic and sub-noun prefix, and every selected
 operation command. Command selectors, declared verbs and groups determine the argument vectors;
 these checks are exhaustive and have no sampling cap. Hand-owned commands, completion plumbing and
@@ -213,7 +221,7 @@ The tools it runs, and the toolchains they need:
 | Python docs samples | the samples' `unittest` module (stub, then recording transport) | `python3` + the SDK's dependencies |
 | TypeScript docs samples | the project's `typescript` (`tsc -p`, gate options), then `node` | `node` + a resolvable `typescript` |
 
-JSON retains SDK results in `suites` and adds `cli_suites` with language, program, output path,
+JSON retains SDK results in `suites` (each with its `cases` and `refused` counts) and adds `cli_suites` with language, program, output path,
 planned case count, tool, duration, status, typed reason and per-command results, and `docs_suites`
 with language, label, docs and SDK output paths, the checked and refused sample counts, tool,
 duration, status and a typed reason (`no_consumer_identity`, `toolchain_absent`, `no_samples`,

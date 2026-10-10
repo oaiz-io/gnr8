@@ -130,7 +130,7 @@ fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, Str
     let mut operation_pages = 0;
     for op in &graph.operations {
         let path = nav.operation_page(&op.id)?.to_string();
-        let sampled = crate::verify::sample_operation(op, graph)?;
+        let sampled = crate::verify::sample_operation(op, graph)?.for_docs();
         let example = example::render_example(graph, op, &sampled, sdks)?;
         let text = page::render_operation(&site, op, &example, &mut links)?;
         operation_pages += 1;

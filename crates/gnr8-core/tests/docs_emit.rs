@@ -703,7 +703,9 @@ fn refused_operation_page_prints_the_refusal_reason() {
     let pages = render(&graph_of(value), &[go_sdk()]);
     let example = section(page(&pages, "operations/get-book.md"), "Example");
     assert!(
-        example.contains("No sample call: parameter `isbn` declares `pattern`."),
+        example.contains(
+            "No sample call: parameter `isbn` declares `pattern`, which gnr8 never synthesizes."
+        ),
         "{example}"
     );
     assert!(!example.contains("```http"), "{example}");
@@ -1142,7 +1144,9 @@ fn imported_parameter_constraints_steer_the_sample_and_show_on_the_page() {
     );
     let refused = section(page(&pages, "operations/get-code.md"), "Example");
     assert!(
-        refused.contains("No sample call: parameter `code` declares `pattern`."),
+        refused.contains(
+            "No sample call: parameter `code` declares `pattern`, which gnr8 never synthesizes."
+        ),
         "{refused}"
     );
 }
@@ -1261,6 +1265,7 @@ fn operation_sample_reply_is_readable_from_an_integration_test() {
         model,
         body,
         field,
+        unmet,
     }) = sample.reply
     else {
         panic!("getBook has a reply");
@@ -1270,6 +1275,7 @@ fn operation_sample_reply_is_readable_from_an_integration_test() {
     let value: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(value["genre"], json!("fiction"));
     assert_eq!(field.map(|field| field.json_name), Some("id".to_string()));
+    assert!(unmet.is_empty(), "{unmet:?}");
 }
 
 /// A page name is the subject's kebab-case ASCII words. A name with none (an imported tag spelled

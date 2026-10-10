@@ -750,13 +750,16 @@ mod tests {
             }),
             selection: 0,
             representations: 2,
+            unmet: Vec::new(),
         };
         let params = [SampleParam {
             name: "genre".to_string(),
             location: "query".to_string(),
             schema: Type::Named("s.Genre".to_string()),
+            required: false,
             value: json!("poetry"),
             wire: "poetry".to_string(),
+            unmet: Vec::new(),
         }];
         let auth = [
             SampleAuth {

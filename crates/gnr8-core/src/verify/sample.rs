@@ -7,6 +7,17 @@
 //! construct, the answer is a [`SampleRefusal`] naming the input and the reason — never a degraded
 //! value, and never a graph error dressed as a refusal.
 //!
+//! One constraint is never synthesized: `pattern` (gnr8 carries no regex engine). A string under a
+//! `pattern` is sampled from its other constraints and the sample records the pattern as an
+//! [`UnmetConstraint`]. The two consumers then read that one sample differently: a contract case
+//! sends it anyway — no generated SDK validates `pattern`, so the wire contract it proves is the
+//! same — while a docs page, which promises values that satisfy the schema, treats an unmet
+//! constraint as a refusal ([`Sampled::for_docs`]).
+//!
+//! A union in a reply is sampled as its first variant, in the graph's variant order: the decoder is
+//! handed text, and the first variant is as valid a reply as any. A union in a request is refused
+//! ([`SampleRefusal::RequestUnion`]).
+//!
 //! The sampler reads type, constraints and a `format` the pipeline maps to a well-known scalar. It
 //! never reads a `default`, a field `example` or a declared media example: those restrict nothing,
 //! and letting one supply a value would be a second source for the same fact (AGENTS.md rule 3).
@@ -39,6 +50,11 @@ const MAX_SAMPLE_ENTRIES: u64 = 64;
 /// The longest string a printed sample holds; a `minLength` above it is a [`SampleRefusal::SampleCap`].
 const MAX_SAMPLE_CHARS: u64 = 1024;
 
+/// The largest integer magnitude a sample may hold: `2^53 − 1`, the largest a TypeScript `number`
+/// (and every JSON reader that decodes into a double) carries exactly. Beyond it the TypeScript SDK
+/// would send a different number than the page prints.
+const MAX_SAFE_INTEGER: i128 = (1 << 53) - 1;
+
 fn sample_cap(subject: &str, constraint: &str, limit: u64) -> SampleRefusal {
     SampleRefusal::SampleCap {
         subject: subject.to_string(),
@@ -56,6 +72,75 @@ pub enum Sampled {
     Refused(SampleRefusal),
 }
 
+impl Sampled {
+    /// The sample as a docs page reads it: every unmet constraint is a refusal.
+    ///
+    /// A page promises values that satisfy the schema, so an input whose sample left a constraint
+    /// unmet is refused exactly as an unsampleable one is: a path or required parameter, or the
+    /// required body, refuses the operation; an optional parameter or an optional body is left out
+    /// of the call; a reply with an unmet constraint is a refused reply. A contract case reads the
+    /// sample itself, unmet constraints and all.
+    #[must_use]
+    pub fn for_docs(self) -> Self {
+        let Self::Sample(mut sample) = self else {
+            return self;
+        };
+        let mut params = Vec::with_capacity(sample.params.len());
+        for param in sample.params {
+            match param.unmet.first() {
+                None => params.push(param),
+                Some(unmet) if param.required => {
+                    return Self::Refused(SampleRefusal::Unmet(unmet.clone()));
+                }
+                // An optional parameter is simply left out of the call.
+                Some(_) => {}
+            }
+        }
+        sample.params = params;
+        if let Some(body) = sample.bodies.first() {
+            if let Some(unmet) = body.unmet.first() {
+                if sample.body_required {
+                    return Self::Refused(SampleRefusal::BodyRefused {
+                        content_type: body.content_type.clone(),
+                        inner: Box::new(SampleRefusal::Unmet(unmet.clone())),
+                    });
+                }
+                // An optional body is simply left out of the call.
+                sample.bodies.clear();
+            }
+        }
+        if let SuccessOutcome::Sample(reply) = &sample.reply {
+            if let Some(unmet) = reply.unmet.first() {
+                sample.reply = SuccessOutcome::Refused(SampleRefusal::Unmet(unmet.clone()));
+            }
+        }
+        Self::Sample(sample)
+    }
+}
+
+/// A constraint a sample could not meet, on the input it sits on.
+///
+/// Only `pattern` is ever unmet: the sampler never synthesizes a value for it. A contract case sends
+/// the sample anyway; a docs page treats it as a refusal ([`Sampled::for_docs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmetConstraint {
+    /// The dotted path of the input, as a [`SampleRefusal`] names it.
+    pub subject: String,
+    /// The unmet constraint's `OpenAPI` keyword.
+    pub constraint: String,
+}
+
+impl fmt::Display for UnmetConstraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} declares `{}`, which gnr8 never synthesizes",
+            phrase(&self.subject),
+            self.constraint
+        )
+    }
+}
+
 /// Everything one operation's page and its contract cases draw from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationSample {
@@ -64,6 +149,12 @@ pub struct OperationSample {
     /// Every constructible JSON request representation, in the operation's media-type order. The
     /// page and single-body cases use the first.
     pub bodies: Vec<SampleBody>,
+    /// Whether the operation's request body is required.
+    pub body_required: bool,
+    /// Why a declared request body has no constructible JSON representation, when it has none: the
+    /// first refused representation's reason, or [`SampleRefusal::NoJsonBody`]. Only an optional
+    /// body reaches a sample this way — a required one refuses the operation.
+    pub body_refusal: Option<Box<SampleRefusal>>,
     /// The credentials one call configures.
     pub auth: Vec<SampleAuth>,
     /// The canned success reply the page prints.
@@ -93,6 +184,8 @@ pub struct SuccessSample {
     pub body: String,
     /// The decoded field a case asserts, when a checkable one exists.
     pub field: Option<DecodedField>,
+    /// The constraints the reply leaves unmet, in field order.
+    pub unmet: Vec<UnmetConstraint>,
 }
 
 /// Why an input has no sample. `subject` is a dotted path from the input root — `query.limit`,
@@ -150,9 +243,13 @@ pub enum SampleRefusal {
         /// Where the budget ran out.
         subject: String,
     },
-    /// A `pattern` constraint, which gnr8 never synthesizes.
-    Pattern {
-        /// The patterned input.
+    /// A constraint the sample leaves unmet, which a docs page reads as a refusal
+    /// ([`Sampled::for_docs`]). The sampler itself never refuses for one.
+    Unmet(UnmetConstraint),
+    /// An integer whose bounds admit only integers beyond `±(2^53 − 1)`, which a TypeScript
+    /// `number` does not carry exactly.
+    IntegerWire {
+        /// The input.
         subject: String,
     },
     /// A float whose bounds admit only numbers the generated languages print differently — a whole
@@ -182,8 +279,9 @@ pub enum SampleRefusal {
     },
     /// A required body that declares no JSON representation at all.
     NoJsonBody,
-    /// A required body whose first JSON representation is refused, with that representation's
-    /// own reason.
+    /// A required body none of whose JSON representations can be sampled, with the first refused
+    /// representation's media type and reason. One constructible representation is enough: the
+    /// call sends it.
     BodyRefused {
         /// The representation's media type.
         content_type: String,
@@ -220,7 +318,12 @@ impl fmt::Display for SampleRefusal {
                 "{} nests deeper than the sampler's {MAX_SAMPLE_DEPTH}-level budget",
                 phrase(subject)
             ),
-            Self::Pattern { subject } => write!(f, "{} declares `pattern`", phrase(subject)),
+            Self::Unmet(unmet) => unmet.fmt(f),
+            Self::IntegerWire { subject } => write!(
+                f,
+                "{} admits no integer within ±(2^53 − 1), the range TypeScript carries exactly",
+                phrase(subject)
+            ),
             Self::SampleCap {
                 subject,
                 constraint,
@@ -289,8 +392,10 @@ impl fmt::Display for Violation {
 /// Whether `value` satisfies every constraint at once; the first one it violates otherwise.
 ///
 /// Constraints apply as `JSON Schema` applies them: a length bound to strings, a numeric bound to
-/// numbers, an item count to arrays and a property count to objects. `pattern` is never evaluated —
-/// gnr8 carries no regex engine — so a value under a `pattern` always violates it.
+/// numbers, an item count to arrays and a property count to objects. `pattern` applies to strings
+/// and is never evaluated — gnr8 carries no regex engine — so a string under a `pattern` always
+/// violates it. That is why the sampler records a `pattern` as an [`UnmetConstraint`] instead of
+/// checking it.
 ///
 /// # Errors
 ///
@@ -315,9 +420,9 @@ pub fn satisfies(value: &Value, constraints: &Constraints) -> Result<(), Violati
         if constraints.max_length.is_some_and(|max| length > max) {
             return violated("maxLength");
         }
-    }
-    if constraints.pattern.is_some() {
-        return violated("pattern");
+        if constraints.pattern.is_some() {
+            return violated("pattern");
+        }
     }
     if let Some(number) = value.as_f64() {
         for (keyword, bound, admits) in [
@@ -423,12 +528,8 @@ pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, Cor
             .iter()
             .find(|schema| schema.id == model.schema_id)
             .ok_or_else(|| dangling(&model.schema_id))?;
-        match Sampler::new(graph, Side::Request).value(
-            &schema.body,
-            &Restriction::NONE,
-            "body",
-            0,
-        )? {
+        let mut sampler = Sampler::new(graph, Side::Request);
+        match sampler.value(&schema.body, &Restriction::NONE, "body", 0)? {
             Ok(value) => bodies.push(SampleBody {
                 content_type: model.content_type.clone(),
                 schema_id: model.schema_id.clone(),
@@ -436,28 +537,37 @@ pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, Cor
                 value,
                 selection: index,
                 representations: declared.len(),
+                unmet: sampler.unmet,
             }),
             Err(refusal) => {
                 first_refusal.get_or_insert((model.content_type.clone(), refusal));
             }
         }
     }
-    // A required body the sampler cannot construct makes the operation uncallable; an optional one
-    // is simply left out.
-    if declared.first().is_some_and(|model| model.required) && bodies.is_empty() {
-        return Ok(Sampled::Refused(match first_refusal {
+    let body_required = declared.first().is_some_and(|model| model.required);
+    let body_refusal = (!declared.is_empty() && bodies.is_empty()).then(|| {
+        Box::new(match first_refusal {
             Some((content_type, inner)) => SampleRefusal::BodyRefused {
                 content_type,
                 inner: Box::new(inner),
             },
             None => SampleRefusal::NoJsonBody,
-        }));
+        })
+    });
+    // A required body the sampler cannot construct makes the operation uncallable; an optional one
+    // is simply left out.
+    if body_required {
+        if let Some(refusal) = body_refusal {
+            return Ok(Sampled::Refused(*refusal));
+        }
     }
     let auth = sample_auth(op, graph)?;
     let reply = success_sample(op, graph, false)?;
     Ok(Sampled::Sample(OperationSample {
         params,
         bodies,
+        body_required,
+        body_refusal,
         auth,
         reply,
     }))
@@ -497,11 +607,11 @@ fn sample_param(
         constraints: &param.constraints,
         format: None,
     };
-    let value =
-        match Sampler::new(graph, Side::Request).value(&param.schema, &restriction, &subject, 0)? {
-            Ok(value) => value,
-            Err(refusal) => return Ok(Err(refusal)),
-        };
+    let mut sampler = Sampler::new(graph, Side::Request);
+    let value = match sampler.value(&param.schema, &restriction, &subject, 0)? {
+        Ok(value) => value,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
     let wire = wire_scalar(&value).ok_or_else(|| CoreError::SdkGen {
         message: format!(
             "the sampler produced a non-scalar value for parameter '{}': {value}",
@@ -512,8 +622,10 @@ fn sample_param(
         name: param.name.clone(),
         location: param.location.clone(),
         schema: param.schema.clone(),
+        required: param.required || param.location == "path",
         value,
         wire,
+        unmet: sampler.unmet,
     }))
 }
 
@@ -638,6 +750,7 @@ pub(crate) fn success_sample(
             model: None,
             body: String::new(),
             field: None,
+            unmet: Vec::new(),
         }));
     };
     let schema = graph
@@ -651,21 +764,20 @@ pub(crate) fn success_sample(
             ),
         })?;
     let subject = format!("response.{status}");
-    let value = match Sampler::new(graph, Side::Response).value(
-        &schema.body,
-        &Restriction::NONE,
-        &subject,
-        0,
-    )? {
+    let mut sampler = Sampler::new(graph, Side::Response);
+    let value = match sampler.value(&schema.body, &Restriction::NONE, &subject, 0)? {
         Ok(value) => value,
         Err(refusal) => return Ok(SuccessOutcome::Refused(refusal)),
     };
+    let mut unmet = sampler.unmet;
     let (value, field) = if omit_optional {
         let (Some(field), Some(object)) = (omitted_field(&schema.body), value.as_object()) else {
             return Ok(SuccessOutcome::NoReply);
         };
         let mut object = object.clone();
         object.remove(&field.json_name);
+        let removed = format!("{subject}.{}", field.json_name);
+        unmet.retain(|unmet| !within(&unmet.subject, &removed));
         (Value::Object(object), Some(field))
     } else {
         let field = checked_field(&schema.body, &value);
@@ -676,17 +788,20 @@ pub(crate) fn success_sample(
         model: Some(model),
         body: json_text(&value)?,
         field,
+        unmet,
     }))
 }
 
-/// The canned error payload for one status, or `None` when the declared error model is refused by
-/// a constraint and the case must be skipped.
+/// The canned error payload for one status, or the refusal of its declared error model, which
+/// skips the case (the planner counts it).
 ///
 /// The declared error model is used when the graph names one, so the body a target decodes matches
 /// the shape it declares. The generic message/slug envelope is sent only where it always was: a
 /// status with no declared response or body, or a model refused as a whole as recursive, too deep,
-/// holding an empty enum or holding an empty union. A model refused by `pattern`, an unsatisfiable
-/// constraint or a map key skips the case instead, so the fallback gains no trigger.
+/// holding an empty enum or holding an empty union. A model refused by an unsatisfiable constraint,
+/// a sampler limit or a map key skips the case instead, so the envelope gains no trigger. A
+/// `pattern` refuses nothing: the payload carries the sample, its pattern unmet, as every other
+/// contract reply does.
 ///
 /// # Errors
 ///
@@ -695,7 +810,7 @@ pub(crate) fn error_payload(
     op: &Operation,
     status: u16,
     graph: &ApiGraph,
-) -> Result<Option<String>, CoreError> {
+) -> Result<Result<String, SampleRefusal>, CoreError> {
     let envelope = || {
         json!({
             "message": "contract test error",
@@ -728,11 +843,11 @@ pub(crate) fn error_payload(
                     | SampleRefusal::EmptyEnum { .. }
                     | SampleRefusal::EmptyUnion { .. },
                 ) => envelope(),
-                Err(_) => return Ok(None),
+                Err(refusal) => return Ok(Err(refusal)),
             }
         }
     };
-    Ok(Some(json_text(&value)?))
+    Ok(Ok(json_text(&value)?))
 }
 
 /// The first required scalar field of an object body, with the value the canned reply carries.
@@ -800,6 +915,13 @@ fn json_text(value: &Value) -> Result<String, CoreError> {
     })
 }
 
+/// Whether `subject` is `root` or a path below it (a field, an array item or a map value).
+fn within(subject: &str, root: &str) -> bool {
+    subject
+        .strip_prefix(root)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '[', '{']))
+}
+
 fn dangling(id: &str) -> CoreError {
     CoreError::SdkGen {
         message: format!(
@@ -852,6 +974,8 @@ struct Sampler<'g> {
     graph: &'g ApiGraph,
     side: Side,
     visiting: BTreeSet<String>,
+    /// The constraints the value sampled so far leaves unmet, in the order they were met.
+    unmet: Vec<UnmetConstraint>,
 }
 
 impl<'g> Sampler<'g> {
@@ -860,7 +984,23 @@ impl<'g> Sampler<'g> {
             graph,
             side,
             visiting: BTreeSet::new(),
+            unmet: Vec::new(),
         }
+    }
+
+    /// Sample one value and hand back the constraints it alone leaves unmet, leaving the sampler's
+    /// own record as it was — so a value the caller then drops takes its unmet constraints with it.
+    fn isolated(
+        &mut self,
+        ty: &Type,
+        restriction: &Restriction<'_>,
+        subject: &str,
+        depth: usize,
+    ) -> Result<Result<(Value, Vec<UnmetConstraint>), SampleRefusal>, CoreError> {
+        let outer = std::mem::take(&mut self.unmet);
+        let outcome = self.value(ty, restriction, subject, depth);
+        let unmet = std::mem::replace(&mut self.unmet, outer);
+        Ok(outcome?.map(|value| (value, unmet)))
     }
 
     /// Sample one value of type `ty` under `restriction`, or refuse it.
@@ -876,12 +1016,27 @@ impl<'g> Sampler<'g> {
                 subject: subject.to_string(),
             }));
         }
-        let constraints = restriction.constraints;
-        if constraints.pattern.is_some() {
-            return Ok(Err(SampleRefusal::Pattern {
-                subject: subject.to_string(),
-            }));
+        if restriction.constraints.pattern.is_some() {
+            // gnr8 never synthesizes a value for `pattern`: the value is sampled from every other
+            // constraint, and a string — the only value `pattern` applies to — records it unmet.
+            let rest = Constraints {
+                pattern: None,
+                ..restriction.constraints.clone()
+            };
+            let unpatterned = Restriction {
+                constraints: &rest,
+                format: restriction.format,
+            };
+            let outcome = self.value(ty, &unpatterned, subject, depth)?;
+            if matches!(outcome, Ok(Value::String(_))) {
+                self.unmet.push(UnmetConstraint {
+                    subject: subject.to_string(),
+                    constraint: "pattern".to_string(),
+                });
+            }
+            return Ok(outcome);
         }
+        let constraints = restriction.constraints;
         match ty {
             // A reference carries the constraints of the input that names it down to its body.
             Type::Named(id) => {
@@ -1091,6 +1246,8 @@ impl<'g> Sampler<'g> {
     ) -> Outcome {
         let mut map = Map::new();
         let mut optional_present: Vec<&str> = Vec::new();
+        // Each present field's unmet constraints, in field order; a dropped field's go with it.
+        let mut field_unmet: Vec<(&str, Vec<UnmetConstraint>)> = Vec::new();
         let min = constraints.min_properties.unwrap_or(0);
         for field in fields {
             let required = match self.side {
@@ -1105,9 +1262,10 @@ impl<'g> Sampler<'g> {
                 format: field.meta.format.as_deref(),
             };
             let path = format!("{subject}.{}", field.json_name);
-            match self.value(&field.schema, &restriction, &path, depth + 1)? {
-                Ok(value) => {
+            match self.isolated(&field.schema, &restriction, &path, depth + 1)? {
+                Ok((value, unmet)) => {
                     map.insert(field.json_name.clone(), value);
+                    field_unmet.push((&field.json_name, unmet));
                     if !required {
                         optional_present.push(&field.json_name);
                     }
@@ -1132,6 +1290,11 @@ impl<'g> Sampler<'g> {
                     break;
                 };
                 map.remove(last);
+            }
+        }
+        for (name, unmet) in field_unmet {
+            if map.contains_key(name) {
+                self.unmet.extend(unmet);
             }
         }
         Ok(checked(Value::Object(map), constraints, subject))
@@ -1187,16 +1350,34 @@ fn enum_candidate(
             .collect()
     };
     let mut last = None;
-    let mut unprintable = false;
+    let mut unprintable = None;
     for member in members {
         let Some(candidate) = parse_member(member, ty) else {
             continue;
         };
-        // A float member is printed by every writer too, so it takes the float rule.
-        if matches!(ty, Type::Primitive(Prim::Float { .. }))
-            && !candidate.as_f64().is_some_and(prints_alike)
-        {
-            unprintable = true;
+        // A float member is printed by every writer too, so it takes the float rule; an integer
+        // member takes the integer range rule.
+        let wire_refusal = match ty {
+            Type::Primitive(Prim::Float { .. })
+                if !candidate.as_f64().is_some_and(prints_alike) =>
+            {
+                Some(SampleRefusal::FloatWire {
+                    subject: subject.to_string(),
+                })
+            }
+            Type::Primitive(Prim::Int { .. })
+                if candidate
+                    .as_i64()
+                    .is_none_or(|n| i128::from(n).abs() > MAX_SAFE_INTEGER) =>
+            {
+                Some(SampleRefusal::IntegerWire {
+                    subject: subject.to_string(),
+                })
+            }
+            _ => None,
+        };
+        if let Some(refusal) = wire_refusal {
+            unprintable.get_or_insert(refusal);
             continue;
         }
         match satisfies(&candidate, constraints) {
@@ -1204,10 +1385,8 @@ fn enum_candidate(
             Err(violation) => last = Some(violation.constraint),
         }
     }
-    if unprintable && last.is_none() {
-        return Err(SampleRefusal::FloatWire {
-            subject: subject.to_string(),
-        });
+    if let (Some(refusal), None) = (unprintable, last) {
+        return Err(refusal);
     }
     unsatisfiable(subject, last.unwrap_or("enum"))
 }
@@ -1366,6 +1545,10 @@ fn numeric_interval(
 /// The base `7` when it lies inside the effective interval; otherwise the nearest admissible
 /// integer. Integer bounds are taken exactly — as integers when they are written as integers — so a
 /// bound beyond 2^53 is never rounded through `f64`.
+///
+/// The sample stays within `±(2^53 − 1)` ([`MAX_SAFE_INTEGER`]): an interval that admits integers
+/// only beyond it is a [`SampleRefusal::IntegerWire`], because TypeScript would send a different
+/// number than the page and the other SDKs.
 fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, SampleRefusal> {
     const BASE: i128 = 7;
     if let Err(keyword) = numeric_interval(constraints) {
@@ -1404,10 +1587,18 @@ fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, 
         (_, Some(highest)) if BASE > highest => highest,
         _ => BASE,
     };
-    match i64::try_from(chosen) {
-        Ok(chosen) => checked(json!(chosen), constraints, subject),
-        Err(_) => unsatisfiable(subject, first_numeric_bound(constraints)),
+    let Ok(chosen) = i64::try_from(chosen) else {
+        return unsatisfiable(subject, first_numeric_bound(constraints));
+    };
+    let value = checked(json!(chosen), constraints, subject)?;
+    if i128::from(chosen).abs() > MAX_SAFE_INTEGER {
+        // The interval is not empty — `chosen` meets it — but it lies wholly beyond the safe range:
+        // `chosen` is the admissible integer nearest the base, so none closer to zero exists.
+        return Err(SampleRefusal::IntegerWire {
+            subject: subject.to_string(),
+        });
     }
+    Ok(value)
 }
 
 /// A numeric bound as the integer nearest it on the admissible side: `ceil` for a lower bound,

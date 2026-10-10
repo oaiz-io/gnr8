@@ -3230,6 +3230,7 @@ impl TargetExec for GoSdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::gosdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            refused: plan.refused.len(),
             go_verification: Some(GoVerificationModule {
                 module: self.module.clone(),
                 go_version: self.go_version.clone(),
@@ -3376,6 +3377,7 @@ impl TargetExec for PySdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::pysdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            refused: plan.refused.len(),
             go_verification: None,
         }])
     }
@@ -3627,6 +3629,7 @@ impl TargetExec for TsSdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::tssdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            refused: plan.refused.len(),
             go_verification: None,
         }])
     }
@@ -4561,7 +4564,7 @@ pub fn target_docs_suites(
     let mut cases = 0;
     let mut refused = 0;
     for op in &graph.operations {
-        match crate::verify::sample_operation(op, graph)? {
+        match crate::verify::sample_operation(op, graph)?.for_docs() {
             crate::verify::Sampled::Sample(_) => cases += 1,
             crate::verify::Sampled::Refused(_) => refused += 1,
         }

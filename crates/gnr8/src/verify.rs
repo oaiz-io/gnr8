@@ -59,6 +59,8 @@ pub(crate) struct SuiteReport {
     pub(crate) test_file: String,
     /// How many cases the suite carries.
     pub(crate) cases: usize,
+    /// How many samples the planner refused; counted, not run.
+    pub(crate) refused: usize,
     /// The command line that ran the suite.
     pub(crate) tool: String,
     /// `passed` or `failed`.
@@ -201,6 +203,17 @@ impl VerifyReport {
             if let Some(reason) = &suite.reason {
                 let _ = writeln!(out, "  {}: {}", suite.label, reason.explain());
             }
+        }
+        for suite in self.suites.iter().filter(|suite| suite.refused > 0) {
+            let _ = writeln!(
+                out,
+                "  {}: {} case{}, {} refused sample{} counted, not run",
+                suite.label,
+                suite.cases,
+                if suite.cases == 1 { "" } else { "s" },
+                suite.refused,
+                if suite.refused == 1 { "" } else { "s" },
+            );
         }
         if self.no_checks_executed() {
             out.push_str("no checks executed: every generated check was skipped\n");
@@ -427,6 +440,7 @@ fn run_suite(
         output_path: suite.output_path.clone(),
         test_file: suite.test_file.clone(),
         cases: suite.cases,
+        refused: suite.refused,
         tool,
         status,
         duration_ms: duration_ms(started.elapsed()),
@@ -688,6 +702,7 @@ mod tests {
             package: "sdk".to_string(),
             test_file: format!("{dir}/contract_test.go"),
             cases: 3,
+            refused: 0,
             go_verification: None,
         }
     }
@@ -761,6 +776,7 @@ mod tests {
                     output_path: "generated/sdk".to_string(),
                     test_file: "generated/sdk/contract_test.go".to_string(),
                     cases: 3,
+                    refused: 0,
                     tool: "go test ./...".to_string(),
                     status,
                     duration_ms: 1,
@@ -941,6 +957,7 @@ mod tests {
                     output_path: "generated/sdk".to_string(),
                     test_file: "generated/sdk/contract_test.go".to_string(),
                     cases: 3,
+                    refused: 0,
                     tool: "go test ./...".to_string(),
                     status: PASSED,
                     duration_ms: 1,
@@ -952,6 +969,7 @@ mod tests {
                     output_path: "generated/sdk-ts".to_string(),
                     test_file: "generated/sdk-ts/contract.test.ts".to_string(),
                     cases: 4,
+                    refused: 2,
                     tool: "tsc && node --test".to_string(),
                     status: PASSED,
                     duration_ms: 2,
@@ -976,7 +994,8 @@ mod tests {
 
         assert_eq!(
             report.render_human(),
-            "Go SDK          passed\nTypeScript SDK  passed\n"
+            "Go SDK          passed\nTypeScript SDK  passed\n  TypeScript SDK: 4 cases, 2 \
+             refused samples counted, not run\n"
         );
     }
 
@@ -1053,6 +1072,7 @@ mod tests {
             package: "sdk".to_string(),
             test_file: "generated/sdk/contract_test.py".to_string(),
             cases: 1,
+            refused: 0,
             go_verification: None,
         }
     }
@@ -1127,6 +1147,7 @@ mod tests {
         assert_eq!(value["suites"][0]["language"], serde_json::json!("go"));
         assert_eq!(value["suites"][0]["status"], serde_json::json!("passed"));
         assert_eq!(value["suites"][0]["cases"], serde_json::json!(3));
+        assert_eq!(value["suites"][0]["refused"], serde_json::json!(0));
         assert!(value["timings_ms"]["tests"].is_number());
         assert!(value["diagnostics"]["total"].is_number());
     }

@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 
 use super::{
     plan_contract_tests, sample_operation, satisfies, CaseOutcome, ContractCaseClass,
-    OperationSample, SampleRefusal, Sampled, SuccessOutcome, SuccessSample,
+    OperationSample, RefusedScope, SampleRefusal, Sampled, SuccessOutcome, SuccessSample,
+    UnmetConstraint,
 };
 use crate::analyze::facts::Constraints;
 use crate::graph::ApiGraph;
@@ -118,6 +119,25 @@ fn refusal(graph: &ApiGraph) -> SampleRefusal {
         Sampled::Refused(refusal) => refusal,
         Sampled::Sample(sample) => panic!("expected a refusal, got {sample:?}"),
     }
+}
+
+/// The probe operation's sample as a docs page reads it.
+fn docs(graph: &ApiGraph) -> Sampled {
+    sample_operation(&graph.operations[0], graph)
+        .expect("no graph error")
+        .for_docs()
+}
+
+fn unmet_pattern(subject: &str) -> UnmetConstraint {
+    UnmetConstraint {
+        subject: subject.to_string(),
+        constraint: "pattern".to_string(),
+    }
+}
+
+/// A constraint set no value meets, for tests that need a refused input of their own.
+fn unmeetable() -> Value {
+    json!({"min_length": 4, "max_length": 3})
 }
 
 /// The one sampled value of a single required query parameter `q`.
@@ -343,26 +363,33 @@ fn contradictory_bounds_are_unsatisfiable() {
     ));
 }
 
+/// D-P: `pattern` is never synthesized and never refuses a sample. The value is sampled from every
+/// other constraint and the pattern is recorded unmet; a docs page reads that as a refusal.
 #[test]
-fn pattern_is_a_typed_refusal() {
+fn pattern_is_recorded_unmet_and_refused_only_by_docs() {
     let graph = probe(
         &[query(
             "isbn",
             &string(),
             true,
-            &json!({"pattern": "^[0-9]{13}$"}),
+            &json!({"pattern": "^[0-9]{13}$", "max_length": 3}),
         )],
         None,
         None,
         &[],
     );
-    let refused = refusal(&graph);
-    assert!(
-        matches!(refused, SampleRefusal::Pattern { .. }),
-        "{refused:?}"
+    let sampled = sample(&graph);
+    assert_eq!(sampled.params[0].value, json!("gnr"));
+    assert_eq!(sampled.params[0].unmet, vec![unmet_pattern("query.isbn")]);
+    let Sampled::Refused(refused) = docs(&graph) else {
+        panic!("a docs page refuses an unmet pattern");
+    };
+    assert_eq!(refused, SampleRefusal::Unmet(unmet_pattern("query.isbn")));
+    assert_eq!(
+        refused.to_string(),
+        "parameter `isbn` declares `pattern`, which gnr8 never synthesizes"
     );
-    assert_eq!(refused.to_string(), "parameter `isbn` declares `pattern`");
-    // Never synthesized, even when an enum member could be checked against it.
+    // Never checked, even when an enum member could be: the member is the value, the pattern unmet.
     let enumerated = probe(
         &[query(
             "isbn",
@@ -374,10 +401,20 @@ fn pattern_is_a_typed_refusal() {
         None,
         &[],
     );
+    assert_eq!(sample(&enumerated).params[0].value, json!("a"));
     assert!(matches!(
-        refusal(&enumerated),
-        SampleRefusal::Pattern { .. }
+        docs(&enumerated),
+        Sampled::Refused(SampleRefusal::Unmet(_))
     ));
+    // `pattern` applies to strings alone: on an integer it is no constraint at all.
+    let number = probe(
+        &[query("n", &int(), true, &json!({"pattern": "^[0-9]+$"}))],
+        None,
+        None,
+        &[],
+    );
+    assert!(sample(&number).params[0].unmet.is_empty());
+    assert!(matches!(docs(&number), Sampled::Sample(_)));
 }
 
 #[test]
@@ -400,7 +437,7 @@ fn refused_field_inside_a_required_json_body_propagates_its_own_reason() {
             "isbn",
             &string(),
             true,
-            &json!({"constraints": {"pattern": "^x$"}}),
+            &json!({"constraints": unmeetable()}),
         )])),
         None,
         &[],
@@ -409,12 +446,37 @@ fn refused_field_inside_a_required_json_body_propagates_its_own_reason() {
     assert!(
         matches!(&refused, SampleRefusal::BodyRefused { content_type, inner }
             if content_type == "application/json"
-                && matches!(&**inner, SampleRefusal::Pattern { subject } if subject == "body.isbn")),
+                && matches!(&**inner, SampleRefusal::Unsatisfiable { subject, .. } if subject == "body.isbn")),
         "{refused:?}"
     );
     assert_eq!(
         refused.to_string(),
-        "request body `application/json`: field `isbn` declares `pattern`"
+        "request body `application/json`: field `isbn` cannot satisfy `maxLength`"
+    );
+}
+
+#[test]
+fn an_unmet_pattern_in_a_required_body_is_sent_by_contracts_and_refused_by_docs() {
+    let graph = probe(
+        &[],
+        Some(&object(&[meta_fld(
+            "isbn",
+            &string(),
+            true,
+            &json!({"constraints": {"pattern": "^x$"}}),
+        )])),
+        None,
+        &[],
+    );
+    let sampled = sample(&graph);
+    assert_eq!(sampled.bodies[0].value, json!({"isbn": "gnr8"}));
+    assert_eq!(sampled.bodies[0].unmet, vec![unmet_pattern("body.isbn")]);
+    let Sampled::Refused(refused) = docs(&graph) else {
+        panic!("a docs page refuses the body");
+    };
+    assert_eq!(
+        refused.to_string(),
+        "request body `application/json`: field `isbn` declares `pattern`, which gnr8 never synthesizes"
     );
 }
 
@@ -470,7 +532,6 @@ fn reply_refusal(graph: &ApiGraph) -> Option<&'static str> {
             SampleRefusal::EmptyEnum { .. } => "EmptyEnum",
             SampleRefusal::EmptyUnion { .. } => "EmptyUnion",
             SampleRefusal::MapKey { .. } => "MapKey",
-            SampleRefusal::Pattern { .. } => "Pattern",
             SampleRefusal::Unsatisfiable { .. } => "Unsatisfiable",
             SampleRefusal::Recursive { .. } => "Recursive",
             SampleRefusal::TooDeep { .. } => "TooDeep",
@@ -573,7 +634,7 @@ fn serialization_style_names_which_rule() {
 fn optional_refused_inputs_are_left_out_without_a_note() {
     let graph = probe(
         &[
-            query("isbn", &string(), false, &json!({"pattern": "^x$"})),
+            query("isbn", &string(), false, &unmeetable()),
             query("limit", &int(), false, &json!({})),
         ],
         Some(&object(&[
@@ -582,7 +643,7 @@ fn optional_refused_inputs_are_left_out_without_a_note() {
                 "code",
                 &string(),
                 false,
-                &json!({"constraints": {"pattern": "^x$"}}),
+                &json!({"constraints": unmeetable()}),
             ),
         ])),
         None,
@@ -594,6 +655,29 @@ fn optional_refused_inputs_are_left_out_without_a_note() {
     assert_eq!(sampled.bodies[0].value, json!({"title": "gnr8"}));
 }
 
+/// An optional parameter with an unmet pattern is sent by a contract case — as on a call that sets
+/// it — and left out of a docs page's call, as any refused optional input is.
+#[test]
+fn an_optional_parameter_with_an_unmet_pattern_is_left_out_of_the_docs_call_only() {
+    let graph = probe(
+        &[
+            query("isbn", &string(), false, &json!({"pattern": "^x$"})),
+            query("limit", &int(), false, &json!({})),
+        ],
+        None,
+        None,
+        &[],
+    );
+    let names = |sample: &OperationSample| -> Vec<String> {
+        sample.params.iter().map(|p| p.name.clone()).collect()
+    };
+    assert_eq!(names(&sample(&graph)), vec!["isbn", "limit"]);
+    let Sampled::Sample(printed) = docs(&graph) else {
+        panic!("an optional input never refuses the operation");
+    };
+    assert_eq!(names(&printed), vec!["limit"]);
+}
+
 #[test]
 fn refused_response_keeps_the_request_sample_and_prints_the_response_note() {
     let graph = probe(
@@ -603,7 +687,7 @@ fn refused_response_keeps_the_request_sample_and_prints_the_response_note() {
             "code",
             &string(),
             true,
-            &json!({"constraints": {"pattern": "^x$"}}),
+            &json!({"constraints": unmeetable()}),
         )])),
         &[],
     );
@@ -613,10 +697,100 @@ fn refused_response_keeps_the_request_sample_and_prints_the_response_note() {
         panic!("{:?}", sampled.reply);
     };
     assert!(
-        matches!(refused, SampleRefusal::Pattern { subject } if subject == "response.200.code"),
+        matches!(refused, SampleRefusal::Unsatisfiable { subject, .. } if subject == "response.200.code"),
         "{refused:?}"
     );
-    assert_eq!(refused.to_string(), "field `code` declares `pattern`");
+    assert_eq!(
+        refused.to_string(),
+        "field `code` cannot satisfy `maxLength`"
+    );
+}
+
+/// D-P: a response-side pattern never drops the reply a contract case decodes; a docs page prints
+/// the refusal in its place.
+#[test]
+fn a_response_pattern_keeps_the_contract_reply_and_refuses_the_printed_one() {
+    let graph = probe(
+        &[query("limit", &int(), true, &json!({}))],
+        None,
+        Some(&object(&[
+            meta_fld(
+                "code",
+                &string(),
+                true,
+                &json!({"constraints": {"pattern": "^x$"}}),
+            ),
+            meta_fld(
+                "note",
+                &string(),
+                false,
+                &json!({"constraints": {"pattern": "^y$"}}),
+            ),
+        ])),
+        &[],
+    );
+    let SuccessOutcome::Sample(reply) = sample(&graph).reply else {
+        panic!("a pattern never refuses a reply");
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&reply.body).unwrap(),
+        json!({"code": "gnr8", "note": "gnr8"})
+    );
+    assert_eq!(
+        reply.unmet,
+        vec![
+            unmet_pattern("response.200.code"),
+            unmet_pattern("response.200.note")
+        ]
+    );
+    let Sampled::Sample(printed) = docs(&graph) else {
+        panic!("a reply never refuses the call");
+    };
+    assert_eq!(printed.params.len(), 1);
+    let SuccessOutcome::Refused(refused) = printed.reply else {
+        panic!("the page prints the refusal");
+    };
+    assert_eq!(
+        refused.to_string(),
+        "field `code` declares `pattern`, which gnr8 never synthesizes"
+    );
+}
+
+/// A field the sampler drops takes its unmet constraints with it, so an unmet list names only
+/// values the sample actually carries.
+#[test]
+fn a_dropped_field_takes_its_unmet_constraints_with_it() {
+    let inner = schema(
+        "Inner",
+        &object(&[
+            fld("a", &string(), true),
+            meta_fld(
+                "b",
+                &string(),
+                false,
+                &json!({"constraints": {"pattern": "^b$"}}),
+            ),
+        ]),
+    );
+    let graph = probe(
+        &[],
+        None,
+        Some(&object(&[meta_fld(
+            "inner",
+            &named("t.Inner"),
+            true,
+            &json!({"constraints": {"max_properties": 1}}),
+        )])),
+        &[inner],
+    );
+    let SuccessOutcome::Sample(reply) = sample(&graph).reply else {
+        panic!("a sampled reply");
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&reply.body).unwrap(),
+        json!({"inner": {"a": "gnr8"}})
+    );
+    assert!(reply.unmet.is_empty(), "{:?}", reply.unmet);
 }
 
 #[test]
@@ -762,7 +936,7 @@ fn refused_optional_response_field_is_dropped_and_the_reply_kept() {
                 "code",
                 &string(),
                 false,
-                &json!({"constraints": {"pattern": "^x$"}}),
+                &json!({"constraints": unmeetable()}),
             ),
         ])),
         &[],
@@ -781,12 +955,12 @@ fn refused_required_response_field_refuses_the_reply() {
                 "code",
                 &string(),
                 true,
-                &json!({"constraints": {"pattern": "^x$"}}),
+                &json!({"constraints": unmeetable()}),
             ),
         ])),
         &[],
     );
-    assert_eq!(reply_refusal(&graph), Some("Pattern"));
+    assert_eq!(reply_refusal(&graph), Some("Unsatisfiable"));
 }
 
 #[test]
@@ -795,12 +969,7 @@ fn response_min_properties_unmet_after_dropping_is_unsatisfiable() {
         "Inner",
         &object(&[
             fld("a", &string(), true),
-            meta_fld(
-                "b",
-                &string(),
-                false,
-                &json!({"constraints": {"pattern": "^x$"}}),
-            ),
+            meta_fld("b", &string(), false, &json!({"constraints": unmeetable()})),
         ]),
     );
     let graph = probe(
@@ -884,7 +1053,7 @@ fn success_outcome_separates_no_reply_from_refused() {
             "code",
             &string(),
             true,
-            &json!({"constraints": {"pattern": "x"}}),
+            &json!({"constraints": unmeetable()}),
         )])),
         &[],
     );
@@ -961,7 +1130,7 @@ fn refused_declared_error_model_skips_its_typed_error_case_and_frees_the_status(
         "code",
         &string(),
         true,
-        &json!({"constraints": {"pattern": "^E[0-9]+$"}}),
+        &json!({"constraints": unmeetable()}),
     )]));
     assert_eq!(
         typed_error_404(&graph),
@@ -972,6 +1141,31 @@ fn refused_declared_error_model_skips_its_typed_error_case_and_frees_the_status(
         .cases
         .iter()
         .any(|case| case.operation_id == "first" && case.class == ContractCaseClass::TypedError));
+    // The skipped case is counted, not lost.
+    assert!(
+        plan.refused
+            .iter()
+            .any(|refused| refused.operation_id == "first"
+                && refused.scope == RefusedScope::ErrorReply { status: 404 }),
+        "{:?}",
+        plan.refused
+    );
+}
+
+/// D-P: a patterned error model is sampled, its pattern unmet, so the case it drives is kept.
+#[test]
+fn a_patterned_declared_error_model_keeps_its_typed_error_case() {
+    let graph = two_404s(&object(&[meta_fld(
+        "code",
+        &string(),
+        true,
+        &json!({"constraints": {"pattern": "^E[0-9]+$"}}),
+    )]));
+    assert_eq!(
+        typed_error_404(&graph),
+        Some(("first".to_string(), "{\"code\":\"gnr8\"}".to_string()))
+    );
+    assert!(plan_contract_tests(&graph).unwrap().refused.is_empty());
 }
 
 #[test]
@@ -1100,7 +1294,8 @@ fn every_sample_satisfies_all_its_constraints() {
                 let graph = probe(&[query("q", ty, true, set)], None, None, &[]);
                 match sample_operation(&graph.operations[0], &graph).unwrap() {
                     Sampled::Sample(sample) => {
-                        satisfies(&sample.params[0].value, &expected)
+                        assert_unmet(&sample.params[0].unmet, set);
+                        satisfies(&sample.params[0].value, &checkable(&expected))
                             .unwrap_or_else(|v| panic!("param {ty} {set}: {v}"));
                         checked += 1;
                     }
@@ -1119,7 +1314,8 @@ fn every_sample_satisfies_all_its_constraints() {
             );
             match sample_operation(&request.operations[0], &request).unwrap() {
                 Sampled::Sample(sample) => {
-                    satisfies(&sample.bodies[0].value["v"], &expected)
+                    assert_unmet(&sample.bodies[0].unmet, set);
+                    satisfies(&sample.bodies[0].value["v"], &checkable(&expected))
                         .unwrap_or_else(|v| panic!("body {ty} {set}: {v}"));
                     checked += 1;
                 }
@@ -1136,9 +1332,10 @@ fn every_sample_satisfies_all_its_constraints() {
                 &[],
             );
             match reply(&response) {
-                SuccessOutcome::Sample(SuccessSample { body, .. }) => {
+                SuccessOutcome::Sample(SuccessSample { body, unmet, .. }) => {
+                    assert_unmet(&unmet, set);
                     let value: Value = serde_json::from_str(&body).unwrap();
-                    satisfies(&value["v"], &expected)
+                    satisfies(&value["v"], &checkable(&expected))
                         .unwrap_or_else(|v| panic!("response {ty} {set}: {v}"));
                     checked += 1;
                 }
@@ -1151,10 +1348,9 @@ fn every_sample_satisfies_all_its_constraints() {
             positions += if is_scalar { 3 } else { 2 };
         }
     }
-    // Exactly the sets no value can meet are refused — a pattern, or contradictory bounds — and
-    // every other position printed a value that satisfies all of its constraints.
+    // Exactly the sets no value can meet are refused — contradictory bounds — and every other
+    // position printed a value that satisfies all of its constraints but an unmet `pattern`.
     let expected: std::collections::BTreeSet<String> = [
-        json!({"pattern": "x"}),
         json!({"min_length": 4, "max_length": 3}),
         json!({"enum_values": ["a"], "max_length": 0}),
         json!({"minimum": "5", "maximum": "4"}),
@@ -1166,17 +1362,34 @@ fn every_sample_satisfies_all_its_constraints() {
     .map(Value::to_string)
     .collect();
     assert_eq!(refused, expected);
-    let refused_positions = 7 * 3 - 2;
+    let refused_positions = 6 * 3 - 2;
     assert_eq!(checked, positions - refused_positions);
 }
 
-/// A refusal under a constraint set is legitimate only as `Pattern` (the set carries a pattern)
-/// or `Unsatisfiable`.
+/// A refusal under a constraint set is legitimate only as `Unsatisfiable`: `pattern` never refuses.
 fn assert_refusal(refusal: &SampleRefusal, set: &Value) {
     match refusal {
-        SampleRefusal::Pattern { .. } => assert!(set.get("pattern").is_some(), "{set}"),
         SampleRefusal::Unsatisfiable { .. } => {}
         other => panic!("unexpected refusal {other:?} for {set}"),
+    }
+}
+
+/// A sample's unmet constraints are exactly the `pattern` its set declares, if any.
+fn assert_unmet(unmet: &[UnmetConstraint], set: &Value) {
+    let keywords: Vec<&str> = unmet.iter().map(|u| u.constraint.as_str()).collect();
+    let expected: Vec<&str> = if set.get("pattern").is_some() {
+        vec!["pattern"]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(keywords, expected, "{set}");
+}
+
+/// The constraints `satisfies` can confirm: every one but `pattern`, which the sampler records unmet.
+fn checkable(constraints: &Constraints) -> Constraints {
+    Constraints {
+        pattern: None,
+        ..constraints.clone()
     }
 }
 
@@ -1374,5 +1587,182 @@ fn non_rfc3339_date_time_members_are_skipped() {
     assert!(matches!(
         refusal(&graph),
         SampleRefusal::Unsatisfiable { .. }
+    ));
+}
+
+/// A `GET /items/{id}` operation with a required path parameter and a 200 reply carrying `code`,
+/// each carrying `constraints`, plus a declared 404.
+fn path_and_reply(param_constraints: &Value, field_constraints: &Value) -> ApiGraph {
+    serde_json::from_value(json!({
+        "module": "t", "base_path": "/api", "title": "Parity", "diagnostics": [], "security": [],
+        "operations": [{
+            "id": "getItem", "method": "GET", "path": "/items/{id}", "handler": "getItem",
+            "params": [{
+                "name": "id", "location": "path", "required": true, "schema": string(),
+                "constraints": param_constraints, "provenance": span()
+            }],
+            "request_body": null,
+            "responses": [
+                {"status": 200, "body": {"ref_id": "t.Item"}, "content_types": ["application/json"]},
+                {"status": 404, "body": null, "body_kind": "empty"}
+            ],
+            "provenance": span()
+        }],
+        "schemas": [schema("Item", &object(&[
+            meta_fld("code", &string(), true, &json!({"constraints": field_constraints})),
+            fld("note", &string(), false),
+        ]))]
+    }))
+    .unwrap()
+}
+
+fn case_names(graph: &ApiGraph) -> Vec<String> {
+    plan_contract_tests(graph)
+        .unwrap()
+        .cases
+        .into_iter()
+        .map(|case| case.name)
+        .collect()
+}
+
+/// D-P coverage parity with the constraint-blind planner on `main`: a `pattern` on a path parameter
+/// or a response field drops no contract case. (Before D-P the path pattern took the operation
+/// from all its cases to none, and the response pattern left only the typed errors.)
+#[test]
+fn a_pattern_drops_no_contract_case() {
+    let plain = case_names(&path_and_reply(&json!({}), &json!({})));
+    assert_eq!(
+        plain,
+        vec![
+            "request_shape_get_item",
+            "response_decode_get_item_present",
+            "response_decode_get_item_absent",
+            "typed_error_get_item_400",
+            "typed_error_get_item_404",
+            "redirect_policy_get_item",
+        ]
+    );
+    let pattern = json!({"pattern": "^[a-z]+$"});
+    assert_eq!(case_names(&path_and_reply(&pattern, &json!({}))), plain);
+    assert_eq!(case_names(&path_and_reply(&json!({}), &pattern)), plain);
+    assert_eq!(case_names(&path_and_reply(&pattern, &pattern)), plain);
+    let patterned = plan_contract_tests(&path_and_reply(&pattern, &pattern)).unwrap();
+    assert!(patterned.refused.is_empty(), "{:?}", patterned.refused);
+    // The case sends the sample as sampled, pattern unmet: no SDK validates a pattern.
+    assert_eq!(patterned.cases[0].expected_path, "/api/items/gnr8");
+}
+
+/// Every sample the planner cannot use is counted on the plan, by scope — never silently lost.
+#[test]
+fn the_plan_counts_every_refused_sample() {
+    let refused_path = path_and_reply(&unmeetable(), &json!({}));
+    let plan = plan_contract_tests(&refused_path).unwrap();
+    assert!(plan.cases.is_empty());
+    assert_eq!(plan.refused.len(), 1);
+    assert_eq!(plan.refused[0].operation_id, "getItem");
+    assert_eq!(plan.refused[0].scope, RefusedScope::Operation);
+    assert_eq!(
+        plan.refused[0].reason.to_string(),
+        "parameter `id` cannot satisfy `maxLength`"
+    );
+
+    let refused_reply = path_and_reply(&json!({}), &unmeetable());
+    let plan = plan_contract_tests(&refused_reply).unwrap();
+    assert_eq!(
+        plan.refused
+            .iter()
+            .map(|refused| refused.scope)
+            .collect::<Vec<_>>(),
+        vec![RefusedScope::SuccessReply]
+    );
+    // The typed errors need no success reply, so they are still sampled.
+    assert!(plan
+        .cases
+        .iter()
+        .all(|case| case.class == ContractCaseClass::TypedError));
+    assert_eq!(plan.cases.len(), 2);
+
+    let mut optional_text_body = probe(&[], Some(&string()), None, &[]);
+    optional_text_body.operations[0].request_body_content_type = Some("text/plain".to_string());
+    optional_text_body.operations[0].request_body_required = false;
+    let plan = plan_contract_tests(&optional_text_body).unwrap();
+    assert_eq!(
+        plan.refused
+            .iter()
+            .map(|refused| (refused.scope, refused.reason.clone()))
+            .collect::<Vec<_>>(),
+        vec![(RefusedScope::OptionalBody, SampleRefusal::NoJsonBody)]
+    );
+}
+
+/// D-INT: an integer sample stays within ±(2^53 − 1), the range a TypeScript `number` carries
+/// exactly; bounds that admit only integers beyond it are a typed refusal, not a rounded value.
+#[test]
+fn integer_samples_stay_within_the_safe_range() {
+    assert_eq!(
+        param_value(&int(), &json!({"minimum": "9007199254740991"})),
+        json!(9_007_199_254_740_991_i64)
+    );
+    assert_eq!(
+        param_value(&int(), &json!({"maximum": "-9007199254740991"})),
+        json!(-9_007_199_254_740_991_i64)
+    );
+    for bounds in [
+        json!({"minimum": "9007199254740993"}),
+        json!({"exclusive_minimum": "9007199254740991"}),
+        json!({"maximum": "-9007199254740992"}),
+        json!({"enum_values": ["9007199254740993"]}),
+    ] {
+        let graph = probe(&[query("n", &int(), true, &bounds)], None, None, &[]);
+        let refused = refusal(&graph);
+        assert_eq!(
+            refused,
+            SampleRefusal::IntegerWire {
+                subject: "query.n".to_string()
+            },
+            "{bounds}"
+        );
+        assert_eq!(
+            refused.to_string(),
+            "parameter `n` admits no integer within ±(2^53 − 1), the range TypeScript carries \
+             exactly"
+        );
+    }
+    // A safe member after an unsafe one is the sample.
+    assert_eq!(
+        param_value(&int(), &json!({"enum_values": ["9007199254740993", "3"]})),
+        json!(3)
+    );
+    // Contradictory bounds stay unsatisfiable, however large.
+    let graph = probe(
+        &[query(
+            "n",
+            &int(),
+            true,
+            &json!({"minimum": "9007199254740995", "maximum": "9007199254740993"}),
+        )],
+        None,
+        None,
+        &[],
+    );
+    assert!(matches!(
+        refusal(&graph),
+        SampleRefusal::Unsatisfiable { .. }
+    ));
+    // A reply takes the same rule: TypeScript decodes it into a number too.
+    let reply_side = probe(
+        &[],
+        None,
+        Some(&object(&[meta_fld(
+            "big",
+            &int(),
+            true,
+            &json!({"constraints": {"minimum": "9007199254740993"}}),
+        )])),
+        &[],
+    );
+    assert!(matches!(
+        reply(&reply_side),
+        SuccessOutcome::Refused(SampleRefusal::IntegerWire { .. })
     ));
 }

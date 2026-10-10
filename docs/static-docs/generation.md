@@ -82,11 +82,18 @@ target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` w
   and the page all print identically: never a whole number (Go and TypeScript print `2`, Python
   `2.0`), never one needing an exponent, and unchanged through a `float32` field. Bounds that only
   admit such numbers print `No sample call: … admits no decimal that Go, Python and TypeScript print
-  alike`.
-- **What has no sample says why.** A required input carrying a `pattern` (never synthesized), or
-  bounds no value can meet, prints `No sample call: …` in place of the exchange and every call. A
-  canned reply that cannot be sampled prints `No sample response body: …`. A file download, no success
-  status, or a first success status outside 2xx prints neither a reply nor a note.
+  alike`. An integer sample stays within ±(2^53 − 1), the range a TypeScript `number` carries
+  exactly; bounds that admit only larger integers print `No sample call: … admits no integer within
+  ±(2^53 − 1)`.
+- **What has no sample says why.** A required input carrying a `pattern` (gnr8 never synthesizes a
+  value for one), or bounds no value can meet, prints `No sample call: …` in place of the exchange
+  and every call; an optional parameter carrying a `pattern` is left out of the call. A canned reply
+  that cannot be sampled, or that carries a `pattern`, prints `No sample response body: …`. A file
+  download, no success status, or a first success status outside 2xx prints neither a reply nor a
+  note. The generated contract tests draw on the same sample but still send a value under a
+  `pattern` — no SDK validates one — so a pattern costs a page its example, never a contract case.
+- **A union reply is its first variant.** A reply whose schema is a union is sampled as the first
+  variant the schema lists; a union in a request has no sample.
 - **Credentials and the base URL are placeholders.** The HTTP exchange prints `{apiKey}`, `{token}`
   and `{base64(username:password)}`; the code takes them and the base URL as variables. No server is
   chosen for you. Paths start at the server root; a server URL with a path prefix prepends it.

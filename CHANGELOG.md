@@ -16,6 +16,10 @@ must move the minor version.
   only that way now publishes a plain string, with no enum and no diagnostic. State the enum with
   the validator's own rule instead: `binding:"oneof=a b"` or `validate:"oneof=a b"`. Separate the
   members with spaces. That rule is the one source of an enum constraint.
+- `gnr8_engine::verify`: `ContractTestSuite` gains `refused` and `ContractTestPlan` gains `refused`
+  (each refused sample, with its operation, scope and reason); `SampleParam` gains `required` and
+  `unmet`, and `SampleBody` gains `unmet`. Code that builds these structs literally needs the new
+  fields.
 
 ### Changed
 
@@ -62,6 +66,22 @@ must move the minor version.
 - **An SDK package or model name can no longer break a docs compile unit**: a Go package named
   `errors` or `outcome` is imported under an alias, a Python model named after the unit's own test
   classes no longer replaces one, and a Python package named `snippets` no longer shadows the unit.
+
+### Fixed
+
+- A `pattern` no longer costs contract-test coverage. gnr8 still never synthesizes a value for one:
+  the sample is drawn from the input's other constraints and records the pattern as unmet. A contract
+  case sends that sample (no generated SDK validates `pattern`), so a pattern on a path parameter or
+  a response field drops no case, and generated `contract_test.*` files regain the cases patterned
+  models had lost. A docs page still promises schema-satisfying values, so it prints the refusal
+  ("parameter `isbn` declares `pattern`, which gnr8 never synthesizes") instead of the call or the
+  reply; an optional patterned parameter is left out of the printed call.
+- Contract suites no longer skip cases silently: every refused sample — a required input, an optional
+  body with no JSON representation, a success reply, or a declared error model — is counted, and
+  `gnr8 verify` prints `N cases, M refused samples counted, not run` under the suite and carries
+  `refused` in `--json`.
+- Integer samples stay within ±(2^53 − 1). Bounds such as `minimum: 9007199254740993` used to yield
+  a sample the TypeScript SDK sent as `…992`; they are now a typed refusal naming the input.
 
 ## 0.17.2 — 2026-10-10
 

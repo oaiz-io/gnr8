@@ -29,7 +29,7 @@ pub(crate) use sample::credential_of;
 use sample::{error_payload, success_sample};
 pub use sample::{
     sample_operation, satisfies, OperationSample, SampleRefusal, Sampled, SuccessOutcome,
-    SuccessSample, Violation,
+    SuccessSample, UnmetConstraint, Violation,
 };
 
 /// The largest number of cases one target's contract test may carry.
@@ -115,6 +115,8 @@ pub struct ContractTestSuite {
     pub test_file: String,
     /// How many cases the suite carries.
     pub cases: usize,
+    /// How many samples the planner refused ([`ContractTestPlan::refused`]); counted, not run.
+    pub refused: usize,
     /// Declared Go module facts; other languages carry none.
     pub go_verification: Option<GoVerificationModule>,
 }
@@ -290,10 +292,14 @@ pub struct SampleParam {
     pub location: String,
     /// The parameter's neutral type, so each target can render a typed literal.
     pub schema: Type,
+    /// Whether a call must carry the parameter: a required or path parameter.
+    pub required: bool,
     /// The sampled scalar, as JSON.
     pub value: Value,
     /// The exact string the scalar takes on the wire.
     pub wire: String,
+    /// The constraints the sampled value leaves unmet.
+    pub unmet: Vec<UnmetConstraint>,
 }
 
 /// The request body one case sends.
@@ -313,6 +319,8 @@ pub struct SampleBody {
     /// How many representations the operation declares. `> 1` means the target's body wrapper is
     /// exercised.
     pub representations: usize,
+    /// The constraints the sampled body leaves unmet, in field order.
+    pub unmet: Vec<UnmetConstraint>,
 }
 
 /// One credential the client is configured with and the request must carry.
@@ -418,6 +426,35 @@ pub struct ContractCase {
     pub outcome: CaseOutcome,
 }
 
+/// What part of an operation the planner could not sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefusedScope {
+    /// A required input — so no case calls the operation at all.
+    Operation,
+    /// An optional request body with no constructible JSON representation: a case would have to
+    /// send it, so none calls the operation.
+    OptionalBody,
+    /// The success reply — so no case that needs one calls the operation.
+    SuccessReply,
+    /// The declared error model of one status — so that typed-error case is skipped.
+    ErrorReply {
+        /// The error status.
+        status: u16,
+    },
+}
+
+/// One sample the planner refused, and why. A contract suite counts these instead of losing the
+/// cases silently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedSample {
+    /// The operation whose sample was refused.
+    pub operation_id: String,
+    /// Which part of it.
+    pub scope: RefusedScope,
+    /// The sampler's reason.
+    pub reason: SampleRefusal,
+}
+
 /// A complete, language-neutral contract-test plan for one SDK target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractTestPlan {
@@ -425,6 +462,9 @@ pub struct ContractTestPlan {
     pub base_url: String,
     /// The sampled cases, ordered by class then case name.
     pub cases: Vec<ContractCase>,
+    /// Every sample the planner refused, in operation order (a refused error model after them, in
+    /// the order the typed-error class meets it). Each is counted, never silently lost.
+    pub refused: Vec<RefusedSample>,
 }
 
 impl ContractTestPlan {
@@ -483,9 +523,26 @@ impl ContractTestPlan {
 /// dangling `$ref`, an unsupported request media type, contradictory responses).
 pub fn plan_contract_tests(graph: &ApiGraph) -> Result<ContractTestPlan, CoreError> {
     let mut candidates: Vec<Candidate> = Vec::new();
+    let mut refused: Vec<RefusedSample> = Vec::new();
     for op in &graph.operations {
-        if let Some(candidate) = Candidate::build(op, graph)? {
-            candidates.push(candidate);
+        let refuse = |scope, reason| RefusedSample {
+            operation_id: op.id.clone(),
+            scope,
+            reason,
+        };
+        match sample_operation(op, graph)? {
+            // A refused required input: the planner skips the operation, exactly as the docs page
+            // prints the refusal instead of a call — and counts it.
+            Sampled::Refused(reason) => refused.push(refuse(RefusedScope::Operation, reason)),
+            Sampled::Sample(sample) => {
+                if let (false, Some(reason)) = (sample.body_required, &sample.body_refusal) {
+                    refused.push(refuse(RefusedScope::OptionalBody, (**reason).clone()));
+                }
+                if let SuccessOutcome::Refused(reason) = &sample.reply {
+                    refused.push(refuse(RefusedScope::SuccessReply, reason.clone()));
+                }
+                candidates.push(Candidate::build(op, graph, sample)?);
+            }
         }
     }
 
@@ -495,7 +552,7 @@ pub fn plan_contract_tests(graph: &ApiGraph) -> Result<ContractTestPlan, CoreErr
             ContractCaseClass::RequestShape => request_shape_cases(&candidates),
             ContractCaseClass::BodySelection => body_selection_cases(&candidates),
             ContractCaseClass::ResponseDecode => response_decode_cases(&candidates, graph)?,
-            ContractCaseClass::TypedError => typed_error_cases(&candidates, graph)?,
+            ContractCaseClass::TypedError => typed_error_cases(&candidates, graph, &mut refused)?,
             ContractCaseClass::Auth => auth_cases(&candidates),
             ContractCaseClass::RedirectPolicy => redirect_cases(&candidates),
         };
@@ -507,6 +564,7 @@ pub fn plan_contract_tests(graph: &ApiGraph) -> Result<ContractTestPlan, CoreErr
     Ok(ContractTestPlan {
         base_url: CONTRACT_TEST_BASE_URL.to_string(),
         cases,
+        refused,
     })
 }
 
@@ -527,15 +585,16 @@ struct Candidate<'op> {
 }
 
 impl<'op> Candidate<'op> {
-    /// The operation's one sample, or `None` when a required input is refused — the planner skips
-    /// such an operation, exactly as the docs page prints the refusal instead of a call.
-    fn build(op: &'op Operation, graph: &ApiGraph) -> Result<Option<Self>, CoreError> {
-        let Sampled::Sample(sample) = sample_operation(op, graph)? else {
-            return Ok(None);
-        };
+    /// The operation's one sample, as a contract case sends it: every value, including one whose
+    /// `pattern` is unmet — no generated SDK validates `pattern`, so the wire contract is the same.
+    fn build(
+        op: &'op Operation,
+        graph: &ApiGraph,
+        sample: OperationSample,
+    ) -> Result<Self, CoreError> {
         let declared = request_body_models_of(op, graph)?;
         let absolute_path = absolute_path(&graph.base_path, &op.path, &sample.params);
-        Ok(Some(Self {
+        Ok(Self {
             op,
             declares_body: !declared.is_empty(),
             bodies_complete: sample.bodies.len() == declared.len(),
@@ -544,7 +603,7 @@ impl<'op> Candidate<'op> {
             auth: sample.auth,
             reply: sample.reply,
             absolute_path,
-        }))
+        })
     }
 
     /// The sampled success reply, when there is one to drive a case with.
@@ -727,6 +786,7 @@ fn response_decode_cases(
 fn typed_error_cases(
     candidates: &[Candidate<'_>],
     graph: &ApiGraph,
+    refused: &mut Vec<RefusedSample>,
 ) -> Result<Vec<ContractCase>, CoreError> {
     let mut seen: BTreeSet<u16> = BTreeSet::new();
     let mut cases = Vec::new();
@@ -750,10 +810,18 @@ fn typed_error_cases(
             if seen.contains(&status) {
                 continue;
             }
-            // A declared error model refused by a constraint skips this case and leaves the status
-            // unclaimed, so a later operation that declares it can still supply one.
-            let Some(payload) = error_payload(candidate.op, status, graph)? else {
-                continue;
+            // A declared error model refused by a constraint skips this case — counted — and leaves
+            // the status unclaimed, so a later operation that declares it can still supply one.
+            let payload = match error_payload(candidate.op, status, graph)? {
+                Ok(payload) => payload,
+                Err(reason) => {
+                    refused.push(RefusedSample {
+                        operation_id: candidate.op.id.clone(),
+                        scope: RefusedScope::ErrorReply { status },
+                        reason,
+                    });
+                    continue;
+                }
             };
             seen.insert(status);
             cases.push(candidate.case(

@@ -454,7 +454,7 @@ pub fn compile_unit(
     let mut entries = Vec::new();
     let mut snippets = Vec::new();
     for op in &graph.operations {
-        let Sampled::Sample(sample) = sample_operation(op, graph)? else {
+        let Sampled::Sample(sample) = sample_operation(op, graph)?.for_docs() else {
             continue;
         };
         let mut snippet = snippet(graph, op, &sample, sdk, &identity)?;
