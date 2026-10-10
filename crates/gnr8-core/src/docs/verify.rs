@@ -9,7 +9,8 @@ use std::fmt::Write as _;
 
 use crate::docs::identity::{go_sdk_import, ConsumerIdentity};
 use crate::docs::model::{
-    CodeSample, DocsModel, ErrorReplyDoc, ExampleDoc, Expect, SampleKind, SdkSamples, View,
+    CodeSample, DocsModel, ErrorReplyDoc, ExampleDoc, Expect, ReplyDoc, SampleKind, SdkSamples,
+    View,
 };
 use crate::docs::sample::go_import_block;
 use crate::gosdk::ERROR_TYPE as GO_ERROR_TYPE;
@@ -53,9 +54,10 @@ pub struct CompileEntry {
     /// The sample's body exactly as the unit wraps it (construction + call + result use), which
     /// names the entry a tool's complaint points into.
     pub snippet: String,
-    /// Every block rung 2 requires the finished pages to print as whole lines: the sample's code
-    /// block, the HTTP request block rung 3 compares against, and, for a typed-error sample, the
-    /// error reply block its harness answers with.
+    /// Every block rung 2 requires the finished pages to print as whole lines: the HTTP request
+    /// block rung 3 compares against, the sample's code block, and the reply block its harness
+    /// answers with — the success reply for a call or an iterator, the error reply for a
+    /// typed-error sample — when the page prints one.
     pub embeds: Vec<PageEmbed>,
     /// The request the sample's call must send — the one the embedded HTTP block prints.
     pub request: HttpRequest,
@@ -185,9 +187,9 @@ fn unit_of(
     for op in &model.operations {
         let ExampleDoc::Sampled {
             request,
+            reply,
             error_reply,
             per_sdk,
-            ..
         } = &op.example
         else {
             continue;
@@ -206,10 +208,13 @@ fn unit_of(
         .flatten()
         {
             let mut blocks = vec![request_block.clone(), render::sample_block(sample)];
-            if let (SampleKind::TypedError, Some(ErrorReplyDoc::Printed { reply, .. })) =
-                (sample.kind, error_reply)
-            {
-                blocks.push(render::error_reply_block(reply));
+            // The reply the sample's harness answers with, as the page prints it.
+            match (sample.kind, reply, error_reply) {
+                (SampleKind::TypedError, _, Some(ErrorReplyDoc::Printed { reply, .. }))
+                | (SampleKind::Call | SampleKind::Iterate, ReplyDoc::Printed(reply), _) => {
+                    blocks.push(render::reply_block(reply));
+                }
+                _ => {}
             }
             let mut embeds = Vec::new();
             for (wanted, root, page) in [

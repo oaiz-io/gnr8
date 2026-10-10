@@ -193,7 +193,7 @@ compiles as printed.
 |---|---|---|
 | 0 | one page per operation, every link names an emitted page, no slug collision, no empty heading, and no prose breaks the page structure | every generation; a failure stops it |
 | 1 | the same graph and declarations produce the same bytes | `gnr8 check` |
-| 2 | every name and argument in every sample resolves against its SDK, and every block a sample relies on — its code block, the HTTP request block and, for a typed-error sample, the error reply block — appears on its page, in the SDK's `reference.md` and, for the quick start, in its `README.md`, after post-processors, byte for byte, as whole lines | `gnr8 verify` |
+| 2 | every name and argument in every sample resolves against its SDK, and every block a sample relies on — its code block, the HTTP request block, and the reply block its call is answered with (the success reply for a call or an iterator, the error reply for a typed-error sample) — appears on its page, in the SDK's `reference.md` and, for the quick start, in its `README.md`, after post-processors, byte for byte, as whole lines | `gnr8 verify` |
 | 3 | every sample's call sends exactly the one request its page prints, and makes of its reply what the page says: the call succeeds, the typed error carries the printed status and body, the iterator stops after one page | `gnr8 verify` |
 
 Prose is printed verbatim: gnr8 never tokenizes, folds or rewrites a doc comment or an imported

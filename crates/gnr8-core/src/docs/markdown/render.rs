@@ -578,7 +578,7 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
             w.heading(3, &Inline::text(HTTP));
             w.block(&request_block(request)?);
             match reply {
-                ReplyDoc::Printed(reply) => w.code("http", &reply.page_text()),
+                ReplyDoc::Printed(reply) => w.block(&reply_block(reply)),
                 ReplyDoc::Refused(refusal) => w.paragraph(&Inline::text(format!(
                     "No sample response body: {refusal}."
                 ))),
@@ -591,7 +591,7 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
                         Inline::code(reply.status.to_string()),
                         Inline::text(" reply:"),
                     ]));
-                    w.block(&error_reply_block(reply));
+                    w.block(&reply_block(reply));
                     Some(reply.status)
                 }
                 Some(ErrorReplyDoc::Refused { status, reason }) => {
@@ -653,9 +653,10 @@ pub(crate) fn request_block(request: &HttpRequest) -> Result<String, CoreError> 
     Ok(code_block("http", &request.page_text()?))
 }
 
-/// The error reply block an operation page prints for its typed-error samples: the block rung 2
-/// requires on the page, and the reply rung 3 answers those samples with.
-pub(crate) fn error_reply_block(reply: &WireReply) -> String {
+/// A reply block an operation page prints — the success reply, or the error reply its typed-error
+/// samples receive: the block rung 2 requires on the page, and the reply rung 3 answers the samples
+/// with (an iterator receives the success reply ended after its first page).
+pub(crate) fn reply_block(reply: &WireReply) -> String {
     code_block("http", &reply.page_text())
 }
 

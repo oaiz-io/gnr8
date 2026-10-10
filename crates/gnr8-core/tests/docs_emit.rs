@@ -1726,8 +1726,9 @@ fn schema_pages_follow_every_root_and_print_every_published_format() {
 }
 
 /// Rung 2's page predicate holds on real output: every block a unit relies on — each sample's code
-/// block and the HTTP request block rung 3 compares against — is on its page as whole lines, and a
-/// description that happens to print an HTTP block of its own is never mistaken for one.
+/// block, the HTTP request block rung 3 compares against, and the reply its harness answers with —
+/// is on its page as whole lines, and a description that happens to print an HTTP block of its own
+/// is never mistaken for one.
 #[test]
 fn every_unit_block_is_on_its_page_as_whole_lines() {
     use gnr8_engine::docs::verify::{compile_unit, embeds, EntryKind, PageRoot};
@@ -1735,6 +1736,22 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
     let mut value = bookstore_json();
     value["operations"][0]["description"] =
         json!("Decoy.\n\n### HTTP\n\n```http\nDELETE /decoy HTTP/1.1\n```");
+    value["operations"][0]["params"]
+        .as_array_mut()
+        .unwrap()
+        .push(
+            json!({"name": "cursor", "location": "query", "required": false,
+                     "schema": string(), "provenance": span()}),
+        );
+    value["schemas"][1]["body"]["of"]
+        .as_array_mut()
+        .unwrap()
+        .push(field("next_cursor", &string(), false));
+    value["pagination"] = json!([{
+        "operation_id": "listBooks", "mode": "cursor", "items_field": "books",
+        "cursor_param": "cursor", "next_cursor_field": "next_cursor",
+        "termination": "no_next_cursor"
+    }]);
     let graph = graph_of(value);
     let pages = render(&graph, &[go_sdk()]);
     let go = GoSdk::new()
@@ -1745,14 +1762,8 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
         !unit.entries.is_empty(),
         "the bookstore samples some operation"
     );
+    let mut answered = Vec::new();
     for (index, entry) in unit.entries.iter().enumerate() {
-        // The request block and the sample's own block; a typed-error sample also relies on the
-        // error reply block its harness answers with.
-        let relied_on = if entry.kind == EntryKind::TypedError {
-            3
-        } else {
-            2
-        };
         let on = |root: PageRoot, page: Option<&str>| {
             entry
                 .embeds
@@ -1761,7 +1772,19 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
                 .collect::<Vec<_>>()
         };
         let site = on(PageRoot::Docs, None);
-        assert_eq!(site.len(), relied_on, "{}", entry.operation_id);
+        // The request block and the sample's own block, then the reply the harness answers with:
+        // the success reply the page prints for a call or an iterator, the error reply for a
+        // typed-error sample.
+        let replies: Vec<_> = site
+            .iter()
+            .filter(|embed| embed.block.starts_with("```http\nHTTP/1.1 "))
+            .collect();
+        if entry.kind == EntryKind::TypedError {
+            assert_eq!(replies.len(), 1, "{}", entry.operation_id);
+        } else if !replies.is_empty() {
+            answered.push((entry.operation_id.clone(), entry.kind));
+        }
+        assert_eq!(site.len(), 2 + replies.len(), "{}", entry.operation_id);
         for embed in &site {
             assert!(
                 embeds(page(&pages, &embed.page), &embed.block),
@@ -1788,6 +1811,17 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
             usize::from(index == 0),
             "{}",
             entry.operation_id
+        );
+    }
+    // Every call whose page prints a success reply relies on it, and so does every iterator.
+    for (operation, kind) in [
+        ("getBook", EntryKind::Call),
+        ("listBooks", EntryKind::Call),
+        ("listBooks", EntryKind::Iterate),
+    ] {
+        assert!(
+            answered.contains(&(operation.to_string(), kind)),
+            "{operation} {kind:?}: {answered:?}"
         );
     }
 }
