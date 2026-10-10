@@ -3128,7 +3128,7 @@ fn emit_non_query_parameter(
 
 fn emit_wire_parameter_helpers(body: &mut String) {
     body.push_str(
-        r##"
+        r#"
 
 type wireParameterPair struct {
 Name string
@@ -3202,7 +3202,7 @@ return instant.Format(time.RFC3339)
 return fmt.Sprint(value)
 }
 
-"##,
+"#,
     );
 }
 

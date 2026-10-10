@@ -435,7 +435,11 @@ fn emit_operation_file(
 
     let mut out = String::from("from __future__ import annotations\n\n");
     out.push_str("import json\n");
-    out.push_str("import urllib.parse\n");
+    // A path segment is encoded by `Client._path_segment`, so only a cookie parameter's encoding
+    // still spells `urllib.parse` in an operation body.
+    if body.contains("urllib.parse.") {
+        out.push_str("import urllib.parse\n");
+    }
     if ops.iter().any(|op| {
         graph
             .pagination

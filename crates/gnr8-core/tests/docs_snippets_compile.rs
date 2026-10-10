@@ -866,10 +866,10 @@ fn go_bound_names(text: &str) -> std::collections::BTreeSet<String> {
 /// them all.
 #[test]
 fn go_units_vet_with_the_sdk_package_named_after_every_name_they_bind() {
+    type Fixture = fn(&dyn Fn(Pipeline) -> Pipeline) -> DocsRun;
     if !docs_pipeline::go_available() {
         return;
     }
-    type Fixture = fn(&dyn Fn(Pipeline) -> Pipeline) -> DocsRun;
     let fixtures: [(&str, Fixture); 2] = [
         ("edge", |targets| docs_pipeline::docs_edge(targets)),
         ("wire", |targets| docs_pipeline::docs_wire(targets)),
