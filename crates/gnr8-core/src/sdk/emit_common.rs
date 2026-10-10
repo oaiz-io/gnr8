@@ -3150,7 +3150,7 @@ pub(crate) enum Qualify<'a> {
     /// manifest declares; there is no other way to construct this variant.
     Consumer {
         /// What the consumer imports.
-        identity: &'a ConsumerIdentity,
+        identity: &'a crate::docs::identity::ConsumerIdentity,
     },
 }
 
@@ -3161,15 +3161,6 @@ pub(crate) struct PaginationNames {
     pub(crate) pages: String,
     /// The helper that iterates every item across pages.
     pub(crate) iterate: String,
-}
-
-/// What a consumer imports. Exists only when the SDK target emits a package manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConsumerIdentity {
-    /// The import specifier: the Go module path, the Python import package, the npm package name.
-    pub(crate) import: String,
-    /// The name the consumer's code spells the package's symbols with (Go: the package clause).
-    pub(crate) qualifier: String,
 }
 
 /// The sampled inputs of one call, whichever planner produced them.

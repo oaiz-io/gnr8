@@ -9,9 +9,7 @@ use std::fmt::Write as _;
 
 use crate::graph::{ApiGraph, Operation};
 use crate::sdk::builtins::SiblingSdk;
-use crate::sdk::emit_common::{
-    cli_operations, command_examples, command_invocation, ConsumerIdentity,
-};
+use crate::sdk::emit_common::{cli_operations, command_examples, command_invocation};
 use crate::verify::{
     absolute_path, percent_encode, request_headers, request_query, ContractTestLanguage,
     OperationSample, Sampled, SuccessOutcome, WireCredentials,
@@ -19,7 +17,8 @@ use crate::verify::{
 use crate::CoreError;
 
 use super::markdown::{code_block, code_span, CLI, HTTP};
-use super::snippets::{sdk_label, snippet, NO_IDENTITY_NOTE};
+use super::snippets::snippet;
+use crate::docs::identity::{sdk_label, ConsumerIdentity, NO_IDENTITY_NOTE};
 
 /// What every Example section says once, before the exchange.
 pub(crate) const EXAMPLE_NOTE: &str = "Values are sampled from the schema and satisfy its declared \

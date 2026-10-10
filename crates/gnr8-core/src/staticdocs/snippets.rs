@@ -8,11 +8,12 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use crate::docs::identity::{consumer_identity, go_sdk_import, ConsumerIdentity};
 use crate::gosdk::ERROR_TYPE as GO_ERROR_TYPE;
 use crate::graph::{ApiGraph, Operation};
 use crate::pysdk::ERROR_TYPE as PY_ERROR_TYPE;
 use crate::sdk::builtins::{sdk_package, SiblingSdk};
-use crate::sdk::emit_common::{CallInputs, CallSite, ConsumerIdentity, Qualify};
+use crate::sdk::emit_common::{CallInputs, CallSite, Qualify};
 use crate::tssdk::ERROR_TYPE as TS_ERROR_TYPE;
 use crate::verify::{
     sample_operation, ContractTestLanguage, OperationSample, Sampled, CONTRACT_TEST_BASE_URL,
@@ -48,184 +49,6 @@ pub struct CompileEntry {
 
 /// The Go file a compile unit is written to, beside the SDK's own sources.
 pub(crate) const GO_UNIT_FILE: &str = "docs_snippets_test.go";
-
-/// The note an SDK section prints when its target emits no package manifest.
-pub(crate) const NO_IDENTITY_NOTE: &str =
-    "No sample call: this SDK target emits no package metadata, so it has no published import name.";
-
-/// What a consumer imports: what the SDK target's own emitted package manifest declares, computed by
-/// the same function the manifest writer uses. `None` when the target emits no manifest — a
-/// consumer's import path for an unpublished SDK depends on where they vendor it, which no
-/// declaration states, so there is nothing to print.
-///
-/// # Errors
-///
-/// Returns the target's own configuration error for a module or package name it would reject.
-pub(crate) fn consumer_identity(
-    sdk: SiblingSdk<'_>,
-) -> Result<Option<ConsumerIdentity>, CoreError> {
-    match sdk {
-        SiblingSdk::Go(t) => {
-            if !t.package_metadata {
-                return Ok(None);
-            }
-            Ok(Some(ConsumerIdentity {
-                import: t.module.clone(),
-                qualifier: go_qualifier(&sdk_package(&t.module)?),
-            }))
-        }
-        SiblingSdk::Python(t) => {
-            if !t.package_metadata {
-                return Ok(None);
-            }
-            let package = sdk_package(&t.module)?;
-            Ok(Some(ConsumerIdentity {
-                import: package.clone(),
-                qualifier: package,
-            }))
-        }
-        SiblingSdk::TypeScript(t) => {
-            if !t.effective_package_metadata() {
-                return Ok(None);
-            }
-            let package = sdk_package(&t.module)?;
-            Ok(Some(ConsumerIdentity {
-                import: t.package_info.resolved_name(&package)?,
-                qualifier: String::new(),
-            }))
-        }
-    }
-}
-
-/// Every name a Go sample, its wrapper or the compile unit's harness binds or imports, plus Go's
-/// predeclared identifiers. An SDK package clause spelled like one of them would be shadowed by it
-/// (`client := client.NewClient(…)`), so the sample imports the SDK under an alias instead.
-///
-/// Only Go needs such a list: Go is the one language whose samples spell the SDK's package name as an
-/// identifier. A TypeScript unit names the package only in its `import … from "<name>"` specifier and
-/// imports nothing from it but `Client` and `ApiError`. A Python unit names the package only in
-/// `from <package> import …`; it imports a sample's models inside the function that runs the sample,
-/// so no model shares the module namespace with the harness, and its file name carries an underscore,
-/// which no package name does (`sdk_package`), so the package directory beside it cannot shadow it.
-/// A Python package named after a standard-library module (`json`) remains unimportable — for a
-/// consumer as much as for the unit — which is the SDK's name to change, not the sample's.
-const GO_TAKEN_NAMES: &[&str] = &[
-    // The sample's locals and imports, and the wrapper's parameters.
-    "client",
-    "result",
-    "err",
-    "ctx",
-    "fmt",
-    "time",
-    "baseURL",
-    "apiKey",
-    "token",
-    "username",
-    "password",
-    // The compile unit's harness: its imports, its declarations, and every local and parameter.
-    "bytes",
-    "context",
-    "errors",
-    "json",
-    "io",
-    "http",
-    "os",
-    "strings",
-    "testing",
-    "docsWireRecord",
-    "docsWireTransport",
-    "TestDocsWire",
-    "transport",
-    "t",
-    "path",
-    "payload",
-    "record",
-    "request",
-    "header",
-    "status",
-    "contentType",
-    "body",
-    "index",
-    "name",
-    "text",
-    "operation",
-    "outcome",
-    "apiErr",
-    // Predeclared identifiers.
-    "any",
-    "append",
-    "bool",
-    "byte",
-    "cap",
-    "clear",
-    "close",
-    "comparable",
-    "complex",
-    "complex128",
-    "complex64",
-    "copy",
-    "delete",
-    "error",
-    "false",
-    "float32",
-    "float64",
-    "imag",
-    "int",
-    "int16",
-    "int32",
-    "int64",
-    "int8",
-    "iota",
-    "len",
-    "make",
-    "max",
-    "min",
-    "new",
-    "nil",
-    "panic",
-    "print",
-    "println",
-    "real",
-    "recover",
-    "rune",
-    "string",
-    "true",
-    "uint",
-    "uint16",
-    "uint32",
-    "uint64",
-    "uint8",
-    "uintptr",
-];
-
-/// The name a Go sample spells the SDK's symbols with: its package clause, or `<package>sdk` when
-/// the clause is a name the sample already uses.
-fn go_qualifier(package: &str) -> String {
-    if GO_TAKEN_NAMES.contains(&package) {
-        format!("{package}sdk")
-    } else {
-        package.to_string()
-    }
-}
-
-/// The Go import entry for the SDK: its module path, aliased when the qualifier is not the package
-/// clause (an entry with a space prints as `alias "path"`).
-fn go_sdk_import(identity: &ConsumerIdentity) -> Result<String, CoreError> {
-    Ok(if sdk_package(&identity.import)? == identity.qualifier {
-        identity.import.clone()
-    } else {
-        format!("{} {}", identity.qualifier, identity.import)
-    })
-}
-
-/// The module or package a section is labelled with: what the declaration names.
-pub(crate) fn sdk_label(sdk: SiblingSdk<'_>) -> &str {
-    match sdk {
-        SiblingSdk::Go(t) => &t.module,
-        SiblingSdk::Python(t) => &t.module,
-        SiblingSdk::TypeScript(t) => &t.module,
-    }
-}
 
 /// One rendered snippet: the import lines it needs, its body, and what rung 3 re-runs of it.
 pub(crate) struct Snippet {

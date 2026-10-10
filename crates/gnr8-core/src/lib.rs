@@ -26,6 +26,7 @@ pub use error::CoreError;
 pub mod analyze;
 pub mod changes;
 pub mod diagnostics;
+pub mod docs;
 pub mod gosdk;
 pub mod graph;
 pub mod graph_artifact;

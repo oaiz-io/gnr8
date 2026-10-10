@@ -55,7 +55,7 @@ pub(crate) fn generate(
         .map(|sdk| {
             Ok(DocsSdk {
                 sdk,
-                identity: snippets::consumer_identity(sdk)?,
+                identity: crate::docs::identity::consumer_identity(sdk)?,
             })
         })
         .collect::<Result<Vec<_>, CoreError>>()?;
@@ -205,7 +205,7 @@ fn credential_options(
             label: format!(
                 "{} — {}",
                 example::language_name(docs.sdk.language()),
-                markdown::code_span(snippets::sdk_label(docs.sdk))
+                markdown::code_span(crate::docs::identity::sdk_label(docs.sdk))
             ),
             option: option.trim_start_matches(", ").to_string(),
         });

@@ -604,10 +604,12 @@ mod tests {
     use serde_json::json;
 
     use super::{render_call, time_date_expression};
+    use crate::docs::identity::ConsumerIdentity;
     use crate::gosdk::emit::{go_type, go_type_in};
     use crate::graph::{ApiGraph, Type};
     use crate::graph_artifact::GraphArtifact;
-    use crate::sdk::emit_common::{CallInputs, ConsumerIdentity, Qualify};
+    use crate::sdk::emit_common::{CallInputs, Qualify};
+    use crate::verify::ContractTestLanguage;
     use crate::verify::{SampleAuth, SampleBody, SampleCredential, SampleParam};
 
     /// Every committed example graph: the graphs the SDK targets actually emit from.
@@ -781,6 +783,8 @@ mod tests {
         let identity = ConsumerIdentity {
             import: "example.com/shapes/sdk".to_string(),
             qualifier: "sdk".to_string(),
+            install: "example.com/shapes/sdk".to_string(),
+            language: ContractTestLanguage::Go,
         };
         let site = render_call(
             &graph,
@@ -872,6 +876,8 @@ mod tests {
         let identity = ConsumerIdentity {
             import: "example.com/shapes/sdk".to_string(),
             qualifier: "sdk".to_string(),
+            install: "example.com/shapes/sdk".to_string(),
+            language: ContractTestLanguage::Go,
         };
         let call = |index: usize, schema: &str, value: serde_json::Value| {
             let body = SampleBody {
