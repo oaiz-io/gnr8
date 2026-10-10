@@ -138,9 +138,11 @@ enum Outcome {
 enum Container {
     Quote,
     /// A list item whose content starts `offset` columns into the line (after the outer
-    /// containers' markers).
+    /// containers' markers). `bare` while the item has no content yet: its marker line was blank,
+    /// and a list item can begin with at most one blank line, so a blank line next ends it.
     Item {
         offset: usize,
+        bare: bool,
     },
 }
 
@@ -203,17 +205,21 @@ impl Scanner {
         let mut rest = line.as_str();
         // Match the open containers, outermost first.
         let mut matched = 0;
-        for container in &self.containers {
+        for container in &mut self.containers {
             match container {
                 Container::Quote => match strip_quote_marker(rest) {
                     Some(after) => rest = after,
                     None => break,
                 },
-                Container::Item { offset } => {
+                Container::Item { offset, bare } => {
                     if is_blank(rest) {
+                        if *bare {
+                            break;
+                        }
                         rest = "";
                     } else if indent_of(rest) >= *offset {
                         rest = &rest[*offset..];
+                        *bare = false;
                     } else {
                         break;
                     }
@@ -312,7 +318,10 @@ impl Scanner {
                     spaces
                 };
                 let offset = indent + width + spaces;
-                self.containers.push(Container::Item { offset });
+                self.containers.push(Container::Item {
+                    offset,
+                    bare: is_blank(content),
+                });
                 self.leaf = Leaf::None;
                 rest = if offset <= rest.len() {
                     &rest[offset..]
@@ -427,6 +436,10 @@ fn strip_quote_marker(text: &str) -> Option<&str> {
 }
 
 /// A line that continues an open paragraph lazily: not blank, and starting no other block.
+///
+/// The line has left a container the paragraph sits in, so a list marker on it starts an item
+/// beside that container rather than interrupting the paragraph: it may be empty, and an ordered
+/// one may start at any number.
 fn is_lazy_continuation(text: &str) -> bool {
     if is_blank(text) {
         return false;
@@ -435,7 +448,7 @@ fn is_lazy_continuation(text: &str) -> bool {
     let text = &text[indent..];
     !(strip_quote_marker(text).is_some()
         || is_thematic_break(text)
-        || list_marker(text, true).is_some()
+        || list_marker(text, false).is_some()
         || fence_opener(text).is_some()
         || is_atx_heading(text)
         || html_start(text, true).is_some())
@@ -790,6 +803,19 @@ mod tests {
         passes("- item\n\n  ```\n  fenced in a list item");
         passes("#\nA line of only `#` is theirs.");
         passes("Text\n---");
+        passes("-\n  ```\n  fenced in an item that began with a blank line");
+    }
+
+    /// A list item can begin with at most one blank line: after a bare marker, a blank line ends
+    /// the empty item, so what follows is at the top level (`CommonMark` example 280).
+    #[test]
+    fn a_bare_list_item_ends_at_a_blank_line() {
+        assert!(fails("-\n\n  ```text\n  never closed").contains("fenced code block"));
+        assert!(fails("1.\n\n   ```\n   x").contains("fenced code block"));
+        passes("-\n\n    ``` indented code at the top level, not a fence");
+        // A bare marker after an item's paragraph is the next item, not a lazy line.
+        assert!(fails("- a\n-\n\n  ```\n  x").contains("fenced code block"));
+        assert!(fails("> a\n2.\n\n   ```\n   x").contains("fenced code block"));
     }
 
     #[test]
