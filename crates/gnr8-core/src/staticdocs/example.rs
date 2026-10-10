@@ -9,7 +9,9 @@ use std::fmt::Write as _;
 
 use crate::graph::{ApiGraph, Operation};
 use crate::sdk::builtins::SiblingSdk;
-use crate::sdk::emit_common::ConsumerIdentity;
+use crate::sdk::emit_common::{
+    cli_operations, command_examples, command_invocation, ConsumerIdentity,
+};
 use crate::verify::{
     absolute_path, percent_encode, request_headers, request_query, ContractTestLanguage,
     OperationSample, Sampled, SuccessOutcome, WireCredentials,
@@ -54,8 +56,12 @@ pub(crate) fn render_example(
     let sample = match sampled {
         Sampled::Sample(sample) => sample,
         // A refused required input refuses the operation: the reason stands in place of the
-        // exchange and of every code sample.
-        Sampled::Refused(refusal) => return Ok(format!("No sample call: {refusal}.\n")),
+        // exchange and of every code sample. A CLI invocation carries no sampled value, so it stays.
+        Sampled::Refused(refusal) => {
+            let mut out = format!("No sample call: {refusal}.\n");
+            out.push_str(&cli_sections(graph, op, sdks)?);
+            return Ok(out);
+        }
     };
     let mut out = format!("{EXAMPLE_NOTE}\n\n### {HTTP}\n\n");
     out.push_str(&code_block("http", &http_request(graph, op, sample)?));
@@ -91,6 +97,46 @@ pub(crate) fn render_example(
                     &snippet.page_text(docs.sdk.language()),
                 ));
             }
+        }
+    }
+    out.push_str(&cli_sections(graph, op, sdks)?);
+    Ok(out)
+}
+
+/// One subsection per sibling SDK whose generated CLI wraps this operation, in plan order: the
+/// invocation the program prints in its usage, then the command examples the user declared,
+/// verbatim. A TypeScript SDK emits no CLI.
+fn cli_sections(
+    graph: &ApiGraph,
+    op: &Operation,
+    sdks: &[DocsSdk<'_>],
+) -> Result<String, CoreError> {
+    let mut out = String::new();
+    for docs in sdks {
+        let cli = match docs.sdk {
+            SiblingSdk::Go(t) => t.cli.as_ref(),
+            SiblingSdk::Python(t) => t.cli.as_ref(),
+            SiblingSdk::TypeScript(_) => None,
+        };
+        let Some(cli) = cli else {
+            continue;
+        };
+        if !cli_operations(graph, cli)?
+            .iter()
+            .any(|wrapped| wrapped.id == op.id)
+        {
+            continue;
+        }
+        let _ = write!(
+            out,
+            "\n### CLI — {}\n\n{}\n",
+            code_span(&cli.program),
+            code_span(&format!("{} {}", cli.program, command_invocation(cli, op)))
+        );
+        let examples = command_examples(cli, op);
+        if !examples.is_empty() {
+            out.push('\n');
+            out.push_str(&code_block("sh", &examples.join("\n")));
         }
     }
     Ok(out)

@@ -684,3 +684,126 @@ fn refused_operation_page_prints_the_refusal_reason() {
     assert!(!example.contains("```http"), "{example}");
     assert!(!example.contains("```go"), "{example}");
 }
+
+fn py_sdk() -> BuiltinTarget {
+    BuiltinTarget::PySdk(
+        PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/py"),
+    )
+}
+
+fn ts_sdk(package: bool) -> BuiltinTarget {
+    let ts = TsSdk::new().module("bookstore").to("generated/ts");
+    BuiltinTarget::TsSdk(if package {
+        ts.package(SdkPackageMetadata::new().registry_name("@example/bookstore-sdk"))
+    } else {
+        ts
+    })
+}
+
+#[test]
+fn consumer_mode_imports_the_listed_package_and_models() {
+    let pages = render(&bookstore(), &[py_sdk()]);
+    let example = section(page(&pages, "operations/create-book.md"), "Example");
+    assert!(
+        example.contains(
+            "### Python — `example.com/bookstore/sdk`\n\n```python\nfrom sdk import Client, CreateBookRequest, Genre\n\nclient = Client(base_url, api_keys={\"ApiKeyAuth\": api_key})\nresult = client.create_book(body=CreateBookRequest("
+        ),
+        "{example}"
+    );
+    assert!(example.contains("print(result)\n```"), "{example}");
+}
+
+#[test]
+fn consumer_mode_imports_the_package_json_name() {
+    let pages = render(&bookstore(), &[ts_sdk(true)]);
+    let example = section(page(&pages, "operations/get-book.md"), "Example");
+    assert!(
+        example.contains(
+            "### TypeScript — `bookstore`\n\n```ts\nimport { Client } from \"@example/bookstore-sdk\";\n\nconst client = new Client({ baseUrl, apiKeys: { \"ApiKeyAuth\": apiKey } });\nconst result = await client.getBook(\"gnr8\");\nconsole.log(result);\n```"
+        ),
+        "{example}"
+    );
+}
+
+#[test]
+fn python_and_typescript_without_package_metadata_print_the_identity_note_and_no_snippet() {
+    let unpublished_py = BuiltinTarget::PySdk(
+        PySdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/py")
+            .package_metadata(false),
+    );
+    let pages = render(&bookstore(), &[unpublished_py, ts_sdk(false)]);
+    let example = section(page(&pages, "operations/create-book.md"), "Example");
+    let note = "No sample call: this SDK target emits no package metadata, so it has no published import name.";
+    assert!(
+        example.contains(&format!(
+            "### Python — `example.com/bookstore/sdk`\n\n{note}\n"
+        )),
+        "{example}"
+    );
+    assert!(
+        example.contains(&format!("### TypeScript — `bookstore`\n\n{note}\n")),
+        "{example}"
+    );
+    assert!(!example.contains("```python"), "{example}");
+    assert!(!example.contains("```ts"), "{example}");
+}
+
+fn go_sdk_with_cli(cli: SdkCli) -> BuiltinTarget {
+    BuiltinTarget::GoSdk(
+        GoSdk::new()
+            .module("example.com/bookstore/sdk")
+            .to("generated/sdk")
+            .cli(cli),
+    )
+}
+
+#[test]
+fn cli_section_only_for_operations_in_cli_scope() {
+    let cli = SdkCli::new("bookstore").commands(OperationSelector::operation("listBooks"));
+    let pages = render(&bookstore(), &[go_sdk_with_cli(cli)]);
+    let listed = section(page(&pages, "operations/list-books.md"), "Example");
+    assert!(
+        listed.contains("### CLI — `bookstore`\n\n`bookstore books list-books`\n"),
+        "{listed}"
+    );
+    let created = section(page(&pages, "operations/create-book.md"), "Example");
+    assert!(!created.contains("### CLI"), "{created}");
+}
+
+#[test]
+fn cli_section_prints_declared_examples_verbatim() {
+    let cli = SdkCli::new("bookstore").topic(
+        CliTopic::new("books").command(
+            CliCommand::operation("listBooks", "list")
+                .example("bookstore books list --genre fiction")
+                .example("bookstore books list | head -n 1"),
+        ),
+    );
+    let pages = render(&bookstore(), &[go_sdk_with_cli(cli)]);
+    let example = section(page(&pages, "operations/list-books.md"), "Example");
+    assert!(
+        example.contains(
+            "### CLI — `bookstore`\n\n`bookstore books list`\n\n```sh\nbookstore books list --genre fiction\nbookstore books list | head -n 1\n```\n"
+        ),
+        "{example}"
+    );
+    // An operation the program wraps without a declared example shows its invocation alone.
+    let created = section(page(&pages, "operations/create-book.md"), "Example");
+    assert!(
+        created.contains("### CLI — `bookstore`\n\n`bookstore books create-book`\n"),
+        "{created}"
+    );
+    assert!(!created.contains("```sh"), "{created}");
+}
+
+#[test]
+fn typescript_sdk_has_no_cli_section() {
+    let pages = render(&bookstore(), &[ts_sdk(true)]);
+    for (path, text) in &pages {
+        assert!(!text.contains("### CLI"), "{path}");
+    }
+}

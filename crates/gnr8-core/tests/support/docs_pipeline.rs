@@ -86,10 +86,15 @@ impl DocsRun {
             .collect()
     }
 
-    /// Write the SDK target's files under `dir`, as `generate` would.
+    /// Write the Go SDK target's files under `dir`, as `generate` would.
     pub(crate) fn write_sdk(&self, dir: &Path) {
+        self.write_dir(SDK_DIR, dir);
+    }
+
+    /// Write every artifact under the project-relative `prefix` into `dir`.
+    pub(crate) fn write_dir(&self, prefix: &str, dir: &Path) {
         for (path, text) in &self.artifacts {
-            if let Some(file) = path.strip_prefix(&format!("{SDK_DIR}/")) {
+            if let Some(file) = path.strip_prefix(&format!("{prefix}/")) {
                 let target = dir.join(file);
                 std::fs::create_dir_all(target.parent().expect("a parent")).expect("mkdir");
                 std::fs::write(target, text).expect("write SDK file");
@@ -101,15 +106,19 @@ impl DocsRun {
 /// The goalservice fixture: `GoGin` source, the base path, title and API key the snapshot tests
 /// use, a Go SDK, and the docs target. `None` without a Go toolchain.
 pub(crate) fn goalservice(go: GoSdk) -> Option<DocsRun> {
+    goalservice_with(|pipeline| pipeline.target(go.to(SDK_DIR)))
+}
+
+/// The goalservice fixture with the SDK targets `targets` adds, then the docs target.
+pub(crate) fn goalservice_with(targets: impl FnOnce(Pipeline) -> Pipeline) -> Option<DocsRun> {
+    let pipeline = Pipeline::new()
+        .source(GoGin::new().inputs(["."]))
+        .transform(SetBasePath::new("/goal"))
+        .transform(SetTitle::new("goalservice"))
+        .transform(ApplySecurity::api_key("ApiKeyAuth", "X-API-Key"));
     run(
         GOALSERVICE,
-        &Pipeline::new()
-            .source(GoGin::new().inputs(["."]))
-            .transform(SetBasePath::new("/goal"))
-            .transform(SetTitle::new("goalservice"))
-            .transform(ApplySecurity::api_key("ApiKeyAuth", "X-API-Key"))
-            .target(go.to(SDK_DIR))
-            .target(StaticDocs::new().to(DOCS_DIR)),
+        &targets(pipeline).target(StaticDocs::new().to(DOCS_DIR)),
     )
 }
 

@@ -52,7 +52,6 @@ pub(crate) fn generate(
     // Code samples cover exactly the SDK targets the same plan declares, in plan order.
     let sdks = plan
         .sdks()
-        .filter(|sdk| sdk.language() == crate::verify::ContractTestLanguage::Go)
         .map(|sdk| {
             Ok(DocsSdk {
                 sdk,

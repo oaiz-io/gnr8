@@ -8,23 +8,20 @@
 //! generated `Client` already exposes: it records the request the client built and answers with a
 //! canned `urllib.response.addinfourl`, so `urllib`'s own `HTTPErrorProcessor` turns a canned 4xx
 //! into exactly the `HTTPError` the client handles in production.
+//!
+//! The call itself is rendered by [`super::callsite`], the renderer docs code samples share.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use serde_json::Value;
-
-use crate::graph::{ApiGraph, Operation, Prim, Type};
-use crate::sdk::emit_common::request_body_models_of;
+use crate::graph::{ApiGraph, Operation, Type};
+use crate::sdk::emit_common::{CallInputs, Qualify};
 use crate::sdk::model_style::PyModelStyle;
-use crate::verify::{
-    CaseOutcome, ContractCase, ContractTestPlan, DecodedField, SampleBody, SampleCredential,
-    CONTRACT_TEST_BASIC_PASSWORD, CONTRACT_TEST_BASIC_USER, CONTRACT_TEST_BEARER,
-    CONTRACT_TEST_CREDENTIAL,
-};
+use crate::verify::{CaseOutcome, ContractCase, ContractTestPlan, DecodedField};
 use crate::CoreError;
 
-use super::emit::{operation_method_name, py_field_ident, py_string_literal, resolve_op_args_for};
+use super::callsite::{py_scalar, render_call};
+use super::emit::{py_field_ident, py_string_literal};
 
 /// The file name the Python SDK's contract test is emitted at.
 pub(crate) const CONTRACT_TEST_FILE: &str = "contract_test.py";
@@ -190,8 +187,18 @@ fn emit_case(
     model_style: PyModelStyle,
     models: &mut BTreeSet<String>,
 ) -> Result<String, CoreError> {
-    let method = operation_method_name(op);
-    let args = call_arguments(graph, op, case, model_style, models)?;
+    let site = render_call(
+        graph,
+        op,
+        &CallInputs {
+            params: &case.params,
+            body: case.body.as_ref(),
+            auth: &case.auth,
+        },
+        &Qualify::InPackage,
+        model_style,
+    )?;
+    models.extend(site.imports.iter().cloned());
     let mut out = String::new();
     writeln!(out, "    def test_{}(self) -> None:", case.name).map_err(sink)?;
     writeln!(out, "        handler = _ContractHandler()").map_err(sink)?;
@@ -203,14 +210,9 @@ fn emit_case(
         py_string_literal(&case.response.body)
     )
     .map_err(sink)?;
-    writeln!(
-        out,
-        "        client = _contract_client(handler{})",
-        client_credentials(case)
-    )
-    .map_err(sink)?;
+    writeln!(out, "        {}", site.construct).map_err(sink)?;
 
-    let call = format!("client.{method}({})", args.join(", "));
+    let call = site.call;
     match &case.outcome {
         CaseOutcome::Decode { field, .. } => {
             writeln!(out, "        result = {call}").map_err(sink)?;
@@ -348,245 +350,4 @@ fn py_query_dict(case: &ContractCase) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{{{entries}}}")
-}
-
-fn client_credentials(case: &ContractCase) -> String {
-    let mut keys: Vec<String> = Vec::new();
-    let mut extras: Vec<String> = Vec::new();
-    for auth in &case.auth {
-        match &auth.credential {
-            SampleCredential::ApiKeyHeader { .. } | SampleCredential::ApiKeyQuery { .. } => {
-                keys.push(format!(
-                    "{}: {}",
-                    py_string_literal(&auth.scheme_id),
-                    py_string_literal(CONTRACT_TEST_CREDENTIAL)
-                ));
-            }
-            SampleCredential::Bearer => extras.push(format!(
-                "bearer_token={}",
-                py_string_literal(CONTRACT_TEST_BEARER)
-            )),
-            SampleCredential::Basic => extras.push(format!(
-                "basic_auth=({}, {})",
-                py_string_literal(CONTRACT_TEST_BASIC_USER),
-                py_string_literal(CONTRACT_TEST_BASIC_PASSWORD)
-            )),
-        }
-    }
-    let mut parts = Vec::new();
-    if !keys.is_empty() {
-        parts.push(format!("api_keys={{{}}}", keys.join(", ")));
-    }
-    parts.extend(extras);
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(", {}", parts.join(", "))
-    }
-}
-
-/// The keyword arguments for one operation call.
-///
-/// Python names every argument, so the call passes each parameter by the identifier
-/// [`resolve_op_args_for`] reserved for it — the same resolution the method signature was emitted
-/// with, so the two cannot drift.
-fn call_arguments(
-    graph: &ApiGraph,
-    op: &Operation,
-    case: &ContractCase,
-    model_style: PyModelStyle,
-    models: &mut BTreeSet<String>,
-) -> Result<Vec<String>, CoreError> {
-    let idents = resolve_op_args_for(op, graph)?;
-    let mut args = Vec::new();
-    for sample in &case.params {
-        let Some(ident) = idents.get(&sample.name) else {
-            continue;
-        };
-        args.push(format!(
-            "{ident}={}",
-            py_literal(&sample.schema, &sample.value, graph, model_style, models)?
-        ));
-    }
-    if let Some(body) = &case.body {
-        args.push(format!(
-            "body={}",
-            body_literal(graph, op, body, model_style, models)?
-        ));
-    }
-    Ok(args)
-}
-
-fn body_literal(
-    graph: &ApiGraph,
-    op: &Operation,
-    body: &SampleBody,
-    model_style: PyModelStyle,
-    models: &mut BTreeSet<String>,
-) -> Result<String, CoreError> {
-    let literal = py_literal(
-        &Type::Named(body.schema_id.clone()),
-        &body.value,
-        graph,
-        model_style,
-        models,
-    )?;
-    if body.representations > 1 {
-        let declared = request_body_models_of(op, graph)?;
-        let content_type = declared.get(body.selection).map_or_else(
-            || body.content_type.clone(),
-            |model| model.content_type.clone(),
-        );
-        return Ok(format!("({}, {literal})", py_string_literal(&content_type)));
-    }
-    Ok(literal)
-}
-
-/// Render one sampled value as a Python literal of its neutral type.
-fn py_literal(
-    ty: &Type,
-    value: &Value,
-    graph: &ApiGraph,
-    model_style: PyModelStyle,
-    models: &mut BTreeSet<String>,
-) -> Result<String, CoreError> {
-    match ty {
-        Type::Primitive(prim) => py_primitive_literal(prim, value),
-        Type::WellKnown(_) | Type::Enum(_) => value
-            .as_str()
-            .map(py_string_literal)
-            .ok_or_else(|| unrenderable(ty)),
-        Type::Array(items) => {
-            let elements = value
-                .as_array()
-                .ok_or_else(|| unrenderable(ty))?
-                .iter()
-                .map(|item| py_literal(items, item, graph, model_style, models))
-                .collect::<Result<Vec<_>, CoreError>>()?;
-            Ok(format!("[{}]", elements.join(", ")))
-        }
-        Type::Map { value: item, .. } => {
-            let entries = value
-                .as_object()
-                .ok_or_else(|| unrenderable(ty))?
-                .iter()
-                .map(|(name, entry)| {
-                    Ok(format!(
-                        "{}: {}",
-                        py_string_literal(name),
-                        py_literal(item, entry, graph, model_style, models)?
-                    ))
-                })
-                .collect::<Result<Vec<_>, CoreError>>()?;
-            Ok(format!("{{{}}}", entries.join(", ")))
-        }
-        Type::Any {} => Ok("{}".to_string()),
-        Type::Object(fields) => {
-            // An inline object is a plain dict on the wire and in the signature.
-            let object = value.as_object().ok_or_else(|| unrenderable(ty))?;
-            let mut rendered = Vec::new();
-            for field in fields {
-                let Some(entry) = object.get(&field.json_name) else {
-                    continue;
-                };
-                rendered.push(format!(
-                    "{}: {}",
-                    py_string_literal(&field.json_name),
-                    py_literal(&field.schema, entry, graph, model_style, models)?
-                ));
-            }
-            Ok(format!("{{{}}}", rendered.join(", ")))
-        }
-        Type::Union(variants) => {
-            let first = variants.first().ok_or_else(|| unrenderable(ty))?;
-            py_literal(first, value, graph, model_style, models)
-        }
-        Type::Named(id) => {
-            let schema = graph
-                .schemas
-                .iter()
-                .find(|schema| &schema.id == id)
-                .ok_or_else(|| CoreError::SdkGen {
-                    message: format!("contract test references dangling $ref '{id}'"),
-                })?;
-            match &schema.body {
-                Type::Enum(_) => {
-                    let text = value.as_str().ok_or_else(|| unrenderable(ty))?;
-                    models.insert(schema.name.clone());
-                    Ok(format!("{}({})", schema.name, py_string_literal(text)))
-                }
-                Type::Object(fields) => {
-                    let object = value.as_object().ok_or_else(|| unrenderable(ty))?;
-                    models.insert(schema.name.clone());
-                    let mut rendered = Vec::new();
-                    for field in fields {
-                        let Some(entry) = object.get(&field.json_name) else {
-                            continue;
-                        };
-                        rendered.push(format!(
-                            "{}={}",
-                            py_field_ident(fields, field, model_style)?,
-                            py_literal(&field.schema, entry, graph, model_style, models)?
-                        ));
-                    }
-                    Ok(format!("{}({})", schema.name, rendered.join(", ")))
-                }
-                other => py_literal(other, value, graph, model_style, models),
-            }
-        }
-    }
-}
-
-fn py_primitive_literal(prim: &Prim, value: &Value) -> Result<String, CoreError> {
-    match prim {
-        Prim::String => value
-            .as_str()
-            .map(py_string_literal)
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Bool => value
-            .as_bool()
-            .map(|flag| if flag { "True" } else { "False" }.to_string())
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Int { .. } => value
-            .as_i64()
-            .map(|number| number.to_string())
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Float { .. } => value
-            .as_f64()
-            .map(format_float)
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Bytes => Err(unrenderable(&Type::Primitive(prim.clone()))),
-    }
-}
-
-fn format_float(number: f64) -> String {
-    let rendered = format!("{number}");
-    if rendered.contains(['.', 'e', 'E']) {
-        rendered
-    } else {
-        format!("{rendered}.0")
-    }
-}
-
-fn py_scalar(value: &Value) -> Result<String, CoreError> {
-    match value {
-        Value::String(text) => Ok(py_string_literal(text)),
-        Value::Bool(flag) => Ok(if *flag { "True" } else { "False" }.to_string()),
-        Value::Number(number) => number
-            .as_i64()
-            .map(|integer| integer.to_string())
-            .or_else(|| number.as_f64().map(format_float))
-            .ok_or_else(|| CoreError::SdkGen {
-                message: "contract assertion value is not a Python scalar".to_string(),
-            }),
-        _ => Err(CoreError::SdkGen {
-            message: "contract assertion value is not a Python scalar".to_string(),
-        }),
-    }
-}
-
-fn unrenderable(ty: &Type) -> CoreError {
-    CoreError::SdkGen {
-        message: format!("contract test cannot render a Python literal for {ty:?}"),
-    }
 }

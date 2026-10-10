@@ -5,6 +5,8 @@
 //! renderer the contract tests use — so a page, a compile unit and a contract case can never spell a
 //! call three ways.
 
+use std::fmt::Write as _;
+
 use crate::graph::{ApiGraph, Operation};
 use crate::sdk::builtins::{sdk_package, SiblingSdk};
 use crate::sdk::emit_common::{CallInputs, CallSite, ConsumerIdentity, Qualify};
@@ -142,13 +144,53 @@ pub(crate) fn snippet(
             let site = crate::gosdk::callsite::render_call(graph, op, &inputs, &qualify)?;
             Ok(go_snippet(&site, identity))
         }
-        SiblingSdk::Python(_) | SiblingSdk::TypeScript(_) => Err(CoreError::SdkGen {
-            message: format!(
-                "StaticDocs renders no {} code sample yet",
-                sdk.language().label()
-            ),
-        }),
+        SiblingSdk::Python(t) => {
+            let site =
+                crate::pysdk::callsite::render_call(graph, op, &inputs, &qualify, t.model_style)?;
+            Ok(py_snippet(&site, identity))
+        }
+        SiblingSdk::TypeScript(_) => {
+            let site = crate::tssdk::callsite::render_call(graph, op, &inputs, &qualify)?;
+            Ok(ts_snippet(&site, identity))
+        }
     }
+}
+
+/// Python: one `from <package> import …` line naming `Client` and every model the call builds,
+/// then construction, call and one use of the result.
+fn py_snippet(site: &CallSite, identity: &ConsumerIdentity) -> Snippet {
+    let mut names = site.imports.clone();
+    names.push("Client".to_string());
+    names.sort();
+    names.dedup();
+    Snippet {
+        imports: vec![format!(
+            "from {} import {}",
+            identity.import,
+            names.join(", ")
+        )],
+        body: format!("{}\nresult = {}\nprint(result)", site.construct, site.call),
+    }
+}
+
+/// TypeScript: `Client` from the `package.json` name — object literals are structural, so nothing
+/// else is imported — then construction, the awaited call and one use of the result.
+fn ts_snippet(site: &CallSite, identity: &ConsumerIdentity) -> Snippet {
+    Snippet {
+        imports: vec![format!(
+            "import {{ Client }} from {};",
+            json_string(&identity.import)
+        )],
+        body: format!(
+            "{}\nconst result = await {};\nconsole.log(result);",
+            site.construct, site.call
+        ),
+    }
+}
+
+/// A double-quoted string literal both Python and TypeScript read the same way.
+fn json_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| format!("\"{text}\""))
 }
 
 /// Go: construction, call, the error check and one use of the result, so it compiles as written.
@@ -216,30 +258,169 @@ pub fn compile_unit(
         };
         let snippet = snippet(graph, op, &sample, sdk, &identity)?;
         imports.extend(snippet.imports.iter().cloned());
-        wrappers.push(go_wrapper(op, &snippet.body));
+        wrappers.push(match sdk {
+            SiblingSdk::Go(_) => go_wrapper(op, &snippet.body),
+            SiblingSdk::Python(_) => py_wrapper(op, &snippet.body),
+            SiblingSdk::TypeScript(_) => ts_wrapper(op, &snippet.body),
+        });
         entries.push(CompileEntry {
             operation_id: op.id.clone(),
             page: nav.operation_page(&op.id)?.to_string(),
             snippet: snippet.body,
         });
     }
-    let text = match sdk {
-        SiblingSdk::Go(t) => go_unit_text(&sdk_package(&t.module)?, &identity, &imports, &wrappers),
-        SiblingSdk::Python(_) | SiblingSdk::TypeScript(_) => {
-            return Err(CoreError::SdkGen {
-                message: format!(
-                    "StaticDocs compiles no {} code sample yet",
-                    sdk.language().label()
-                ),
-            });
-        }
+    let (file_name, text) = match sdk {
+        SiblingSdk::Go(t) => (
+            GO_UNIT_FILE,
+            go_unit_text(&sdk_package(&t.module)?, &identity, &imports, &wrappers),
+        ),
+        SiblingSdk::Python(_) => (
+            PY_UNIT_FILE,
+            py_unit_text(&identity, &imports, &wrappers, &entries),
+        ),
+        SiblingSdk::TypeScript(_) => (TS_UNIT_FILE, ts_unit_text(&identity, &wrappers)),
     };
     Ok(Some(CompileUnit {
-        file_name: GO_UNIT_FILE.to_string(),
+        file_name: file_name.to_string(),
         identity: identity.import,
         text,
         entries,
     }))
+}
+
+/// The Python file a compile unit is written to, beside the copied package.
+pub(crate) const PY_UNIT_FILE: &str = "snippets.py";
+
+/// The TypeScript file a compile unit is written to, beside the copied SDK.
+pub(crate) const TS_UNIT_FILE: &str = "snippets.ts";
+
+/// The Python wrapper function for one operation: `docs_snippet_<snake id>`.
+fn py_wrapper_name(operation_id: &str) -> String {
+    let words = crate::sdk::emit_common::split_words(operation_id);
+    let mut out = String::from("docs_snippet");
+    for word in words {
+        out.push('_');
+        out.push_str(&word.to_ascii_lowercase());
+    }
+    out
+}
+
+/// The TypeScript wrapper function for one operation: `docsSnippet<PascalId>`.
+fn ts_wrapper_name(operation_id: &str) -> String {
+    let mut out = String::from("docsSnippet");
+    for word in crate::sdk::emit_common::split_words(operation_id) {
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            out.push(first.to_ascii_uppercase());
+            out.push_str(&chars.as_str().to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// One Python snippet as a function whose parameters are the variables a page leaves to the reader.
+fn py_wrapper(op: &Operation, body: &str) -> String {
+    let indented = body
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "def {}(base_url, api_key, token, username, password):\n{indented}\n",
+        py_wrapper_name(&op.id)
+    )
+}
+
+/// The Python unit: the samples run as written, with `Client` standing in for the SDK's own so every
+/// client is built through the opener seam with a stub that refuses every request. A sample passes
+/// only when its call raises the SDK's typed `ApiError`, which proves the method name, every method
+/// keyword, every model constructor and every required model field resolved and a request was built.
+fn py_unit_text(
+    identity: &ConsumerIdentity,
+    imports: &[String],
+    wrappers: &[String],
+    entries: &[CompileEntry],
+) -> String {
+    let package = &identity.import;
+    let mut models: Vec<String> = imports
+        .iter()
+        .filter_map(|line| line.strip_prefix(&format!("from {package} import ")))
+        .flat_map(|names| names.split(", ").map(str::to_string).collect::<Vec<_>>())
+        .filter(|name| name != "Client")
+        .collect();
+    models.sort();
+    models.dedup();
+    let mut out = String::from(
+        "from __future__ import annotations\n\nimport email.message\nimport io\nimport unittest\nimport urllib.request\nimport urllib.response\n\n",
+    );
+    let _ = writeln!(out, "from {package} import ApiError");
+    let _ = writeln!(out, "from {package} import Client as _DocsClient");
+    if !models.is_empty() {
+        let _ = writeln!(out, "from {package} import {}", models.join(", "));
+    }
+    out.push_str(PY_STUB);
+    for wrapper in wrappers {
+        out.push_str("\n\n");
+        out.push_str(wrapper);
+    }
+    out.push_str("\n\nclass DocsSnippets(unittest.TestCase):\n");
+    if entries.is_empty() {
+        out.push_str("    pass\n");
+    }
+    for entry in entries {
+        let name = py_wrapper_name(&entry.operation_id);
+        let _ = write!(
+            out,
+            "    def test_{name}(self) -> None:\n        with self.assertRaises(ApiError):\n            {name}(\"http://gnr8.test\", \"key\", \"token\", \"user\", \"secret\")\n\n"
+        );
+    }
+    out.push_str("\nif __name__ == \"__main__\":\n    unittest.main()\n");
+    out
+}
+
+/// The stub transport and the `Client` stand-in a Python unit runs its samples with.
+const PY_STUB: &str = r#"
+
+class _Refuse(urllib.request.HTTPHandler):
+    """Answers every request with an empty-bodied 400, so each call ends in the SDK's ApiError."""
+
+    def http_open(self, req):
+        response = urllib.response.addinfourl(
+            io.BytesIO(b""), email.message.Message(), req.full_url, 400
+        )
+        response.msg = "Refused"
+        return response
+
+    https_open = http_open
+
+
+def Client(*args, **kwargs):  # noqa: N802 - stands in for the SDK's Client
+    return _DocsClient(*args, opener=urllib.request.build_opener(_Refuse()), **kwargs)
+"#;
+
+/// One TypeScript snippet as an exported async function whose parameters are the variables a page
+/// leaves to the reader.
+fn ts_wrapper(op: &Operation, body: &str) -> String {
+    let indented = body
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "export async function {}(baseUrl: string, apiKey: string, token: string, username: string, password: string): Promise<void> {{\n{indented}\n}}\n",
+        ts_wrapper_name(&op.id)
+    )
+}
+
+fn ts_unit_text(identity: &ConsumerIdentity, wrappers: &[String]) -> String {
+    if wrappers.is_empty() {
+        return "export {};\n".to_string();
+    }
+    format!(
+        "import {{ Client }} from {};\n\n{}",
+        json_string(&identity.import),
+        wrappers.join("\n")
+    )
 }
 
 /// One snippet wrapped in a function whose parameters are the variables a page leaves to the

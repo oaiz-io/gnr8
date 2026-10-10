@@ -8,36 +8,23 @@
 //!
 //! The fake transport is a `typeof fetch` closure installed on `ClientOptions.fetch`, the seam the
 //! generated client already exposes. It records `(url, init)` and answers with `new Response(...)`.
+//!
+//! The call itself is rendered by [`super::callsite`], the renderer docs code samples share.
 
 use std::fmt::Write as _;
 
 use serde_json::Value;
 
-use crate::graph::{ApiGraph, Operation, Prim, Type};
-use crate::sdk::emit_common::request_body_models_of;
-use crate::verify::{
-    CaseOutcome, ContractCase, ContractTestPlan, DecodedField, SampleBody, SampleCredential,
-    CONTRACT_TEST_BASIC_PASSWORD, CONTRACT_TEST_BASIC_USER, CONTRACT_TEST_BEARER,
-    CONTRACT_TEST_CREDENTIAL,
-};
+use crate::graph::{ApiGraph, Operation, Type};
+use crate::sdk::emit_common::{CallInputs, Qualify};
+use crate::verify::{CaseOutcome, ContractCase, ContractTestPlan, DecodedField};
 use crate::CoreError;
 
-use super::emit::{
-    is_ident, operation_method_name, ts_operation_args, ts_operation_shape, ts_string_literal,
-    TsOperationShape,
-};
+use super::callsite::{render_call, ts_key, ts_object};
+use super::emit::{is_ident, ts_string_literal};
 
 /// The file name the TypeScript SDK's contract test is emitted at.
 pub(crate) const CONTRACT_TEST_FILE: &str = "contract.test.ts";
-
-/// The expression the generated call passes in the params-object slot.
-const PARAMS_SLOT: &str = "__gnr8ContractParams";
-
-/// The expression the generated call passes in the body slot.
-const BODY_SLOT: &str = "body";
-
-/// The expression the generated call passes in the request-options slot.
-const OPTIONS_SLOT: &str = "options";
 
 fn sink(error: std::fmt::Error) -> CoreError {
     CoreError::SdkGen {
@@ -225,9 +212,17 @@ function assertApiError(caught: unknown, status: number): void {{
 }
 
 fn emit_case(graph: &ApiGraph, op: &Operation, case: &ContractCase) -> Result<String, CoreError> {
-    let method = operation_method_name(op);
-    let args = call_arguments(graph, op, case)?;
-    let call = format!("client.{method}({})", args.join(", "));
+    let site = render_call(
+        graph,
+        op,
+        &CallInputs {
+            params: &case.params,
+            body: case.body.as_ref(),
+            auth: &case.auth,
+        },
+        &Qualify::InPackage,
+    )?;
+    let call = site.call;
 
     let mut out = String::new();
     writeln!(out, "  {{").map_err(sink)?;
@@ -242,12 +237,7 @@ fn emit_case(graph: &ApiGraph, op: &Operation, case: &ContractCase) -> Result<St
         ts_string_literal(&case.response.body)
     )
     .map_err(sink)?;
-    writeln!(
-        out,
-        "      const client = new Client({{ baseUrl: BASE_URL, fetch: transport.fetch{} }});",
-        client_credentials(case)
-    )
-    .map_err(sink)?;
+    writeln!(out, "      {}", site.construct).map_err(sink)?;
 
     match &case.outcome {
         CaseOutcome::Decode { field, .. } => {
@@ -367,21 +357,6 @@ fn ts_property_read(base: &str, key: &str) -> String {
 
 /// An object literal whose keys are wire names: a plain identifier is emitted bare, anything else
 /// (a header name with a dash, say) is quoted — the same rule the model emitter uses.
-fn ts_object(entries: &[String]) -> String {
-    if entries.is_empty() {
-        return "{}".to_string();
-    }
-    format!("{{ {} }}", entries.join(", "))
-}
-
-fn ts_key(name: &str) -> String {
-    if is_ident(name) {
-        name.to_string()
-    } else {
-        ts_string_literal(name)
-    }
-}
-
 fn ts_record(entries: &[(String, String)]) -> String {
     ts_object(
         &entries
@@ -408,261 +383,6 @@ fn ts_query_record(case: &ContractCase) -> String {
     )
 }
 
-fn client_credentials(case: &ContractCase) -> String {
-    let mut keys = Vec::new();
-    let mut extras = Vec::new();
-    for auth in &case.auth {
-        match &auth.credential {
-            SampleCredential::ApiKeyHeader { .. } | SampleCredential::ApiKeyQuery { .. } => {
-                keys.push(format!(
-                    "{}: {}",
-                    ts_string_literal(&auth.scheme_id),
-                    ts_string_literal(CONTRACT_TEST_CREDENTIAL)
-                ));
-            }
-            SampleCredential::Bearer => extras.push(format!(
-                "bearerToken: {}",
-                ts_string_literal(CONTRACT_TEST_BEARER)
-            )),
-            SampleCredential::Basic => extras.push(format!(
-                "basicAuth: {{ username: {}, password: {} }}",
-                ts_string_literal(CONTRACT_TEST_BASIC_USER),
-                ts_string_literal(CONTRACT_TEST_BASIC_PASSWORD)
-            )),
-        }
-    }
-    let mut parts = Vec::new();
-    if !keys.is_empty() {
-        parts.push(format!("apiKeys: {{ {} }}", keys.join(", ")));
-    }
-    parts.extend(extras);
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(", {}", parts.join(", "))
-    }
-}
-
-/// Build the positional argument list for one operation call, plus the params-object literal.
-///
-/// The slot ORDER is taken from [`ts_operation_args`] — the very function the method signature was
-/// emitted from — so a required body that lands before the params object here lands there too.
-fn call_arguments(
-    graph: &ApiGraph,
-    op: &Operation,
-    case: &ContractCase,
-) -> Result<Vec<String>, CoreError> {
-    let shape = ts_operation_shape(op, graph)?;
-    let slots = ts_operation_args(
-        op,
-        graph,
-        &shape.path_params,
-        &shape.body_models,
-        &shape.resolved,
-        PARAMS_SLOT,
-    )?;
-
-    let mut path_values: Vec<(String, String)> = Vec::new();
-    for (param, ident) in shape
-        .path_params
-        .iter()
-        .zip(shape.resolved.path_idents.iter())
-    {
-        let sample = case
-            .params
-            .iter()
-            .find(|candidate| candidate.name == param.name && candidate.location == "path")
-            .ok_or_else(|| CoreError::SdkGen {
-                message: format!(
-                    "contract case for '{}' has no value for path parameter '{}'",
-                    op.id, param.name
-                ),
-            })?;
-        path_values.push((
-            ident.clone(),
-            ts_literal(&sample.schema, &sample.value, graph)?,
-        ));
-    }
-
-    let params_literal = params_object(&shape, case);
-    let body_literal = case
-        .body
-        .as_ref()
-        .map(|body| body_expression(graph, op, body))
-        .transpose()?;
-
-    let mut args = Vec::new();
-    for slot in &slots.forwarded {
-        if slot == OPTIONS_SLOT {
-            continue;
-        }
-        if slot == PARAMS_SLOT {
-            // Inlined at the call site rather than bound to a local: TypeScript contextually types an
-            // object literal in an argument position, so `{ fmt: "hardcover" }` narrows to the
-            // parameter's enum. A `const` would widen it to `string` and stop compiling.
-            args.push(params_literal.clone());
-            continue;
-        }
-        if slot == BODY_SLOT {
-            let Some(body) = &body_literal else {
-                // An optional body the sampler chose not to send: leave the slot out entirely, which
-                // is exactly what a caller who omits it does.
-                continue;
-            };
-            args.push(body.clone());
-            continue;
-        }
-        let value = path_values
-            .iter()
-            .find(|(ident, _)| ident == slot)
-            .map(|(_, literal)| literal.clone())
-            .ok_or_else(|| CoreError::SdkGen {
-                message: format!(
-                    "contract case for '{}' cannot fill the '{slot}' argument slot",
-                    op.id
-                ),
-            })?;
-        args.push(value);
-    }
-
-    Ok(args)
-}
-
-fn params_object(shape: &TsOperationShape<'_>, case: &ContractCase) -> String {
-    let entries = shape
-        .resolved
-        .properties()
-        .filter_map(|(param, key)| {
-            let sample = case
-                .params
-                .iter()
-                .find(|sample| sample.name == param.name && sample.location != "path")?;
-            Some(format!(
-                "{}: {}",
-                ts_key(key),
-                ts_json_literal(&sample.value)
-            ))
-        })
-        .collect::<Vec<_>>();
-    ts_object(&entries)
-}
-
-fn body_expression(
-    graph: &ApiGraph,
-    op: &Operation,
-    body: &SampleBody,
-) -> Result<String, CoreError> {
-    let literal = ts_literal(&Type::Named(body.schema_id.clone()), &body.value, graph)?;
-    if body.representations > 1 {
-        let declared = request_body_models_of(op, graph)?;
-        let content_type = declared.get(body.selection).map_or_else(
-            || body.content_type.clone(),
-            |model| model.content_type.clone(),
-        );
-        return Ok(format!(
-            "{{ contentType: {}, value: {literal} }}",
-            ts_string_literal(&content_type)
-        ));
-    }
-    Ok(literal)
-}
-
-/// Render one sampled value as a TypeScript literal.
-///
-/// TypeScript is structurally typed, so a plain object literal is the model: no constructor, no
-/// import of the interface, and excess-property checking still holds every emitted key to the
-/// declared shape.
-fn ts_literal(ty: &Type, value: &Value, graph: &ApiGraph) -> Result<String, CoreError> {
-    match ty {
-        Type::Primitive(prim) => ts_primitive_literal(prim, value),
-        Type::WellKnown(_) | Type::Enum(_) => value
-            .as_str()
-            .map(ts_string_literal)
-            .ok_or_else(|| unrenderable(ty)),
-        Type::Array(items) => {
-            let elements = value
-                .as_array()
-                .ok_or_else(|| unrenderable(ty))?
-                .iter()
-                .map(|item| ts_literal(items, item, graph))
-                .collect::<Result<Vec<_>, CoreError>>()?;
-            Ok(format!("[{}]", elements.join(", ")))
-        }
-        Type::Map { value: item, .. } => {
-            let entries = value
-                .as_object()
-                .ok_or_else(|| unrenderable(ty))?
-                .iter()
-                .map(|(name, entry)| {
-                    Ok(format!(
-                        "{}: {}",
-                        ts_key(name),
-                        ts_literal(item, entry, graph)?
-                    ))
-                })
-                .collect::<Result<Vec<_>, CoreError>>()?;
-            Ok(ts_object(&entries))
-        }
-        Type::Any {} => Ok("{}".to_string()),
-        Type::Union(variants) => {
-            let first = variants.first().ok_or_else(|| unrenderable(ty))?;
-            ts_literal(first, value, graph)
-        }
-        Type::Object(fields) => {
-            let object = value.as_object().ok_or_else(|| unrenderable(ty))?;
-            let mut rendered = Vec::new();
-            for field in fields {
-                let Some(entry) = object.get(&field.json_name) else {
-                    continue;
-                };
-                let key = ts_key(&field.json_name);
-                rendered.push(format!(
-                    "{key}: {}",
-                    ts_literal(&field.schema, entry, graph)?
-                ));
-            }
-            Ok(format!("{{ {} }}", rendered.join(", ")))
-        }
-        Type::Named(id) => {
-            let schema = graph
-                .schemas
-                .iter()
-                .find(|schema| &schema.id == id)
-                .ok_or_else(|| CoreError::SdkGen {
-                    message: format!("contract test references dangling $ref '{id}'"),
-                })?;
-            ts_literal(&schema.body, value, graph)
-        }
-    }
-}
-
-fn ts_primitive_literal(prim: &Prim, value: &Value) -> Result<String, CoreError> {
-    match prim {
-        Prim::String => value
-            .as_str()
-            .map(ts_string_literal)
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Bool => value
-            .as_bool()
-            .map(|flag| flag.to_string())
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Int { .. } | Prim::Float { .. } => value
-            .as_f64()
-            .map(|number| format!("{number}"))
-            .ok_or_else(|| unrenderable(&Type::Primitive(prim.clone()))),
-        Prim::Bytes => Err(unrenderable(&Type::Primitive(prim.clone()))),
-    }
-}
-
-/// Render a JSON value as a plain TypeScript literal, used where no declared type narrows it.
-fn ts_json_literal(value: &Value) -> String {
-    match value {
-        Value::String(text) => ts_string_literal(text),
-        Value::Null => "null".to_string(),
-        other => other.to_string(),
-    }
-}
-
 fn ts_scalar(value: &Value) -> Result<String, CoreError> {
     match value {
         Value::String(text) => Ok(ts_string_literal(text)),
@@ -671,11 +391,5 @@ fn ts_scalar(value: &Value) -> Result<String, CoreError> {
         _ => Err(CoreError::SdkGen {
             message: "contract assertion value is not a TypeScript scalar".to_string(),
         }),
-    }
-}
-
-fn unrenderable(ty: &Type) -> CoreError {
-    CoreError::SdkGen {
-        message: format!("contract test cannot render a TypeScript literal for {ty:?}"),
     }
 }

@@ -14,6 +14,7 @@
 //! markers; the pipeline is byte-identical across runs and never panics (RUST-04).
 //! [`write_to_dir`](crate::sdk::bundle::write_to_dir) materializes the same framing.
 
+pub(crate) mod callsite;
 mod contract;
 mod emit;
 

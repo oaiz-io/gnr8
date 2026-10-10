@@ -100,3 +100,219 @@ fn go_docs_snippets_compile_against_the_generated_sdk() {
     let entries = assert_go_unit_vets(&run, &gin, "gin-regression");
     assert!(entries >= 10, "only {entries} gin operations were sampled");
 }
+
+const TSC: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tsextract/node_modules/typescript/bin/tsc"
+);
+
+fn python_available() -> bool {
+    Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn typescript_available() -> bool {
+    std::path::Path::new(TSC).exists()
+        && Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+}
+
+/// The goalservice graph with a stdlib-only (dataclass) Python SDK, which the stub run needs no
+/// third-party package for.
+fn python_run() -> Option<(DocsRun, PySdk)> {
+    if !python_available() {
+        return None;
+    }
+    let py = PySdk::new()
+        .module("example.com/goalservice/sdk")
+        .dataclasses()
+        .to("generated/py");
+    let run = docs_pipeline::goalservice_with(|pipeline| pipeline.target(py.clone()))?;
+    Some((run, py))
+}
+
+/// Copy the Python package to `<tmp>/<import>/`, write the unit beside it, and run it.
+fn run_python_unit(
+    run: &DocsRun,
+    unit_text: &str,
+    file_name: &str,
+    package: &str,
+) -> std::process::Output {
+    let dir = temp_dir("python-unit");
+    run.write_dir("generated/py", &dir.join(package));
+    std::fs::write(dir.join(file_name), unit_text).unwrap();
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "-v", file_name.trim_end_matches(".py")])
+        .current_dir(&dir)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    output
+}
+
+#[test]
+fn python_docs_snippet_calls_raise_api_error_through_the_stub_opener() {
+    let Some((run, py)) = python_run() else {
+        return;
+    };
+    let unit = compile_unit(&run.graph, SiblingSdk::Python(&py))
+        .unwrap()
+        .expect("a Python SDK with package metadata has a consumer identity");
+    assert_eq!(unit.identity, "sdk");
+    assert_eq!(unit.entries.len(), run.graph.operations.len());
+    let pages = run.pages();
+    for entry in &unit.entries {
+        assert!(
+            pages[&entry.page].contains(&entry.snippet),
+            "{}",
+            entry.page
+        );
+    }
+    let output = run_python_unit(&run, &unit.text, &unit.file_name, &unit.identity);
+    assert!(
+        output.status.success(),
+        "{}\n{}\n--- {} ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        unit.file_name,
+        unit.text
+    );
+    let report = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        report.contains(&format!("Ran {} tests", unit.entries.len())),
+        "{report}"
+    );
+}
+
+#[test]
+fn python_misspelled_method_or_keyword_fails_rung_two() {
+    let Some((run, py)) = python_run() else {
+        return;
+    };
+    let unit = compile_unit(&run.graph, SiblingSdk::Python(&py))
+        .unwrap()
+        .unwrap();
+    for (from, to) in [
+        ("client.create_goal(", "client.create_bok("),
+        ("client.create_goal(body=", "client.create_goal(payload="),
+        (
+            "CreateGoalInput(analyticsQuery=",
+            "CreateGoalInput(analyticsQueryy=",
+        ),
+    ] {
+        assert!(unit.text.contains(from), "{from} is not in:\n{}", unit.text);
+        let planted = unit.text.replace(from, to);
+        let output = run_python_unit(&run, &planted, &unit.file_name, &unit.identity);
+        assert!(
+            !output.status.success(),
+            "planting {to} must fail rung 2:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// The `tsconfig.json` rung 2 type-checks with: exactly the `tssdk_compile` gate's options, plus a
+/// `paths` entry mapping the published package name to the copied SDK's sources.
+fn tsconfig(package: &str) -> String {
+    serde_json::json!({
+        "compilerOptions": {
+            "noEmit": true,
+            "strict": true,
+            "noUnusedLocals": true,
+            "exactOptionalPropertyTypes": true,
+            "noUncheckedIndexedAccess": true,
+            "target": "es2022",
+            "module": "esnext",
+            "moduleResolution": "bundler",
+            "lib": ["es2022", "dom"],
+            "paths": { package: ["./sdk/index.ts"] }
+        },
+        "files": ["snippets.ts"]
+    })
+    .to_string()
+}
+
+fn typescript_run() -> Option<(DocsRun, TsSdk)> {
+    if !typescript_available() {
+        return None;
+    }
+    let ts = TsSdk::new()
+        .module("goalservice")
+        .package(SdkPackageMetadata::new().registry_name("@example/goalservice-sdk"))
+        .to("generated/ts");
+    let run = docs_pipeline::goalservice_with(|pipeline| pipeline.target(ts.clone()))?;
+    Some((run, ts))
+}
+
+fn run_tsc(run: &DocsRun, unit_text: &str, package: &str) -> std::process::Output {
+    let dir = temp_dir("typescript-unit");
+    run.write_dir("generated/ts", &dir.join("sdk"));
+    std::fs::write(dir.join("snippets.ts"), unit_text).unwrap();
+    std::fs::write(dir.join("tsconfig.json"), tsconfig(package)).unwrap();
+    let output = Command::new("node")
+        .args([TSC, "-p", "tsconfig.json"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    output
+}
+
+#[test]
+fn typescript_docs_snippets_typecheck_under_the_gate_options_with_paths() {
+    let Some((run, ts)) = typescript_run() else {
+        return;
+    };
+    let unit = compile_unit(&run.graph, SiblingSdk::TypeScript(&ts))
+        .unwrap()
+        .expect("a TypeScript SDK with package metadata has a consumer identity");
+    assert_eq!(unit.identity, "@example/goalservice-sdk");
+    assert_eq!(unit.entries.len(), run.graph.operations.len());
+    let pages = run.pages();
+    for entry in &unit.entries {
+        assert!(
+            pages[&entry.page].contains(&entry.snippet),
+            "{}",
+            entry.page
+        );
+    }
+    let output = run_tsc(&run, &unit.text, &unit.identity);
+    assert!(
+        output.status.success(),
+        "{}\n{}\n--- snippets.ts ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        unit.text
+    );
+}
+
+#[test]
+fn typescript_unresolvable_import_fails_rung_two() {
+    let Some((run, ts)) = typescript_run() else {
+        return;
+    };
+    let unit = compile_unit(&run.graph, SiblingSdk::TypeScript(&ts))
+        .unwrap()
+        .unwrap();
+    let planted = unit
+        .text
+        .replace("\"@example/goalservice-sdk\"", "\"@example/no-such-sdk\"");
+    let output = run_tsc(&run, &planted, &unit.identity);
+    assert!(
+        !output.status.success(),
+        "an unresolvable import must fail rung 2"
+    );
+    let misspelled = unit
+        .text
+        .replace("client.createGoal(", "client.createGoall(");
+    let output = run_tsc(&run, &misspelled, &unit.identity);
+    assert!(
+        !output.status.success(),
+        "a misspelled method must fail rung 2"
+    );
+}
