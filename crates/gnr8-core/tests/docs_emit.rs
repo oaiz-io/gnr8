@@ -1023,7 +1023,7 @@ fn check_wire_compares_json_numbers_by_value() {
         operation: "m".to_string(),
         method: "POST".to_string(),
         path: "/m".to_string(),
-        query: BTreeMap::new(),
+        query: String::new(),
         headers: [("content-type".to_string(), "application/json".to_string())]
             .into_iter()
             .collect(),
@@ -1043,6 +1043,64 @@ fn check_wire_compares_json_numbers_by_value() {
     )
     .unwrap_err();
     assert!(err.starts_with("body:"), "{err}");
+}
+
+/// Rung 3 compares the query string as sent, still encoded: a space a client writes as `+` is not
+/// the `%20` the page prints, and the values of one name keep their order. Only the order between
+/// different names is free.
+#[test]
+fn check_wire_compares_the_raw_query_string() {
+    use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord};
+    use gnr8_engine::verify::ContractTestLanguage;
+    let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nGET /m?a=1&a=2&b=x%20y&key={apiKey} HTTP/1.1\n```\n";
+    let record = |query: &str| WireRecord {
+        operation: "m".to_string(),
+        method: "GET".to_string(),
+        path: "/m".to_string(),
+        query: query.to_string(),
+        headers: std::collections::BTreeMap::new(),
+        body: None,
+        outcome: String::new(),
+    };
+    for sent in [
+        "a=1&a=2&b=x%20y&key=gnr8-contract-key",
+        "key=gnr8-contract-key&b=x%20y&a=1&a=2",
+    ] {
+        check_wire(page, &record(sent), ContractTestLanguage::Go)
+            .unwrap_or_else(|err| panic!("{sent}: {err}"));
+    }
+    for sent in [
+        "a=1&a=2&b=x+y&key=gnr8-contract-key",
+        "a=2&a=1&b=x%20y&key=gnr8-contract-key",
+        "a=1&a=2&b=x%20y",
+    ] {
+        let err = check_wire(page, &record(sent), ContractTestLanguage::Go).unwrap_err();
+        assert!(err.starts_with("query:"), "{sent}: {err}");
+    }
+}
+
+/// Rung 3 holds an operation to exactly one request: none is a finding, and so is a second one even
+/// when the first matches the page.
+#[test]
+fn check_operation_wire_asserts_exactly_one_request() {
+    use gnr8_engine::staticdocs::snippets::{check_operation_wire, WireRecord};
+    use gnr8_engine::verify::ContractTestLanguage;
+    let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nGET /m HTTP/1.1\n```\n";
+    let record = |operation: &str| WireRecord {
+        operation: operation.to_string(),
+        method: "GET".to_string(),
+        path: "/m".to_string(),
+        query: String::new(),
+        headers: std::collections::BTreeMap::new(),
+        body: None,
+        outcome: String::new(),
+    };
+    let go = ContractTestLanguage::Go;
+    check_operation_wire(page, &[record("other"), record("m")], "m", go).expect("one request");
+    let none = check_operation_wire(page, &[record("other")], "m", go).unwrap_err();
+    assert!(none.contains("sent no request"), "{none}");
+    let two = check_operation_wire(page, &[record("m"), record("m")], "m", go).unwrap_err();
+    assert!(two.contains("sent 2 requests"), "{two}");
 }
 
 #[path = "support/docs_pipeline.rs"]
@@ -1312,7 +1370,7 @@ fn check_wire_reads_the_example_section_only() {
         operation: "m".to_string(),
         method: "GET".to_string(),
         path: "/m".to_string(),
-        query: BTreeMap::new(),
+        query: String::new(),
         headers: BTreeMap::new(),
         body: None,
         outcome: String::new(),

@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use gnr8_engine::sdk::Artifact;
-use gnr8_engine::staticdocs::snippets::{check_wire, CompileUnit, WireRecord, WIRE_ENV};
+use gnr8_engine::staticdocs::snippets::{check_operation_wire, CompileUnit, WireRecord, WIRE_ENV};
 use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite};
 
 use super::cli_help::{NativeRunner, ProcessRunner};
@@ -534,8 +534,8 @@ fn read_records(path: &Path) -> Result<Vec<WireRecord>, DocsReason> {
     })
 }
 
-/// Rung 3: each sample's recorded request equals the HTTP exchange its page prints, after the
-/// placeholders are replaced by the contract credentials the harness configured.
+/// Rung 3: each sample's call sent exactly one request, and it equals the HTTP exchange its page
+/// prints, after the placeholders are replaced by the contract credentials the harness configured.
 fn compare_wire(
     suite: &DocsSnippetSuite,
     unit: &CompileUnit,
@@ -548,13 +548,7 @@ fn compare_wire(
             .iter()
             .find(|artifact| artifact.path == path)
             .map_or("", |artifact| artifact.text.as_str());
-        let outcome = records
-            .iter()
-            .find(|record| record.operation == entry.operation_id)
-            .map_or_else(
-                || Err("the sample's call sent no request".to_string()),
-                |record| check_wire(page, record, suite.language),
-            );
+        let outcome = check_operation_wire(page, records, &entry.operation_id, suite.language);
         if let Err(field) = outcome {
             let mut reason = DocsReason::new(
                 DocsFailure::WireMismatch,

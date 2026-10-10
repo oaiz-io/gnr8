@@ -615,7 +615,7 @@ class _Wire(urllib.request.HTTPHandler):
                 "operation": "",
                 "method": req.get_method(),
                 "path": url.path,
-                "query": urllib.parse.parse_qs(url.query, keep_blank_values=True),
+                "query": url.query,
                 "headers": {name.lower(): value for name, value in req.header_items()},
                 "body": None if data is None else data.decode("utf-8"),
                 "outcome": "",
@@ -706,7 +706,7 @@ export interface DocsWireRecord {
   operation: string;
   method: string;
   path: string;
-  query: Record<string, string[]>;
+  query: string;
   headers: Record<string, string>;
   body: string | null;
   outcome: string;
@@ -723,10 +723,6 @@ export async function docsWire(): Promise<DocsWireRecord[]> {
     const url = new URL(
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
     );
-    const query: Record<string, string[]> = {};
-    url.searchParams.forEach((value, name) => {
-      (query[name] ??= []).push(value);
-    });
     const headers: Record<string, string> = {};
     new Headers(init?.headers).forEach((value, name) => {
       headers[name] = value;
@@ -735,7 +731,7 @@ export async function docsWire(): Promise<DocsWireRecord[]> {
       operation: "",
       method: init?.method ?? "GET",
       path: url.pathname,
-      query,
+      query: url.search.slice(1),
       headers,
       body: typeof init?.body === "string" ? init.body : null,
       outcome: "",
@@ -850,13 +846,13 @@ fn go_unit_text(
 const GO_WIRE_HEAD: &str = r#"
 // docsWireRecord is one request a sample's call sent, as rung 3 compares it with the page.
 type docsWireRecord struct {
-	Operation string              `json:"operation"`
-	Method    string              `json:"method"`
-	Path      string              `json:"path"`
-	Query     map[string][]string `json:"query"`
-	Headers   map[string]string   `json:"headers"`
-	Body      *string             `json:"body"`
-	Outcome   string              `json:"outcome"`
+	Operation string            `json:"operation"`
+	Method    string            `json:"method"`
+	Path      string            `json:"path"`
+	Query     string            `json:"query"`
+	Headers   map[string]string `json:"headers"`
+	Body      *string           `json:"body"`
+	Outcome   string            `json:"outcome"`
 }
 
 // docsWireTransport records each request and answers it with the reply set last.
@@ -877,7 +873,7 @@ func (transport *docsWireTransport) RoundTrip(request *http.Request) (*http.Resp
 	record := docsWireRecord{
 		Method:  request.Method,
 		Path:    request.URL.EscapedPath(),
-		Query:   map[string][]string(request.URL.Query()),
+		Query:   request.URL.RawQuery,
 		Headers: map[string]string{},
 	}
 	for name := range request.Header {
@@ -933,8 +929,8 @@ pub struct WireRecord {
     pub method: String,
     /// The request path, as sent.
     pub path: String,
-    /// Every query parameter, decoded.
-    pub query: BTreeMap<String, Vec<String>>,
+    /// The query string as sent: still encoded, without the leading `?`.
+    pub query: String,
     /// Every header the client set, lowercase names.
     pub headers: BTreeMap<String, String>,
     /// The request body text, when one was sent.
@@ -949,9 +945,15 @@ pub struct WireRecord {
 /// placeholders are replaced by the contract credentials the harness configured. The harness's base
 /// URL carries no path, so a printed path compares as is.
 ///
-/// Compares the method, the path, every query parameter, every header the page prints (the client
-/// may send more, such as a user agent), the body as JSON with numbers compared by value, and what
-/// the call made of the canned reply ([`WireRecord::outcome`]).
+/// Compares the method, the path, the query string, every header the page prints (the client may
+/// send more, such as a user agent), the body as JSON with numbers compared by value, and what the
+/// call made of the canned reply ([`WireRecord::outcome`]).
+///
+/// The path and the query compare as encoded text, never decoded: every generated client encodes a
+/// path segment, a query name and a query value with the one rule the page prints them with
+/// (`verify::percent_encode`), so `%20` and `+` are different requests here. The query's
+/// `name=value` pairs compare in order within one name; the order between different names is not a
+/// fact the page states, so each side is ordered by name first.
 ///
 /// The page's `cookie` line is compared too, except for TypeScript: its generated client leaves
 /// cookies to the `fetch` transport by design (a browser owns them), so the harness never sees one.
@@ -988,27 +990,10 @@ pub fn check_wire(
     if path != record.path {
         return differ("path", path, &record.path);
     }
-    let mut printed: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        printed
-            .entry(percent_decode(name))
-            .or_default()
-            .push(substitute(&percent_decode(value)));
-    }
-    let mut sent = record.query.clone();
-    for values in printed.values_mut().chain(sent.values_mut()) {
-        values.sort();
-    }
-    for name in printed.keys().chain(sent.keys()) {
-        let (want, got) = (printed.get(name), sent.get(name));
-        if want != got {
-            return differ(
-                &format!("query.{name}"),
-                &want.map(|v| v.join(",")).unwrap_or_default(),
-                &got.map(|v| v.join(",")).unwrap_or_default(),
-            );
-        }
+    let printed = substitute(query);
+    let (want, got) = (query_pairs(&printed), query_pairs(&record.query));
+    if want != got {
+        return differ("query", &want.join("&"), &got.join("&"));
     }
     for (name, value) in &exchange.headers {
         if language == ContractTestLanguage::TypeScript && name.eq_ignore_ascii_case("cookie") {
@@ -1038,6 +1023,40 @@ pub fn check_wire(
                 _ => differ("body", want, sent_body),
             }
         }
+    }
+}
+
+/// Rung 3 for one operation: its sample's call sent exactly one request, and [`check_wire`] holds for
+/// it. `records` are every request the unit's harness recorded; the operation's are those its
+/// harness marked with `operation`.
+///
+/// A second request is a finding even when the first one matches: the page prints one exchange, and
+/// the harness answers with the page's own reply, which no generated client retries.
+///
+/// # Errors
+///
+/// Returns what [`check_wire`] returns for the first request, else names the request count.
+pub fn check_operation_wire(
+    page: &str,
+    records: &[WireRecord],
+    operation: &str,
+    language: ContractTestLanguage,
+) -> Result<(), String> {
+    let sent: Vec<&WireRecord> = records
+        .iter()
+        .filter(|record| record.operation == operation)
+        .collect();
+    let first = sent
+        .first()
+        .ok_or_else(|| "the sample's call sent no request".to_string())?;
+    check_wire(page, first, language)?;
+    if sent.len() == 1 {
+        Ok(())
+    } else {
+        Err(format!(
+            "the sample's call sent {} requests; the page prints one",
+            sent.len()
+        ))
     }
 }
 
@@ -1113,32 +1132,10 @@ fn page_request(page: &str) -> Option<PageRequest> {
     })
 }
 
-/// Decode `%XX` escapes (and `+` as a space, as form-encoded query strings do).
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok();
-                if let Some(byte) = hex.and_then(|hex| u8::from_str_radix(hex, 16).ok()) {
-                    out.push(byte);
-                    index += 3;
-                } else {
-                    out.push(b'%');
-                    index += 1;
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                index += 1;
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+/// A raw query string's `name=value` pairs, still encoded, stably ordered by name so the pairs of
+/// one name keep the order they were sent in.
+fn query_pairs(query: &str) -> Vec<&str> {
+    let mut pairs: Vec<&str> = query.split('&').filter(|pair| !pair.is_empty()).collect();
+    pairs.sort_by_key(|pair| pair.split_once('=').map_or(*pair, |(name, _)| name));
+    pairs
 }
