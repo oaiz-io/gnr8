@@ -5,7 +5,9 @@
 `StaticDocs` writes a deterministic Markdown reference for the API: an index, one page per group,
 operation and schema, an error catalog, an authentication page, and an `llms.txt` index for agents.
 Every page is rendered from the same final graph as `openapi.yaml` and the SDKs, and every code
-sample on it is checked against the SDK it documents by `gnr8 verify`.
+sample on it is checked against the SDK it documents by `gnr8 verify`. The per-SDK `README.md` and
+`reference.md` are another view of the same docs model; see
+[The SDK's README and reference](#the-sdks-readme-and-reference).
 
 ## The one builder call
 
@@ -28,7 +30,8 @@ it — docs are opt-in.
 
 ```text
 <dir>/
-  index.md                     title, description, version, servers, groups, operations, schemas
+  index.md                     title, description, version, servers, groups, operations, schemas,
+                               and the diagnostics that name no operation
   llms.txt                     the same pages, in the same order, as an index for agents
   errors.md                    when some operation declares an error response
   authentication.md            when the graph declares security
@@ -46,7 +49,21 @@ An **operation page** carries, in order and only when the fact exists: the opera
 title; the method and path, group, tags and deprecation; the operation's prose; authentication;
 parameters; request body; responses with their declared examples; the **Example** section;
 pagination; and the diagnostics extraction raised for the operation. A **schema page** carries its
-kind, the operations that use it, and its fields, members or type.
+kind, the operations that use it, and its fields, members or type. A diagnostic that names no
+operation the graph carries is about the API as a whole, so `index.md` prints it under its own
+`## Diagnostics`; every published diagnostic is printed exactly once, its path module-relative and
+spelled with `/`.
+
+The **errors page** lists every error status and body every operation declares, after one
+sentence that names each declared SDK's own typed error — Go `*APIError`, Python and TypeScript
+`ApiError`, only for the SDK languages the pipeline declares, and no sentence when it declares
+none. The **authentication page** lists each scheme, how each SDK with an import configures it, and
+the operations that require or accept it; an operation whose alternative requires schemes together
+says so beside the operation (*together with `TenantKey`*, or *alone, or together with …*).
+
+A **table** prints only the columns some row fills: a column empty in every row, such as
+`Headers` on a page whose responses declare none, is left out, and a column one row fills keeps an
+empty cell in the others.
 
 ## Where each word comes from
 
@@ -54,6 +71,8 @@ kind, the operations that use it, and its fields, members or type.
   `DocumentOperation` for an operation with neither). The page title is always the operation id; an
   undocumented operation gets a full structural page and no prose.
 - **Parameter prose** is the parameter's documented source, as the generated CLI's `--help` prints it.
+  A parameter row also prints its declared example and every constraint it carries, `multipleOf`
+  and `uniqueItems` included, as a field row does.
 - **Group prose** is the line `GroupOperations::describe` set; a group without one shows its name.
 - **Field facts** are exactly the ones `openapi.yaml` publishes for the field: type and format,
   required, nullable, constraints, default, description and example. Required and nullable are the
@@ -69,8 +88,23 @@ property of extraction; see [Sources and extraction](../extraction/sources.md).
 
 ## The Example section
 
-Every operation page shows the HTTP exchange its sample produces, then one call per sibling SDK
+Every operation page shows the HTTP exchange its sample produces, then one section per sibling SDK
 target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` wraps the operation.
+An SDK section is headed by its language and the package a consumer imports
+(`` ### Go — `example.com/acme/sdk` ``, `` ### TypeScript — `@acme/sdk` ``), the one consumer
+identity every sample under it imports, and carries up to three samples:
+
+- **the call**: construction, the call, and one use of the result;
+- **the typed error**, when the operation declares a JSON error body: the call again, handling the
+  error its lowest such status raises — Go `errors.As` and the typed `Body`, Python `isinstance` on
+  `error.body`, TypeScript `instanceof ApiError` and the status. The exchange prints that error
+  reply under *The typed-error samples receive this `<status>` reply:*, its body the status's
+  declared example or a value sampled from its schema by the same rules as every other body. An
+  error body with no sample prints *No typed-error sample for the `<status>` reply: …* in place of
+  the reply and of every typed-error sample;
+- **the iterator**, when a `ConfigurePagination` transform declares pagination and the page prints
+  a JSON reply: the SDK's own iterator (`IterateListItems`, `iter_list_items`,
+  `iterateListItems`) called with the operation's arguments, over every item of every page.
 
 - **Declared examples come first.** An input that declares an example takes it, and an input that
   declares none is built from its type. A field declares one with its `example`. A request body or
@@ -144,8 +178,9 @@ import line is exactly what that manifest publishes:
 | `PySdk` | `pyproject.toml` (on by default) | `from <package> import Client, …` |
 | `TsSdk` | `package.json` (off by default) | `Client` from the `package.json` name |
 
-A target without one prints *"No sample call: this SDK target emits no package metadata, so it has
-no published import name."* For a `TsSdk`, turn it on with
+A target without one has no import to name, so its section is headed by its language alone and
+prints *"No sample call: this SDK target emits no package metadata, so it has no published import
+name."* For a `TsSdk`, turn it on with
 `.package(SdkPackageMetadata::new().registry_name("@acme/sdk"))`.
 
 A Go package whose name is one the sample itself uses (`client`, `fmt`, `err`, `http`, a predeclared
@@ -158,11 +193,13 @@ compiles as printed.
 |---|---|---|
 | 0 | one page per operation, every link names an emitted page, no slug collision, no empty heading, and no prose breaks the page structure | every generation; a failure stops it |
 | 1 | the same graph and declarations produce the same bytes | `gnr8 check` |
-| 2 | every name and argument in every sample resolves against its SDK, and every block a sample relies on — its code block and the HTTP request block — appears on its page after post-processors, byte for byte, as whole lines | `gnr8 verify` |
-| 3 | every sample's call sends the request its page prints | `gnr8 verify` |
+| 2 | every name and argument in every sample resolves against its SDK, and every block a sample relies on — its code block, the HTTP request block and, for a typed-error sample, the error reply block — appears on its page, in the SDK's `reference.md` and, for the quick start, in its `README.md`, after post-processors, byte for byte, as whole lines | `gnr8 verify` |
+| 3 | every sample's call sends exactly the one request its page prints, and makes of its reply what the page says: the call succeeds, the typed error carries the printed status and body, the iterator stops after one page | `gnr8 verify` |
 
 Prose is printed verbatim: gnr8 never tokenizes, folds or rewrites a doc comment or an imported
-description, inside a page or between its blocks. Rung 0 reads the finished page instead, in
+description, inside a page or between its blocks — a line's trailing spaces (a Markdown hard break)
+and its tabs reach the page as written. Reading inside prose to repair it would make the comment a
+dialect, so rung 0 checks only gnr8's own lines, and only for structure: it reads the finished page, in
 CommonMark's block grammar, at the lines gnr8 itself printed — each heading, paragraph, list,
 table and code fence of its own. Each must still start a block where it was printed, and each
 code block gnr8 opened must close where gnr8 closed it. Prose that opens a fenced code block, an
@@ -184,6 +221,14 @@ query string as encoded text, the body as JSON, numbers by value, and the `cooki
 TypeScript, whose client leaves cookies to the `fetch` transport (a browser owns them). Each call
 must send exactly one request.
 
+A typed-error sample is answered with the error reply its page prints, and must raise the SDK's
+typed error carrying that status, its body decoded into the status's model (Go: the `Body` type
+assertion; Python: `isinstance`; TypeScript has no runtime model) and equal to the printed body as
+JSON. An iterator is answered with the page's reply with the iteration ended — the next cursor set
+to `""`, which every generated iterator stops on and a required or nullable cursor field still
+decodes, or the items field emptied, as the policy's termination rule says — so it sends the page's
+one request and stops.
+
 A page, a contract test and every generated client encode a path segment, a query name or value,
 and a cookie name or value with one rule: every byte but an RFC 3986 unreserved one
 (`A-Z a-z 0-9 - . _ ~`) becomes `%XX`, so a space is `%20`, never `+`. Rung 3 compares the query's
@@ -199,6 +244,26 @@ A sibling with no published import name, a missing toolchain (no `node`, or `nod
 reported `skipped` with the reason. A run in which every check was skipped is not verified. A
 Python unit that cannot import a module its SDK needs — `pydantic` for the default model style —
 names the `ModuleNotFoundError`.
+
+## The SDK's README and reference
+
+Each SDK target that writes docs (`SdkDocs::reference()`, on by default) writes `README.md` and
+`reference.md` in its own directory, rendered from the same docs model built for that one SDK, so
+neither can say anything a page would not:
+
+- `README.md` names what to import and how to install it — the Go module path and `go get`, the
+  Python import package and `pip install` with the distribution name `pyproject.toml` lists, the
+  `package.json` name and `npm install` — names the SDK's typed error, and its quick start is the
+  first sampled operation's call, byte for byte as its page and `reference.md` print it. An SDK
+  with no package metadata says why it has neither an import nor a quick start.
+- `reference.md` is one file: the index, every operation, schema, the errors page and the
+  authentication page as sections, each page's headings one level down under the file's own title.
+  Its errors, credentials and samples cover this SDK alone. It links nothing but `README.md`; every
+  other reference is a code span. A single file writes no page, so no page name is refused for it.
+
+`gnr8 verify` checks the samples these two files print whenever an SDK writes them, with or without
+a `StaticDocs` target: rung 2 holds each block to the file, and rungs 2 and 3 run the same compile
+unit as the pages.
 
 ## `llms.txt`
 
@@ -216,8 +281,9 @@ escaped and summaries are folded to one line.
 - Formats gnr8 does not map to a well-known scalar (`hostname`, `password`, …) are annotations: a
   string carrying one is sampled as `"gnr8"`.
 - An enum member is printed as declared, even when it contradicts a mapped format.
-- An error status with no declared response body keeps the contract test's generic error envelope;
-  error bodies are never printed on a page.
+- An error status with no declared response body keeps the contract test's generic error envelope.
+  A page prints one error body: the reply its typed-error samples receive, for the lowest error
+  status with a JSON body.
 - A field or parameter example states only a scalar. A field whose type is an array, map, object or
   union has no example its text can state, so declaring one is an error. A body example can state
   such a field. An imported array, object or `null` field example is reported and not imported; an
@@ -231,7 +297,10 @@ escaped and summaries are folded to one line.
   rather than of the API.
 - A page name is the kebab-case of the subject's ASCII letters and digits. A name with none (a tag
   spelled `日本語`), or one Windows reserves as a device name (`con`, `nul`, `com1`, …), stops
-  generation with an error naming it.
+  `StaticDocs` generation with an error naming it. An SDK's `reference.md` writes no page, so it is
+  unaffected.
+- Two SDK sections with no import are both headed by their language alone (`### Go`), in plan
+  order.
 - The index omits the version when none is declared; `openapi.yaml` prints its `0.1.0` default.
 - A Python SDK whose package is named after a standard-library module (`json`, `email`, …) cannot
   be imported under that name, by a consumer or by rung 2, so its samples fail; rename the module.
@@ -240,5 +309,5 @@ escaped and summaries are folded to one line.
 
 No HTML, JavaScript, search index, try-it console or hosted service; no site-generator files,
 sidebar manifests or front matter; no `curl`; no heading anchors; no error-code catalog; no
-changelog page; no source-file links; no TypeScript CLI section; no samples for custom targets. The
-per-SDK `README.md` and `reference.md` that `SdkDocs` writes are unchanged.
+changelog page; no source-file links; no TypeScript CLI section; no samples for custom targets; no
+sample for a declared error status other than the lowest with a body.

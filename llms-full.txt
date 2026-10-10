@@ -74,7 +74,8 @@ fn main() -> std::process::ExitCode {
 - Python SDK: `PySdk::new().module("example.com/yourservice/sdk").to("sdk")`.
 - TypeScript SDK: `TsSdk::new().module("example.com/yourservice/sdk").to("sdk")`.
 
-SDK outputs include `README.md` and `reference.md` with operation/schema summaries for later agents.
+SDK outputs include `README.md` (import, install line, one verified quick-start call) and
+`reference.md` (every operation and schema with verified samples for that SDK) for later agents.
 
 ## Commands
 

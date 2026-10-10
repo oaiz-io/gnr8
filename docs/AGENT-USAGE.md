@@ -189,8 +189,10 @@ be patched; set other field facts in the source or with a graph `Transform`.
 ## Generated SDKs
 
 SDK targets write `README.md` and `reference.md` in the SDK output directory. Read those files before
-calling the client. They list operation IDs, paths, request schemas, response statuses, schemas, and
-diagnostics from the generation run.
+calling the client. The README names the package to import and install and quotes one verified call;
+`reference.md` documents every operation — parameters, bodies, responses, errors, credentials and
+`gnr8 verify`-checked samples for that SDK — every schema, and the diagnostics from the generation
+run.
 
 The SDK output is generated. Do not patch generated client files by hand; update service source or
 `.gnr8/src/main.rs`, then run `gnr8 generate`.
