@@ -22,7 +22,7 @@ use super::nav::NavModel;
 /// One language's snippets for one sibling SDK, as gnr8 compiles and checks them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileUnit {
-    /// File name inside the temporary tree: `docs_snippets_test.go`, `snippets.ts`, `snippets.py`.
+    /// File name inside the temporary tree: `docs_snippets_test.go`, `snippets.ts`, `docs_snippets.py`.
     pub file_name: String,
     /// The consumer import specifier the unit and every page print.
     pub identity: String,
@@ -97,6 +97,15 @@ pub(crate) fn consumer_identity(
 /// Every name a Go sample, its wrapper or the compile unit's harness binds or imports, plus Go's
 /// predeclared identifiers. An SDK package clause spelled like one of them would be shadowed by it
 /// (`client := client.NewClient(…)`), so the sample imports the SDK under an alias instead.
+///
+/// Only Go needs such a list: Go is the one language whose samples spell the SDK's package name as an
+/// identifier. A TypeScript unit names the package only in its `import … from "<name>"` specifier and
+/// imports nothing from it but `Client` and `ApiError`. A Python unit names the package only in
+/// `from <package> import …`; it imports a sample's models inside the function that runs the sample,
+/// so no model shares the module namespace with the harness, and its file name carries an underscore,
+/// which no package name does (`sdk_package`), so the package directory beside it cannot shadow it.
+/// A Python package named after a standard-library module (`json`) remains unimportable — for a
+/// consumer as much as for the unit — which is the SDK's name to change, not the sample's.
 const GO_TAKEN_NAMES: &[&str] = &[
     // The sample's locals and imports, and the wrapper's parameters.
     "client",
@@ -110,25 +119,35 @@ const GO_TAKEN_NAMES: &[&str] = &[
     "token",
     "username",
     "password",
-    // The compile unit's harness.
+    // The compile unit's harness: its imports, its declarations, and every local and parameter.
     "bytes",
     "context",
+    "errors",
     "json",
     "io",
     "http",
     "os",
     "strings",
     "testing",
+    "docsWireRecord",
+    "docsWireTransport",
+    "TestDocsWire",
     "transport",
     "t",
     "path",
     "payload",
     "record",
     "request",
+    "header",
+    "status",
+    "contentType",
+    "body",
     "index",
     "name",
     "text",
     "operation",
+    "outcome",
+    "apiErr",
     // Predeclared identifiers.
     "any",
     "append",
@@ -464,7 +483,10 @@ pub fn compile_unit(
 }
 
 /// The Python file a compile unit is written to, beside the copied package.
-pub(crate) const PY_UNIT_FILE: &str = "snippets.py";
+///
+/// An SDK package name is ASCII letters and digits only (`sdk_package`), so a module name with an
+/// underscore can never be shadowed by the package directory written beside it.
+pub(crate) const PY_UNIT_FILE: &str = "docs_snippets.py";
 
 /// The TypeScript file a compile unit is written to, beside the copied SDK.
 pub(crate) const TS_UNIT_FILE: &str = "snippets.ts";
@@ -506,30 +528,35 @@ fn indent(body: &str, by: &str) -> String {
 /// keyword, every model constructor and every required model field resolved and a request was built.
 fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)]) -> String {
     let package = &identity.import;
-    let mut models: Vec<String> = snippets
-        .iter()
-        .flat_map(|(_, snippet)| snippet.imports.iter())
-        .filter_map(|line| line.strip_prefix(&format!("from {package} import ")))
-        .flat_map(|names| names.split(", ").map(str::to_string).collect::<Vec<_>>())
-        .filter(|name| name != "Client")
-        .collect();
-    models.sort();
-    models.dedup();
+    // The models one sample builds, imported inside the function that runs it: a model then never
+    // shares the module namespace with the harness's own names (`DocsWire`, `_Wire`, …), so a schema
+    // may be called anything the SDK itself accepts.
+    let model_import = |snippet: &Snippet| -> Option<String> {
+        let models: Vec<&str> = snippet
+            .imports
+            .iter()
+            .filter_map(|line| line.strip_prefix(&format!("from {package} import ")))
+            .flat_map(|names| names.split(", "))
+            .filter(|name| *name != "Client")
+            .collect();
+        (!models.is_empty()).then(|| format!("from {package} import {}", models.join(", ")))
+    };
     let mut out = String::from(
         "from __future__ import annotations\n\nimport email.message\nimport io\nimport json\nimport os\nimport unittest\nimport urllib.parse\nimport urllib.request\nimport urllib.response\n\n",
     );
     let _ = writeln!(out, "from {package} import ApiError");
     let _ = writeln!(out, "from {package} import Client as _DocsClient");
-    if !models.is_empty() {
-        let _ = writeln!(out, "from {package} import {}", models.join(", "));
-    }
     out.push_str(PY_STUB);
     for (op, snippet) in snippets {
+        let body = match model_import(snippet) {
+            Some(import) => format!("{import}\n{}", snippet.body),
+            None => snippet.body.clone(),
+        };
         let _ = write!(
             out,
             "\n\ndef {}(base_url, api_key, token, username, password):\n{}\n",
             py_wrapper_name(&op.id),
-            indent(&snippet.body, "    ")
+            indent(&body, "    ")
         );
     }
     out.push_str("\n\nclass DocsSnippets(unittest.TestCase):\n");
@@ -556,18 +583,22 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
             json_string(&reply.content_type),
             json_string(&reply.body)
         );
+        let call = match model_import(snippet) {
+            Some(import) => format!("{import}\n            {}", snippet.call),
+            None => snippet.call.clone(),
+        };
         if reply.success {
             let _ = write!(
                 out,
                 "        outcome = \"\"\n        try:\n            {}\n            {}\n            del result\n        except Exception as error:  # noqa: BLE001 - any failure is the finding\n            outcome = \"the call failed on the page's reply: \" + repr(error)\n",
-                snippet.wire_client, snippet.call
+                snippet.wire_client, call
             );
         } else {
             let _ = write!(
                 out,
                 "        outcome = \"expected the SDK's typed ApiError with status {status}, but the call returned\"\n        try:\n            {}\n            {}\n            del result\n        except ApiError as error:\n            outcome = \"\" if error.status_code == {status} else \"expected status {status}, got \" + str(error.status_code)\n        except Exception as error:  # noqa: BLE001 - any other failure is the finding\n            outcome = \"expected the SDK's typed ApiError with status {status}, got \" + repr(error)\n",
                 snippet.wire_client,
-                snippet.call,
+                call,
                 status = reply.status
             );
         }
