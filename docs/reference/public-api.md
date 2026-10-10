@@ -115,6 +115,7 @@ See [OpenAPI generation](../openapi/generation.md).
 | `TsSdk` | TypeScript client/model/docs/package/contract-test target |
 | `SdkCli` | generated-CLI program name, command scope, default host, and Go library seam (`hand_owned_main`, `owned_command`); unrelated to gnr8's own command surface |
 | `OwnedCommand` | one hand-owned command the generated Go dispatcher names, at the root (`SdkCli::owned_command`) or under a topic (`CliTopic::owned_command`) |
+| `CliRenameError` | one retired invocation for `SdkCli::rename_error`: a path, or a command path ending in a retired `--flag`; prints the replacement and exits 2 |
 | `SdkFileLayout` | compact/split files, directories, and templates |
 | `OperationFileSplit` | compact/per-tag/per-endpoint operation layout enum |
 | `SdkDocs` | none/reference generated docs policy |

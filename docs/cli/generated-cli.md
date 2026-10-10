@@ -52,11 +52,42 @@ name), and the name must not equal one of its verbs or sub-nouns. Each owned com
 under a topic, calls its own function, and that name must not be one the generated `package cli`
 already uses: a declaration, an import, a Go predeclared name, `_` or `init`. Like a root owned command, it is absent from `help --json` and shell completion.
 
-A `rename_error(...)` path is matched before any command is dispatched, so it must name a path the
-CLI no longer runs. Generation refuses a retired path with a flag token (`--help`), one that is a
-live command or a prefix of one
-(`books` while `books list` exists), one that extends a live command which takes arguments (`books
-get old` while `books get <id>` exists), and one that an earlier retired path already matches.
+A `rename_error(...)` names a retired invocation: a path (`books list-books`), or the path of a
+live command ending in one long flag it no longer takes (`books get --book-id`). It is resolved only
+where the invocation already fails: an unknown command under the root, a topic or a sub-noun, an
+unexpected argument after a generated command that takes none, or an unknown flag of a generated
+command. The Python CLI resolves it when argparse rejects the arguments. A retired invocation
+therefore never shadows a live one. When several match, the longest command path wins, then a
+retired flag over the path it follows, then the retired flag typed first. The output is the same for
+both forms: `error: books get --book-id is now bookstore books get <id>` on stderr (one JSON object
+under `--json`), exit 2, and no request.
+
+Generation refuses a retired invocation that no error reaches: a live command path (`books`,
+`books list`, `help`), an extension of a generated command that takes arguments (`books get old`
+while `books get <id>` exists), a flag the command binds, a flag after a topic or with no command,
+a flag after a path that extends a generated command (`books list old --x`), `--help`, `-h` and
+`--version`, and one declared twice. A retired flag is spelled `--name` in
+lowercase ASCII. Python also refuses a retired flag that begins a flag the command binds, because
+argparse reads `--deb` as `--debug`.
+
+Under a hand-owned command (Go only), the hand-owned code resolves retired invocations through the
+same table. Generation accepts any retired invocation under a root or topic owned command. Generated
+`package cli` always declares the seam, even when the table is empty:
+
+```go
+// path is the live command path the failure happened under; args are the remaining arguments.
+func checkRetired(path []string, args []string) int
+```
+
+Because `path` is live, only a retired invocation beyond it matches: a retired path longer than
+`path`, or a retired flag of `path` or of a longer path. A hand-owned dispatcher calls
+`checkRetired([]string{"workflow"}, args)` before it reports an unknown command, and returns its
+result when it is not 0. A hand-owned command that parses flags with the generated `parseFlags`
+gets retired flags without a call: name its `flag.FlagSet` after the command's full invocation
+(`flag.NewFlagSet("workflow get", flag.ContinueOnError)`). When the parse fails, `parseFlags` passes
+that name as the command path and the flag tokens as the arguments, so it resolves only retired
+flags of that exact path. A `flag.FlagSet` named for less than the full invocation (`get`) resolves
+retired flags of that shorter path instead.
 
 `.cli("bookstore")` is still accepted — a program name converts into an `SdkCli` — so a program that
 needs nothing but a name says nothing but a name. `SdkCli` is unrelated to gnr8's own CLI.

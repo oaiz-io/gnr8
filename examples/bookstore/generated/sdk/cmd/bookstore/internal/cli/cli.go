@@ -391,6 +391,9 @@ func dispatchBooks(args []string) int {
 	case "update":
 		return cmdUpdateBook(args[1:])
 	default:
+		if code := checkRetired([]string{"books"}, args); code != 0 {
+			return code
+		}
 		errorMessage(2, "unknown command %q under %s", args[0], group.name)
 		if hint := suggestCommand(args[0], group.commands); !machineOutput() && hint != "" {
 			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s %s`?\n", program, group.name, hint)
@@ -405,30 +408,63 @@ func dispatchBooks(args []string) int {
 	}
 }
 
-func checkRename(args []string) int {
-	renames := []struct {
+// checkRetired prints the replacement and returns 2 when path followed by args is a
+// retired invocation, and returns 0 otherwise. path is the live command the failure
+// happened under, so only a retired invocation beyond it matches. Call it only where the
+// invocation already failed: an unknown command under path, or an unknown flag or
+// argument of command path.
+func checkRetired(path []string, args []string) int {
+	retired := []struct {
 		from []string
+		flag string
 		to   string
 	}{
-		{[]string{"books", "list-books"}, "books list"},
+		{[]string{"books", "list-books"}, "", "books list"},
 	}
-	for _, rename := range renames {
-		if len(args) < len(rename.from) {
+	tokens := append(append([]string{}, path...), args...)
+	best, bestAt := -1, 0
+	for i, entry := range retired {
+		if len(entry.from) < len(path) || len(entry.from) == len(path) && entry.flag == "" || len(tokens) < len(entry.from) {
 			continue
 		}
 		match := true
-		for i, token := range rename.from {
-			if args[i] != token {
+		for j, token := range entry.from {
+			if tokens[j] != token {
 				match = false
 				break
 			}
 		}
-		if match {
-			errorMessage(2, "%s is now %s %s", strings.Join(rename.from, " "), program, rename.to)
-			return 2
+		if !match {
+			continue
+		}
+		at := len(tokens)
+		if entry.flag != "" {
+			at = -1
+			for k := len(entry.from); k < len(tokens) && tokens[k] != "--"; k++ {
+				name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(tokens[k], "-"), "-"), "=")
+				if strings.HasPrefix(tokens[k], "-") && name == entry.flag {
+					at = k
+					break
+				}
+			}
+			if at < 0 {
+				continue
+			}
+		}
+		if best < 0 || len(entry.from) > len(retired[best].from) || len(entry.from) == len(retired[best].from) && at < bestAt {
+			best, bestAt = i, at
 		}
 	}
-	return 0
+	if best < 0 {
+		return 0
+	}
+	entry := retired[best]
+	invocation := strings.Join(entry.from, " ")
+	if entry.flag != "" {
+		invocation += " --" + entry.flag
+	}
+	errorMessage(2, "%s is now %s %s", invocation, program, entry.to)
+	return 2
 }
 
 // Run executes one invocation and returns the process exit code.
@@ -441,9 +477,6 @@ func Run(args []string, opts Options) int {
 	args = rest
 	resolveFormat()
 	resolveEnv()
-	if code := checkRename(args); code != 0 {
-		return code
-	}
 	if len(args) == 0 {
 		if !machineOutput() {
 			printRootUsage(os.Stderr)
@@ -466,6 +499,9 @@ func Run(args []string, opts Options) int {
 	case "books":
 		return dispatchBooks(args[1:])
 	default:
+		if code := checkRetired(nil, args); code != 0 {
+			return code
+		}
 		errorMessage(2, "unknown command %q", args[0])
 		if hint := suggestTopLevel(args[0]); !machineOutput() && hint != "" {
 			fmt.Fprintf(os.Stderr, "\nDid you mean `%s %s`?\n", program, hint)

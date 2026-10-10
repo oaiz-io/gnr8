@@ -2369,6 +2369,35 @@ code, _out, err = run(["books", "list-books", "--base-url", BASE])
 check(code == 2 and "is now bookstore books list" in err, f"rename: {code} {err!r}")
 check(not SEEN, f"a rename error must not send a request: {SEEN}")
 
+for args, message in [
+    (["books", "get", "--book-id", "b1"], "books get --book-id is now bookstore books get <id>"),
+    (["books", "get", "--book-id=b1"], "books get --book-id is now bookstore books get <id>"),
+    (["books", "get", "b1", "--book-id", "b1"], "books get --book-id is now bookstore books get <id>"),
+    (["job", "list"], "job is now bookstore books list"),
+    (["job", "get", "b1"], "job get is now bookstore books get <id>"),
+    (["job", "get", "--job-uuid", "b1"], "job get --job-uuid is now bookstore books get <id>"),
+]:
+    code, out, err = run([*args, "--base-url", BASE])
+    check(code == 2 and not out and err.startswith(f"error: {message}"), f"retired {args}: {code} {err!r}")
+    code, out, err = run(["--json", *args, "--base-url", BASE])
+    check(code == 2 and json.loads(err)["error"]["message"] == message, f"retired {args} --json: {code} {err!r}")
+code, out, err = run(["books", "get", "b1", "--isbn", "1", "--book-id", "b1", "--base-url", BASE])
+check(code == 2 and err.startswith("error: books get --isbn is now bookstore books get <id>"), f"the retired flag typed first wins: {code} {err!r}")
+check(not SEEN, f"a retired invocation must not send a request: {SEEN}")
+
+# argparse reads `-qy` as `-q -y`, a valid invocation, so the retired `--qy` must not capture it.
+code, out, err = run(["books", "get", "b1", "-qy", "--json", "--base-url", BASE], (200, BOOK))
+check(code == 0 and "is now" not in err and len(SEEN) == 1, f"a short-flag cluster is not a retired flag: {code} {err!r} {SEEN}")
+SEEN.clear()
+
+for args in [["--help"], ["--version"], ["books", "--help"], ["books", "get", "--book-id", "b1", "--help"], ["help", "books", "get"]]:
+    code, out, err = run(args)
+    check(code == 0 and out and "is now" not in err, f"help with retired table: {args} {code} {err!r}")
+code, out, err = run(["books", "nope"])
+check(code == 2 and "invalid choice" in err, f"an unknown command keeps its own error: {code} {err!r}")
+code, out, err = run(["books", "get", "b1", "--nope", "--base-url", BASE])
+check(code == 2 and "unrecognized arguments: --nope" in err, f"an unknown flag keeps its own error: {code} {err!r}")
+
 code, _out, err = run(["books", "get", "b1", "--json", "--base-url", BASE], (200, "{not json"))
 check(code == 1, f"an undecodable success must exit 1, not retry-later: {code} {err!r}")
 
@@ -2573,6 +2602,24 @@ fn generated_cli_python_command_spec_keeps_the_output_contract() {
                 ),
         )
         .rename_error(CliRenameError::new(["books", "list-books"], "books list"))
+        .rename_error(CliRenameError::new(
+            ["books", "get", "--book-id"],
+            "books get <id>",
+        ))
+        .rename_error(CliRenameError::new(["job"], "books list"))
+        .rename_error(CliRenameError::new(["job", "get"], "books get <id>"))
+        .rename_error(CliRenameError::new(
+            ["job", "get", "--job-uuid"],
+            "books get <id>",
+        ))
+        .rename_error(CliRenameError::new(
+            ["books", "get", "--isbn"],
+            "books get <id>",
+        ))
+        .rename_error(CliRenameError::new(
+            ["books", "get", "--qy"],
+            "books get <id> -q -y",
+        ))
         .view(CliView::schema("Book").preview(["title", "id"]));
     let dir = unique_temp_dir("cli-spec");
     let mut out = Artifacts::new();
