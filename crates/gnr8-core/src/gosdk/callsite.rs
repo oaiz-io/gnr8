@@ -243,10 +243,53 @@ impl<'a> Speller<'a> {
             return Ok(format!("{}{variant}{{Value: {literal}}}", self.qualifier));
         }
         let required = models.first().is_some_and(|model| model.required);
+        let body_type = Type::Named(body.schema_id.clone());
         if required {
             Ok(literal)
-        } else {
+        } else if self.is_composite_literal(&body_type)? {
             Ok(format!("&{literal}"))
+        } else {
+            // Go takes the address of a composite literal only: `&sdk.Kind("a")` and
+            // `&time.Date(…)` do not compile, so any other optional body goes through the SDK's own
+            // `Ptr` helper.
+            let value_type = go_type_in(&body_type, false, self.graph, &self.qualifier)?;
+            Ok(self.pointer_wrap(literal, 1, &value_type))
+        }
+    }
+
+    /// Whether [`Self::go_literal`] renders `ty` as a composite literal (`T{…}`, `[]T{…}`,
+    /// `map[K]V{…}`), the one kind of expression Go lets `&` take the address of.
+    fn is_composite_literal(&self, ty: &Type) -> Result<bool, CoreError> {
+        let mut current = ty;
+        let mut visited = std::collections::BTreeSet::new();
+        loop {
+            match current {
+                Type::Named(id) => {
+                    if !visited.insert(id.clone()) {
+                        return Err(CoreError::SdkGen {
+                            message: format!("sampled call reaches cyclic $ref '{id}'"),
+                        });
+                    }
+                    let schema = self
+                        .graph
+                        .schemas
+                        .iter()
+                        .find(|schema| &schema.id == id)
+                        .ok_or_else(|| CoreError::SdkGen {
+                            message: format!("sampled call references dangling $ref '{id}'"),
+                        })?;
+                    match &schema.body {
+                        Type::Object(_) => return Ok(true),
+                        body => current = body,
+                    }
+                }
+                Type::Array(_) | Type::Map { .. } | Type::Any {} => return Ok(true),
+                Type::Primitive(_)
+                | Type::WellKnown(_)
+                | Type::Enum(_)
+                | Type::Object(_)
+                | Type::Union(_) => return Ok(false),
+            }
         }
     }
 
@@ -788,6 +831,85 @@ mod tests {
             .call
             .contains("contractTime(\"2024-01-02T03:04:05Z\")"));
         assert_eq!(in_package.imports, vec!["time"]);
+    }
+
+    /// An optional body of a non-object type: an enum newtype, a date-time and a string. Go takes the
+    /// address of a composite literal only, so each goes through the SDK's `Ptr` helper.
+    #[test]
+    fn optional_non_object_body_is_passed_through_ptr() {
+        let span = json!({"file": "a.go", "start_line": 1, "end_line": 1});
+        let op = |id: &str, schema: &str| {
+            json!({
+                "id": id, "method": "POST", "path": format!("/{id}"), "handler": id, "params": [],
+                "request_body": {"ref_id": schema}, "request_body_required": false,
+                "request_body_content_type": "application/json",
+                "responses": [{"status": 204}], "provenance": span
+            })
+        };
+        let graph: ApiGraph = serde_json::from_value(json!({
+            "module": "shapes", "base_path": "/", "title": "Shapes", "security": [],
+            "diagnostics": [],
+            "operations": [op("kind", "s.Kind"), op("when", "s.When"), op("note", "s.Note"),
+                           op("book", "s.Book")],
+            "schemas": [
+                {"id": "s.Kind", "name": "Kind", "provenance": span,
+                 "body": {"type": "enum", "of": ["a+b"]}},
+                {"id": "s.When", "name": "When", "provenance": span,
+                 "body": {"type": "well_known", "of": "date_time"}},
+                {"id": "s.Note", "name": "Note", "provenance": span,
+                 "body": {"type": "primitive", "of": {"prim": "string"}}},
+                {"id": "s.Book", "name": "Book", "provenance": span,
+                 "body": {"type": "object", "of": [
+                     field("name", &json!({"type": "primitive", "of": {"prim": "string"}}), true)
+                 ]}}
+            ]
+        }))
+        .expect("the optional-body graph deserializes");
+        let identity = ConsumerIdentity {
+            import: "example.com/shapes/sdk".to_string(),
+            qualifier: "sdk".to_string(),
+        };
+        let call = |index: usize, schema: &str, value: serde_json::Value| {
+            let body = SampleBody {
+                content_type: "application/json".to_string(),
+                schema_id: schema.to_string(),
+                model: String::new(),
+                value,
+                selection: 0,
+                representations: 1,
+            };
+            let inputs = CallInputs {
+                params: &[],
+                body: Some(&body),
+                auth: &[],
+            };
+            render_call(
+                &graph,
+                &graph.operations[index],
+                &inputs,
+                &Qualify::Consumer {
+                    identity: &identity,
+                },
+            )
+            .unwrap()
+            .call
+        };
+        let kind = call(0, "s.Kind", json!("a+b"));
+        assert!(
+            kind.ends_with("(ctx, sdk.Ptr[sdk.Kind](sdk.Kind(\"a+b\")))"),
+            "{kind}"
+        );
+        let when = call(1, "s.When", json!("2024-01-02T03:04:05Z"));
+        assert!(
+            when.ends_with(
+                "(ctx, sdk.Ptr[sdk.When](time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)))"
+            ),
+            "{when}"
+        );
+        let note = call(2, "s.Note", json!("x"));
+        assert!(note.ends_with("(ctx, sdk.Ptr[sdk.Note](\"x\"))"), "{note}");
+        let book = call(3, "s.Book", json!({"name": "x"}));
+        assert!(book.ends_with("(ctx, &sdk.Book{Name: \"x\"})"), "{book}");
     }
 
     #[test]
