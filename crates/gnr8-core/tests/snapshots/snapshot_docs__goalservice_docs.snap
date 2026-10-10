@@ -503,7 +503,7 @@ Kind: object
 
 | Field | Type | Required | Nullable | Constraints | Default | Description | Example |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `hints` | array of `string` | no | no |  |  |  | `hint 1,hint 2` |
+| `hints` | array of `string` | no | no |  |  |  |  |
 | `message` | `string` | yes | no |  |  |  | `error message` |
 | `slug` | `string` | no | no |  |  |  | `error-slug` |
 --- schemas/list-goals-output.md ---

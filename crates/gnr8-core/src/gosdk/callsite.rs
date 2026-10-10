@@ -751,6 +751,7 @@ mod tests {
             selection: 0,
             representations: 2,
             unmet: Vec::new(),
+            example: None,
         };
         let params = [SampleParam {
             name: "genre".to_string(),
@@ -881,6 +882,7 @@ mod tests {
                 selection: 0,
                 representations: 1,
                 unmet: Vec::new(),
+                example: None,
             };
             let inputs = CallInputs {
                 params: &[],

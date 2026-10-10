@@ -102,6 +102,35 @@ pub(crate) fn render_example(
     Ok(out)
 }
 
+/// The declared examples the Example section prints as its exchange: the request example the call
+/// sends and the response example it receives. The sections those examples are declared in name
+/// them and leave their values to the exchange, so no value is printed twice.
+///
+/// # Errors
+///
+/// Returns [`CoreError::DocsGen`] for a reply with a body but no media type.
+pub(crate) fn shown_examples(
+    op: &Operation,
+    sampled: &Sampled,
+) -> Result<super::page::ShownExamples, CoreError> {
+    let mut shown = super::page::ShownExamples::default();
+    let Sampled::Sample(sample) = sampled else {
+        return Ok(shown);
+    };
+    if let Some(body) = sample.bodies.first() {
+        shown.request = body
+            .example
+            .clone()
+            .map(|name| (body.content_type.clone(), name));
+    }
+    if let SuccessOutcome::Sample(reply) = &sample.reply {
+        if let (Some(name), Some(wire)) = (&reply.example, wire_reply(op, reply)?) {
+            shown.reply = Some((reply.status, wire.content_type, name.clone()));
+        }
+    }
+    Ok(shown)
+}
+
 /// One subsection per sibling SDK whose generated CLI wraps this operation, in plan order: the
 /// invocation the program prints in its usage, then the command examples the user declared,
 /// verbatim. A TypeScript SDK emits no CLI.
@@ -232,27 +261,13 @@ pub(crate) fn cookie_header(params: &[crate::verify::SampleParam]) -> Option<Str
 /// Returns [`CoreError::DocsGen`] for a status that carries a body but declares no media type,
 /// which the lowering refuses as well.
 pub(crate) fn reply_media_type(op: &Operation, status: u16) -> Result<String, CoreError> {
-    let mut declared: Vec<&String> = op
-        .responses
-        .iter()
-        .filter(|response| response.status == status)
-        .flat_map(|response| {
-            response
-                .content_types
-                .iter()
-                .chain(response.content_type.iter())
-        })
-        .collect();
-    declared.sort();
-    declared
-        .first()
-        .map(|media| (*media).clone())
-        .ok_or_else(|| CoreError::DocsGen {
-            message: format!(
-                "operation '{}' response {status} carries a body but declares no media type",
-                op.id
-            ),
-        })
+    // The sampler picks the reply's declared example by the same media type.
+    crate::verify::reply_media(op, status).ok_or_else(|| CoreError::DocsGen {
+        message: format!(
+            "operation '{}' response {status} carries a body but declares no media type",
+            op.id
+        ),
+    })
 }
 
 /// One success reply in the wire form of the media type the operation declares for it: the reply a
@@ -366,6 +381,7 @@ mod tests {
             body: body.to_string(),
             field: None,
             unmet: Vec::new(),
+            example: None,
         }
     }
 

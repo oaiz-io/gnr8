@@ -72,8 +72,23 @@ property of extraction; see [Sources and extraction](../extraction/sources.md).
 Every operation page shows the HTTP exchange its sample produces, then one call per sibling SDK
 target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` wraps the operation.
 
-- **Values are sampled, and valid.** Each value satisfies every declared constraint on its input at
-  once — enum, length, range, item count, property count — and a string whose format gnr8 maps to a
+- **Declared examples come first.** An input that declares an example takes it, and an input that
+  declares none is built from its type. A field declares one with its `example`. A request body or
+  a success reply declares one with the operation's first `MediaExample` for the JSON media type the
+  call sends or the reply carries. A body or reply that declares an example *is* that example, so
+  its fields' examples play no part in it. A field example counts only where a body or reply is
+  built, and the reply of an operation that declares no response example shows its fields'
+  examples. A field example is text read as a value of the field's type, the way an enum member is,
+  so it states a scalar only. Parameters declare no example.
+- **Declared examples are checked.** Before any page is sampled, every declared example is checked
+  against the input it is declared for, whether the sample uses it or not. The check covers the
+  type, the required fields, fields the schema does not declare, `null` where the field is not
+  nullable, and every constraint below except `pattern`. One that breaks its input stops generation
+  with an error that names where it is declared (schema and field, or operation, status, example
+  name and media type) and what it breaks. It is never skipped or replaced. The contract tests run
+  the same check.
+- **Values are sampled, and valid.** A built value satisfies every declared constraint on its input
+  at once: enum, length, range, item count and property count. A string whose format gnr8 maps to a
   well-known scalar (`uuid`, `date-time`, `date`, `duration`, `decimal`, `email`, `uri`) takes that
   scalar's literal. Other formats are annotations and are not honoured. An enum member is printed as
   declared. A parameter imported from an OpenAPI document carries its `minimum`, `maxLength` and
@@ -85,10 +100,15 @@ target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` w
   alike`. An integer sample stays within ±(2^53 − 1), the range a TypeScript `number` carries
   exactly; bounds that admit only larger integers print `No sample call: … admits no integer within
   ±(2^53 − 1)`.
-- **What has no sample says why.** A required input carrying a `pattern` (gnr8 never synthesizes a
-  value for one), or bounds no value can meet, prints `No sample call: …` in place of the exchange
-  and every call; an optional parameter carrying a `pattern` is left out of the call. A canned reply
-  that cannot be sampled, or that carries a `pattern`, prints `No sample response body: …`. A file
+- **What has no sample says why.** A required input carrying a `pattern` and no declared example
+  prints `No sample call: …` in place of the exchange and every call, and so do bounds no value can
+  meet. gnr8 never synthesizes a value for a `pattern` and never evaluates one, so a declared example
+  is the only way such an input gets a sample, and it is taken as matching on its author's word. An
+  optional parameter carrying a `pattern` is left out of the call. A declared example that is valid
+  but that no call can state prints `No sample call: …` with the value: a `null` in a request, a
+  free-form value other than `{}` in a request, or a number that breaks the number rule above. A
+  canned reply that cannot be sampled, or that carries a `pattern`, prints `No sample response
+  body: …`. A file
   download, no success status, or a first success status outside 2xx prints neither a reply nor a
   note. The generated contract tests draw on the same sample but still send a value under a
   `pattern` — no SDK validates one — so a pattern costs a page its example, never a contract case.
@@ -102,9 +122,12 @@ target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` w
   media type's wire form: JSON for a JSON type, the text itself (never quoted) for a `text/*` type.
   A reply in any other media type has no printable body and, like a file download, is not printed.
   `gnr8 verify` answers each call with exactly that reply.
-- **Declared examples are shown where they are declared.** A `MediaExample` appears under the
-  request body or the response status it belongs to. The sampled call never substitutes for it, and
-  it never substitutes for the sampled call.
+- **A declared example is printed once.** A `MediaExample` is listed under the request body or the
+  response status it belongs to, with its name, media type, summary and description. When the
+  exchange sends it as the body or receives it as the reply, the listing says so in place of its
+  value: *The call under Example sends this body.* or *The call under Example receives this
+  reply.* Every other declared example keeps its value there, including one for a media type the
+  sample does not use and one on an operation whose call is refused.
 
 ### Which SDKs get a call
 
@@ -181,6 +204,10 @@ escaped and summaries are folded to one line.
 - An enum member is printed as declared, even when it contradicts a mapped format.
 - An error status with no declared response body keeps the contract test's generic error envelope;
   error bodies are never printed on a page.
+- A field example states only a scalar. A field whose type is an array, map, object or union has no
+  example its text can state, so declaring one is an error. A body example can state such a field.
+- `openapi.yaml` publishes a field example as the text it was declared as, so a number example
+  appears there as a string, while the sample reads it as a number.
 - A printed sample holds at most 64 array or map entries and 1024 string characters; a lower bound
   above that prints `No sample call: … above the 64 a printed sample holds`, a limit of the page
   rather than of the API.

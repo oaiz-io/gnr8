@@ -25,12 +25,12 @@ use crate::CoreError;
 
 mod sample;
 
-pub(crate) use sample::credential_of;
-use sample::{error_payload, success_sample};
 pub use sample::{
-    sample_operation, satisfies, OperationSample, SampleRefusal, Sampled, SuccessOutcome,
-    SuccessSample, UnmetConstraint, Violation,
+    check_declared_examples, sample_operation, satisfies, DeclaredLimit, OperationSample,
+    SampleRefusal, Sampled, SuccessOutcome, SuccessSample, UnmetConstraint, Violation,
 };
+pub(crate) use sample::{credential_of, reply_media};
+use sample::{error_payload, success_sample};
 
 /// The largest number of cases one target's contract test may carry.
 pub const CONTRACT_TEST_CASE_CAP: usize = 24;
@@ -321,6 +321,9 @@ pub struct SampleBody {
     pub representations: usize,
     /// The constraints the sampled body leaves unmet, in field order.
     pub unmet: Vec<UnmetConstraint>,
+    /// The name of the declared request example this body is, when the operation declares one for
+    /// this representation's media type.
+    pub example: Option<String>,
 }
 
 impl SampleBody {
@@ -551,8 +554,11 @@ impl ContractTestPlan {
 /// # Errors
 ///
 /// Returns [`CoreError::SdkGen`] when the graph carries a fact the shared SDK helpers reject (a
-/// dangling `$ref`, an unsupported request media type, contradictory responses).
+/// dangling `$ref`, an unsupported request media type, contradictory responses), and
+/// [`CoreError::InvalidExample`] for a declared example that is not a value of its input
+/// ([`check_declared_examples`]).
 pub fn plan_contract_tests(graph: &ApiGraph) -> Result<ContractTestPlan, CoreError> {
+    check_declared_examples(graph)?;
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut refused: Vec<RefusedSample> = Vec::new();
     for op in &graph.operations {

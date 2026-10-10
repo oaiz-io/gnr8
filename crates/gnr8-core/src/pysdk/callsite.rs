@@ -349,6 +349,7 @@ pub(crate) mod tests {
             selection,
             representations: 2,
             unmet: Vec::new(),
+            example: None,
         }
     }
 

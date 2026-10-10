@@ -30,6 +30,24 @@ must move the minor version.
   (each refused sample, with its operation, scope and reason); `SampleParam` gains `required` and
   `unmet`, and `SampleBody` gains `unmet`. Code that builds these structs literally needs the new
   fields.
+- **Declared examples are the sample, and an invalid one stops generation.** A field's `example`,
+  and an operation's first request or response `MediaExample` for the JSON media type the sample
+  uses, are now the values the docs pages and the contract tests send and reply with. A body or
+  reply that declares an example is that example, and is not built from its fields. Each declared
+  example is checked against its input before anything is sampled, whether a sample uses it or not:
+  its type, the required fields, fields the schema does not declare, nullability and every
+  constraint except `pattern`. A field example is read as a value of the field's type, so it can
+  state only a scalar: `example:"a,b"` on a `[]string` field is not a list. An example that breaks
+  its input fails generation with `CoreError::InvalidExample`, which names where the example is
+  declared and the type or constraint it breaks. This happens in any pipeline that samples:
+  `StaticDocs`, or an SDK target with contract tests, which are on by default. gnr8 does not check
+  a declared value against `pattern`; the author's example is taken as matching it, and it is now
+  the only way a pattern-bound input gets a sample on a page. A valid example that no call can
+  state, such as a `null` in a request or a whole number in a float field, prints `No sample call:
+  …` and names the value. An operation page prints a declared example's value once, in the Example
+  section. Where the example is declared, the page keeps its name and prose. `SampleBody` and
+  `SuccessSample` gain `example`, `SampleRefusal` gains `Declared`, and `CoreError` gains
+  `InvalidExample`.
 
 ### Added
 

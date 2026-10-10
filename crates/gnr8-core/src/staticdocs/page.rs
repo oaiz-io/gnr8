@@ -164,11 +164,26 @@ fn request_line(graph: &ApiGraph, op: &Operation) -> String {
     )
 }
 
-/// Render one operation page. `example` is the rendered `## Example` section body.
+/// The declared examples an operation's Example section prints as its exchange, each named by
+/// where it is declared: the request example by media type and name, the response example by
+/// status, media type and name.
+#[derive(Debug, Default)]
+pub(crate) struct ShownExamples {
+    pub(crate) request: Option<(String, String)>,
+    pub(crate) reply: Option<(u16, String, String)>,
+}
+
+/// The sentence a declared example the exchange prints carries in place of its value.
+const SENT_BY_THE_CALL: &str = "The call under Example sends this body.";
+const RECEIVED_BY_THE_CALL: &str = "The call under Example receives this reply.";
+
+/// Render one operation page. `example` is the rendered `## Example` section body; `shown` names
+/// the declared examples it prints.
 pub(crate) fn render_operation(
     site: &Site<'_>,
     op: &Operation,
     example: &str,
+    shown: &ShownExamples,
     links: &mut LinkRegistry,
 ) -> Result<String, CoreError> {
     let graph = site.graph;
@@ -206,8 +221,10 @@ pub(crate) fn render_operation(
 
     out.push_str(&authentication_section(graph, &page, op, links)?);
     out.push_str(&parameters_section(site, &page, op, links)?);
-    out.push_str(&request_body_section(site, &page, op, policy, links)?);
-    out.push_str(&responses_section(site, &page, op, policy, links)?);
+    out.push_str(&request_body_section(
+        site, &page, op, policy, shown, links,
+    )?);
+    out.push_str(&responses_section(site, &page, op, policy, shown, links)?);
     let _ = write!(out, "## {EXAMPLE}\n\n{example}");
     out.push_str(&pagination_section(graph, op));
     out.push_str(&diagnostics_section(graph, op));
@@ -564,6 +581,7 @@ fn request_body_section(
     page: &str,
     op: &Operation,
     policy: Option<&OperationDocsPolicy>,
+    shown: &ShownExamples,
     links: &mut LinkRegistry,
 ) -> Result<String, CoreError> {
     let models = request_body_models_of(op, site.graph)?;
@@ -588,9 +606,14 @@ fn request_body_section(
         .iter()
         .map(|model| model.content_type.as_str())
         .collect();
+    let sent = shown
+        .request
+        .as_ref()
+        .map(|(media, name)| (media.as_str(), name.as_str(), SENT_BY_THE_CALL));
     let examples = declared_examples(
         policy.map_or(&[][..], |policy| policy.request_examples.as_slice()),
         &content_types,
+        sent,
     )?;
     if !examples.is_empty() {
         let _ = write!(out, "### {DECLARED_REQUEST_EXAMPLES}\n\n");
@@ -604,6 +627,7 @@ fn responses_section(
     page: &str,
     op: &Operation,
     policy: Option<&OperationDocsPolicy>,
+    shown: &ShownExamples,
     links: &mut LinkRegistry,
 ) -> Result<String, CoreError> {
     if op.responses.is_empty() {
@@ -658,9 +682,15 @@ fn responses_section(
                     .unwrap_or_default(),
             ),
         ]);
+        let received = shown
+            .reply
+            .as_ref()
+            .filter(|(status, _, _)| *status == response.status)
+            .map(|(_, media, name)| (media.as_str(), name.as_str(), RECEIVED_BY_THE_CALL));
         let declared = declared_examples(
             docs.map_or(&[][..], |docs| docs.examples.as_slice()),
             &content_types.iter().map(String::as_str).collect::<Vec<_>>(),
+            received,
         )?;
         if !declared.is_empty() {
             let _ = write!(
@@ -682,10 +712,13 @@ fn responses_section(
 }
 
 /// The declared examples whose media type the operation declares, as the `OpenAPI` target keeps
-/// them: each labelled with its name and media type, its value printed as JSON.
+/// them: each labelled with its name and media type, its value printed as JSON. The one the Example
+/// section prints (`shown`: media type, name, and the sentence that says so) keeps its label and
+/// prose, and the sentence stands in for its value.
 fn declared_examples(
     examples: &[MediaExample],
     content_types: &[&str],
+    shown: Option<(&str, &str, &str)>,
 ) -> Result<String, CoreError> {
     let mut out = String::new();
     for example in examples.iter().filter(|example| {
@@ -704,6 +737,12 @@ fn declared_examples(
         let _ = write!(out, "{label}\n\n");
         if let Some(description) = nonblank(example.description.as_deref()) {
             let _ = write!(out, "{}\n\n", description.trim_end());
+        }
+        if let Some((_, _, sentence)) = shown.filter(|(media, name, _)| {
+            example.name == *name && example.content_type.eq_ignore_ascii_case(media)
+        }) {
+            let _ = write!(out, "{sentence}\n\n");
+            continue;
         }
         let value =
             serde_json::to_string_pretty(&example.value).map_err(|error| CoreError::DocsGen {

@@ -449,27 +449,81 @@ fn servers_are_listed_in_order_and_snippets_use_a_variable() {
 }
 
 #[test]
-fn declared_examples_render_under_their_status_beside_the_sample() {
-    let pages = render(&bookstore(), &[go_sdk()]);
+fn declared_examples_drive_the_sample_and_are_printed_once() {
+    let mut graph = bookstore_json();
+    graph["operation_docs"][0]["request_examples"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "name": "poem", "content_type": "application/json",
+            "description": "A second body, shown as declared.",
+            "value": {"title": "Ode", "genre": "poetry"}
+        }));
+    let pages = render(&graph_of(graph), &[go_sdk()]);
     let text = page(&pages, "operations/create-book.md");
-    let responses = section(text, "Responses");
+    let example = section(text, "Example");
+    // The first declared request example is the body the call sends, and the declared 201 example
+    // is the reply it gets.
+    assert!(example.contains("\"title\": \"Dune\""), "{example}");
+    assert!(example.contains("\"id\": \"b-1\""), "{example}");
+    assert!(!example.contains("gnr8"), "{example}");
+
+    // Each keeps its name and prose where it is declared, and its value is printed once.
+    let request = section(text, "Request body");
     assert!(
-        responses.contains("**`stored`** (`application/json`) — A stored book"),
-        "{responses}"
+        request
+            .contains("**`dune`** (`application/json`)\n\nThe call under Example sends this body."),
+        "{request}"
     );
+    assert!(!request.contains("\"title\": \"Dune\""), "{request}");
+    // A declared example the call does not send keeps its value.
+    assert!(
+        request.contains("A second body, shown as declared."),
+        "{request}"
+    );
+    assert!(request.contains("\"title\": \"Ode\""), "{request}");
+    let responses = section(text, "Responses");
     assert!(
         responses.contains("Declared examples for `201`"),
         "{responses}"
     );
-    assert!(responses.contains("\"id\": \"b-1\""), "{responses}");
+    assert!(
+        responses.contains(
+            "**`stored`** (`application/json`) — A stored book\n\nThe call under Example \
+             receives this reply."
+        ),
+        "{responses}"
+    );
+    assert!(!responses.contains("\"id\": \"b-1\""), "{responses}");
+}
+
+#[test]
+fn a_declared_example_keeps_its_value_when_the_call_is_refused() {
+    let mut graph = bookstore_json();
+    // A required query parameter with a pattern refuses the call, so nothing prints the example.
+    graph["operations"][1]["params"] = json!([{
+        "name": "token", "location": "query", "required": true, "schema": string(),
+        "constraints": {"pattern": "^[a-z]+$"}, "provenance": span()
+    }]);
+    let pages = render(&graph_of(graph), &[go_sdk()]);
+    let text = page(&pages, "operations/create-book.md");
     let request = section(text, "Request body");
     assert!(request.contains("\"title\": \"Dune\""), "{request}");
-    let example = section(text, "Example");
+    let responses = section(text, "Responses");
+    assert!(responses.contains("\"id\": \"b-1\""), "{responses}");
+}
+
+#[test]
+fn an_invalid_declared_example_stops_generation() {
+    let mut graph = bookstore_json();
+    graph["operation_docs"][0]["request_examples"][0]["value"] = json!({"title": "Dune"});
+    let err = try_render(&graph_of(graph), &[go_sdk()]).unwrap_err();
     assert!(
-        example.contains("\"title\": \"gnr8\""),
-        "the sampled call is always the sampled call:\n{example}"
+        matches!(&err, CoreError::InvalidExample { example, problem }
+            if example.contains("`dune`") && example.contains("`createBook`")
+                && problem.contains("lacks required field `genre`")),
+        "{err}"
     );
-    assert!(!example.contains("Dune"), "{example}");
 }
 
 #[test]
@@ -1224,6 +1278,9 @@ fn inline_object_fields_render_with_their_own_facts() {
         &json!({"type": "array", "of": {"type": "object", "of": [note]}}),
         false,
     ));
+    // The declared reply of createBook is a Book, so it carries the new required field too.
+    value["operation_docs"][0]["responses"][0]["examples"][0]["value"]["dimensions"] =
+        json!({"width": 1.5});
     let pages = render(&graph_of(value), &[]);
     let fields = section(page(&pages, "schemas/book.md"), "Fields");
     assert!(
@@ -1266,6 +1323,7 @@ fn operation_sample_reply_is_readable_from_an_integration_test() {
         body,
         field,
         unmet,
+        example,
     }) = sample.reply
     else {
         panic!("getBook has a reply");
@@ -1274,6 +1332,10 @@ fn operation_sample_reply_is_readable_from_an_integration_test() {
     assert_eq!(model.as_deref(), Some("Book"));
     let value: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(value["genre"], json!("fiction"));
+    // getBook declares no response example, so the reply is built, and the title field's
+    // declared example is its value.
+    assert_eq!(value["title"], json!("Dune"));
+    assert_eq!(example, None);
     assert_eq!(field.map(|field| field.json_name), Some("id".to_string()));
     assert!(unmet.is_empty(), "{unmet:?}");
 }
