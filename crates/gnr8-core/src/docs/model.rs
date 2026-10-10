@@ -493,8 +493,18 @@ pub(crate) struct AuthSchemeDoc {
     pub(crate) kind: Inline,
     /// How each sibling SDK with a consumer identity configures it; `None` when none does.
     pub(crate) options: Option<Table>,
-    /// Indexes of the operations whose every alternative includes it.
-    pub(crate) required_by: Vec<usize>,
-    /// Indexes of the operations that accept it as one alternative among others.
-    pub(crate) accepted_by: Vec<usize>,
+    /// The operations whose every alternative includes it.
+    pub(crate) required_by: Vec<SchemeUse>,
+    /// The operations that accept it as one alternative among others.
+    pub(crate) accepted_by: Vec<SchemeUse>,
+}
+
+/// One operation that accepts a scheme, and what the scheme is required together with there.
+#[derive(Debug, Clone)]
+pub(crate) struct SchemeUse {
+    /// Index into [`DocsModel::operations`].
+    pub(crate) operation: usize,
+    /// For each of the operation's alternatives that includes the scheme, in order and each once,
+    /// the other schemes that alternative requires with it; an empty entry is the scheme alone.
+    pub(crate) partners: Vec<Vec<String>>,
 }

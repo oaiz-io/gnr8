@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::docs::identity::error_type;
 use crate::docs::markdown::escape::one_line;
 use crate::docs::model::{
-    ApiDoc, AuthDoc, AuthSchemeDoc, ErrorCatalog, GroupDoc, Inline, PageRef, Prose, SdkDoc,
-    ServerDoc, Table,
+    ApiDoc, AuthDoc, AuthSchemeDoc, ErrorCatalog, GroupDoc, Inline, PageRef, Prose, SchemeUse,
+    SdkDoc, ServerDoc, Table,
 };
 use crate::graph::ApiGraph;
 use crate::sdk::builtins::SiblingSdk;
@@ -163,8 +163,8 @@ pub(super) fn auth_doc(
     }
     // An operation requires a scheme only when every one of its alternatives includes it; a scheme
     // that appears in some alternatives is one way, among others, to meet its requirement.
-    let mut required_by: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut accepted_by: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut required_by: BTreeMap<String, Vec<SchemeUse>> = BTreeMap::new();
+    let mut accepted_by: BTreeMap<String, Vec<SchemeUse>> = BTreeMap::new();
     for (index, op) in graph.operations.iter().enumerate() {
         let alternatives = operation_auth_alternatives(graph, op)?;
         let mut seen: Vec<&str> = Vec::new();
@@ -177,12 +177,31 @@ pub(super) fn auth_doc(
             let in_every = alternatives
                 .iter()
                 .all(|alternative| alternative.iter().any(|other| scheme_id(other) == id));
+            // What the scheme is required together with, per alternative that includes it.
+            let mut partners: Vec<Vec<String>> = Vec::new();
+            for alternative in &alternatives {
+                if !alternative.iter().any(|other| scheme_id(other) == id) {
+                    continue;
+                }
+                let others: Vec<String> = alternative
+                    .iter()
+                    .map(scheme_id)
+                    .filter(|other| *other != id)
+                    .map(str::to_string)
+                    .collect();
+                if !partners.contains(&others) {
+                    partners.push(others);
+                }
+            }
             let list = if in_every {
                 &mut required_by
             } else {
                 &mut accepted_by
             };
-            list.entry(id.to_string()).or_default().push(index);
+            list.entry(id.to_string()).or_default().push(SchemeUse {
+                operation: index,
+                partners,
+            });
         }
     }
     let schemes = declared_auth_schemes(graph)?

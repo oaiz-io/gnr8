@@ -12,7 +12,7 @@ use crate::docs::build::language_name;
 use crate::docs::identity::NO_IDENTITY_NOTE;
 use crate::docs::model::{
     CodeSample, DeclaredExample, DocsModel, ExampleDoc, ExampleValue, HttpRequest, Inline,
-    OperationDoc, PageRef, ReplyDoc, SchemaBody, SchemaDoc, SdkSamples, Table,
+    OperationDoc, PageRef, ReplyDoc, SchemaBody, SchemaDoc, SchemeUse, SdkSamples, Table,
 };
 use crate::verify::ContractTestLanguage;
 use crate::CoreError;
@@ -171,7 +171,7 @@ pub(crate) fn site(model: &DocsModel) -> Result<BTreeMap<String, String>, CoreEr
                         continue;
                     }
                     w.paragraph(&Inline::text(label));
-                    w.list(&operation_links(model, users));
+                    w.list(&scheme_uses(model, users));
                 }
             }
             Ok(())
@@ -291,6 +291,41 @@ fn operation_links(model: &DocsModel, operations: &[usize]) -> Vec<Inline> {
         .iter()
         .filter_map(|index| model.operations.get(*index))
         .map(|op| Inline::link(op.page.clone(), Inline::code(op.id.clone())))
+        .collect()
+}
+
+/// One list item per operation that accepts a scheme: its link, then — when some alternative
+/// requires the scheme together with others — what it is required with, per alternative.
+fn scheme_uses(model: &DocsModel, uses: &[SchemeUse]) -> Vec<Inline> {
+    uses.iter()
+        .filter_map(|scheme_use| {
+            let op = model.operations.get(scheme_use.operation)?;
+            let link = Inline::link(op.page.clone(), Inline::code(op.id.clone()));
+            if scheme_use.partners.iter().all(Vec::is_empty) {
+                return Some(link);
+            }
+            let phrases = scheme_use
+                .partners
+                .iter()
+                .map(|partners| {
+                    if partners.is_empty() {
+                        return Inline::text("alone");
+                    }
+                    Inline::Seq(vec![
+                        Inline::text("together with "),
+                        Inline::join(
+                            partners.iter().map(|id| Inline::code(id.clone())).collect(),
+                            " and ",
+                        ),
+                    ])
+                })
+                .collect();
+            Some(Inline::Seq(vec![
+                link,
+                Inline::text(" — "),
+                Inline::join(phrases, ", or "),
+            ]))
+        })
         .collect()
 }
 

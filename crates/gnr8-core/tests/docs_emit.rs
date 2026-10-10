@@ -1366,6 +1366,48 @@ fn authentication_page_distinguishes_required_from_alternative_schemes() {
     );
 }
 
+/// Schemes an alternative requires together (`[ApiKeyAuth, TenantKey]`) are one requirement: the
+/// authentication page names each scheme's partners beside the operation, so no reader takes one
+/// key for enough. An alternative a scheme meets alone says so.
+#[test]
+fn authentication_page_shows_schemes_required_together() {
+    let mut value = bookstore_json();
+    value["security"].as_array_mut().unwrap().push(
+        json!({"id": "TenantKey", "kind": "apiKey", "location": "header", "name": "X-Tenant"}),
+    );
+    value["security_requirements"] = json!([{"schemes": ["ApiKeyAuth", "TenantKey"]}]);
+    value["operation_security"] = json!([{
+        "operation_id": "health",
+        "alternatives": [{"schemes": ["ApiKeyAuth"]}, {"schemes": ["ApiKeyAuth", "TenantKey"]}]
+    }]);
+    let pages = render(&graph_of(value), &[]);
+    let text = page(&pages, "authentication.md");
+    let api_key =
+        &text[text.find("## `ApiKeyAuth`").unwrap()..text.find("## `TenantKey`").unwrap()];
+    assert!(
+        api_key.contains(
+            "Required by:\n\n- [`listBooks`](operations/list-books.md) — together with `TenantKey`\n"
+        ),
+        "{api_key}"
+    );
+    assert!(
+        api_key
+            .contains("- [`health`](operations/health.md) — alone, or together with `TenantKey`\n"),
+        "{api_key}"
+    );
+    let tenant = &text[text.find("## `TenantKey`").unwrap()..];
+    assert!(
+        tenant.contains("- [`listBooks`](operations/list-books.md) — together with `ApiKeyAuth`\n"),
+        "{tenant}"
+    );
+    assert!(
+        tenant.contains(
+            "Accepted by, as one of their alternatives:\n\n- [`health`](operations/health.md) — together with `ApiKeyAuth`\n"
+        ),
+        "{tenant}"
+    );
+}
+
 /// An inline object's fields are field facts `openapi.yaml` publishes too, so the schema page
 /// lists them as rows of their own under a dotted name (`[]` for an array's items), with every fact
 /// a top-level field gets (D1).
