@@ -103,6 +103,12 @@ fn longest_backtick_run(text: &str) -> usize {
 }
 
 /// One pipe-table row; `|` inside a cell is escaped so it cannot end the cell.
+///
+/// Every `|` gets one backslash, whatever precedes it: GitHub-flavoured Markdown splits a row only at
+/// a `|` with no backslash before it, and takes that one backslash off again before it reads the
+/// cell's inlines — cmark-gfm and markdown-it alike. So a cell whose Markdown holds `a\|b` is printed
+/// `a\\|b`, and its inlines read `a\|b` exactly as the cell held it: a code span (a `pattern` such as
+/// `a\|b`) shows the backslash. Doubling the backslash before the pipe would end the cell there.
 pub(crate) fn table_row(cells: &[String]) -> String {
     let mut out = String::from("|");
     for cell in cells {
@@ -143,6 +149,8 @@ mod tests {
             table_row(&[one_line("x | y"), String::new()]),
             "| x \\| y |  |\n"
         );
+        // A backslash already before the pipe stays; the pipe still gets its own.
+        assert_eq!(table_row(&[code_span("a\\|b")]), "| `a\\\\|b` |\n");
     }
 
     #[test]

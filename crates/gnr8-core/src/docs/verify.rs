@@ -320,12 +320,15 @@ pub(crate) fn plan_units(
     })
 }
 
-/// The snippets of every sampled operation for one sibling SDK, as one compilable file: the docs
-/// model built for that SDK alone, and its unit.
+/// One sibling SDK's compile unit, from a docs model built for that SDK alone in the `StaticDocs`
+/// view: every entry names its `StaticDocs` page and, when the SDK writes its docs, the SDK's own
+/// `README.md` and `reference.md` too. `gnr8 verify` builds its units with `plan_units`, from one
+/// model per plan; this is the unit of a plan whose only SDK is `sdk`.
 ///
 /// The file also carries the rung-3 harness: when [`WIRE_ENV`] names a file, every sample's call
-/// statement runs against a recording transport that answers with the page's reply, and the
-/// requests are written there as [`WireRecord`]s.
+/// statement runs against a recording transport that answers with the reply its page prints — the
+/// success reply, the typed-error reply, or for an iterator the success reply ended after one page
+/// — and the requests are written there as [`WireRecord`]s.
 ///
 /// # Errors
 ///
