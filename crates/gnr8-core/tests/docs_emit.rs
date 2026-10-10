@@ -246,15 +246,7 @@ fn try_render(
 }
 
 fn render(graph: &ApiGraph, siblings: &[BuiltinTarget]) -> BTreeMap<String, String> {
-    let pages = try_render(graph, siblings).expect("StaticDocs must generate");
-    if let Ok(dir) = std::env::var("DOCS_DUMP") {
-        for (path, text) in &pages {
-            let target = std::path::Path::new(&dir).join(path);
-            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-            std::fs::write(target, text).unwrap();
-        }
-    }
-    pages
+    try_render(graph, siblings).expect("StaticDocs must generate")
 }
 
 fn page<'a>(pages: &'a BTreeMap<String, String>, path: &str) -> &'a str {

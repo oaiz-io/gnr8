@@ -3835,7 +3835,7 @@ fn is_go_file(path: &str) -> bool {
 ///
 /// Returns [`CoreError::Config`] if `module`'s last segment yields no valid Go identifier (no ASCII
 /// letter to anchor it).
-fn sdk_package(module: &str) -> Result<String, CoreError> {
+pub(crate) fn sdk_package(module: &str) -> Result<String, CoreError> {
     let last = module.rsplit('/').next().unwrap_or("");
     let kept: String = last
         .chars()

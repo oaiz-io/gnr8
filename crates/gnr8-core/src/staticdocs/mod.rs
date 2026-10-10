@@ -17,11 +17,14 @@ use crate::sdk::builtins::{PlanTargets, StaticDocs};
 use crate::sdk::Artifacts;
 use crate::CoreError;
 
+mod example;
 mod links;
 mod markdown;
 mod nav;
 mod page;
+pub mod snippets;
 
+use example::DocsSdk;
 use links::LinkRegistry;
 use nav::{NavModel, INDEX_PAGE, LLMS_TXT};
 use page::Site;
@@ -46,7 +49,18 @@ pub(crate) fn generate(
     validate(decl, plan)?;
     let projected = crate::graph::projection::for_generation(ir)?;
     let graph = &*projected;
-    let pages = render(graph)?;
+    // Code samples cover exactly the SDK targets the same plan declares, in plan order.
+    let sdks = plan
+        .sdks()
+        .filter(|sdk| sdk.language() == crate::verify::ContractTestLanguage::Go)
+        .map(|sdk| {
+            Ok(DocsSdk {
+                sdk,
+                identity: snippets::consumer_identity(sdk)?,
+            })
+        })
+        .collect::<Result<Vec<_>, CoreError>>()?;
+    let pages = render(graph, &sdks)?;
     let dir = decl.dir.trim_end_matches('/');
     for (path, text) in pages {
         out.create(format!("{dir}/{path}"), text)?;
@@ -55,7 +69,7 @@ pub(crate) fn generate(
 }
 
 /// Render every page, keyed by docs-relative path, and run rung 0 over the result.
-fn render(graph: &ApiGraph) -> Result<BTreeMap<String, String>, CoreError> {
+fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, String>, CoreError> {
     let nav = NavModel::build(graph)?;
     let consumers = schema_consumers(graph)
         .operations
@@ -85,7 +99,9 @@ fn render(graph: &ApiGraph) -> Result<BTreeMap<String, String>, CoreError> {
     let mut operation_pages = 0;
     for op in &graph.operations {
         let path = nav.operation_page(&op.id)?.to_string();
-        let text = page::render_operation(&site, op, "", &mut links)?;
+        let sampled = crate::verify::sample_operation(op, graph)?;
+        let example = example::render_example(graph, op, &sampled, sdks)?;
+        let text = page::render_operation(&site, op, &example, &mut links)?;
         operation_pages += 1;
         pages.insert(path, text);
     }

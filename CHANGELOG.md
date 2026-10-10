@@ -15,6 +15,17 @@ must move the minor version.
   an arm. The host/worker protocol is now version 9, so a worker and CLI cannot silently disagree
   about the stage-plan shape.
 
+### Added
+
+- `StaticDocs::new().to(dir)` writes a deterministic Markdown reference — index, group, operation and
+  schema pages, and `llms.txt` — with an HTTP example and a Go call on every operation page. Names
+  are spelled by the Go SDK emitter's own functions, and every sample value — request and canned
+  response — satisfies the declared constraints and any format gnr8 maps to a well-known scalar (an
+  enum member is printed as declared). An operation or SDK with no sample prints the reason, and so
+  does a canned reply that is refused. An operation with no reply to show — a file download, no
+  success status, or a first success status outside 2xx — prints neither a reply nor a note.
+  Generation fails on a missing page or broken internal link.
+
 ### Fixed
 
 - Contract-test sample values — request inputs and canned success replies — now satisfy declared

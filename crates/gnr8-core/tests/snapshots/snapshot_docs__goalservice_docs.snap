@@ -1,0 +1,518 @@
+---
+source: crates/gnr8-core/tests/snapshot_docs.rs
+expression: tree
+---
+--- index.md ---
+# goalservice
+
+- Base path: `/goal`
+
+## Operations
+
+- [`createGoal`](operations/create-goal.md) — `POST /goal/` — Creates a goal for the calling actor.
+- [`listGoals`](operations/list-goals.md) — `GET /goal/list` — Returns a page of goals for the calling actor.
+- [`deleteGoal`](operations/delete-goal.md) — `DELETE /goal/{uuid}` — Permanently removes one goal.
+- [`updateGoal`](operations/update-goal.md) — `PUT /goal/{uuid}` — Replaces the mutable fields of one goal.
+
+## Schemas
+
+- [`CommandMessage`](schemas/command-message.md)
+- [`CommandMessageWithUUID`](schemas/command-message-with-uuid.md)
+- [`CreateGoalInput`](schemas/create-goal-input.md)
+- [`GoalAnalyticsQueryInput`](schemas/goal-analytics-query-input.md)
+- [`GoalAnalyticsQueryOutput`](schemas/goal-analytics-query-output.md)
+- [`GoalResponse`](schemas/goal-response.md)
+- [`HttpError`](schemas/http-error.md)
+- [`ListGoalsOutput`](schemas/list-goals-output.md)
+- [`TargetDirection`](schemas/target-direction.md)
+- [`UpdateGoalInput`](schemas/update-goal-input.md)
+--- llms.txt ---
+# goalservice
+
+## Operations
+
+- [createGoal](operations/create-goal.md): Creates a goal for the calling actor.
+- [listGoals](operations/list-goals.md): Returns a page of goals for the calling actor.
+- [deleteGoal](operations/delete-goal.md): Permanently removes one goal.
+- [updateGoal](operations/update-goal.md): Replaces the mutable fields of one goal.
+
+## Schemas
+
+- [CommandMessage](schemas/command-message.md)
+- [CommandMessageWithUUID](schemas/command-message-with-uuid.md)
+- [CreateGoalInput](schemas/create-goal-input.md)
+- [GoalAnalyticsQueryInput](schemas/goal-analytics-query-input.md)
+- [GoalAnalyticsQueryOutput](schemas/goal-analytics-query-output.md)
+- [GoalResponse](schemas/goal-response.md)
+- [HttpError](schemas/http-error.md)
+- [ListGoalsOutput](schemas/list-goals-output.md)
+- [TargetDirection](schemas/target-direction.md)
+- [UpdateGoalInput](schemas/update-goal-input.md)
+--- operations/create-goal.md ---
+# `createGoal`
+
+`POST /goal/`
+
+Creates a goal for the calling actor.
+
+The goal starts in the pending state and is assigned a server-generated
+identifier, which is returned in the response.
+
+## Authentication
+
+- `ApiKeyAuth` (API key in header `X-API-Key`)
+
+## Request body
+
+Required: yes
+
+| Media type | Schema |
+| --- | --- |
+| `application/json` | [`CreateGoalInput`](../schemas/create-goal-input.md) |
+
+## Responses
+
+| Status | Body | Media types | Headers | Description |
+| --- | --- | --- | --- | --- |
+| `201` | [`CommandMessageWithUUID`](../schemas/command-message-with-uuid.md) | `application/json` |  |  |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |  |  |
+
+## Example
+
+Values are sampled from the schema and satisfy its declared constraints. Credentials are placeholders — `{apiKey}`, `{token}`, `{base64(username:password)}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+POST /goal/ HTTP/1.1
+content-type: application/json
+x-api-key: {apiKey}
+
+{
+  "analyticsQuery": {
+    "metric": "gnr8"
+  },
+  "name": "gnr8"
+}
+```
+
+```http
+HTTP/1.1 201
+content-type: application/json
+
+{
+  "message": "gnr8",
+  "uuid": "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234"
+}
+```
+
+### Go — `example.com/goalservice/sdk`
+
+```go
+import (
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.CreateGoal(ctx, sdk.CreateGoalInput{AnalyticsQuery: sdk.Ptr[sdk.GoalAnalyticsQueryInput](sdk.GoalAnalyticsQueryInput{Metric: "gnr8"}), Name: "gnr8"})
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+--- operations/delete-goal.md ---
+# `deleteGoal`
+
+`DELETE /goal/{uuid}`
+
+Permanently removes one goal.
+
+## Authentication
+
+- `ApiKeyAuth` (API key in header `X-API-Key`)
+
+## Parameters
+
+### Path
+
+| Name | Type | Required | Default | Constraints | Description |
+| --- | --- | --- | --- | --- | --- |
+| `uuid` | `string` | yes |  |  |  |
+
+## Responses
+
+| Status | Body | Media types | Headers | Description |
+| --- | --- | --- | --- | --- |
+| `200` | [`CommandMessage`](../schemas/command-message.md) | `application/json` |  |  |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |  |  |
+
+## Example
+
+Values are sampled from the schema and satisfy its declared constraints. Credentials are placeholders — `{apiKey}`, `{token}`, `{base64(username:password)}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+DELETE /goal/gnr8 HTTP/1.1
+x-api-key: {apiKey}
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "message": "gnr8"
+}
+```
+
+### Go — `example.com/goalservice/sdk`
+
+```go
+import (
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.DeleteGoal(ctx, "gnr8")
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+--- operations/list-goals.md ---
+# `listGoals`
+
+`GET /goal/list`
+
+Returns a page of goals for the calling actor.
+
+Results are ordered newest first and paginated with an opaque cursor. Pass the
+cursor from the previous page to continue; omit it to start from the beginning.
+
+## Authentication
+
+- `ApiKeyAuth` (API key in header `X-API-Key`)
+
+## Parameters
+
+### Query
+
+| Name | Type | Required | Default | Constraints | Description |
+| --- | --- | --- | --- | --- | --- |
+| `aggregation` | `string` | no |  |  |  |
+| `cursor` | `string` | no |  |  |  |
+| `page_size` | `string` | no |  |  |  |
+
+## Responses
+
+| Status | Body | Media types | Headers | Description |
+| --- | --- | --- | --- | --- |
+| `200` | [`ListGoalsOutput`](../schemas/list-goals-output.md) | `application/json` |  |  |
+
+## Example
+
+Values are sampled from the schema and satisfy its declared constraints. Credentials are placeholders — `{apiKey}`, `{token}`, `{base64(username:password)}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+GET /goal/list?aggregation=gnr8&cursor=gnr8&page_size=gnr8 HTTP/1.1
+x-api-key: {apiKey}
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "goals": [
+    {
+      "analyticsQuery": {
+        "includePast": true,
+        "metric": "gnr8",
+        "windowDays": 7
+      },
+      "createdAt": "2024-01-02T03:04:05Z",
+      "description": "gnr8",
+      "metadata": {},
+      "name": "gnr8",
+      "targetDirection": "gte",
+      "targetValue": 1.5,
+      "uuid": "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234"
+    }
+  ],
+  "nextCursor": "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234",
+  "pageSize": 7,
+  "total": 7
+}
+```
+
+### Go — `example.com/goalservice/sdk`
+
+```go
+import (
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.ListGoals(ctx, sdk.ListGoalsParams{Aggregation: sdk.Ptr[string]("gnr8"), Cursor: sdk.Ptr[string]("gnr8"), PageSize: sdk.Ptr[string]("gnr8")})
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+--- operations/update-goal.md ---
+# `updateGoal`
+
+`PUT /goal/{uuid}`
+
+Replaces the mutable fields of one goal.
+
+The goal is identified by its uuid. Fields omitted from the payload are left
+unchanged; the goal's identifier and creation time are never modified.
+
+## Authentication
+
+- `ApiKeyAuth` (API key in header `X-API-Key`)
+
+## Parameters
+
+### Path
+
+| Name | Type | Required | Default | Constraints | Description |
+| --- | --- | --- | --- | --- | --- |
+| `uuid` | `string` | yes |  |  |  |
+
+## Request body
+
+Required: yes
+
+| Media type | Schema |
+| --- | --- |
+| `application/json` | [`UpdateGoalInput`](../schemas/update-goal-input.md) |
+
+## Responses
+
+| Status | Body | Media types | Headers | Description |
+| --- | --- | --- | --- | --- |
+| `200` | [`CommandMessage`](../schemas/command-message.md) | `application/json` |  |  |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |  |  |
+
+## Example
+
+Values are sampled from the schema and satisfy its declared constraints. Credentials are placeholders — `{apiKey}`, `{token}`, `{base64(username:password)}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+PUT /goal/gnr8 HTTP/1.1
+content-type: application/json
+x-api-key: {apiKey}
+
+{}
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "message": "gnr8"
+}
+```
+
+### Go — `example.com/goalservice/sdk`
+
+```go
+import (
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.UpdateGoal(ctx, "gnr8", sdk.UpdateGoalInput{})
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+--- schemas/command-message-with-uuid.md ---
+# `CommandMessageWithUUID`
+
+Kind: object
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `message` | `string` | yes | no |  |  |  |  |
+| `uuid` | `string` (`uuid`) | yes | no |  |  |  |  |
+--- schemas/command-message.md ---
+# `CommandMessage`
+
+Kind: object
+
+## Used by
+
+- [`deleteGoal`](../operations/delete-goal.md)
+- [`updateGoal`](../operations/update-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `message` | `string` | yes | no |  |  |  |  |
+--- schemas/create-goal-input.md ---
+# `CreateGoalInput`
+
+Kind: object
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryInput`](goal-analytics-query-input.md) | yes | yes |  |  |  |  |
+| `description` | `string` | no | yes |  |  | Longer explanation |  |
+| `name` | `string` | yes | no |  |  | Short human-readable goal name |  |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | yes |  |  |  |  |
+| `targetValue` | `number` | no | yes |  |  |  |  |
+| `workflowChainIds` | array of `string` (`uuid`) | no | yes |  |  |  |  |
+--- schemas/goal-analytics-query-input.md ---
+# `GoalAnalyticsQueryInput`
+
+Kind: object
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+- [`updateGoal`](../operations/update-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `includePast` | `boolean` | no | yes |  |  | Whether to include historical data points |  |
+| `metric` | `string` | yes | no |  |  | Analytics metric to evaluate |  |
+| `windowDays` | `integer` | no | yes |  |  | Rolling window size in days |  |
+--- schemas/goal-analytics-query-output.md ---
+# `GoalAnalyticsQueryOutput`
+
+Kind: object
+
+## Used by
+
+- [`listGoals`](../operations/list-goals.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `includePast` | `boolean` | no | no |  |  | Whether to include historical data points |  |
+| `metric` | `string` | yes | no |  |  | Analytics metric to evaluate |  |
+| `windowDays` | `integer` | yes | no |  |  | Rolling window size in days |  |
+--- schemas/goal-response.md ---
+# `GoalResponse`
+
+Kind: object
+
+## Used by
+
+- [`listGoals`](../operations/list-goals.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryOutput`](goal-analytics-query-output.md) | yes | no |  |  |  |  |
+| `createdAt` | `string` (`date-time`) | yes | no |  |  |  |  |
+| `description` | `string` | no | no |  |  |  |  |
+| `metadata` | `any` | no | no |  |  |  |  |
+| `name` | `string` | yes | no |  |  |  |  |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | no |  |  |  |  |
+| `targetValue` | `number` | no | no |  |  |  |  |
+| `uuid` | `string` (`uuid`) | yes | no |  |  |  |  |
+--- schemas/http-error.md ---
+# `HttpError`
+
+Kind: object
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+- [`deleteGoal`](../operations/delete-goal.md)
+- [`updateGoal`](../operations/update-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `hints` | array of `string` | no | no |  |  |  | `hint 1,hint 2` |
+| `message` | `string` | yes | no |  |  |  | `error message` |
+| `slug` | `string` | no | no |  |  |  | `error-slug` |
+--- schemas/list-goals-output.md ---
+# `ListGoalsOutput`
+
+Kind: object
+
+## Used by
+
+- [`listGoals`](../operations/list-goals.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `goals` | array of [`GoalResponse`](goal-response.md) | yes | yes |  |  |  |  |
+| `nextCursor` | `string` (`uuid`) | no | no |  |  |  |  |
+| `pageSize` | `integer` | yes | no |  |  |  |  |
+| `total` | `integer` | yes | no |  |  |  |  |
+--- schemas/target-direction.md ---
+# `TargetDirection`
+
+Kind: enum
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+- [`listGoals`](../operations/list-goals.md)
+- [`updateGoal`](../operations/update-goal.md)
+
+## Members
+
+- `gte`
+- `lte`
+--- schemas/update-goal-input.md ---
+# `UpdateGoalInput`
+
+Kind: object
+
+## Used by
+
+- [`updateGoal`](../operations/update-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryInput`](goal-analytics-query-input.md) | no | yes |  |  |  |  |
+| `description` | `string` | no | yes |  |  | Updated explanation |  |
+| `name` | `string` | no | yes |  |  | Updated goal name |  |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | yes |  |  |  |  |
+| `targetValue` | `number` | no | yes |  |  |  |  |
+| `workflowChainIds` | array of `string` (`uuid`) | no | yes |  |  |  |  |

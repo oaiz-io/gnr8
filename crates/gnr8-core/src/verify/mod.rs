@@ -536,64 +536,11 @@ impl<'op> Candidate<'op> {
     }
 
     fn query_pairs(&self) -> Vec<(String, Vec<String>)> {
-        let mut pairs: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for param in self.params.iter().filter(|p| p.location == "query") {
-            pairs
-                .entry(param.name.clone())
-                .or_default()
-                .push(param.wire.clone());
-        }
-        for auth in &self.auth {
-            if let SampleCredential::ApiKeyQuery { name } = &auth.credential {
-                pairs
-                    .entry(name.clone())
-                    .or_default()
-                    .push(CONTRACT_TEST_CREDENTIAL.to_string());
-            }
-        }
-        pairs.into_iter().collect()
+        request_query(&self.params, &self.auth, &WireCredentials::contract())
     }
 
     fn header_pairs(&self, body: Option<&SampleBody>) -> Vec<(String, String)> {
-        let mut headers: BTreeMap<String, String> = BTreeMap::new();
-        for param in self.params.iter().filter(|p| p.location == "header") {
-            headers.insert(param.name.to_ascii_lowercase(), param.wire.clone());
-        }
-        if let Some(body) = body {
-            headers.insert("content-type".to_string(), body.content_type.clone());
-        }
-        for auth in &self.auth {
-            match &auth.credential {
-                SampleCredential::ApiKeyHeader { name } => {
-                    headers.insert(
-                        name.to_ascii_lowercase(),
-                        CONTRACT_TEST_CREDENTIAL.to_string(),
-                    );
-                }
-                SampleCredential::Bearer => {
-                    headers.insert(
-                        "authorization".to_string(),
-                        format!("Bearer {CONTRACT_TEST_BEARER}"),
-                    );
-                }
-                SampleCredential::Basic => {
-                    headers.insert(
-                        "authorization".to_string(),
-                        format!(
-                            "Basic {}",
-                            base64_encode(
-                                format!(
-                                    "{CONTRACT_TEST_BASIC_USER}:{CONTRACT_TEST_BASIC_PASSWORD}"
-                                )
-                                .as_bytes()
-                            )
-                        ),
-                    );
-                }
-                SampleCredential::ApiKeyQuery { .. } => {}
-            }
-        }
-        headers.into_iter().collect()
+        request_headers(&self.params, body, &self.auth, &WireCredentials::contract())
     }
 
     fn case(
@@ -868,8 +815,97 @@ fn redirect_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
     Vec::new()
 }
 
+/// The credential values one request carries on the wire.
+///
+/// A contract case sends the contract constants; a docs page prints placeholders, because the reader
+/// supplies their own. Both go through [`request_query`] and [`request_headers`], so the request a page
+/// prints and the request a contract case asserts are one derivation with two sets of values.
+pub(crate) struct WireCredentials {
+    /// The API key, in whichever header or query parameter the scheme names.
+    pub(crate) api_key: String,
+    /// The bearer token after `Bearer `.
+    pub(crate) bearer: String,
+    /// The basic credentials after `Basic `.
+    pub(crate) basic: String,
+}
+
+impl WireCredentials {
+    /// The constants every generated contract test configures and expects.
+    pub(crate) fn contract() -> Self {
+        Self {
+            api_key: CONTRACT_TEST_CREDENTIAL.to_string(),
+            bearer: CONTRACT_TEST_BEARER.to_string(),
+            basic: base64_encode(
+                format!("{CONTRACT_TEST_BASIC_USER}:{CONTRACT_TEST_BASIC_PASSWORD}").as_bytes(),
+            ),
+        }
+    }
+}
+
+/// The query parameters one request carries, sorted by name: sampled query parameters, then an
+/// API key a query-parameter scheme sends.
+pub(crate) fn request_query(
+    params: &[SampleParam],
+    auth: &[SampleAuth],
+    credentials: &WireCredentials,
+) -> Vec<(String, Vec<String>)> {
+    let mut pairs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for param in params.iter().filter(|p| p.location == "query") {
+        pairs
+            .entry(param.name.clone())
+            .or_default()
+            .push(param.wire.clone());
+    }
+    for auth in auth {
+        if let SampleCredential::ApiKeyQuery { name } = &auth.credential {
+            pairs
+                .entry(name.clone())
+                .or_default()
+                .push(credentials.api_key.clone());
+        }
+    }
+    pairs.into_iter().collect()
+}
+
+/// The request headers one request must carry, lowercase names, sorted.
+pub(crate) fn request_headers(
+    params: &[SampleParam],
+    body: Option<&SampleBody>,
+    auth: &[SampleAuth],
+    credentials: &WireCredentials,
+) -> Vec<(String, String)> {
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
+    for param in params.iter().filter(|p| p.location == "header") {
+        headers.insert(param.name.to_ascii_lowercase(), param.wire.clone());
+    }
+    if let Some(body) = body {
+        headers.insert("content-type".to_string(), body.content_type.clone());
+    }
+    for auth in auth {
+        match &auth.credential {
+            SampleCredential::ApiKeyHeader { name } => {
+                headers.insert(name.to_ascii_lowercase(), credentials.api_key.clone());
+            }
+            SampleCredential::Bearer => {
+                headers.insert(
+                    "authorization".to_string(),
+                    format!("Bearer {}", credentials.bearer),
+                );
+            }
+            SampleCredential::Basic => {
+                headers.insert(
+                    "authorization".to_string(),
+                    format!("Basic {}", credentials.basic),
+                );
+            }
+            SampleCredential::ApiKeyQuery { .. } => {}
+        }
+    }
+    headers.into_iter().collect()
+}
+
 /// Join the base path and the operation path, substituting sampled path parameters.
-fn absolute_path(base_path: &str, path: &str, params: &[SampleParam]) -> String {
+pub(crate) fn absolute_path(base_path: &str, path: &str, params: &[SampleParam]) -> String {
     let base = base_path.trim_end_matches('/');
     let joined = if path.starts_with('/') {
         format!("{base}{path}")
@@ -929,7 +965,7 @@ fn snake_case(value: &str) -> String {
 }
 
 /// Percent-encode a path segment the way every generated client encodes one.
-fn percent_encode(value: &str) -> String {
+pub(crate) fn percent_encode(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {

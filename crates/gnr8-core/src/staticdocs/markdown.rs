@@ -22,6 +22,8 @@ pub(crate) const REQUEST_BODY: &str = "Request body";
 pub(crate) const RESPONSES: &str = "Responses";
 /// `## Example` on an operation page.
 pub(crate) const EXAMPLE: &str = "Example";
+/// `### HTTP` inside the example.
+pub(crate) const HTTP: &str = "HTTP";
 /// `## Used by` on a schema page.
 pub(crate) const USED_BY: &str = "Used by";
 /// `## Fields` on an object schema page.
@@ -53,6 +55,7 @@ pub(crate) const FIXED_HEADINGS: &[&str] = &[
     REQUEST_BODY,
     RESPONSES,
     EXAMPLE,
+    HTTP,
     USED_BY,
     FIELDS,
     MEMBERS,

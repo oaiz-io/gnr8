@@ -2562,8 +2562,6 @@ fn validate_request_body_schema(
 /// the SDK package, and the docs target's code samples, which are written from a consumer's code.
 /// The mode is the only difference between them.
 #[derive(Debug, Clone)]
-// `Consumer` is constructed by the docs target's code samples, which land with the docs examples.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum Qualify<'a> {
     /// Inside the SDK package — the contract tests (unchanged output).
     InPackage,

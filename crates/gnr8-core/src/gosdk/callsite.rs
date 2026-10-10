@@ -22,9 +22,12 @@ use crate::verify::{
 use crate::CoreError;
 
 use super::emit::{
-    exported, go_field_emissions, go_pointer_depth, go_request_body_variant_names,
-    go_struct_field_type, go_type_in, operation_method_name, ordered_path_params,
+    go_field_emissions, go_pointer_depth, go_request_body_variant_names, go_struct_field_type,
+    go_type_in, operation_method_name, ordered_path_params,
 };
+
+/// The exported Go identifier the SDK emits for a name, for code that names one beside a call.
+pub(crate) use super::emit::exported;
 
 /// The Go standard-library import a rendered date-time literal needs.
 pub(crate) const TIME_IMPORT: &str = "time";
