@@ -365,6 +365,9 @@ must move the minor version.
 - A docs page whose first request representation leaves a constraint unmet (an unmet `pattern`,
   say) takes the first representation that meets every constraint instead of refusing the
   operation or dropping the body.
+- The OpenAPI source documentation now states that a server's `variables` are not carried: the
+  importer reads a server's path with each variable's `default`, and `openapi.yaml` publishes the
+  server URL without `variables`.
 
 ## 0.18.0 — 2026-10-10
 
