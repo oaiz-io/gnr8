@@ -46,6 +46,12 @@ class OrderInput(BaseModel):
 
     def to_dict(self) -> dict[str, Any]:
         _data = self.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if self.coupon is None and "coupon" in self.model_fields_set:
+            _data["coupon"] = None
+        if self.discount is None and "discount" in self.model_fields_set:
+            _data["discount"] = None
+        if self.note is None and "note" in self.model_fields_set:
+            _data["note"] = None
         _data["price"] = self.price.to_dict()
         return _data
 

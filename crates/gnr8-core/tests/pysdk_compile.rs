@@ -2794,3 +2794,135 @@ fn nested_models_round_trip_through_every_shape_in_both_styles() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A PATCH-shaped model: optional nullable keys (`name`, `class`, a list of models) beside an
+/// optional key that is not nullable (`tag`).
+const OPTIONAL_NULLABLE_SPEC: &str = r##"openapi: 3.0.3
+info: { title: Patch, version: 1.0.0 }
+components:
+  schemas:
+    Inner:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+    Patch:
+      type: object
+      properties:
+        name: { type: string, nullable: true }
+        class: { type: string, nullable: true }
+        tag: { type: string }
+        items: { type: array, nullable: true, items: { $ref: "#/components/schemas/Inner" } }
+paths:
+  /p:
+    patch:
+      operationId: patchP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Patch" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Patch" }
+"##;
+
+/// What both styles send: a key left unset is no key, an explicit `None` on a nullable key is
+/// `null`, and `None` on a key that is not nullable is no key. Each payload reads back as itself.
+const OPTIONAL_NULLABLE_DRIVER: &str = r#"
+import json
+import bookstore
+
+P = bookstore.Patch
+I = bookstore.Inner
+assert P().to_dict() == {}, P().to_dict()
+assert P(name=None).to_dict() == {"name": None}, P(name=None).to_dict()
+assert P(class_=None).to_dict() == {"class": None}, P(class_=None).to_dict()
+assert P(tag=None).to_dict() == {}, P(tag=None).to_dict()
+assert P(items=None).to_dict() == {"items": None}, P(items=None).to_dict()
+built = P(name="x", tag="y", items=[I(label="b")])
+assert built.to_dict() == {"name": "x", "tag": "y", "items": [{"label": "b"}]}, built.to_dict()
+for payload in [
+    {},
+    {"name": None},
+    {"name": "x"},
+    {"class": None},
+    {"items": None},
+    {"items": [{"label": "b"}]},
+]:
+    decoded = P.from_dict(payload)
+    assert decoded.to_dict() == payload, (payload, decoded.to_dict())
+    json.dumps(decoded.to_dict())
+"#;
+
+/// Dataclass style: an optional nullable field defaults to `UNSET`, which reads as no key.
+const OPTIONAL_NULLABLE_DATACLASS_DRIVER: &str = r#"
+from bookstore.unset import UNSET
+
+assert P().name is UNSET
+assert P().tag is None
+assert P.from_dict({}).name is UNSET
+assert P.from_dict({"name": None}).name is None
+assert not UNSET
+assert repr(UNSET) == "UNSET"
+"#;
+
+/// Pydantic style: an unset field reads `None`; `model_fields_set` says whether it was set.
+const OPTIONAL_NULLABLE_PYDANTIC_DRIVER: &str = r#"
+assert P().name is None
+assert P.from_dict({}).name is None
+"#;
+
+/// An optional nullable field can be left out or sent as an explicit `null` — the PATCH that clears
+/// a value — in both model styles, and every payload reads back as itself.
+#[test]
+fn an_optional_nullable_field_sends_null_only_when_set_in_both_styles() {
+    if !python_available() {
+        eprintln!("skipping optional nullable round trip: python3 toolchain unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "unset-dataclass",
+        OPTIONAL_NULLABLE_SPEC,
+        PyModelStyle::Dataclass,
+    );
+    let driver = dir.join("unset_driver.py");
+    std::fs::write(
+        &driver,
+        format!("{OPTIONAL_NULLABLE_DRIVER}{OPTIONAL_NULLABLE_DATACLASS_DRIVER}"),
+    )
+    .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let models = std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "dataclass optional nullable fields: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if !pydantic_v2_available() {
+        eprintln!("skipping Pydantic optional nullable round trip: Pydantic v2 unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "unset-pydantic",
+        OPTIONAL_NULLABLE_SPEC,
+        PyModelStyle::Pydantic,
+    );
+    let driver = dir.join("unset_driver.py");
+    std::fs::write(
+        &driver,
+        format!("{OPTIONAL_NULLABLE_DRIVER}{OPTIONAL_NULLABLE_PYDANTIC_DRIVER}"),
+    )
+    .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let models = std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "Pydantic optional nullable fields: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

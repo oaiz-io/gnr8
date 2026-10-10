@@ -38,6 +38,8 @@ class Book(BaseModel):
     def to_dict(self) -> dict[str, Any]:
         _data = self.model_dump(mode="json", by_alias=True, exclude_none=True)
         _data["author"] = self.author.to_dict()
+        if self.rating is None and "rating" in self.model_fields_set:
+            _data["rating"] = None
         return _data
 
 
@@ -56,6 +58,8 @@ class BookFilters(BaseModel):
         _data = self.model_dump(mode="json", by_alias=True, exclude_none=True)
         if self.published is None:
             _data["published"] = None
+        if self.sort is None and "sort" in self.model_fields_set:
+            _data["sort"] = None
         return _data
 
 

@@ -111,7 +111,7 @@ fn typing_import_line(m: &ModelImports) -> Option<String> {
 /// import (`ruff` F401) — the divergence from the old fixed-header scheme. This is a bag of independent
 /// feature flags (one per importable symbol), so bools are the natural representation.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct ModelImports {
     /// `import enum` — a named `enum.Enum` class is emitted.
     enum_class: bool,
@@ -127,6 +127,9 @@ struct ModelImports {
     union: bool,
     /// The generated `MultipartFile` value type is used by a multipart request model.
     multipart_file: bool,
+    /// A field is both optional and nullable, which a dataclass defaults to `UNSET`
+    /// ([`defaults_to_unset`]).
+    unset: bool,
 }
 
 /// Accumulate the `typing` constructs a `Type` uses into [`ModelImports`] (recursing through
@@ -184,6 +187,9 @@ fn compute_model_imports(
                     if omittable || reached.field_is_nullable(field) {
                         m.optional = true;
                     }
+                    if defaults_to_unset(field, reached) {
+                        m.unset = true;
+                    }
                     if needs_alias(field, &emission.ident) || omittable {
                         m.field = true;
                     }
@@ -202,7 +208,15 @@ fn compute_model_imports(
 }
 
 /// Assemble the import header for a model file from its computed [`ModelImports`] and style.
-fn model_header(m: &ModelImports, model_style: PyModelStyle, multipart_module: &str) -> String {
+/// `multipart_module` and `unset_module` are the relative modules of the package's `multipart.py`
+/// and `unset.py`.
+fn model_header(
+    m: &ModelImports,
+    model_style: PyModelStyle,
+    multipart_module: &str,
+    unset_module: &str,
+) -> String {
+    let dataclass_unset = model_style == PyModelStyle::Dataclass && m.unset;
     let mut stdlib: Vec<String> = Vec::new();
     if m.enum_class {
         stdlib.push("import enum".to_string());
@@ -212,7 +226,12 @@ fn model_header(m: &ModelImports, model_style: PyModelStyle, multipart_module: &
             stdlib.push("from dataclasses import dataclass".to_string());
         }
     }
-    if let Some(line) = typing_import_line(m) {
+    // A dataclass field that defaults to `UNSET` is annotated `Union[<type>, Unset]`.
+    let typing = ModelImports {
+        union: m.union || dataclass_unset,
+        ..*m
+    };
+    if let Some(line) = typing_import_line(&typing) {
         stdlib.push(line);
     }
 
@@ -227,11 +246,13 @@ fn model_header(m: &ModelImports, model_style: PyModelStyle, multipart_module: &
         }
     }
 
-    let first_party = if m.multipart_file {
-        vec![format!("from {multipart_module} import MultipartFile")]
-    } else {
-        Vec::new()
-    };
+    let mut first_party = Vec::new();
+    if m.multipart_file {
+        first_party.push(format!("from {multipart_module} import MultipartFile"));
+    }
+    if dataclass_unset {
+        first_party.push(format!("from {unset_module} import UNSET, Unset"));
+    }
 
     import_block(&[
         vec!["from __future__ import annotations".to_string()],
@@ -684,7 +705,7 @@ pub(crate) fn emit_models_with_style(
         ));
     }
     let imports = compute_model_imports(&schema_refs, false)?;
-    let mut out = model_header(&imports, model_style, ".multipart");
+    let mut out = model_header(&imports, model_style, ".multipart", ".unset");
 
     // The first top-level item is separated from the import block by isort's `lines-after-imports`: two
     // blank lines before a class/enum def, but only one before a bare alias assignment (a simple
@@ -748,6 +769,7 @@ pub(crate) fn emit_model_schema(
     dep_modules: &BTreeMap<String, String>,
     directions: SchemaDirections,
     multipart_module: &str,
+    unset_module: &str,
 ) -> Result<String, CoreError> {
     // Forward-ref imports are needed only for an object model's field types. Other aliases are
     // either the builtin `bytes` type or an opaque string literal.
@@ -760,7 +782,7 @@ pub(crate) fn emit_model_schema(
         &[(schema, directions, multipart_file_schema)],
         !deps.is_empty(),
     )?;
-    let mut out = model_header(&imports, model_style, multipart_module);
+    let mut out = model_header(&imports, model_style, multipart_module, unset_module);
     if deps.is_empty() {
         // No forward-ref block: separate the class/enum from the imports by two blank lines, but a bare
         // alias assignment by only one (isort `lines-after-imports`, matching the compact path).
@@ -1203,7 +1225,9 @@ fn emit_pydantic_model(
 /// most models need. Two repairs ride on top, and both exist so a model can read back what it wrote:
 ///
 /// - a REQUIRED nullable key is one the payload always carries, so its `null` is restored after the
-///   dump drops it; and
+///   dump drops it, and an OPTIONAL nullable key set to `None` (it is in `model_fields_set`) is an
+///   explicit `null` — the PATCH that clears a value — so its `null` is restored too, while one left
+///   unset stays out; and
 /// - a nested model is re-encoded through its OWN `to_dict`, because `model_dump` walks the nesting
 ///   itself and would otherwise apply the first repair only to the outermost model.
 ///
@@ -1271,30 +1295,38 @@ fn emit_pydantic_to_dict_body(
     for repair in repairs {
         let ident = repair.field.ident.as_str();
         let wire = py_string_literal(&repair.field.field.json_name);
-        match (
-            repair.encode,
-            repair.dump_may_drop_key,
-            repair.dropped_key_may_be_null,
-        ) {
+        let set = format!("{} in self.model_fields_set", py_string_literal(ident));
+        match (repair.encode, repair.dump_may_drop_key, repair.null) {
             // The dump kept the key, so the re-encode is unconditional.
             (Some(expr), false, _) => {
                 writeln!(out, "        _data[{wire}] = {expr}").map_err(sink)?;
             }
             // A dropped key is a key the caller may legitimately leave out, so there is nothing to
             // re-encode and no `null` to put back in its place.
-            (Some(expr), true, false) => {
+            (Some(expr), true, NullRestore::Never) => {
                 writeln!(out, "        if self.{ident} is not None:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = {expr}").map_err(sink)?;
             }
             // Both repairs land on one key: re-encode what is there, restore the `null` when it is not.
-            (Some(expr), true, true) => {
+            (Some(expr), true, NullRestore::Always) => {
                 writeln!(out, "        if self.{ident} is not None:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = {expr}").map_err(sink)?;
                 writeln!(out, "        else:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
             }
+            // Both repairs on an optional key: the `null` only when the caller set it.
+            (Some(expr), true, NullRestore::WhenSet) => {
+                writeln!(out, "        if self.{ident} is not None:").map_err(sink)?;
+                writeln!(out, "            _data[{wire}] = {expr}").map_err(sink)?;
+                writeln!(out, "        elif {set}:").map_err(sink)?;
+                writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
+            }
             // Nothing nested below this key, so the restored `null` is the whole repair.
-            (None, _, _) => {
+            (None, _, NullRestore::WhenSet) => {
+                writeln!(out, "        if self.{ident} is None and {set}:").map_err(sink)?;
+                writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
+            }
+            (None, _, NullRestore::Always | NullRestore::Never) => {
                 writeln!(out, "        if self.{ident} is None:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
             }
@@ -1330,8 +1362,19 @@ struct ToDictRepair<'a> {
     encode: Option<String>,
     /// Whether `exclude_none` can drop this key, so a re-encode has to ask before touching it.
     dump_may_drop_key: bool,
-    /// Whether a dropped key is one the payload carries as an explicit `null`.
-    dropped_key_may_be_null: bool,
+    /// When a key the dump dropped is put back as an explicit `null`.
+    null: NullRestore,
+}
+
+/// When `to_dict` puts back a `null` that `model_dump(exclude_none=True)` dropped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NullRestore {
+    /// The key is not nullable: a dropped key is an absent one.
+    Never,
+    /// A required nullable key: the payload always carries it.
+    Always,
+    /// An optional nullable key: `null` when the caller set it (`model_fields_set`), absent when not.
+    WhenSet,
 }
 
 impl<'a> ToDictRepair<'a> {
@@ -1348,13 +1391,18 @@ impl<'a> ToDictRepair<'a> {
         );
         let optional = directions.model_field_is_optional(field.field);
         let nullable = directions.field_is_nullable(field.field);
+        let null = match (nullable, optional) {
+            (false, _) => NullRestore::Never,
+            (true, false) => NullRestore::Always,
+            (true, true) => NullRestore::WhenSet,
+        };
         let repair = Self {
             field,
             encode,
             dump_may_drop_key: optional || nullable,
-            dropped_key_may_be_null: !optional && nullable,
+            null,
         };
-        (repair.encode.is_some() || repair.dropped_key_may_be_null).then_some(repair)
+        (repair.encode.is_some() || repair.null != NullRestore::Never).then_some(repair)
     }
 }
 
@@ -1411,6 +1459,12 @@ fn emit_dataclass(
         // value is not itself nullable.
         let nullable = directions.field_is_nullable(field);
         let hint = py_model_field_type(&field.schema, nullable, graph, multipart_file_schema)?;
+        if defaults_to_unset(field, directions) {
+            // Optional AND nullable: `None` is the `null` the field may carry, so leaving the
+            // field out takes the separate `UNSET` default.
+            writeln!(out, "    {}: Union[{hint}, Unset] = UNSET", emission.ident).map_err(sink)?;
+            continue;
+        }
         let defaulted_hint = if nullable {
             hint
         } else {
@@ -1435,7 +1489,25 @@ fn emit_dataclass(
         let field = emission.field;
         let ident = &emission.ident;
         let wire = &field.json_name;
-        if directions.model_field_is_optional(field) {
+        if defaults_to_unset(field, directions) {
+            // Optional and nullable: an absent key is `UNSET`, a `null` is `None`, so the model
+            // sends back exactly what it read.
+            let accessor = format!("_data[\"{wire}\"]");
+            let decoded = decode_expr(&field.schema, graph, &accessor);
+            if decoded == accessor {
+                writeln!(
+                    out,
+                    "            {ident}={accessor} if \"{wire}\" in _data else UNSET,"
+                )
+                .map_err(sink)?;
+            } else {
+                writeln!(
+                    out,
+                    "            {ident}=UNSET if \"{wire}\" not in _data else ({decoded}) if {accessor} is not None else None,"
+                )
+                .map_err(sink)?;
+            }
+        } else if directions.model_field_is_optional(field) {
             // Omittable: only decode when present (and non-null), else keep the None default. The
             // conditional expression evaluates the decode lazily so a nested model still recurses.
             let decoded_present = decode_expr(&field.schema, graph, &format!("_data[\"{wire}\"]"));
@@ -1468,12 +1540,13 @@ fn emit_dataclass(
 }
 
 /// Emit a dataclass's `to_dict`: the payload the client sends for it, keyed by each field's wire name
-/// (`class`, never the `class_` attribute), with an unset omittable field left out — the wire the
-/// Pydantic style's `model_dump(by_alias=True, exclude_unset=True)` produces. A field the payload
-/// always carries keeps an explicit `None`; a nested model is encoded through its own `to_dict`.
+/// (`class`, never the `class_` attribute), with an unset omittable field left out. A field the
+/// payload always carries keeps an explicit `None`; a nested model is encoded through its own
+/// `to_dict`.
 ///
-/// A dataclass cannot tell an omittable field left unset from one set to `None`, so `None` is the
-/// absent key.
+/// An omittable field that is not nullable cannot carry `null`, so its `None` is the absent key. An
+/// omittable field that is nullable defaults to `UNSET` instead ([`defaults_to_unset`]): `UNSET` is
+/// the absent key and `None` is an explicit `null`, the PATCH that clears a value.
 fn emit_dataclass_to_dict(
     out: &mut String,
     emissions: &[PyFieldEmission<'_>],
@@ -1518,6 +1591,17 @@ fn emit_dataclass_to_dict(
     }
     for emission in optional {
         let attribute = format!("self.{}", emission.ident);
+        if defaults_to_unset(emission.field, directions) {
+            writeln!(out, "        if {attribute} is not UNSET:").map_err(sink)?;
+            writeln!(
+                out,
+                "            _data[{}] = {}",
+                py_string_literal(&emission.field.json_name),
+                encoded(emission)
+            )
+            .map_err(sink)?;
+            continue;
+        }
         let value = encode_expr(
             &emission.field.schema,
             graph,
@@ -1535,6 +1619,42 @@ fn emit_dataclass_to_dict(
     }
     writeln!(out, "        return _data").map_err(sink)?;
     Ok(())
+}
+
+/// Whether a dataclass field defaults to `UNSET`: it may be left out AND may carry `null`, so `None`
+/// alone cannot say which. The Pydantic style keeps `None` and reads `model_fields_set` instead.
+pub(crate) fn defaults_to_unset(field: &Field, directions: SchemaDirections) -> bool {
+    directions.model_field_is_optional(field) && directions.field_is_nullable(field)
+}
+
+/// Emit `unset.py` (dataclass style): the `UNSET` default of a field that may be left out and may
+/// carry `null`. A model sends a field holding `UNSET` as no key, and `None` as `null`.
+pub(crate) fn emit_unset() -> String {
+    "\
+from __future__ import annotations
+
+import enum
+
+
+class Unset(enum.Enum):
+    \"\"\"The value of an optional field the caller left out.
+
+    A model sends a field holding ``UNSET`` as no key at all, and ``None`` as an explicit ``null``.
+    Reading a reply, a key the server left out is ``UNSET`` and a ``null`` is ``None``.
+    \"\"\"
+
+    UNSET = \"UNSET\"
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return \"UNSET\"
+
+
+UNSET = Unset.UNSET
+"
+    .to_string()
 }
 
 /// Emit `errors.py`: the typed `ApiError(Exception)` with status, response metadata, and decoded body.

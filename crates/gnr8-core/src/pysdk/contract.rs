@@ -11,9 +11,10 @@
 //!
 //! The call itself is rendered by [`super::callsite`], the renderer docs code samples share.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{ApiGraph, Operation, Type};
 use crate::sdk::emit_common::{CallInputs, Qualify};
 use crate::sdk::model_style::PyModelStyle;
@@ -23,7 +24,7 @@ use crate::verify::{CaseOutcome, ContractCase, ContractTestPlan, DecodedField};
 use crate::CoreError;
 
 use super::callsite::{py_scalar, render_call};
-use super::emit::{py_field_ident, py_string_literal};
+use super::emit::{defaults_to_unset, py_field_ident, py_string_literal};
 
 /// The file name the Python SDK's contract test is emitted at.
 pub(crate) const CONTRACT_TEST_FILE: &str = "contract_test.py";
@@ -51,14 +52,25 @@ pub(crate) fn emit_contract_test(
 
     let mut models: BTreeSet<String> = BTreeSet::new();
     let mut cases = String::new();
+    let mut emitted = CaseContext {
+        directions: schema_directions(graph),
+        uses_unset: false,
+    };
     for case in &plan.cases {
         let op = operation(graph, &case.operation_id)?;
         cases.push('\n');
-        cases.push_str(&emit_case(graph, op, case, model_style, &mut models)?);
+        cases.push_str(&emit_case(
+            graph,
+            op,
+            case,
+            model_style,
+            &mut models,
+            &mut emitted,
+        )?);
     }
 
     let mut out = String::new();
-    out.push_str(&header(model_module, &models));
+    out.push_str(&header(model_module, &models, emitted.uses_unset));
     out.push_str(&harness(&plan.base_url));
     out.push_str(&cases);
     out.push_str("\n\nif __name__ == \"__main__\":  # pragma: no cover\n    unittest.main()\n");
@@ -78,7 +90,13 @@ fn operation<'graph>(
         })
 }
 
-fn header(model_module: &str, models: &BTreeSet<String>) -> String {
+/// What the cases share: the graph's schema directions, and whether an assertion reads `UNSET`.
+struct CaseContext<'g> {
+    directions: BTreeMap<&'g str, SchemaDirections>,
+    uses_unset: bool,
+}
+
+fn header(model_module: &str, models: &BTreeSet<String>, uses_unset: bool) -> String {
     let mut out = String::from(
         "from __future__ import annotations\n\
          \n\
@@ -99,6 +117,9 @@ fn header(model_module: &str, models: &BTreeSet<String>) -> String {
             let _ = writeln!(out, "    {model},");
         }
         out.push_str(")\n");
+    }
+    if uses_unset {
+        out.push_str("from .unset import UNSET\n");
     }
     out
 }
@@ -188,6 +209,7 @@ fn emit_case(
     case: &ContractCase,
     model_style: PyModelStyle,
     models: &mut BTreeSet<String>,
+    emitted: &mut CaseContext<'_>,
 ) -> Result<String, CoreError> {
     let site = render_call(
         graph,
@@ -220,7 +242,7 @@ fn emit_case(
             writeln!(out, "        result = {call}").map_err(sink)?;
             emit_wire_assertions(&mut out, case)?;
             if let Some(field) = field {
-                emit_field_assertion(&mut out, graph, case, field, model_style)?;
+                emit_field_assertion(&mut out, graph, case, field, model_style, emitted)?;
             } else {
                 writeln!(out, "        del result").map_err(sink)?;
             }
@@ -283,6 +305,7 @@ fn emit_field_assertion(
     case: &ContractCase,
     field: &DecodedField,
     model_style: PyModelStyle,
+    emitted: &mut CaseContext<'_>,
 ) -> Result<(), CoreError> {
     let CaseOutcome::Decode {
         model: Some(model), ..
@@ -290,11 +313,27 @@ fn emit_field_assertion(
     else {
         return Ok(());
     };
-    let Some(ident) = py_model_field(graph, model, &field.json_name, model_style)? else {
+    let Some((ident, unset)) = py_model_field(
+        graph,
+        model,
+        &field.json_name,
+        model_style,
+        &emitted.directions,
+    )?
+    else {
         writeln!(out, "        del result").map_err(sink)?;
         return Ok(());
     };
     match &field.value {
+        // A dataclass field that may be left out and may be `null` reads an absent key as `UNSET`.
+        None if unset => {
+            emitted.uses_unset = true;
+            writeln!(
+                out,
+                "        self.assertIs(result.{ident}, UNSET, \"{ident} must decode as absent\")"
+            )
+            .map_err(sink)?;
+        }
         None => {
             writeln!(
                 out,
@@ -314,12 +353,15 @@ fn emit_field_assertion(
     Ok(())
 }
 
+/// The Python attribute of one model field, and whether it defaults to `UNSET` ([`defaults_to_unset`],
+/// dataclass style only).
 fn py_model_field(
     graph: &ApiGraph,
     model: &str,
     json_name: &str,
     model_style: PyModelStyle,
-) -> Result<Option<String>, CoreError> {
+    directions: &BTreeMap<&str, SchemaDirections>,
+) -> Result<Option<(String, bool)>, CoreError> {
     let Some(schema) = graph.schemas.iter().find(|schema| schema.name == model) else {
         return Ok(None);
     };
@@ -329,7 +371,9 @@ fn py_model_field(
     let Some(field) = fields.iter().find(|field| field.json_name == json_name) else {
         return Ok(None);
     };
-    py_field_ident(fields, field, model_style).map(Some)
+    let unset = model_style == PyModelStyle::Dataclass
+        && defaults_to_unset(field, directions_of(directions, &schema.id));
+    py_field_ident(fields, field, model_style).map(|ident| Some((ident, unset)))
 }
 
 fn py_header_dict(headers: &[(String, String)]) -> String {

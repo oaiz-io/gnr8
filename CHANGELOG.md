@@ -43,6 +43,16 @@ must move the minor version.
   or an example where the base states none (0.18.0 dropped an enum with a member of another kind,
   and a number or boolean example); and a plain string that is now a string enum, with the `null`
   its members admit. Every fact the base states is compared.
+- **A Python field that is optional and nullable can be sent as an explicit `null` again**, the
+  PATCH that clears a value. A dataclass field of that kind now defaults to `UNSET`, defined in the
+  new `unset.py` every dataclass SDK carries (`from <package>.unset import UNSET`). `UNSET` is
+  sent as no key and `None` as `null`. Its `from_dict` reads an absent key as `UNSET` and a `null`
+  as `None`, where both used to read `None`. Code that tests such a field with `is None` after
+  decoding a reply must test `is UNSET` for an absent key (`UNSET` is falsy). A Pydantic model's
+  field still reads `None`, and `to_dict` sends `null` when the field was set (`model_fields_set`).
+  An optional field that is not nullable is unchanged: its `None` is the absent key. Generated
+  dataclass `models.py`, the generated CLI's `output.py` and `contract_test.py` change for such
+  fields, and Pydantic `models.py` changes for every model with one.
 - **Each SDK's `README.md` and `reference.md` are rewritten from the docs model** that `StaticDocs`
   renders its pages from, built for that one SDK. `README.md` replaces the `Package/module` line
   with `Import` (the Go module path, the Python import package, the `package.json` name) and

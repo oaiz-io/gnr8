@@ -230,6 +230,13 @@ pub(crate) fn generate_files_with_options(
         contents: emit::emit_multipart(),
     });
 
+    if model_style == PyModelStyle::Dataclass {
+        files.push(SdkFile {
+            name: "unset.py".to_string(),
+            contents: emit::emit_unset(),
+        });
+    }
+
     if split_operations {
         files.extend(generate_operation_files(
             graph,
@@ -319,6 +326,7 @@ pub(crate) fn generate_files_with_options(
                 dep_modules,
                 directions_of(&directions, &schema.id),
                 &python_relative_module(&name, "multipart.py"),
+                &python_relative_module(&name, "unset.py"),
             )?;
             Ok(SdkFile { name, contents })
         })?);

@@ -258,6 +258,18 @@ holds its JSON value both ways. `from_dict` keeps the decoded value, and `to_dic
 field holds, so set it to the wire value (a `dict`), not a model. A Pydantic model's `from_dict` is `model_validate`, which also builds a union's model
 variant, so its `to_dict` encodes that variant too.
 
+`to_dict` leaves out an optional field the caller did not set. A field that is optional and
+nullable can also be sent as an explicit `null`, which is how a PATCH clears a value:
+
+- In a dataclass, such a field defaults to `UNSET` (`from <package>.unset import UNSET`). `UNSET`
+  is no key and `None` is `null`, so `Patch()` sends `{}` and `Patch(name=None)` sends
+  `{"name": null}`. `from_dict` reads an absent key as `UNSET` and a `null` as `None`. `UNSET` is
+  falsy. Every dataclass SDK carries `unset.py`.
+- In a Pydantic model, the field reads `None` either way, and `to_dict` sends `null` when the field
+  was set (`model_fields_set`), so `Patch(name=None)` sends `{"name": null}` and `Patch()` sends `{}`.
+
+An optional field that is not nullable cannot carry `null`, so its `None` is always the absent key.
+
 `.cli("bookstore")` emits a `<sdk dir>/cli/` subpackage — an argparse client for the same
 operations, one module per concern — and a `[project.scripts]` entry in `pyproject.toml`. It is the CLI gnr8 generates for the user's API, not
 gnr8's own command surface. See [Generated CLI](../cli/generated-cli.md).

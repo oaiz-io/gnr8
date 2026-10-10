@@ -484,6 +484,10 @@ fn emit_output_module(graph: &ApiGraph, model_style: PyModelStyle) -> Result<Str
         writeln!(out, "from pydantic import BaseModel").map_err(sink)?;
     }
     writeln!(out).map_err(sink)?;
+    // A dataclass field left out holds `UNSET`, which a result prints as `null`.
+    if model_style == PyModelStyle::Dataclass && has_object_schema(graph) {
+        writeln!(out, "from ..unset import UNSET").map_err(sink)?;
+    }
     writeln!(out, "from .config import (").map_err(sink)?;
     writeln!(out, "    DEBUG_ENV,").map_err(sink)?;
     writeln!(out, "    FORMAT_ENV,").map_err(sink)?;
@@ -993,12 +997,14 @@ fn emit_print_helpers(
         writeln!(out, "        return value.model_dump(mode=\"json\")").map_err(sink)?;
     }
     if model_style == PyModelStyle::Dataclass && has_object_schema(graph) {
+        writeln!(out, "    if value is UNSET:").map_err(sink)?;
+        writeln!(out, "        return None").map_err(sink)?;
         writeln!(
             out,
             "    if dataclasses.is_dataclass(value) and not isinstance(value, type):"
         )
         .map_err(sink)?;
-        writeln!(out, "        return dataclasses.asdict(value)").map_err(sink)?;
+        writeln!(out, "        return _jsonable(dataclasses.asdict(value))").map_err(sink)?;
     }
     writeln!(out, "    if isinstance(value, list):").map_err(sink)?;
     writeln!(out, "        return [_jsonable(item) for item in value]").map_err(sink)?;
