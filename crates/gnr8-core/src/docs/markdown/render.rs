@@ -1,0 +1,923 @@
+//! The pure Markdown renderer: a [`DocsModel`] in, every `StaticDocs` page out.
+//!
+//! It derives no fact. Each page is a sequence of blocks separated by one blank line; every fixed
+//! heading is a `const` here so one unit test can hold all of them against the invariant gate's
+//! vocabulary. Pages use the GitHub-flavoured pipe-table subset and nothing else: no raw HTML, no
+//! heading anchors.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+
+use crate::docs::build::language_name;
+use crate::docs::identity::NO_IDENTITY_NOTE;
+use crate::docs::model::{
+    DeclaredExample, DocsModel, ExampleDoc, ExampleValue, Inline, OperationDoc, PageRef, ReplyDoc,
+    SchemaBody, SchemaDoc, SdkSamples, Table,
+};
+use crate::verify::ContractTestLanguage;
+use crate::CoreError;
+
+use super::escape::{code_block, code_span, link_label, one_line, table_row};
+
+/// `## Servers` on the index.
+const SERVERS: &str = "Servers";
+/// `## Groups` on the index.
+const GROUPS: &str = "Groups";
+/// `## Operations` on the index (ungrouped operations), on group pages, and in `llms.txt`.
+const OPERATIONS: &str = "Operations";
+/// `## Schemas` on the index and in `llms.txt`.
+const SCHEMAS: &str = "Schemas";
+/// `## Authentication` on an operation page, `# Authentication` on its own page.
+const AUTHENTICATION: &str = "Authentication";
+/// `## Parameters` on an operation page.
+const PARAMETERS: &str = "Parameters";
+/// `## Request body` on an operation page.
+const REQUEST_BODY: &str = "Request body";
+/// `## Responses` on an operation page.
+const RESPONSES: &str = "Responses";
+/// `## Example` on an operation page.
+const EXAMPLE: &str = "Example";
+/// `### HTTP` inside the example.
+const HTTP: &str = "HTTP";
+/// `## Used by` on a schema page.
+const USED_BY: &str = "Used by";
+/// `## Fields` on an object schema page.
+const FIELDS: &str = "Fields";
+/// `## Members` on an enum schema page.
+const MEMBERS: &str = "Members";
+/// `## Type` on an alias schema page.
+const TYPE: &str = "Type";
+/// `# Errors`, and its link label in the reference lists.
+const ERRORS: &str = "Errors";
+/// `## Reference` on the index and in `llms.txt`: the errors and authentication pages.
+const REFERENCE: &str = "Reference";
+/// `## Pagination` on an operation page.
+const PAGINATION: &str = "Pagination";
+/// `## Diagnostics` on an operation page.
+const DIAGNOSTICS: &str = "Diagnostics";
+/// `### CLI — <program>` inside the example.
+const CLI: &str = "CLI";
+/// `### Declared examples for <status>` under the responses.
+const DECLARED_EXAMPLES_FOR: &str = "Declared examples for";
+/// `### Declared request examples` under the request body.
+const DECLARED_REQUEST_EXAMPLES: &str = "Declared request examples";
+
+/// The sentence a declared example the exchange prints carries in place of its value.
+const SENT_BY_THE_CALL: &str = "The call under Example sends this body.";
+const RECEIVED_BY_THE_CALL: &str = "The call under Example receives this reply.";
+
+/// The docs-relative path of the agent index.
+pub(crate) const LLMS_TXT: &str = "llms.txt";
+
+/// What every Example section says once, before the exchange.
+const EXAMPLE_NOTE: &str = "Values are sampled from the schema and satisfy its declared \
+constraints. Credentials are placeholders — `{apiKey}`, `{token}`, `{base64(username:password)}` — and the \
+code samples take them and the base URL as variables. Paths start at the server root; a server URL \
+with a path prefix prepends it to every path.";
+
+/// The one guarantee the error catalog states, once.
+const UNDECLARED_STATUS_GUARANTEE: &str = "Every generated client surfaces a non-success status \
+as its typed error — Go `*APIError`, Python and TypeScript `ApiError` — including a status the API \
+does not declare.";
+
+/// Render every `StaticDocs` page, keyed by docs-relative path.
+///
+/// Rung 0's link check runs over the result: every link a page prints names a page this render
+/// emits.
+///
+/// # Errors
+///
+/// Returns [`CoreError::DocsGen`] naming every dangling link and the page that printed it, or a
+/// sample that cannot be printed.
+pub(crate) fn site(model: &DocsModel) -> Result<BTreeMap<String, String>, CoreError> {
+    let mut links = Links::default();
+    let mut pages = BTreeMap::new();
+    let mut emit = |page: &PageRef, render: &dyn Fn(&mut Writer<'_>) -> Result<(), CoreError>| {
+        let path = page.path();
+        let mut writer = Writer::new(&path, &mut links);
+        render(&mut writer)?;
+        let text = writer.finish();
+        pages.insert(path, text);
+        Ok::<(), CoreError>(())
+    };
+    emit(&PageRef::index(), &|w| {
+        index(w, model);
+        Ok(())
+    })?;
+    for group in &model.groups {
+        emit(&group.page, &|w| {
+            w.heading(1, &Inline::text(group.name.clone()));
+            if let Some(summary) = &group.summary {
+                w.paragraph(&Inline::text(one_line(summary)));
+            }
+            w.heading(2, &Inline::text(OPERATIONS));
+            w.list(&operation_entries(model, &group.operations));
+            Ok(())
+        })?;
+    }
+    for op in &model.operations {
+        emit(&op.page, &|w| operation(w, model, op))?;
+    }
+    for schema in &model.schemas {
+        emit(&schema.page, &|w| {
+            schema_page(w, model, schema);
+            Ok(())
+        })?;
+    }
+    if let Some(errors) = &model.errors {
+        emit(&errors.page, &|w| {
+            w.heading(1, &Inline::text(ERRORS));
+            w.paragraph(&Inline::text(UNDECLARED_STATUS_GUARANTEE));
+            w.table(&errors.table);
+            Ok(())
+        })?;
+    }
+    if let Some(auth) = &model.auth {
+        emit(&auth.page, &|w| {
+            w.heading(1, &Inline::text(AUTHENTICATION));
+            for scheme in &auth.schemes {
+                w.heading(2, &Inline::code(scheme.id.clone()));
+                w.paragraph(&Inline::Seq(vec![scheme.kind.clone(), Inline::text(".")]));
+                if let Some(options) = &scheme.options {
+                    w.table(options);
+                }
+                for (label, users) in [
+                    ("Required by:", &scheme.required_by),
+                    (
+                        "Accepted by, as one of their alternatives:",
+                        &scheme.accepted_by,
+                    ),
+                ] {
+                    if users.is_empty() {
+                        continue;
+                    }
+                    w.paragraph(&Inline::text(label));
+                    w.list(&operation_links(model, users));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    pages.insert(LLMS_TXT.to_string(), finish(&llms_txt(model)));
+    let emitted: BTreeSet<String> = pages.keys().cloned().collect();
+    links.check(&emitted)?;
+    Ok(pages)
+}
+
+fn index(w: &mut Writer<'_>, model: &DocsModel) {
+    let api = &model.api;
+    w.heading(1, &Inline::text(api.title.trim()));
+    if let Some(description) = &api.description {
+        w.raw(description.trim_end());
+    }
+    let mut facts = Vec::new();
+    if let Some(version) = &api.version {
+        facts.push(Inline::Seq(vec![
+            Inline::text("Version: "),
+            Inline::code(version.clone()),
+        ]));
+    }
+    if let Some(base_path) = &api.base_path {
+        facts.push(Inline::Seq(vec![
+            Inline::text("Base path: "),
+            Inline::code(base_path.clone()),
+        ]));
+    }
+    w.list(&facts);
+    if !api.servers.is_empty() {
+        w.heading(2, &Inline::text(SERVERS));
+        let servers: Vec<Inline> = api
+            .servers
+            .iter()
+            .map(|server| match &server.description {
+                Some(description) => Inline::Seq(vec![
+                    Inline::code(server.url.clone()),
+                    Inline::text(format!(" — {description}")),
+                ]),
+                None => Inline::code(server.url.clone()),
+            })
+            .collect();
+        w.list(&servers);
+    }
+    if !model.groups.is_empty() {
+        w.heading(2, &Inline::text(GROUPS));
+        for group in &model.groups {
+            w.heading(
+                3,
+                &Inline::link(group.page.clone(), Inline::text(link_label(&group.name))),
+            );
+            if let Some(summary) = &group.summary {
+                w.paragraph(&Inline::text(one_line(summary)));
+            }
+            w.list(&operation_entries(model, &group.operations));
+        }
+    }
+    if !model.ungrouped.is_empty() {
+        w.heading(2, &Inline::text(OPERATIONS));
+        w.list(&operation_entries(model, &model.ungrouped));
+    }
+    if !model.schemas.is_empty() {
+        w.heading(2, &Inline::text(SCHEMAS));
+        let schemas: Vec<Inline> = model
+            .schemas
+            .iter()
+            .map(|schema| Inline::link(schema.page.clone(), Inline::code(schema.name.clone())))
+            .collect();
+        w.list(&schemas);
+    }
+    let reference = reference_pages(model);
+    if !reference.is_empty() {
+        w.heading(2, &Inline::text(REFERENCE));
+        let items: Vec<Inline> = reference
+            .into_iter()
+            .map(|(label, page)| Inline::link(page, Inline::text(label)))
+            .collect();
+        w.list(&items);
+    }
+}
+
+/// The reference pages this run emits, as `(label, page)`, in index order.
+fn reference_pages(model: &DocsModel) -> Vec<(&'static str, PageRef)> {
+    let mut out = Vec::new();
+    if let Some(errors) = &model.errors {
+        out.push((ERRORS, errors.page.clone()));
+    }
+    if let Some(auth) = &model.auth {
+        out.push((AUTHENTICATION, auth.page.clone()));
+    }
+    out
+}
+
+/// One list item per operation: its link, its request line and its summary.
+fn operation_entries(model: &DocsModel, operations: &[usize]) -> Vec<Inline> {
+    operations
+        .iter()
+        .filter_map(|index| model.operations.get(*index))
+        .map(|op| {
+            let mut entry = vec![
+                Inline::link(op.page.clone(), Inline::code(op.id.clone())),
+                Inline::text(" — "),
+                Inline::code(op.request_line.clone()),
+            ];
+            if let Some(summary) = &op.summary_line {
+                entry.push(Inline::text(format!(" — {summary}")));
+            }
+            Inline::Seq(entry)
+        })
+        .collect()
+}
+
+fn operation_links(model: &DocsModel, operations: &[usize]) -> Vec<Inline> {
+    operations
+        .iter()
+        .filter_map(|index| model.operations.get(*index))
+        .map(|op| Inline::link(op.page.clone(), Inline::code(op.id.clone())))
+        .collect()
+}
+
+fn operation(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(), CoreError> {
+    w.heading(1, &Inline::code(op.id.clone()));
+    let mut line = vec![Inline::code(op.request_line.clone())];
+    if let Some((name, page)) = &op.group {
+        line.push(Inline::Seq(vec![
+            Inline::text("Group: "),
+            Inline::link(page.clone(), Inline::text(link_label(name))),
+        ]));
+    }
+    if !op.tags.is_empty() {
+        line.push(Inline::Seq(vec![
+            Inline::text("Tags: "),
+            Inline::join(
+                op.tags
+                    .iter()
+                    .map(|tag| Inline::code(tag.clone()))
+                    .collect(),
+                ", ",
+            ),
+        ]));
+    }
+    if op.deprecated {
+        line.push(Inline::Strong(Box::new(Inline::text("Deprecated"))));
+    }
+    w.paragraph(&Inline::join(line, " · "));
+    if let Some(summary) = &op.summary {
+        w.raw(summary.text());
+    }
+    if let Some(description) = &op.description {
+        w.raw(description.text());
+    }
+    auth_section(w, op);
+    if !op.parameters.is_empty() {
+        w.heading(2, &Inline::text(PARAMETERS));
+        for (heading, table) in &op.parameters {
+            w.heading(3, &Inline::text(*heading));
+            w.table(table);
+        }
+    }
+    body_sections(w, op);
+    w.heading(2, &Inline::text(EXAMPLE));
+    example(w, model, op)?;
+    trailer(w, op);
+    Ok(())
+}
+
+/// The schemes an operation accepts, each alternative a list item.
+fn auth_section(w: &mut Writer<'_>, op: &OperationDoc) {
+    if !op.auth.is_empty() {
+        w.heading(2, &Inline::text(AUTHENTICATION));
+        if op.auth.len() > 1 {
+            w.paragraph(&Inline::text("Any one of:"));
+        }
+        let items: Vec<Inline> = op
+            .auth
+            .iter()
+            .map(|alternative| {
+                if alternative.is_empty() {
+                    return Inline::text("no credentials");
+                }
+                Inline::join(
+                    alternative
+                        .iter()
+                        .map(|scheme| {
+                            Inline::Seq(vec![
+                                Inline::link(scheme.page.clone(), Inline::code(scheme.id.clone())),
+                                Inline::text(" ("),
+                                scheme.kind.clone(),
+                                Inline::text(")"),
+                            ])
+                        })
+                        .collect(),
+                    " and ",
+                )
+            })
+            .collect();
+        w.list(&items);
+    }
+}
+
+/// The request body and responses sections, each with its declared examples.
+fn body_sections(w: &mut Writer<'_>, op: &OperationDoc) {
+    if let Some(body) = &op.request_body {
+        w.heading(2, &Inline::text(REQUEST_BODY));
+        w.paragraph(&Inline::text(format!(
+            "Required: {}",
+            if body.required { "yes" } else { "no" }
+        )));
+        w.table(&body.media);
+        if !body.examples.is_empty() {
+            w.heading(3, &Inline::text(DECLARED_REQUEST_EXAMPLES));
+            declared_examples(w, &body.examples);
+        }
+    }
+    if let Some(responses) = &op.responses {
+        w.heading(2, &Inline::text(RESPONSES));
+        w.table(&responses.table);
+        for (status, examples) in &responses.examples {
+            w.heading(
+                3,
+                &Inline::Seq(vec![
+                    Inline::text(format!("{DECLARED_EXAMPLES_FOR} ")),
+                    Inline::code(status.to_string()),
+                ]),
+            );
+            declared_examples(w, examples);
+        }
+    }
+}
+
+/// The pagination and diagnostics sections, after the example.
+fn trailer(w: &mut Writer<'_>, op: &OperationDoc) {
+    if let Some(pagination) = &op.pagination {
+        w.heading(2, &Inline::text(PAGINATION));
+        let mut items = vec![
+            Inline::Seq(vec![Inline::text("Mode: "), Inline::code(pagination.mode)]),
+            Inline::Seq(vec![
+                Inline::text("Items field: "),
+                Inline::code(pagination.items_field.clone()),
+            ]),
+        ];
+        for (label, value) in &pagination.fields {
+            items.push(Inline::Seq(vec![
+                Inline::text(format!("{label}: ")),
+                Inline::code(value.clone()),
+            ]));
+        }
+        items.push(Inline::text(pagination.termination));
+        w.list(&items);
+    }
+    if !op.diagnostics.is_empty() {
+        w.heading(2, &Inline::text(DIAGNOSTICS));
+        let items: Vec<Inline> = op
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                Inline::text(format!(
+                    "{}: {} ({})",
+                    diagnostic.severity, diagnostic.message, diagnostic.location
+                ))
+            })
+            .collect();
+        w.list(&items);
+    }
+}
+
+fn declared_examples(w: &mut Writer<'_>, examples: &[DeclaredExample]) {
+    for example in examples {
+        let mut label = vec![
+            Inline::Strong(Box::new(Inline::code(example.name.clone()))),
+            Inline::text(" ("),
+            Inline::code(example.content_type.clone()),
+            Inline::text(")"),
+        ];
+        if let Some(summary) = &example.summary {
+            label.push(Inline::text(format!(" — {summary}")));
+        }
+        w.paragraph(&Inline::Seq(label));
+        if let Some(description) = &example.description {
+            w.raw(description.text());
+        }
+        match &example.value {
+            ExampleValue::Json(value) => w.code("json", value),
+            ExampleValue::SentByTheCall => w.paragraph(&Inline::text(SENT_BY_THE_CALL)),
+            ExampleValue::ReceivedByTheCall => w.paragraph(&Inline::text(RECEIVED_BY_THE_CALL)),
+        }
+    }
+}
+
+/// The body of one operation's `## Example` section.
+fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(), CoreError> {
+    match &op.example {
+        // A refused required input refuses the operation: the reason stands in place of the
+        // exchange and of every code sample. A CLI invocation carries no sampled value, so it stays.
+        ExampleDoc::Refused(reason) => w.paragraph(&Inline::text(reason.clone())),
+        ExampleDoc::Sampled {
+            request,
+            reply,
+            per_sdk,
+        } => {
+            w.paragraph(&Inline::text(EXAMPLE_NOTE));
+            w.heading(3, &Inline::text(HTTP));
+            w.code("http", &request.page_text()?);
+            match reply {
+                ReplyDoc::Printed(reply) => w.code("http", &reply.page_text()),
+                ReplyDoc::Refused(refusal) => w.paragraph(&Inline::text(format!(
+                    "No sample response body: {refusal}."
+                ))),
+                ReplyDoc::Absent => {}
+            }
+            for (sdk, samples) in model.sdks.iter().zip(per_sdk) {
+                w.heading(
+                    3,
+                    &Inline::Seq(vec![
+                        Inline::text(format!("{} — ", language_name(sdk.language))),
+                        Inline::code(sdk.label.clone()),
+                    ]),
+                );
+                match samples {
+                    SdkSamples::NoIdentity => w.paragraph(&Inline::text(NO_IDENTITY_NOTE)),
+                    SdkSamples::Code { call } => {
+                        w.code(language_fence(call.language), &call.text);
+                    }
+                }
+            }
+        }
+    }
+    for cli in &op.cli {
+        w.heading(
+            3,
+            &Inline::Seq(vec![
+                Inline::text(format!("{CLI} — ")),
+                Inline::code(cli.program.clone()),
+            ]),
+        );
+        w.paragraph(&Inline::code(cli.invocation.clone()));
+        if !cli.examples.is_empty() {
+            w.code("sh", &cli.examples.join("\n"));
+        }
+    }
+    Ok(())
+}
+
+/// The info string a language's code blocks carry.
+pub(crate) const fn language_fence(language: ContractTestLanguage) -> &'static str {
+    match language {
+        ContractTestLanguage::Go => "go",
+        ContractTestLanguage::Python => "python",
+        ContractTestLanguage::TypeScript => "ts",
+    }
+}
+
+fn schema_page(w: &mut Writer<'_>, model: &DocsModel, schema: &SchemaDoc) {
+    w.heading(1, &Inline::code(schema.name.clone()));
+    w.paragraph(&Inline::text(format!("Kind: {}", schema.kind)));
+    if !schema.used_by.is_empty() {
+        w.heading(2, &Inline::text(USED_BY));
+        w.list(&operation_links(model, &schema.used_by));
+    }
+    match &schema.body {
+        SchemaBody::Fields(table) => {
+            w.heading(2, &Inline::text(FIELDS));
+            w.table(table);
+        }
+        SchemaBody::Members(members) => {
+            w.heading(2, &Inline::text(MEMBERS));
+            let items: Vec<Inline> = members.iter().map(|m| Inline::code(m.clone())).collect();
+            w.list(&items);
+        }
+        SchemaBody::Type(label) => {
+            w.heading(2, &Inline::text(TYPE));
+            w.paragraph(label);
+        }
+        SchemaBody::Empty => {}
+    }
+}
+
+/// Render `llms.txt`: an index for agents, in exactly the order `index.md` lists its pages.
+///
+/// Every label is escaped so a name cannot close its link early, and every summary is one line.
+fn llms_txt(model: &DocsModel) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# {}", one_line(&model.api.title));
+    if let Some(description) = model
+        .api
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    {
+        out.push('\n');
+        for line in description.lines() {
+            let _ = writeln!(out, "> {}", line.trim_end());
+        }
+    }
+    let operation_line = |out: &mut String, index: &usize| {
+        if let Some(op) = model.operations.get(*index) {
+            let _ = writeln!(
+                out,
+                "{}",
+                llms_line(&op.id, &op.page.path(), op.summary_line.as_deref())
+            );
+        }
+    };
+    for group in &model.groups {
+        let _ = writeln!(out, "\n## {}\n", one_line(&group.name));
+        let summary = group.summary.as_deref().map(one_line);
+        let _ = writeln!(
+            out,
+            "{}",
+            llms_line(&group.name, &group.page.path(), summary.as_deref())
+        );
+        for index in &group.operations {
+            operation_line(&mut out, index);
+        }
+    }
+    if !model.ungrouped.is_empty() {
+        let _ = writeln!(out, "\n## {OPERATIONS}\n");
+        for index in &model.ungrouped {
+            operation_line(&mut out, index);
+        }
+    }
+    if !model.schemas.is_empty() {
+        let _ = writeln!(out, "\n## {SCHEMAS}\n");
+        for schema in &model.schemas {
+            let _ = writeln!(
+                out,
+                "{}",
+                llms_line(&schema.name, &schema.page.path(), None)
+            );
+        }
+    }
+    let reference = reference_pages(model);
+    if !reference.is_empty() {
+        let _ = writeln!(out, "\n## {REFERENCE}\n");
+        for (label, page) in reference {
+            let _ = writeln!(out, "{}", llms_line(label, &page.path(), None));
+        }
+    }
+    out
+}
+
+fn llms_line(label: &str, page: &str, summary: Option<&str>) -> String {
+    let label = link_label(label);
+    match summary {
+        Some(summary) => format!("- [{label}]({page}): {summary}"),
+        None => format!("- [{label}]({page})"),
+    }
+}
+
+/// One page being written: its blocks, separated by one blank line, and the links it prints.
+struct Writer<'a> {
+    page: &'a str,
+    links: &'a mut Links,
+    blocks: Vec<String>,
+}
+
+impl<'a> Writer<'a> {
+    fn new(page: &'a str, links: &'a mut Links) -> Self {
+        Self {
+            page,
+            links,
+            blocks: Vec::new(),
+        }
+    }
+
+    fn inline(&mut self, inline: &Inline) -> String {
+        match inline {
+            Inline::Text(text) => text.clone(),
+            Inline::Code(text) => code_span(text),
+            Inline::Link { to, label } => {
+                let label = self.inline(label);
+                let href = self.links.href(self.page, &to.path());
+                format!("[{label}]({href})")
+            }
+            Inline::Strong(inner) => format!("**{}**", self.inline(inner)),
+            Inline::Seq(items) => items.iter().map(|item| self.inline(item)).collect(),
+        }
+    }
+
+    fn heading(&mut self, level: usize, text: &Inline) {
+        let text = self.inline(text);
+        self.blocks.push(format!("{} {text}", "#".repeat(level)));
+    }
+
+    fn paragraph(&mut self, text: &Inline) {
+        let text = self.inline(text);
+        self.blocks.push(text);
+    }
+
+    /// The user's verbatim prose, as one block.
+    fn raw(&mut self, text: &str) {
+        self.blocks.push(text.to_string());
+    }
+
+    /// A bullet list; nothing when `items` is empty.
+    fn list(&mut self, items: &[Inline]) {
+        if items.is_empty() {
+            return;
+        }
+        let lines: Vec<String> = items
+            .iter()
+            .map(|item| format!("- {}", self.inline(item)))
+            .collect();
+        self.blocks.push(lines.join("\n"));
+    }
+
+    fn table(&mut self, table: &Table) {
+        let mut out = table_row(
+            &table
+                .columns
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        );
+        out.push_str(&table_row(&vec!["---".to_string(); table.columns.len()]));
+        for row in &table.rows {
+            let cells: Vec<String> = row.iter().map(|cell| self.inline(cell)).collect();
+            out.push_str(&table_row(&cells));
+        }
+        self.blocks.push(out.trim_end_matches('\n').to_string());
+    }
+
+    fn code(&mut self, language: &str, body: &str) {
+        self.blocks.push(
+            code_block(language, body)
+                .trim_end_matches('\n')
+                .to_string(),
+        );
+    }
+
+    fn finish(self) -> String {
+        finish(&(self.blocks.join("\n\n") + "\n"))
+    }
+}
+
+/// Every relative link the pages print, and rung 0's check that each names an emitted page.
+///
+/// Links are file-level only. A heading anchor's validity would depend on the renderer's slug
+/// algorithm — a property of GitHub or a site generator, not of gnr8 — whereas a file link can be
+/// checked against the set of files this target writes, before any of them is written.
+#[derive(Debug, Default)]
+struct Links {
+    links: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Links {
+    /// The relative href from page `from` to page `to` (both docs-relative), recorded for rung 0.
+    fn href(&mut self, from: &str, to: &str) -> String {
+        self.links
+            .entry(from.to_string())
+            .or_default()
+            .insert(to.to_string());
+        relative(from, to)
+    }
+
+    /// Rung 0: every recorded link names a file in `emitted`. A dangling link is a renderer defect,
+    /// so generation fails closed rather than writing it.
+    fn check(&self, emitted: &BTreeSet<String>) -> Result<(), CoreError> {
+        let dangling: Vec<String> = self
+            .links
+            .iter()
+            .flat_map(|(from, targets)| {
+                targets
+                    .iter()
+                    .filter(|target| !emitted.contains(*target))
+                    .map(move |target| format!("{from} -> {target}"))
+            })
+            .collect();
+        if dangling.is_empty() {
+            Ok(())
+        } else {
+            Err(CoreError::DocsGen {
+                message: format!(
+                    "StaticDocs rendered a link to a page it does not emit: {}",
+                    dangling.join(", ")
+                ),
+            })
+        }
+    }
+}
+
+/// The relative path from the directory of page `from` to page `to`, both docs-relative with `/`.
+fn relative(from: &str, to: &str) -> String {
+    let from_dirs: Vec<&str> = from.split('/').collect();
+    let from_dirs = &from_dirs[..from_dirs.len().saturating_sub(1)];
+    let to_parts: Vec<&str> = to.split('/').collect();
+    let common = from_dirs
+        .iter()
+        .zip(to_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(to_parts.len().saturating_sub(1));
+    let mut parts: Vec<&str> = vec![".."; from_dirs.len() - common];
+    parts.extend(&to_parts[common..]);
+    parts.join("/")
+}
+
+/// A fenced-code-block marker: the fence character and its run length, when `line` opens or
+/// closes one (`` ``` `` or `~~~`, three or more, indented at most three spaces).
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    let fence = trimmed
+        .chars()
+        .next()
+        .filter(|ch| *ch == '`' || *ch == '~')?;
+    let run = trimmed.chars().take_while(|ch| *ch == fence).count();
+    (run >= 3).then_some((fence, run))
+}
+
+/// Tracks which lines of a page sit inside a fenced code block, for both fence kinds: a fence is
+/// closed only by the same character, at least as long, with nothing after it.
+#[derive(Default)]
+struct Fences {
+    open: Option<(char, usize)>,
+}
+
+impl Fences {
+    /// Feed one line; returns whether it is inside a fence (fence lines themselves included).
+    fn inside(&mut self, line: &str) -> bool {
+        match (self.open, fence_marker(line)) {
+            (None, Some(marker)) => {
+                self.open = Some(marker);
+                true
+            }
+            (Some((fence, run)), Some((closing, length)))
+                if closing == fence
+                    && length >= run
+                    && line.trim().chars().all(|ch| ch == fence) =>
+            {
+                self.open = None;
+                true
+            }
+            (open, _) => open.is_some(),
+        }
+    }
+}
+
+/// Normalize a rendered page: `\n` line endings, no trailing whitespace on any line, no run of more
+/// than one blank line, and exactly one trailing newline.
+pub(crate) fn finish(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut blank_run = 0;
+    let mut fences = Fences::default();
+    for line in text.replace("\r\n", "\n").lines() {
+        let line = line.trim_end();
+        let in_fence = fences.inside(line);
+        if line.is_empty() && !in_fence {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue;
+            }
+        } else {
+            blank_run = 0;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    let trimmed = out.trim_end_matches('\n');
+    format!("{}\n", trimmed.trim_start_matches('\n'))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::collections::BTreeSet;
+
+    use super::{finish, relative, Links};
+
+    /// Every fixed heading a page can print, for the vocabulary test.
+    const FIXED_HEADINGS: &[&str] = &[
+        super::SERVERS,
+        super::GROUPS,
+        super::OPERATIONS,
+        super::SCHEMAS,
+        super::AUTHENTICATION,
+        super::PARAMETERS,
+        super::REQUEST_BODY,
+        super::RESPONSES,
+        super::EXAMPLE,
+        super::HTTP,
+        super::USED_BY,
+        super::FIELDS,
+        super::MEMBERS,
+        super::TYPE,
+        super::DECLARED_REQUEST_EXAMPLES,
+        super::ERRORS,
+        super::REFERENCE,
+        super::PAGINATION,
+        super::DIAGNOSTICS,
+        "Path",
+        "Query",
+        "Header",
+        "Cookie",
+        super::CLI,
+        super::DECLARED_EXAMPLES_FOR,
+        "Go",
+        "Python",
+        "TypeScript",
+    ];
+
+    /// The AGENTS.md rule 0.3 words a doc section must not be named with. `make invariants` greps
+    /// these only as identifiers, so a heading in prose needs this test. The one 0.3 word the gate
+    /// rejects anywhere in its scope, in any case, is left out: the heading literals above sit in
+    /// this file, which is in the gate's scope, so the gate itself already fails on them.
+    const GATED: [&str; 5] = ["compat", "legacy", "migration", "baseline", "profile"];
+
+    #[test]
+    fn fixed_headings_are_invariant_gate_clean() {
+        for heading in FIXED_HEADINGS {
+            assert!(!heading.trim().is_empty(), "an empty fixed heading");
+            let lower = heading.to_ascii_lowercase();
+            for word in GATED {
+                assert!(
+                    !lower.contains(word),
+                    "heading {heading:?} uses gated word {word:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hrefs_are_relative_to_the_emitting_page() {
+        assert_eq!(relative("index.md", "operations/a.md"), "operations/a.md");
+        assert_eq!(
+            relative("operations/a.md", "schemas/b.md"),
+            "../schemas/b.md"
+        );
+        assert_eq!(relative("schemas/a.md", "schemas/b.md"), "b.md");
+        assert_eq!(relative("groups/g.md", "index.md"), "../index.md");
+    }
+
+    #[test]
+    fn dangling_link_fails_generation() {
+        let mut links = Links::default();
+        links.href("index.md", "operations/a.md");
+        links.href("operations/a.md", "schemas/missing.md");
+        let emitted: BTreeSet<String> = ["index.md", "operations/a.md"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let err = links.check(&emitted).unwrap_err().to_string();
+        assert!(
+            err.contains("operations/a.md -> schemas/missing.md"),
+            "{err}"
+        );
+        assert!(!err.contains("index.md ->"), "{err}");
+
+        let mut whole = emitted;
+        whole.insert("schemas/missing.md".to_string());
+        assert!(links.check(&whole).is_ok());
+    }
+
+    #[test]
+    fn finished_pages_have_one_trailing_newline_and_no_trailing_space() {
+        assert_eq!(finish("# a  \n\n\n\nb\n\n\n"), "# a\n\nb\n");
+        assert_eq!(finish("```\n\n\n```\n"), "```\n\n\n```\n");
+        assert_eq!(finish("~~~\n\n\n~~~\n\n\nx\n"), "~~~\n\n\n~~~\n\nx\n");
+        // A shorter or different fence does not close a block.
+        assert_eq!(finish("````\n```\n\n\n````\n"), "````\n```\n\n\n````\n");
+    }
+}

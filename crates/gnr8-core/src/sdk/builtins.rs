@@ -4619,7 +4619,7 @@ pub fn target_docs_suites(
                 docs_dir: docs.dir().trim_end_matches('/').to_string(),
                 sdk_output_path: dir.trim_end_matches('/').to_string(),
                 package: sdk_package(module)?,
-                compile_unit: crate::staticdocs::snippets::compile_unit(graph, sdk)?,
+                compile_unit: crate::docs::verify::compile_unit(graph, sdk)?,
                 cases,
                 refused,
                 go_verification,

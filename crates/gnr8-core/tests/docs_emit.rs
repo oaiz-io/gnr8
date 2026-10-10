@@ -1072,7 +1072,7 @@ fn pagination_section_only_with_a_policy() {
 /// page's `0.5` and a client's `0.50` (or `1.0` and `1`) are the same number.
 #[test]
 fn check_wire_compares_json_numbers_by_value() {
-    use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord};
+    use gnr8_engine::docs::verify::{check_wire, WireRecord};
     use gnr8_engine::verify::ContractTestLanguage;
     let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nPOST /m HTTP/1.1\ncontent-type: application/json\n\n{\n  \"ratio\": 1.0,\n  \"n\": [2, 0.5]\n}\n```\n";
     let record = |body: &str| WireRecord {
@@ -1106,7 +1106,7 @@ fn check_wire_compares_json_numbers_by_value() {
 /// different names is free.
 #[test]
 fn check_wire_compares_the_raw_query_string() {
-    use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord};
+    use gnr8_engine::docs::verify::{check_wire, WireRecord};
     use gnr8_engine::verify::ContractTestLanguage;
     let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nGET /m?a=1&a=2&b=x%20y&key={apiKey} HTTP/1.1\n```\n";
     let record = |query: &str| WireRecord {
@@ -1139,7 +1139,7 @@ fn check_wire_compares_the_raw_query_string() {
 /// when the first matches the page.
 #[test]
 fn check_operation_wire_asserts_exactly_one_request() {
-    use gnr8_engine::staticdocs::snippets::{check_operation_wire, WireRecord};
+    use gnr8_engine::docs::verify::{check_operation_wire, WireRecord};
     use gnr8_engine::verify::ContractTestLanguage;
     let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nGET /m HTTP/1.1\n```\n";
     let record = |operation: &str| WireRecord {
@@ -1431,7 +1431,7 @@ fn schema_pages_follow_every_root_and_print_every_published_format() {
 /// description happens to contain.
 #[test]
 fn check_wire_reads_the_example_section_only() {
-    use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord};
+    use gnr8_engine::docs::verify::{check_wire, WireRecord};
     use gnr8_engine::verify::ContractTestLanguage;
     let page = "# `m`\n\n### HTTP\n\n```http\nDELETE /decoy HTTP/1.1\n```\n\n## Example\n\n### HTTP\n\n```http\nGET /m HTTP/1.1\n```\n";
     let record = WireRecord {

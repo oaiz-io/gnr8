@@ -1,6 +1,6 @@
 //! Rung 2 in gnr8's own suite: every docs code sample resolves against the SDK it documents.
 //!
-//! The compile unit comes from `staticdocs::snippets::compile_unit` — the one producer of the text the
+//! The compile unit comes from `docs::verify::compile_unit` — the one producer of the text the
 //! pages print — so what compiles here is what the pages say. Go: the unit is written beside the
 //! generated SDK as an external `<pkg>_test` package and `go vet ./...` type-checks it. Returns early
 //! when `go` is absent, as `sdk_compile.rs` does.
@@ -13,9 +13,9 @@ mod docs_pipeline;
 use std::process::Command;
 
 use docs_pipeline::{temp_dir, DocsRun, SDK_DIR};
+use gnr8_engine::docs::verify::compile_unit;
 use gnr8_engine::sdk::builtins::SiblingSdk;
 use gnr8_engine::sdk::prelude::*;
-use gnr8_engine::staticdocs::snippets::compile_unit;
 
 /// Write the run's Go SDK and the compile unit into one temporary module, then `go vet` it.
 fn assert_go_unit_vets(run: &DocsRun, go: &GoSdk, label: &str) -> usize {
@@ -318,7 +318,7 @@ fn typescript_unresolvable_import_fails_rung_two() {
     );
 }
 
-use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord, WIRE_ENV};
+use gnr8_engine::docs::verify::{check_wire, WireRecord, WIRE_ENV};
 use gnr8_engine::verify::ContractTestLanguage;
 
 /// Assert every entry's recorded request equals the HTTP exchange its page prints.
@@ -546,7 +546,7 @@ fn go_rungs_two_and_three(run: &DocsRun, go: &GoSdk, label: &str) {
 
 /// Run one (possibly planted) Go unit's rungs 2 and 3 and compare every record with its page.
 fn go_unit_rungs(run: &DocsRun, go: &GoSdk, label: &str, text: &str, entries: usize) {
-    let unit = gnr8_engine::staticdocs::snippets::CompileUnit {
+    let unit = gnr8_engine::docs::verify::CompileUnit {
         file_name: "docs_snippets_test.go".to_string(),
         identity: go.module.clone(),
         text: text.to_string(),

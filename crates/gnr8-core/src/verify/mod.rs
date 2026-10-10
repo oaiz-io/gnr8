@@ -187,11 +187,11 @@ pub struct DocsSnippetSuite {
     /// [`ContractTestSuite::package`]. It is NOT the consumer import specifier, which is
     /// `CompileUnit::identity` (Go: package `sdk`, identity `example.com/bookstore/sdk`).
     pub package: String,
-    /// The compile unit from `staticdocs::snippets::compile_unit`, the same `render_call` output the
+    /// The compile unit from `docs::verify::compile_unit`, the same `render_call` output the
     /// pages were assembled from. Its `entries` carry each page path and the snippet text that page
     /// must contain verbatim. `None` is the one encoding of "no consumer identity": the suite is
     /// reported skipped with that reason and never run.
-    pub compile_unit: Option<crate::staticdocs::snippets::CompileUnit>,
+    pub compile_unit: Option<crate::docs::verify::CompileUnit>,
     /// Operations with a sample.
     pub cases: usize,
     /// Operations whose sample is refused; counted, not run.

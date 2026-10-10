@@ -15,8 +15,8 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use gnr8_engine::docs::verify::{check_operation_wire, CompileUnit, WireRecord, WIRE_ENV};
 use gnr8_engine::sdk::Artifact;
-use gnr8_engine::staticdocs::snippets::{check_operation_wire, CompileUnit, WireRecord, WIRE_ENV};
 use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite};
 
 use super::cli_help::{NativeRunner, ProcessRunner};
@@ -685,8 +685,8 @@ mod tests {
 
     use super::{run_with_runner, DocsFailure, DocsStatus};
     use crate::verify::cli_help::ProcessRunner;
+    use gnr8_engine::docs::verify::{CompileEntry, CompileUnit};
     use gnr8_engine::sdk::Artifact;
-    use gnr8_engine::staticdocs::snippets::{CompileEntry, CompileUnit};
     use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite, GoVerificationModule};
     use std::collections::VecDeque;
     use std::io;
@@ -725,7 +725,7 @@ mod tests {
                 .push(command.get_program().to_string_lossy().into_owned());
             let wire_path = command
                 .get_envs()
-                .find(|(name, _)| *name == gnr8_engine::staticdocs::snippets::WIRE_ENV)
+                .find(|(name, _)| *name == gnr8_engine::docs::verify::WIRE_ENV)
                 .and_then(|(_, value)| value.map(std::path::PathBuf::from));
             if let (Some(path), Some(wire)) = (wire_path, &self.wire) {
                 std::fs::write(path, wire).unwrap();

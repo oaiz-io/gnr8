@@ -1,27 +1,24 @@
-//! The one producer of code-sample text: for the pages, for gnr8's own compile tests, and for the
-//! `gnr8 verify` docs suite.
+//! Rung 2 and rung 3 of the docs ladder, from the docs model: each sibling SDK's samples as one
+//! compilable unit, and the comparison of what a sample's call sent with the request its page prints.
 //!
-//! A sample is assembled from the `CallSite` the language's call-site renderer returns — the same
-//! renderer the contract tests use — so a page, a compile unit and a contract case can never spell a
-//! call three ways.
+//! A unit is assembled from the model's [`CodeSample`]s — the exact text the pages print — so a page,
+//! a compile unit and a contract case can never spell a call three ways.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::docs::identity::{consumer_identity, go_sdk_import, ConsumerIdentity};
+use crate::docs::identity::{go_sdk_import, ConsumerIdentity};
+use crate::docs::model::{CodeSample, DocsModel, ExampleDoc, SdkSamples};
+use crate::docs::sample::go_import_block;
 use crate::gosdk::ERROR_TYPE as GO_ERROR_TYPE;
-use crate::graph::{ApiGraph, Operation};
+use crate::graph::ApiGraph;
 use crate::pysdk::ERROR_TYPE as PY_ERROR_TYPE;
 use crate::sdk::builtins::{sdk_package, SiblingSdk};
-use crate::sdk::emit_common::{CallInputs, CallSite, Qualify};
 use crate::tssdk::ERROR_TYPE as TS_ERROR_TYPE;
-use crate::verify::{
-    sample_operation, ContractTestLanguage, OperationSample, Sampled, CONTRACT_TEST_BASE_URL,
-};
+use crate::verify::ContractTestLanguage;
 use crate::CoreError;
 
-use super::markdown::json_string;
-use super::nav::NavModel;
+use super::markdown::escape::json_string;
 
 /// One language's snippets for one sibling SDK, as gnr8 compiles and checks them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,218 +47,65 @@ pub struct CompileEntry {
 /// The Go file a compile unit is written to, beside the SDK's own sources.
 pub(crate) const GO_UNIT_FILE: &str = "docs_snippets_test.go";
 
-/// One rendered snippet: the import lines it needs, its body, and what rung 3 re-runs of it.
-pub(crate) struct Snippet {
-    /// Import specifiers, standard library first, each once.
-    pub(crate) imports: Vec<String>,
-    /// Construction, call and result use, exactly as printed.
-    pub(crate) body: String,
-    /// The call expression or statement alone, exactly as the body prints it.
-    pub(crate) call: String,
-    /// The client a rung-3 harness builds instead: the contract base URL and credentials, on the
-    /// recording transport, the way the contract harness builds its client.
-    pub(crate) wire_client: String,
-    /// What a rung-3 harness answers the call with, and what the call must make of it.
-    pub(crate) reply: CannedReply,
-}
-
-/// The reply a rung-3 harness answers one sample's call with.
-///
-/// It is the reply the page prints — its status, its declared media type and its body in that
-/// media type's wire form ([`super::example::wire_reply`]) — and the call must succeed on it. An
-/// operation whose page prints no reply (a file download, a reply in a media type with no printable
-/// form, no success status, a first success status outside 2xx, or a refused reply) is answered
-/// with an empty-bodied `400`, and the call must surface the SDK's typed error carrying that status.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct CannedReply {
-    pub(crate) status: u16,
-    pub(crate) content_type: String,
-    pub(crate) body: String,
-    /// `true`: the call must succeed; `false`: it must raise the typed error with `status`.
-    pub(crate) success: bool,
-}
-
-/// The status a rung-3 harness answers an operation with when its page prints no reply.
-const NO_REPLY_STATUS: u16 = 400;
-
-fn canned_reply(op: &Operation, sample: &OperationSample) -> Result<CannedReply, CoreError> {
-    let printed = match &sample.reply {
-        crate::verify::SuccessOutcome::Sample(reply) => super::example::wire_reply(op, reply)?,
-        crate::verify::SuccessOutcome::NoReply | crate::verify::SuccessOutcome::Refused(_) => None,
-    };
-    Ok(match printed {
-        Some(wire) => CannedReply {
-            status: wire.status,
-            content_type: wire.content_type,
-            body: wire.body,
-            success: true,
-        },
-        None => CannedReply {
-            status: NO_REPLY_STATUS,
-            content_type: String::new(),
-            body: String::new(),
-            success: false,
-        },
-    })
-}
-
-impl Snippet {
-    /// The snippet as a page prints it: the import block, then the body.
-    pub(crate) fn page_text(&self, language: ContractTestLanguage) -> String {
-        match language {
-            ContractTestLanguage::Go => {
-                format!("{}\n\n{}", go_import_block(&self.imports), self.body)
-            }
-            ContractTestLanguage::Python | ContractTestLanguage::TypeScript => {
-                format!("{}\n\n{}", self.imports.join("\n"), self.body)
-            }
-        }
-    }
-}
-
-/// Render one operation's snippet for one sibling SDK.
-///
-/// # Errors
-///
-/// Returns the call-site renderer's error when a sampled value has no literal in the language.
-pub(crate) fn snippet(
-    graph: &ApiGraph,
-    op: &Operation,
-    sample: &OperationSample,
-    sdk: SiblingSdk<'_>,
-    identity: &ConsumerIdentity,
-) -> Result<Snippet, CoreError> {
-    let inputs = CallInputs {
-        params: &sample.params,
-        body: sample.bodies.first(),
-        auth: &sample.auth,
-    };
-    let qualify = Qualify::Consumer { identity };
-    let base_url = json_string(CONTRACT_TEST_BASE_URL);
-    match sdk {
-        SiblingSdk::Go(_) => {
-            let site = crate::gosdk::callsite::render_call(graph, op, &inputs, &qualify)?;
-            let qualifier = format!("{}.", identity.qualifier);
-            let options =
-                crate::gosdk::callsite::credential_options(&sample.auth, &qualifier, false, ", ");
-            let wire_client = format!(
-                "client := {qualifier}NewClient({base_url}, {qualifier}WithHTTPClient(&http.Client{{Transport: transport}}){options})"
-            );
-            go_snippet(&site, identity, wire_client)
-        }
-        SiblingSdk::Python(t) => {
-            let site =
-                crate::pysdk::callsite::render_call(graph, op, &inputs, &qualify, t.model_style)?;
-            let credentials = crate::pysdk::callsite::client_credentials(&sample.auth, false);
-            let wire_client = format!(
-                "client = _DocsClient({base_url}, opener=urllib.request.build_opener(wire){credentials})"
-            );
-            Ok(py_snippet(&site, identity, wire_client))
-        }
-        SiblingSdk::TypeScript(_) => {
-            let site = crate::tssdk::callsite::render_call(graph, op, &inputs, &qualify)?;
-            let credentials = crate::tssdk::callsite::client_credentials(&sample.auth, false);
-            let wire_client = format!(
-                "const client = new Client({{ baseUrl: {base_url}, fetch: fetchStub{credentials} }});"
-            );
-            Ok(ts_snippet(&site, identity, wire_client))
-        }
-    }
-}
-
-/// Python: one `from <package> import …` line naming `Client` and every model the call builds,
-/// then construction, call and one use of the result.
-fn py_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String) -> Snippet {
-    let mut names = site.imports.clone();
-    names.push("Client".to_string());
-    names.sort();
-    names.dedup();
-    Snippet {
-        imports: vec![format!(
-            "from {} import {}",
-            identity.import,
-            names.join(", ")
-        )],
-        body: format!("{}\nresult = {}\nprint(result)", site.construct, site.call),
-        call: format!("result = {}", site.call),
-        wire_client,
-        reply: CannedReply::default(),
-    }
-}
-
-/// TypeScript: `Client` from the `package.json` name — object literals are structural, so nothing
-/// else is imported — then construction, the awaited call and one use of the result.
-fn ts_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String) -> Snippet {
-    Snippet {
-        imports: vec![format!(
-            "import {{ Client }} from {};",
-            json_string(&identity.import)
-        )],
-        body: format!(
-            "{}\nconst result = await {};\nconsole.log(result);",
-            site.construct, site.call
-        ),
-        call: format!("const result = await {};", site.call),
-        wire_client,
-        reply: CannedReply::default(),
-    }
-}
-
-/// Go: construction, call, the error check and one use of the result, so it compiles as written.
-fn go_snippet(
-    site: &CallSite,
-    identity: &ConsumerIdentity,
-    wire_client: String,
-) -> Result<Snippet, CoreError> {
-    let mut standard: Vec<String> = site
-        .imports
-        .iter()
-        .filter(|import| **import != identity.import)
-        .cloned()
-        .collect();
-    standard.push("fmt".to_string());
-    standard.sort();
-    standard.dedup();
-    standard.push(String::new());
-    standard.push(go_sdk_import(identity)?);
-    Ok(Snippet {
-        imports: standard,
-        body: format!(
-            "{}\n{}\nif err != nil {{\n\treturn err\n}}\nfmt.Printf(\"%+v\\n\", result)",
-            site.construct, site.call
-        ),
-        call: site.call.clone(),
-        wire_client,
-        reply: CannedReply::default(),
-    })
-}
-
-/// A Go import block; an empty entry separates the standard library from the SDK.
-fn go_import_block(imports: &[String]) -> String {
-    let lines = imports
-        .iter()
-        .map(|import| match import.split_once(' ') {
-            _ if import.is_empty() => String::new(),
-            Some((alias, path)) => format!("\t{alias} \"{path}\""),
-            None => format!("\t\"{import}\""),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("import (\n{lines}\n)")
-}
-
 /// The environment variable naming the file a unit's rung-3 harness writes its recorded requests
 /// to. Without it the harness skips, so rung 2 never records anything.
 pub const WIRE_ENV: &str = "GNR8_DOCS_WIRE";
 
-/// The snippets of every sampled operation for one sibling SDK, as one compilable file.
+/// One sibling SDK's compile unit, from the docs model built for one plan.
+///
+/// `index` is the SDK's position in the model's plan-order SDK list. `None` is the one encoding of
+/// "no consumer identity": the sibling emits no package manifest, so its pages print the identity
+/// note and there is nothing to compile.
+///
+/// # Errors
+///
+/// Returns the SDK's own configuration error for a module name it would reject.
+pub(crate) fn unit_of(
+    model: &DocsModel,
+    index: usize,
+    sdk: SiblingSdk<'_>,
+) -> Result<Option<CompileUnit>, CoreError> {
+    let Some(identity) = model.sdks.get(index).and_then(|sdk| sdk.identity.as_ref()) else {
+        return Ok(None);
+    };
+    let mut entries = Vec::new();
+    let mut samples: Vec<(&str, &CodeSample)> = Vec::new();
+    for op in &model.operations {
+        let ExampleDoc::Sampled { per_sdk, .. } = &op.example else {
+            continue;
+        };
+        let Some(SdkSamples::Code { call }) = per_sdk.get(index) else {
+            continue;
+        };
+        entries.push(CompileEntry {
+            operation_id: op.id.clone(),
+            page: op.page.path(),
+            snippet: call.body.clone(),
+        });
+        samples.push((op.id.as_str(), call));
+    }
+    let (file_name, text) = match sdk {
+        SiblingSdk::Go(t) => (
+            GO_UNIT_FILE,
+            go_unit_text(&sdk_package(&t.module)?, identity, &samples)?,
+        ),
+        SiblingSdk::Python(_) => (PY_UNIT_FILE, py_unit_text(identity, &samples)),
+        SiblingSdk::TypeScript(_) => (TS_UNIT_FILE, ts_unit_text(identity, &samples)),
+    };
+    Ok(Some(CompileUnit {
+        file_name: file_name.to_string(),
+        identity: identity.import.clone(),
+        text,
+        entries,
+    }))
+}
+
+/// The snippets of every sampled operation for one sibling SDK, as one compilable file: the docs
+/// model built for that SDK alone, and its unit.
 ///
 /// The file also carries the rung-3 harness: when [`WIRE_ENV`] names a file, every sample's call
-/// statement runs against a recording transport that answers an empty-bodied `400`, and the requests
-/// are written there as [`WireRecord`]s.
-///
-/// `None` is the one encoding of "no consumer identity": the sibling emits no package manifest, so
-/// its pages print the identity note and there is nothing to compile.
+/// statement runs against a recording transport that answers with the page's reply, and the
+/// requests are written there as [`WireRecord`]s.
 ///
 /// # Errors
 ///
@@ -270,41 +114,9 @@ pub fn compile_unit(
     graph: &ApiGraph,
     sdk: SiblingSdk<'_>,
 ) -> Result<Option<CompileUnit>, CoreError> {
-    let Some(identity) = consumer_identity(sdk)? else {
-        return Ok(None);
-    };
     let projected = crate::graph::projection::for_generation(graph)?;
-    let graph = &*projected;
-    let nav = NavModel::build(graph, false)?;
-    let mut entries = Vec::new();
-    let mut snippets = Vec::new();
-    for op in &graph.operations {
-        let Sampled::Sample(sample) = sample_operation(op, graph)?.for_docs() else {
-            continue;
-        };
-        let mut snippet = snippet(graph, op, &sample, sdk, &identity)?;
-        snippet.reply = canned_reply(op, &sample)?;
-        entries.push(CompileEntry {
-            operation_id: op.id.clone(),
-            page: nav.operation_page(&op.id)?.to_string(),
-            snippet: snippet.body.clone(),
-        });
-        snippets.push((op, snippet));
-    }
-    let (file_name, text) = match sdk {
-        SiblingSdk::Go(t) => (
-            GO_UNIT_FILE,
-            go_unit_text(&sdk_package(&t.module)?, &identity, &snippets)?,
-        ),
-        SiblingSdk::Python(_) => (PY_UNIT_FILE, py_unit_text(&identity, &snippets)),
-        SiblingSdk::TypeScript(_) => (TS_UNIT_FILE, ts_unit_text(&identity, &snippets)),
-    };
-    Ok(Some(CompileUnit {
-        file_name: file_name.to_string(),
-        identity: identity.import,
-        text,
-        entries,
-    }))
+    let model = DocsModel::build(&projected, &[sdk])?;
+    unit_of(&model, 0, sdk)
 }
 
 /// The Python file a compile unit is written to, beside the copied package.
@@ -351,12 +163,12 @@ fn indent(body: &str, by: &str) -> String {
 /// client is built through the opener seam with a stub that refuses every request. A sample passes
 /// only when its call raises the SDK's typed `ApiError`, which proves the method name, every method
 /// keyword, every model constructor and every required model field resolved and a request was built.
-fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)]) -> String {
+fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -> String {
     let package = &identity.import;
     // The models one sample builds, imported inside the function that runs it: a model then never
     // shares the module namespace with the harness's own names (`DocsWire`, `_Wire`, …), so a schema
     // may be called anything the SDK itself accepts.
-    let model_import = |snippet: &Snippet| -> Option<String> {
+    let model_import = |snippet: &CodeSample| -> Option<String> {
         let models: Vec<&str> = snippet
             .imports
             .iter()
@@ -380,7 +192,7 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         let _ = write!(
             out,
             "\n\ndef {}(base_url, api_key, token, username, password):\n{}\n",
-            py_wrapper_name(&op.id),
+            py_wrapper_name(op),
             indent(&body, "    ")
         );
     }
@@ -389,7 +201,7 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         out.push_str("    pass\n");
     }
     for (op, _) in snippets {
-        let name = py_wrapper_name(&op.id);
+        let name = py_wrapper_name(op);
         let _ = write!(
             out,
             "    def test_{name}(self) -> None:\n        with self.assertRaises({PY_ERROR_TYPE}):\n            {name}(\"http://gnr8.test\", \"key\", \"token\", \"user\", \"secret\")\n\n"
@@ -400,7 +212,7 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         "\n@unittest.skipUnless(os.environ.get(\"{WIRE_ENV}\"), \"rung 3 runs only when {WIRE_ENV} names a file\")\nclass DocsWire(unittest.TestCase):\n    def test_record(self) -> None:\n        wire = _Wire()\n"
     );
     for (op, snippet) in snippets {
-        let reply = &snippet.reply;
+        let reply = &snippet.wire.reply;
         let _ = writeln!(
             out,
             "        wire.respond({}, {}, {})",
@@ -416,18 +228,18 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
             let _ = write!(
                 out,
                 "        outcome = \"\"\n        try:\n            {}\n            {}\n            del result\n        except Exception as error:  # noqa: BLE001 - any failure is the finding\n            outcome = \"the call failed on the page's reply: \" + repr(error)\n",
-                snippet.wire_client, call
+                snippet.wire.client, call
             );
         } else {
             let _ = write!(
                 out,
                 "        outcome = \"expected the SDK's typed {PY_ERROR_TYPE} with status {status}, but the call returned\"\n        try:\n            {}\n            {}\n            del result\n        except {PY_ERROR_TYPE} as error:\n            outcome = \"\" if error.status_code == {status} else \"expected status {status}, got \" + str(error.status_code)\n        except Exception as error:  # noqa: BLE001 - any other failure is the finding\n            outcome = \"expected the SDK's typed {PY_ERROR_TYPE} with status {status}, got \" + repr(error)\n",
-                snippet.wire_client,
+                snippet.wire.client,
                 call,
                 status = reply.status
             );
         }
-        let _ = writeln!(out, "        wire.mark({}, outcome)", json_string(&op.id));
+        let _ = writeln!(out, "        wire.mark({}, outcome)", json_string(op));
     }
     let _ = write!(
         out,
@@ -500,11 +312,14 @@ def Client(*args, **kwargs):  # noqa: N802 - stands in for the SDK's Client
     return _DocsClient(*args, opener=urllib.request.build_opener(_Refuse()), **kwargs)
 "#;
 
-fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)]) -> String {
+fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -> String {
     if snippets.is_empty() {
         return "export {};\n".to_string();
     }
-    let names = if snippets.iter().any(|(_, snippet)| !snippet.reply.success) {
+    let names = if snippets
+        .iter()
+        .any(|(_, snippet)| !snippet.wire.reply.success)
+    {
         format!("{TS_ERROR_TYPE}, Client")
     } else {
         "Client".to_string()
@@ -517,13 +332,13 @@ fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         let _ = write!(
             out,
             "\nexport async function {}(baseUrl: string, apiKey: string, token: string, username: string, password: string): Promise<void> {{\n{}\n}}\n",
-            ts_wrapper_name(&op.id),
+            ts_wrapper_name(op),
             indent(&snippet.body, "  ")
         );
     }
     out.push_str(TS_WIRE_HEAD);
     for (op, snippet) in snippets {
-        let reply = &snippet.reply;
+        let reply = &snippet.wire.reply;
         let _ = writeln!(
             out,
             "  respond({}, {}, {});",
@@ -535,17 +350,17 @@ fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
             let _ = write!(
                 out,
                 "  {{\n    let outcome = \"\";\n    try {{\n      {}\n      {}\n      void result;\n    }} catch (error) {{\n      outcome = `the call failed on the page's reply: ${{String(error)}}`;\n    }}\n    mark({}, outcome);\n  }}\n",
-                snippet.wire_client,
+                snippet.wire.client,
                 snippet.call,
-                json_string(&op.id)
+                json_string(op)
             );
         } else {
             let _ = write!(
                 out,
                 "  {{\n    let outcome = \"expected the SDK's typed {TS_ERROR_TYPE} with status {status}, but the call returned\";\n    try {{\n      {}\n      {}\n      void result;\n    }} catch (error) {{\n      outcome =\n        error instanceof {TS_ERROR_TYPE} && error.status === {status}\n          ? \"\"\n          : `expected the SDK's typed {TS_ERROR_TYPE} with status {status}, got ${{String(error)}}`;\n    }}\n    mark({}, outcome);\n  }}\n",
-                snippet.wire_client,
+                snippet.wire.client,
                 snippet.call,
-                json_string(&op.id),
+                json_string(op),
                 status = reply.status
             );
         }
@@ -613,10 +428,10 @@ export async function docsWire(): Promise<DocsWireRecord[]> {
 
 /// One snippet wrapped in a function whose parameters are the variables a page leaves to the
 /// reader, so `go vet` resolves every name the snippet uses.
-fn go_wrapper(op: &Operation, body: &str) -> String {
+fn go_wrapper(operation_id: &str, body: &str) -> String {
     format!(
         "func docsSnippet{}(ctx context.Context, baseURL, apiKey, token, username, password string) error {{\n{}\n\treturn nil\n}}\n",
-        crate::gosdk::callsite::exported(&op.id),
+        crate::gosdk::callsite::exported(operation_id),
         indent(body, "\t")
     )
 }
@@ -624,7 +439,7 @@ fn go_wrapper(op: &Operation, body: &str) -> String {
 fn go_unit_text(
     package: &str,
     identity: &ConsumerIdentity,
-    snippets: &[(&Operation, Snippet)],
+    snippets: &[(&str, &CodeSample)],
 ) -> Result<String, CoreError> {
     if snippets.is_empty() {
         return Ok(format!("package {package}_test\n"));
@@ -649,7 +464,10 @@ fn go_unit_text(
         ]
         .map(str::to_string),
     );
-    if snippets.iter().any(|(_, snippet)| !snippet.reply.success) {
+    if snippets
+        .iter()
+        .any(|(_, snippet)| !snippet.wire.reply.success)
+    {
         standard.push("errors".to_string());
     }
     standard.sort();
@@ -663,14 +481,14 @@ fn go_unit_text(
     }
     out.push_str(GO_WIRE_HEAD);
     for (op, snippet) in snippets {
-        let reply = &snippet.reply;
+        let reply = &snippet.wire.reply;
         let _ = write!(
             out,
             "\t{{\n\t\ttransport.respond({}, {}, {})\n\t\t{}\n\t\t{}\n\t\t_ = result\n",
             reply.status,
             json_string(&reply.content_type),
             json_string(&reply.body),
-            snippet.wire_client,
+            snippet.wire.client,
             snippet.call
         );
         if reply.success {
@@ -688,7 +506,7 @@ fn go_unit_text(
         let _ = write!(
             out,
             "\t\ttransport.mark({}, outcome)\n\t}}\n",
-            json_string(&op.id)
+            json_string(op)
         );
     }
     let _ = write!(
@@ -943,7 +761,7 @@ fn json_equivalent(left: &serde_json::Value, right: &serde_json::Value) -> bool 
 /// sends in its place.
 #[must_use]
 pub fn wire_substitutions() -> Vec<(String, String)> {
-    let placeholders = super::example::placeholders();
+    let placeholders = crate::docs::sample::placeholders();
     let contract = crate::verify::WireCredentials::contract();
     vec![
         (placeholders.api_key, contract.api_key),
