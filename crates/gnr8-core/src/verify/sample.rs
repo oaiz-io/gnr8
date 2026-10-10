@@ -159,8 +159,10 @@ impl Sampled {
 
 /// A constraint a sample could not meet, on the input it sits on.
 ///
-/// Only `pattern` is ever unmet: the sampler never synthesizes a value for it. A contract case sends
-/// the sample anyway; a docs page treats it as a refusal ([`Sampled::for_docs`]).
+/// The sampler never synthesizes a value for `pattern`, nor for a keyword the graph does not model
+/// on a parameter (`const`, `not`, …), and it repeats one array item to reach `minItems`, so
+/// `uniqueItems` above one element is unmet too. A contract case sends the sample anyway; a docs
+/// page treats it as a refusal ([`Sampled::for_docs`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnmetConstraint {
     /// The dotted path of the input, as a [`SampleRefusal`] names it.
@@ -524,8 +526,9 @@ impl fmt::Display for Violation {
 /// # Errors
 ///
 /// Returns the first violated constraint, in the order `enum`, `minLength`, `maxLength`, `pattern`,
-/// `minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`, `minItems`, `maxItems`,
-/// `minProperties`, `maxProperties`. A bound that is not a number is violated.
+/// `minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`, `multipleOf`, `minItems`,
+/// `maxItems`, `uniqueItems`, `minProperties`, `maxProperties`. A bound that is not a number is
+/// violated.
 pub fn satisfies(value: &Value, constraints: &Constraints) -> Result<(), Violation> {
     let violated = |constraint| Err(Violation { constraint });
     if !constraints.enum_values.is_empty()
@@ -586,6 +589,11 @@ pub fn satisfies(value: &Value, constraints: &Constraints) -> Result<(), Violati
                 return violated(keyword);
             }
         }
+        if let Some(of) = &constraints.multiple_of {
+            if !is_multiple(value, of) {
+                return violated("multipleOf");
+            }
+        }
     }
     if let Value::Array(items) = value {
         let count = items.len() as u64;
@@ -594,6 +602,9 @@ pub fn satisfies(value: &Value, constraints: &Constraints) -> Result<(), Violati
         }
         if constraints.max_items.is_some_and(|max| count > max) {
             return violated("maxItems");
+        }
+        if constraints.unique_items && has_duplicates(items) {
+            return violated("uniqueItems");
         }
     }
     if let Value::Object(entries) = value {
@@ -606,6 +617,32 @@ pub fn satisfies(value: &Value, constraints: &Constraints) -> Result<(), Violati
         }
     }
     Ok(())
+}
+
+/// Whether `value` is a multiple of the `multipleOf` text `of`. An integer against an integer
+/// divisor divides exactly; anything else divides through `f64`, within rounding of the quotient. A
+/// divisor that is not a positive number admits nothing.
+fn is_multiple(value: &Value, of: &str) -> bool {
+    let of = of.trim();
+    if let (Some(integer), Ok(divisor)) = (value.as_i64(), of.parse::<i128>()) {
+        return divisor > 0 && i128::from(integer) % divisor == 0;
+    }
+    let (Some(number), Ok(divisor)) = (value.as_f64(), of.parse::<f64>()) else {
+        return false;
+    };
+    if !(divisor.is_finite() && divisor > 0.0) {
+        return false;
+    }
+    let quotient = number / divisor;
+    (quotient - quotient.round()).abs() <= 1e-9 * quotient.abs().max(1.0)
+}
+
+/// Whether two items of an array are equal.
+fn has_duplicates(items: &[Value]) -> bool {
+    items
+        .iter()
+        .enumerate()
+        .any(|(index, item)| items[..index].contains(item))
 }
 
 /// Whether a declared enum member (always stored as text) names `value`.
@@ -760,6 +797,19 @@ fn sample_param(
             param.name
         ),
     })?;
+    let mut unmet = sampler.unmet;
+    // A declared example meets what gnr8 does not evaluate on its author's word, as it meets a
+    // `pattern`; a built value records every keyword the graph does not model.
+    if param.example.is_none() {
+        unmet.extend(
+            unmodelled_keywords(param, graph)
+                .into_iter()
+                .map(|constraint| UnmetConstraint {
+                    subject: subject.clone(),
+                    constraint: constraint.to_string(),
+                }),
+        );
+    }
     Ok(Ok(SampleParam {
         name: param.name.clone(),
         location: param.location.clone(),
@@ -767,8 +817,68 @@ fn sample_param(
         required: param.required || param.location == "path",
         value,
         wire,
-        unmet: sampler.unmet,
+        unmet,
     }))
+}
+
+/// The JSON Schema validation keywords that restrict a scalar value, in the order a sample
+/// records them unmet.
+const VALIDATION_KEYWORDS: &[&str] = &[
+    "enum",
+    "const",
+    "not",
+    "if",
+    "then",
+    "else",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "minimum",
+    "exclusiveMinimum",
+    "maximum",
+    "exclusiveMaximum",
+    "multipleOf",
+];
+
+/// The validation keywords a parameter's kept raw schema still states: those the graph does not
+/// model as a typed fact (`const`, `not`, …), and those it could not type as declared (an enum with
+/// no scalar type, a non-integer `minLength`). The importer moves every keyword it types out of the
+/// raw schema, so what is left restricts the value without the sampler knowing how. A string enum
+/// that is the parameter's own type, and an exclusive-bound flag with no bound beside it, restrict
+/// nothing more.
+fn unmodelled_keywords(param: &Param, graph: &ApiGraph) -> Vec<&'static str> {
+    let Some(raw) = param
+        .openapi_fields
+        .iter()
+        .find(|(name, _)| name == "schema")
+        .and_then(|(_, raw)| raw.as_object())
+    else {
+        return Vec::new();
+    };
+    let enum_is_the_type = matches!(resolved(&param.schema, graph), Some(Type::Enum(_)));
+    VALIDATION_KEYWORDS
+        .iter()
+        .copied()
+        .filter(|keyword| match raw.get(*keyword) {
+            None => false,
+            Some(_) if *keyword == "enum" => !enum_is_the_type,
+            Some(Value::Bool(_)) => !matches!(*keyword, "exclusiveMinimum" | "exclusiveMaximum"),
+            Some(_) => true,
+        })
+        .collect()
+}
+
+/// A type through its named aliases; `None` for a dangling or circular reference.
+fn resolved<'g>(ty: &'g Type, graph: &'g ApiGraph) -> Option<&'g Type> {
+    let mut ty = ty;
+    let mut seen = BTreeSet::new();
+    while let Type::Named(id) = ty {
+        if !seen.insert(id.as_str()) {
+            return None;
+        }
+        ty = &graph.schemas.iter().find(|schema| &schema.id == id)?.body;
+    }
+    Some(ty)
 }
 
 /// Refuse a parameter whose type, through any named aliases, is not a scalar.
@@ -1114,6 +1224,8 @@ static UNCONSTRAINED: Constraints = Constraints {
     maximum: None,
     exclusive_minimum: None,
     exclusive_maximum: None,
+    multiple_of: None,
+    unique_items: false,
     pattern: None,
     enum_values: Vec::new(),
 };
@@ -1200,6 +1312,66 @@ impl<'g> Sampler<'g> {
         Ok(outcome?.map(|value| (value, unmet)))
     }
 
+    /// The value of an input under a constraint the sampler never synthesizes a value for, sampled
+    /// from every other constraint and recorded unmet when the value breaks it: a `pattern` on a
+    /// string, a `uniqueItems` on an array that repeats its item. `None` when no such constraint
+    /// applies.
+    fn unsynthesized(
+        &mut self,
+        ty: &Type,
+        restriction: &Restriction<'_>,
+        subject: &str,
+        depth: usize,
+    ) -> Option<Outcome> {
+        if restriction.constraints.pattern.is_some() {
+            // gnr8 never synthesizes a value for `pattern`: the value is sampled from every other
+            // constraint, and a string — the only value `pattern` applies to — records it unmet.
+            let rest = Constraints {
+                pattern: None,
+                ..restriction.constraints.clone()
+            };
+            let unpatterned = Restriction {
+                constraints: &rest,
+                format: restriction.format,
+            };
+            let outcome = match self.value(ty, &unpatterned, subject, depth) {
+                Ok(outcome) => outcome,
+                Err(error) => return Some(Err(error)),
+            };
+            if matches!(outcome, Ok(Value::String(_))) {
+                self.unmet.push(UnmetConstraint {
+                    subject: subject.to_string(),
+                    constraint: "pattern".to_string(),
+                });
+            }
+            return Some(Ok(outcome));
+        }
+        if restriction.constraints.unique_items {
+            // The sampler repeats one item to reach `minItems`: an array of one element meets
+            // `uniqueItems`, and a longer one records it unmet rather than refusing.
+            let rest = Constraints {
+                unique_items: false,
+                ..restriction.constraints.clone()
+            };
+            let repeating = Restriction {
+                constraints: &rest,
+                format: restriction.format,
+            };
+            let outcome = match self.value(ty, &repeating, subject, depth) {
+                Ok(outcome) => outcome,
+                Err(error) => return Some(Err(error)),
+            };
+            if matches!(&outcome, Ok(Value::Array(items)) if has_duplicates(items)) {
+                self.unmet.push(UnmetConstraint {
+                    subject: subject.to_string(),
+                    constraint: "uniqueItems".to_string(),
+                });
+            }
+            return Some(Ok(outcome));
+        }
+        None
+    }
+
     /// Sample one value of type `ty` under `restriction`, or refuse it.
     fn value(
         &mut self,
@@ -1213,25 +1385,8 @@ impl<'g> Sampler<'g> {
                 subject: subject.to_string(),
             }));
         }
-        if restriction.constraints.pattern.is_some() {
-            // gnr8 never synthesizes a value for `pattern`: the value is sampled from every other
-            // constraint, and a string — the only value `pattern` applies to — records it unmet.
-            let rest = Constraints {
-                pattern: None,
-                ..restriction.constraints.clone()
-            };
-            let unpatterned = Restriction {
-                constraints: &rest,
-                format: restriction.format,
-            };
-            let outcome = self.value(ty, &unpatterned, subject, depth)?;
-            if matches!(outcome, Ok(Value::String(_))) {
-                self.unmet.push(UnmetConstraint {
-                    subject: subject.to_string(),
-                    constraint: "pattern".to_string(),
-                });
-            }
-            return Ok(outcome);
+        if let Some(outcome) = self.unsynthesized(ty, restriction, subject, depth) {
+            return outcome;
         }
         let constraints = restriction.constraints;
         match ty {
@@ -1781,6 +1936,27 @@ fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, 
         (_, Some(highest)) if BASE > highest => highest,
         _ => BASE,
     };
+    // Under a `multipleOf`, the admissible multiple nearest the base: one of the two multiples
+    // around `chosen`, since `chosen` is the admissible integer nearest the base.
+    let chosen = match constraints.multiple_of.as_deref().map(integer_step) {
+        None => chosen,
+        Some(None) => return unsatisfiable(subject, "multipleOf"),
+        Some(Some(step)) => {
+            let down = chosen.div_euclid(step) * step;
+            let admissible = |candidate: &i128| {
+                lowest.is_none_or(|lowest| *candidate >= lowest)
+                    && highest.is_none_or(|highest| *candidate <= highest)
+            };
+            let Some(multiple) = [down, down + step]
+                .into_iter()
+                .filter(admissible)
+                .min_by_key(|candidate| (candidate - BASE).abs())
+            else {
+                return unsatisfiable(subject, "multipleOf");
+            };
+            multiple
+        }
+    };
     let Ok(chosen) = i64::try_from(chosen) else {
         return unsatisfiable(subject, first_numeric_bound(constraints));
     };
@@ -1793,6 +1969,30 @@ fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, 
         });
     }
     Ok(value)
+}
+
+/// The smallest positive integer that is a multiple of the `multipleOf` text `of` — `of` itself
+/// for an integer, `2` for `0.5` — or `None` when there is none a sample could use.
+fn integer_step(of: &str) -> Option<i128> {
+    let of = of.trim();
+    if let Ok(step) = of.parse::<i128>() {
+        return (step > 0).then_some(step);
+    }
+    let divisor = of
+        .parse::<f64>()
+        .ok()
+        .filter(|d| d.is_finite() && *d > 0.0)?;
+    (1..=10_000_u32).find_map(|factor| {
+        let multiple = f64::from(factor) * divisor;
+        if (multiple - multiple.round()).abs() > 1e-9 || multiple.round() < 1.0 {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "multiple is a positive whole number of at most 10_000 times a finite divisor"
+        )]
+        Some(multiple.round() as i128)
+    })
 }
 
 /// A numeric bound as the integer nearest it on the admissible side: `ceil` for a lower bound,
@@ -1830,6 +2030,31 @@ fn prints_alike(value: f64) -> bool {
         && value.fract() != 0.0
         && (1e-4..1e6).contains(&magnitude)
         && format!("{narrowed}") == format!("{value}")
+}
+
+/// How many digits a decimal text has after its point: `2` for `0.25`, `0` for `5`. An exponent
+/// form is read as the digits it needs, at most 15.
+fn decimal_places(text: &str) -> i32 {
+    let text = text.trim();
+    if text.contains(['e', 'E']) {
+        return text.parse::<f64>().map_or(15, |value| {
+            (0..=15)
+                .find(|places| {
+                    (round_to(value, *places) - value).abs() <= f64::EPSILON * value.abs()
+                })
+                .unwrap_or(15)
+        });
+    }
+    text.split_once('.').map_or(0, |(_, fraction)| {
+        i32::try_from(fraction.trim_end_matches('0').len()).map_or(15, |places| places.min(15))
+    })
+}
+
+/// `value` rounded to `places` decimal places, so a multiple computed through `f64` prints as the
+/// decimal it is (`1.6`, not `1.6000000000000003`).
+fn round_to(value: f64, places: i32) -> f64 {
+    let scale = 10_f64.powi(places);
+    (value * scale).round() / scale
 }
 
 /// The float sample: the first candidate that lies inside the effective interval and prints alike
@@ -1899,16 +2124,41 @@ fn float_candidate(constraints: &Constraints, subject: &str) -> Result<Value, Sa
             f64::midpoint(middle, high.value),
         ]);
     }
+    // Under a `multipleOf`, each candidate is replaced by the multiples nearest it.
+    if let Some(of) = &constraints.multiple_of {
+        let Some(divisor) = of
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|d| d.is_finite() && *d > 0.0)
+        else {
+            return unsatisfiable(subject, "multipleOf");
+        };
+        let decimals = decimal_places(of);
+        candidates = candidates
+            .into_iter()
+            .flat_map(|x| {
+                let quotient = x / divisor;
+                [quotient.round(), quotient.ceil(), quotient.floor()]
+                    .map(|factor| round_to(factor * divisor, decimals))
+            })
+            .collect();
+    }
     let admissible: Vec<f64> = candidates
         .into_iter()
         .filter(|x| above_low(*x) && below_high(*x))
         .collect();
+    let bound = if constraints.multiple_of.is_some() {
+        "multipleOf"
+    } else {
+        first_numeric_bound(constraints)
+    };
     match admissible.iter().find(|x| prints_alike(**x)) {
         Some(&chosen) => match Number::from_f64(chosen) {
             Some(number) => checked(Value::Number(number), constraints, subject),
-            None => unsatisfiable(subject, first_numeric_bound(constraints)),
+            None => unsatisfiable(subject, bound),
         },
-        None if admissible.is_empty() => unsatisfiable(subject, first_numeric_bound(constraints)),
+        None if admissible.is_empty() => unsatisfiable(subject, bound),
         None => Err(SampleRefusal::FloatWire {
             subject: subject.to_string(),
         }),

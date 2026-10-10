@@ -466,6 +466,12 @@ fn write_schema(schema: &SchemaObject) -> Value {
             number_or_string(exclusive_maximum),
         );
     }
+    if let Some(multiple_of) = &schema.multiple_of {
+        out.insert("multipleOf".to_string(), number_or_string(multiple_of));
+    }
+    if schema.unique_items {
+        out.insert("uniqueItems".to_string(), Value::Bool(true));
+    }
     if let Some(pattern) = &schema.pattern {
         out.insert("pattern".to_string(), Value::String(pattern.clone()));
     }

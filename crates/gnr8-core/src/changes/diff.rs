@@ -1261,6 +1261,8 @@ fn stated_by(
             current.exclusive_maximum.as_ref(),
             base.exclusive_maximum.as_ref(),
         ),
+        multiple_of: keep(current.multiple_of.as_ref(), base.multiple_of.as_ref()),
+        unique_items: base.unique_items && current.unique_items,
         pattern: keep(current.pattern.as_ref(), base.pattern.as_ref()),
         enum_values: if base.enum_values.is_empty() {
             Vec::new()

@@ -152,6 +152,8 @@ fn documented_facts(patch: &crate::sdk::builtins::OpenApiFieldPatch) -> Vec<&'st
         maximum,
         exclusive_minimum,
         exclusive_maximum,
+        multiple_of,
+        unique_items,
         pattern,
         enum_values,
     } = constraints;
@@ -168,6 +170,8 @@ fn documented_facts(patch: &crate::sdk::builtins::OpenApiFieldPatch) -> Vec<&'st
         ("maximum", maximum.is_some()),
         ("exclusiveMinimum", exclusive_minimum.is_some()),
         ("exclusiveMaximum", exclusive_maximum.is_some()),
+        ("multipleOf", multiple_of.is_some()),
+        ("uniqueItems", *unique_items),
         ("pattern", pattern.is_some()),
         ("default", default.is_some()),
         ("example", example.is_some()),

@@ -693,10 +693,14 @@ fn write_raw_constraints(
         ("maximum", &constraints.maximum),
         ("exclusiveMinimum", &constraints.exclusive_minimum),
         ("exclusiveMaximum", &constraints.exclusive_maximum),
+        ("multipleOf", &constraints.multiple_of),
     ] {
         if let Some(bound) = bound {
             object.insert(key.to_string(), json::number_or_string(bound));
         }
+    }
+    if constraints.unique_items {
+        object.insert("uniqueItems".to_string(), Value::Bool(true));
     }
     if let Some(pattern) = &constraints.pattern {
         object.insert("pattern".to_string(), Value::String(pattern.clone()));
@@ -1138,6 +1142,8 @@ fn apply_constraints(constraints: &Constraints, prop: &mut SchemaObject) {
         .clone_from(&constraints.exclusive_minimum);
     prop.exclusive_maximum
         .clone_from(&constraints.exclusive_maximum);
+    prop.multiple_of.clone_from(&constraints.multiple_of);
+    prop.unique_items = constraints.unique_items;
     prop.pattern.clone_from(&constraints.pattern);
     if !constraints.enum_values.is_empty() {
         let mut enum_values = constraints.enum_values.clone();

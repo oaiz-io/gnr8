@@ -1216,6 +1216,12 @@ impl Importer {
                  parameter carries one pattern, so '{beside}' is carried and '{named}' is neither \
                  published nor checked"
             ),
+            ConstraintConflict::MultipleOf { beside, named } => format!(
+                "the {what} schema of parameter '{name}' states multipleOf {beside} beside its \
+                 reference '{reference}', whose schema states multipleOf {named}; both apply, but \
+                 a parameter carries one, so {beside} is carried and {named} is neither published \
+                 nor checked"
+            ),
             ConstraintConflict::DisjointEnum => format!(
                 "the {what} schema of parameter '{name}' states an enum beside its reference \
                  '{reference}' that shares no member with that schema's enum, so no value is valid; \
@@ -1293,6 +1299,7 @@ impl Importer {
                 "minItems",
                 "maxItems",
                 "uniqueItems",
+                "multipleOf",
                 "nullable",
                 "x-nullable",
             ] {
@@ -2726,6 +2733,11 @@ fn constraints_from_schema(schema: &Value) -> Constraints {
         maximum,
         exclusive_minimum,
         exclusive_maximum,
+        multiple_of: schema
+            .get("multipleOf")
+            .filter(|value| value.is_number())
+            .map(json_number_or_string),
+        unique_items: schema.get("uniqueItems").and_then(Value::as_bool) == Some(true),
         pattern: schema
             .get("pattern")
             .and_then(Value::as_str)
@@ -2778,6 +2790,20 @@ fn take_constraints(
     if pattern.is_some() {
         object.remove("pattern");
     }
+    let multiple_of = object
+        .get("multipleOf")
+        .filter(|value| value.is_number())
+        .map(json_number_or_string);
+    if multiple_of.is_some() {
+        object.remove("multipleOf");
+    }
+    let unique_items = match object.get("uniqueItems").and_then(Value::as_bool) {
+        Some(flag) => {
+            object.remove("uniqueItems");
+            flag
+        }
+        None => false,
+    };
     let enum_values = take_enum(object, kind);
     Constraints {
         min_length,
@@ -2790,6 +2816,8 @@ fn take_constraints(
         maximum,
         exclusive_minimum,
         exclusive_maximum,
+        multiple_of,
+        unique_items,
         pattern,
         enum_values,
     }
@@ -2913,6 +2941,13 @@ enum ConstraintConflict {
     },
     /// Two enums with no member in common: no value is valid.
     DisjointEnum,
+    /// Two different `multipleOf`; a parameter carries one.
+    MultipleOf {
+        /// The `multipleOf` stated beside the `$ref`.
+        beside: String,
+        /// The `multipleOf` of the schema it names.
+        named: String,
+    },
 }
 
 /// The constraints of a schema stated in two places that both apply — keywords beside a `$ref`
@@ -2950,6 +2985,16 @@ fn combined_constraints(
         (false, true) => beside.enum_values,
         (true, _) => named.enum_values,
     };
+    let multiple_of = match (beside.multiple_of, named.multiple_of) {
+        (Some(beside), Some(named)) if beside != named => {
+            conflicts.push(ConstraintConflict::MultipleOf {
+                beside: beside.clone(),
+                named,
+            });
+            Some(beside)
+        }
+        (beside, named) => beside.or(named),
+    };
     let pattern = match (beside.pattern, named.pattern) {
         (Some(beside), Some(named)) if beside != named => {
             conflicts.push(ConstraintConflict::Pattern {
@@ -2971,6 +3016,8 @@ fn combined_constraints(
         maximum: tighter_bound(beside.maximum, named.maximum, false),
         exclusive_minimum: tighter_bound(beside.exclusive_minimum, named.exclusive_minimum, true),
         exclusive_maximum: tighter_bound(beside.exclusive_maximum, named.exclusive_maximum, false),
+        multiple_of,
+        unique_items: beside.unique_items || named.unique_items,
         pattern,
         enum_values,
     };
@@ -5460,6 +5507,78 @@ components:
         );
         super::upgrade_graph_from_artifact_v1(&mut version_1);
         assert_eq!(version_1, current);
+    }
+
+    /// `multipleOf` and `uniqueItems` are typed constraints, on a field and on a parameter alike:
+    /// imported once, published from the typed fact, and read by the sampler.
+    #[test]
+    fn multiple_of_and_unique_items_are_typed_and_published() {
+        let graph = import_yaml(
+            r##"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - { name: step, in: query, required: true, schema: { type: integer, multipleOf: 5, minimum: 6 } }
+        - { name: ids, in: query, schema: { type: array, uniqueItems: true, items: { type: integer, multipleOf: 2 } } }
+      responses:
+        "200":
+          description: ok
+          content: { application/json: { schema: { $ref: "#/components/schemas/Item" } } }
+components:
+  schemas:
+    Item:
+      type: object
+      required: [price, tags]
+      properties:
+        price: { type: number, multipleOf: 0.25 }
+        tags: { type: array, uniqueItems: true, items: { type: string } }
+"##,
+        );
+        let param = |name: &str| {
+            graph.operations[0]
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+        };
+        assert_eq!(param("step").constraints.multiple_of.as_deref(), Some("5"));
+        assert!(param("ids").constraints.unique_items);
+        assert_eq!(
+            param("ids").item_constraints.multiple_of.as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            emitted_parameter_schema(&graph, "step"),
+            serde_json::json!({"type": "integer", "multipleOf": 5, "minimum": 6})
+        );
+        assert_eq!(
+            emitted_parameter_schema(&graph, "ids"),
+            serde_json::json!({
+                "type": "array", "uniqueItems": true, "items": {"type": "integer", "multipleOf": 2}
+            })
+        );
+        let yaml = to_openapi(&graph, "P", "/", &graph.security).unwrap();
+        let emitted = parse_json_or_yaml(&yaml, std::path::Path::new("generated.yaml")).unwrap();
+        assert_eq!(
+            emitted.pointer("/components/schemas/Item/properties/price/multipleOf"),
+            Some(&serde_json::json!(0.25))
+        );
+        assert_eq!(
+            emitted.pointer("/components/schemas/Item/properties/tags/uniqueItems"),
+            Some(&serde_json::json!(true))
+        );
+        let op = &graph.operations[0];
+        let crate::verify::Sampled::Sample(sample) = crate::verify::sample_operation(op, &graph)
+            .unwrap()
+            .for_docs()
+        else {
+            panic!("the operation samples");
+        };
+        assert_eq!(sample.params[0].value, serde_json::json!(10));
     }
 
     /// A parameter whose schema is a `$ref` to an array keeps the referenced items' constraints,

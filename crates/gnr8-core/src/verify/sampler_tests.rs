@@ -2228,3 +2228,142 @@ fn a_refused_second_representation_is_counted_and_the_first_still_selected() {
     );
     assert!(plan.refused.is_empty(), "{:?}", plan.refused);
 }
+
+/// `multipleOf` is a modelled constraint: [`satisfies`] evaluates it, and an integer or float
+/// sample is a multiple of it — or a typed refusal when the bounds admit none.
+#[test]
+fn samples_are_multiples_of_their_multiple_of() {
+    assert_eq!(param_value(&int(), &json!({"multiple_of": "5"})), json!(5));
+    assert_eq!(
+        param_value(&int(), &json!({"multiple_of": "5", "minimum": "6"})),
+        json!(10)
+    );
+    assert_eq!(
+        param_value(&int(), &json!({"multiple_of": "3", "maximum": "-1"})),
+        json!(-3)
+    );
+    let none = probe(
+        &[query(
+            "q",
+            &int(),
+            true,
+            &json!({"multiple_of": "5", "minimum": "6", "maximum": "9"}),
+        )],
+        None,
+        None,
+        &[],
+    );
+    assert_eq!(
+        refusal(&none).to_string(),
+        "parameter `q` cannot satisfy `multipleOf`"
+    );
+    assert_eq!(
+        param_value(&float(), &json!({"multiple_of": "0.25"})),
+        json!(1.5)
+    );
+    assert_eq!(
+        param_value(&float(), &json!({"multiple_of": "0.4"})),
+        json!(1.6)
+    );
+    // Every multiple of 1 is a whole number, which the generated languages print differently.
+    let whole = probe(
+        &[query("q", &float(), true, &json!({"multiple_of": "1"}))],
+        None,
+        None,
+        &[],
+    );
+    assert!(matches!(refusal(&whole), SampleRefusal::FloatWire { .. }));
+
+    let multiple = constraints(&json!({"multiple_of": "4"}));
+    assert_eq!(satisfies(&json!(8), &multiple), Ok(()));
+    assert_eq!(
+        satisfies(&json!(10), &multiple).unwrap_err().constraint,
+        "multipleOf"
+    );
+    assert_eq!(
+        satisfies(&json!(0.3), &constraints(&json!({"multiple_of": "0.1"}))),
+        Ok(())
+    );
+}
+
+/// `uniqueItems` is modelled: [`satisfies`] evaluates it, and a sampled array of one element meets
+/// it. The sampler repeats one item to reach `minItems`, so above one element it records the
+/// constraint unmet — sent by a contract case, refused by a docs page — never a silent violation.
+#[test]
+fn unique_items_is_evaluated_and_recorded_unmet_when_the_sample_repeats_an_item() {
+    let unique = constraints(&json!({"unique_items": true}));
+    assert_eq!(satisfies(&json!([1, 2]), &unique), Ok(()));
+    assert_eq!(
+        satisfies(&json!([1, 1]), &unique).unwrap_err().constraint,
+        "uniqueItems"
+    );
+    let one = probe(
+        &[],
+        Some(&object(&[meta_fld(
+            "tags",
+            &array(&string()),
+            true,
+            &json!({"constraints": {"unique_items": true}}),
+        )])),
+        None,
+        &[],
+    );
+    assert!(
+        sample(&one).bodies[0].unmet.is_empty(),
+        "one element meets uniqueItems"
+    );
+    let two = probe(
+        &[],
+        Some(&object(&[meta_fld(
+            "tags",
+            &array(&string()),
+            true,
+            &json!({"constraints": {"unique_items": true, "min_items": 2}}),
+        )])),
+        None,
+        &[],
+    );
+    assert_eq!(
+        sample(&two).bodies[0]
+            .unmet
+            .iter()
+            .map(|unmet| (unmet.subject.as_str(), unmet.constraint.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("body.tags", "uniqueItems")]
+    );
+    assert!(matches!(docs(&two), Sampled::Refused(_)));
+}
+
+/// A validation keyword a parameter's kept raw schema still states is one the graph does not
+/// model. The sample records it unmet, so a docs page refuses instead of printing a value that may
+/// break it.
+#[test]
+fn an_unmodelled_parameter_keyword_is_recorded_unmet() {
+    let mut param = query("q", &int(), true, &json!({}));
+    param["openapi_fields"] = json!([["schema", {"type": "integer", "const": 3}]]);
+    let graph = probe(&[param], None, None, &[]);
+    assert_eq!(
+        sample(&graph).params[0]
+            .unmet
+            .iter()
+            .map(|unmet| unmet.constraint.as_str())
+            .collect::<Vec<_>>(),
+        vec!["const"]
+    );
+    assert_eq!(
+        docs(&graph),
+        Sampled::Refused(SampleRefusal::Unmet(UnmetConstraint {
+            subject: "query.q".to_string(),
+            constraint: "const".to_string(),
+        }))
+    );
+    // A declared example meets it on its author's word, as it meets a `pattern`.
+    let mut param = query("q", &int(), true, &json!({}));
+    param["openapi_fields"] = json!([["schema", {"type": "integer", "const": 3}]]);
+    param["example"] = json!("3");
+    let graph = probe(&[param], None, None, &[]);
+    assert!(
+        sample(&graph).params[0].unmet.is_empty(),
+        "the example meets what gnr8 does not evaluate"
+    );
+}

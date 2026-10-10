@@ -221,6 +221,17 @@ must move the minor version.
   patterned path parameter with an example gets a sample a docs page prints, and an example that
   breaks the parameter's type or constraints fails generation with `CoreError::InvalidExample`. That
   error, for a field or a parameter example, now names the file the example is declared in.
+- **`multipleOf` and `uniqueItems` are typed constraints.** An imported field dropped both from
+  `openapi.yaml`, and the sampler ignored them on a parameter, so a sample could break them.
+  `Constraints` gains `multiple_of` and `unique_items`. They are imported on fields and parameters,
+  published from the typed fact, and checked against declared examples. An integer or float sample
+  is a multiple of its `multipleOf`, or a typed refusal when the bounds admit none. A float
+  `multipleOf: 1` admits only whole numbers, which the languages print differently. A sampled array
+  repeats one item, so a `uniqueItems` array above one element records the constraint as unmet.
+  The contract test still sends it, and the docs page refuses. Any other validation keyword left
+  in an imported parameter's schema is recorded as unmet too, so the page refuses instead of
+  printing a value that may break it. That covers keywords gnr8 does not model (`const`, `not`, …)
+  and keywords it could not type (an enum with no scalar `type`).
 - Integer samples stay within ±(2^53 − 1). Bounds such as `minimum: 9007199254740993` used to yield
   a sample the TypeScript SDK sent as `…992`; they are now a typed refusal naming the input.
 - An imported parameter's validation keywords (`minimum`, `maxLength`, `pattern`, a non-string
