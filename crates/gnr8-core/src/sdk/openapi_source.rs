@@ -299,7 +299,7 @@ impl Importer {
 
         let group_docs = self.group_docs(&operations);
 
-        Ok(ApiGraph {
+        let mut graph = ApiGraph {
             module: self
                 .root
                 .get("info")
@@ -327,7 +327,9 @@ impl Importer {
             operation_docs: std::mem::take(&mut self.operation_docs),
             group_docs,
             schema_uses: Vec::new(),
-        })
+        };
+        take_parameter_examples(&mut graph);
+        Ok(graph)
     }
 
     fn validate_representable_security(&self) -> Result<(), CoreError> {
@@ -1103,6 +1105,9 @@ impl Importer {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             description,
+            // Taken from `openapi_fields` once the parameter's type can be resolved
+            // (`take_parameter_examples`).
+            example: None,
             openapi_content,
             openapi_fields,
             provenance: self.span(),
@@ -2209,10 +2214,7 @@ impl Importer {
                         .get("description")
                         .and_then(Value::as_str)
                         .map(ToString::to_string),
-                    example: property_schema
-                        .get("example")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string),
+                    example: self.field_example(name, property_schema),
                     meta: field_meta_from_schema(property_schema),
                 });
             }
@@ -2233,6 +2235,21 @@ impl Importer {
             },
             _ => Type::Object(Vec::new()),
         }
+    }
+
+    /// A property's declared `example`, as the text a field example is ([`example_text`]). An
+    /// example a field example cannot state — an array, an object, `null` — is reported, never
+    /// silently dropped.
+    fn field_example(&mut self, name: &str, property_schema: &Value) -> Option<String> {
+        let example = property_schema.get("example")?;
+        let text = example_text(example);
+        if text.is_none() {
+            self.warn(format!(
+                "the example of property '{name}' is not a string, number or boolean; a field \
+                 example states only a scalar, so it is not imported"
+            ));
+        }
+        text
     }
 
     fn resolve_ref_schema(&mut self, ref_value: &str) -> Option<(String, Value)> {
@@ -2843,6 +2860,72 @@ fn json_number_or_string(value: &Value) -> String {
         .map_or_else(|| value.to_string(), ToString::to_string)
 }
 
+/// A declared `example` as the text the graph holds a field or parameter example in: a string is
+/// its own text, a number or boolean its JSON spelling (`7`, `1.5`, `true`). The sampler reads the
+/// text back as a value of the input's type and the `OpenAPI` lowering publishes it in that type's
+/// JSON kind, so `example: 7` on an integer round-trips as `7`. Anything else — an array, an
+/// object, `null` — is no scalar and has no such text.
+fn example_text(example: &Value) -> Option<String> {
+    match example {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+/// Move each scalar parameter's Parameter Object `example` out of the kept raw fields into its
+/// typed example ([`example_text`]), so the graph holds it once: the sampler reads it and the
+/// `OpenAPI` lowering writes it back. The example of a parameter the sampler never samples (an
+/// array, map, object or `content`-encoded one) or one with no scalar text stays as declared.
+///
+/// The importer applies it to the graph it builds, and the version 1 upgrade to the graph an old
+/// artifact holds, so both read an example the same way.
+fn take_parameter_examples(graph: &mut ApiGraph) {
+    let ApiGraph {
+        operations,
+        schemas,
+        ..
+    } = graph;
+    for param in operations.iter_mut().flat_map(|op| op.params.iter_mut()) {
+        if param.openapi_content.is_some() || !is_scalar_type(&param.schema, schemas) {
+            continue;
+        }
+        let Some(index) = param
+            .openapi_fields
+            .iter()
+            .position(|(name, value)| name == "example" && example_text(value).is_some())
+        else {
+            continue;
+        };
+        let (_, example) = param.openapi_fields.remove(index);
+        param.example = example_text(&example);
+    }
+}
+
+/// Whether a type, through named aliases, is a scalar a sample states.
+fn is_scalar_type(ty: &Type, schemas: &[Schema]) -> bool {
+    let mut ty = ty;
+    let mut seen = BTreeSet::new();
+    loop {
+        match ty {
+            Type::Named(id) if seen.insert(id.as_str()) => {
+                match schemas.iter().find(|schema| &schema.id == id) {
+                    Some(schema) => ty = &schema.body,
+                    None => return false,
+                }
+            }
+            Type::Primitive(_) | Type::WellKnown(_) | Type::Enum(_) => return true,
+            Type::Named(_)
+            | Type::Array(_)
+            | Type::Map { .. }
+            | Type::Object(_)
+            | Type::Union(_)
+            | Type::Any {} => return false,
+        }
+    }
+}
+
 fn literal_value(value: &Value) -> Option<LiteralValue> {
     if value.is_null() {
         Some(LiteralValue::Null)
@@ -2961,9 +3044,11 @@ fn parameter_items_mut(raw: &mut Value) -> Option<&mut Value> {
 /// Read a graph that graph-artifact schema version 1 wrote the way version 2 represents it.
 ///
 /// Version 1 kept an imported parameter's validation keywords in the raw schema the graph holds for
-/// it, and kept the base path on the imported servers too. This applies the importer's own two
-/// rules to that graph: [`take_constraints`] moves each kept raw schema's keywords (and its items')
-/// into typed constraints, and a server whose path is the base path loses it. A keyword beside a
+/// it, kept a parameter's example among its raw fields, and kept the base path on the imported
+/// servers too. This applies the importer's own rules to that graph: [`take_constraints`] moves
+/// each kept raw schema's keywords (and its items') into typed constraints,
+/// [`take_parameter_examples`] moves a scalar parameter's example into its typed example, and a
+/// server whose path is the base path loses it. A keyword beside a
 /// `$ref` moves; the bounds of the schema a `$ref` names were never in a version 1 graph and stay
 /// unknown.
 pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
@@ -2992,6 +3077,7 @@ pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
                 tighter_constraints(items, std::mem::take(&mut param.item_constraints));
         }
     }
+    take_parameter_examples(graph);
     let base_path = normalize_path(&graph.base_path);
     if base_path != "/" {
         for server in &mut graph.openapi_metadata.servers {
@@ -5145,7 +5231,7 @@ components:
             "paths": {"/items": {"get": {
                 "operationId": "listItems",
                 "parameters": [
-                    {"name": "limit", "in": "query", "schema": limit_schema},
+                    {"name": "limit", "in": "query", "example": 3, "schema": limit_schema},
                     {"name": "ids", "in": "query", "schema": ids_schema}
                 ],
                 "responses": {"204": {"description": "none"}}
@@ -5170,6 +5256,12 @@ components:
                 if field == "schema" {
                     *value = raw.clone();
                 }
+            }
+            // Version 1 kept a parameter's example in the raw Parameter Object fields.
+            if param.example.take().is_some() {
+                param
+                    .openapi_fields
+                    .insert(0, ("example".to_string(), serde_json::json!(3)));
             }
         }
         assert_ne!(
@@ -5501,5 +5593,165 @@ paths:
             swagger.openapi_metadata.servers[0].url,
             "https://api.example.com"
         );
+    }
+
+    const EXAMPLES: &str = r##"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+paths:
+  /items/{code}:
+    get:
+      operationId: getItem
+      parameters:
+        - { name: code, in: path, required: true, example: AB, schema: { type: string, pattern: "^[A-Z]{2}$" } }
+        - { name: limit, in: query, example: 7, schema: { type: integer, minimum: 1 } }
+        - { name: ids, in: query, example: [1, 2], schema: { type: array, items: { type: integer } } }
+      responses:
+        "200":
+          description: ok
+          content: { application/json: { schema: { $ref: "#/components/schemas/Item" } } }
+components:
+  schemas:
+    Item:
+      type: object
+      required: [count, flag, name, ratio]
+      properties:
+        count: { type: integer, example: 7 }
+        ratio: { type: number, example: 1.5 }
+        flag: { type: boolean, example: true }
+        name: { type: string, example: "7" }
+        tags: { type: array, items: { type: string }, example: [a] }
+"##;
+
+    /// D-EX: a declared scalar example of every JSON type is imported by one rule — its text, read
+    /// back as a value of the input's type — on fields and on scalar parameters alike, and is
+    /// published in its type's JSON kind. A parameter example is the parameter's sample, so a
+    /// patterned path parameter with an example gets a sample a docs page can print.
+    #[test]
+    fn scalar_examples_of_every_json_type_are_imported_and_sampled() {
+        let graph = import_yaml(EXAMPLES);
+        let item = graph
+            .schemas
+            .iter()
+            .find(|schema| schema.name == "Item")
+            .unwrap();
+        let Type::Object(fields) = &item.body else {
+            panic!("Item is an object");
+        };
+        let example = |name: &str| {
+            fields
+                .iter()
+                .find(|field| field.json_name == name)
+                .and_then(|field| field.example.as_deref())
+        };
+        assert_eq!(example("count"), Some("7"));
+        assert_eq!(example("ratio"), Some("1.5"));
+        assert_eq!(example("flag"), Some("true"));
+        assert_eq!(example("name"), Some("7"));
+        assert_eq!(example("tags"), None);
+        assert!(
+            graph.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("the example of property 'tags' is not a string, number or boolean")),
+            "{:?}",
+            graph.diagnostics
+        );
+        let param = |name: &str| {
+            graph.operations[0]
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+        };
+        assert_eq!(param("code").example.as_deref(), Some("AB"));
+        assert_eq!(param("limit").example.as_deref(), Some("7"));
+        assert!(
+            !param("limit")
+                .openapi_fields
+                .iter()
+                .any(|(name, _)| name == "example"),
+            "the example is held once, as the typed fact"
+        );
+        // An array parameter is never sampled, so its example stays as declared.
+        assert_eq!(param("ids").example, None);
+        assert!(param("ids")
+            .openapi_fields
+            .contains(&("example".to_string(), serde_json::json!([1, 2]))));
+
+        let yaml = to_openapi(&graph, "P", "/", &graph.security).unwrap();
+        let emitted = parse_json_or_yaml(&yaml, std::path::Path::new("generated.yaml")).unwrap();
+        let property = |name: &str| {
+            emitted
+                .pointer(&format!(
+                    "/components/schemas/Item/properties/{name}/example"
+                ))
+                .cloned()
+        };
+        assert_eq!(property("count"), Some(serde_json::json!(7)));
+        assert_eq!(property("ratio"), Some(serde_json::json!(1.5)));
+        assert_eq!(property("flag"), Some(serde_json::json!(true)));
+        assert_eq!(property("name"), Some(serde_json::json!("7")));
+        let parameters = emitted
+            .pointer("/paths/~1items~1{code}/get/parameters")
+            .and_then(Value::as_array)
+            .unwrap();
+        let published = |name: &str| {
+            parameters
+                .iter()
+                .find(|p| p["name"] == name)
+                .map(|p| p["example"].clone())
+        };
+        assert_eq!(published("limit"), Some(serde_json::json!(7)));
+        assert_eq!(published("code"), Some(serde_json::json!("AB")));
+        assert_eq!(published("ids"), Some(serde_json::json!([1, 2])));
+
+        let op = &graph.operations[0];
+        let crate::verify::Sampled::Sample(sample) = crate::verify::sample_operation(op, &graph)
+            .unwrap()
+            .for_docs()
+        else {
+            panic!("the patterned path parameter takes its example, so the operation samples");
+        };
+        let code = sample.params.iter().find(|p| p.name == "code").unwrap();
+        assert_eq!(code.value, serde_json::json!("AB"));
+        assert!(code.unmet.is_empty(), "the example meets the pattern");
+        let limit = sample.params.iter().find(|p| p.name == "limit").unwrap();
+        assert_eq!(limit.value, serde_json::json!(7));
+        let crate::verify::SuccessOutcome::Sample(reply) = &sample.reply else {
+            panic!("the reply samples");
+        };
+        let reply: Value = serde_json::from_str(&reply.body).unwrap();
+        assert_eq!(reply["count"], serde_json::json!(7));
+        assert_eq!(reply["flag"], serde_json::json!(true));
+    }
+
+    /// D-EX: an imported example that breaks its input fails generation, and the error names the
+    /// operation, the parameter or the schema field, and the document it is declared in.
+    #[test]
+    fn an_invalid_imported_example_names_where_the_spec_declares_it() {
+        let graph = import_yaml(&EXAMPLES.replace("example: 7, schema", "example: 0, schema"));
+        let Err(crate::CoreError::InvalidExample { example, problem }) =
+            crate::verify::plan_contract_tests(&graph)
+        else {
+            panic!("an invalid parameter example is an error");
+        };
+        assert_eq!(
+            example,
+            "the example `0` of query parameter `limit` of operation `getItem`, declared in \
+             `openapi.yaml`"
+        );
+        assert_eq!(problem, "parameter `limit` violates `minimum`");
+
+        let graph = import_yaml(&EXAMPLES.replace("example: 1.5", "example: yes"));
+        let Err(crate::CoreError::InvalidExample { example, problem }) =
+            crate::verify::plan_contract_tests(&graph)
+        else {
+            panic!("an invalid field example is an error");
+        };
+        assert_eq!(
+            example,
+            "the example `yes` of field `ratio` in schema `Item`, declared in `openapi.yaml`"
+        );
+        assert_eq!(problem, "field `ratio` is not a number");
     }
 }

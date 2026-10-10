@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 use crate::analyze::facts::Constraints;
 use crate::graph::direction::SchemaDirections;
 use crate::graph::{
-    ApiGraph, Field, MediaExample, Operation, OperationDocsPolicy, Prim, Schema, Type, WellKnown,
+    ApiGraph, Field, MediaExample, Operation, OperationDocsPolicy, Param, Prim, Schema, Type,
+    WellKnown,
 };
 use crate::sdk::emit_common::{
     media_family, reply_wire_media_type, request_body_models_of, response_media_type, MediaFamily,
@@ -147,17 +148,20 @@ pub(super) fn declared_body(
 pub(super) fn field_example(
     graph: &ApiGraph,
     side: Side,
-    schema: &str,
+    schema: &Schema,
     path: &str,
     field: &Field,
     text: &str,
     subject: &str,
 ) -> Result<Result<Value, SampleRefusal>, CoreError> {
     let invalid = |reason: &str| CoreError::InvalidExample {
-        example: format!("the example `{text}` of field `{path}` in schema `{schema}`"),
+        example: format!(
+            "the example `{text}` of field `{path}` in schema `{}`, declared in `{}`",
+            schema.name, schema.provenance.file
+        ),
         problem: format!("field `{path}` {reason}"),
     };
-    let value = parse_field_example(graph, text, &field.schema)?.map_err(invalid)?;
+    let value = parse_example(graph, text, &field.schema, "field")?.map_err(|r| invalid(&r))?;
     match fit(
         graph,
         side,
@@ -172,35 +176,82 @@ pub(super) fn field_example(
     }
 }
 
-/// A field example's text as a value of the field's type, read the way an enum member is
-/// ([`parse_member`]); the reason it is not one otherwise.
+/// A parameter's declared example `text` as the parameter's value, checked against its type and
+/// constraints exactly as a field example is. `subject` is where the sample puts the value.
+///
+/// # Errors
+///
+/// Returns [`CoreError::InvalidExample`] naming the operation, the parameter, the example and the
+/// file it is declared in when the text is not a value of the parameter's type or breaks one of its
+/// constraints.
+pub(super) fn param_example(
+    graph: &ApiGraph,
+    op: &Operation,
+    param: &Param,
+    text: &str,
+    subject: &str,
+) -> Result<Result<Value, SampleRefusal>, CoreError> {
+    let invalid = |reason: &str| CoreError::InvalidExample {
+        example: format!(
+            "the example `{text}` of {} parameter `{}` of operation `{}`, declared in `{}`",
+            param.location, param.name, op.id, param.provenance.file
+        ),
+        problem: format!("parameter `{}` {reason}", param.name),
+    };
+    let value = parse_example(graph, text, &param.schema, "parameter")?.map_err(|r| invalid(&r))?;
+    match fit(
+        graph,
+        Side::Request,
+        &param.schema,
+        &value,
+        &param.constraints,
+        subject,
+    )? {
+        Fit::Fits => Ok(Ok(value)),
+        Fit::Refused(refusal) => Ok(Err(refusal)),
+        Fit::Mismatch { reason, .. } => Err(invalid(&reason)),
+    }
+}
+
+/// An example's text as a value of its input's type, read the way an enum member is
+/// ([`parse_member`]); the reason it is not one otherwise. `what` names the input kind (`field`,
+/// `parameter`) in that reason.
 ///
 /// The text is a literal and nothing more: it states a scalar. There is no list or object grammar
-/// inside it, so a field whose type is not a scalar has no example the text can state.
-fn parse_field_example(
+/// inside it, so an input whose type is not a scalar has no example the text can state.
+fn parse_example(
     graph: &ApiGraph,
     text: &str,
     ty: &Type,
-) -> Result<Result<Value, &'static str>, CoreError> {
+    what: &str,
+) -> Result<Result<Value, String>, CoreError> {
     let mut ty = ty;
     let mut seen = BTreeSet::new();
     while let Type::Named(id) = ty {
         if !seen.insert(id.as_str()) {
-            return Ok(Err("refers back to itself"));
+            return Ok(Err("refers back to itself".to_string()));
         }
         ty = &schema_by_id(graph, id)?.body;
     }
+    let not_scalar = |kind: &str| {
+        Err(format!(
+            "is {kind}, and a {what} example states only a scalar"
+        ))
+    };
     Ok(match ty {
         Type::Primitive(Prim::Bytes) | Type::Any {} => Ok(Value::String(text.to_string())),
-        Type::Array(_) => Err("is an array, and a field example states only a scalar"),
-        Type::Map { .. } => Err("is a map, and a field example states only a scalar"),
-        Type::Object(_) => Err("is an object, and a field example states only a scalar"),
-        Type::Union(_) => Err("is a union, and a field example states only a scalar"),
-        scalar => parse_member(text, scalar).ok_or(match scalar {
-            Type::Primitive(Prim::Int { .. }) => "is not an integer",
-            Type::Primitive(Prim::Float { .. }) => "is not a number",
-            Type::Primitive(Prim::Bool) => "is not a boolean",
-            _ => "is not an RFC 3339 date-time",
+        Type::Array(_) => not_scalar("an array"),
+        Type::Map { .. } => not_scalar("a map"),
+        Type::Object(_) => not_scalar("an object"),
+        Type::Union(_) => not_scalar("a union"),
+        scalar => parse_member(text, scalar).ok_or_else(|| {
+            match scalar {
+                Type::Primitive(Prim::Int { .. }) => "is not an integer",
+                Type::Primitive(Prim::Float { .. }) => "is not a number",
+                Type::Primitive(Prim::Bool) => "is not a boolean",
+                _ => "is not an RFC 3339 date-time",
+            }
+            .to_string()
         }),
     })
 }
@@ -221,9 +272,16 @@ fn parse_field_example(
 /// SDK helpers reject.
 pub fn check_declared_examples(graph: &ApiGraph) -> Result<(), CoreError> {
     for schema in &graph.schemas {
-        check_field_examples(graph, &schema.name, &schema.body, "")?;
+        check_field_examples(graph, schema, &schema.body, "")?;
     }
     for op in &graph.operations {
+        for param in &op.params {
+            if let Some(text) = &param.example {
+                let subject = format!("{}.{}", param.location, param.name);
+                // Only validity is checked here: a refusal is no error.
+                let _ = param_example(graph, op, param, text, &subject)?;
+            }
+        }
         let Some(policy) = docs_policy(op, graph) else {
             continue;
         };
@@ -276,7 +334,7 @@ pub fn check_declared_examples(graph: &ApiGraph) -> Result<(), CoreError> {
 /// and union variants. A reference is checked where its own schema is.
 fn check_field_examples(
     graph: &ApiGraph,
-    schema: &str,
+    schema: &Schema,
     ty: &Type,
     prefix: &str,
 ) -> Result<(), CoreError> {

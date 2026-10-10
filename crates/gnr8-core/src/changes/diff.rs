@@ -1151,6 +1151,13 @@ fn parameter_openapi_value(parameter: &Param) -> serde_json::Value {
             serde_json::Value::String(description.clone()),
         );
     }
+    // So is the typed example: the Parameter Object `example` the document carries.
+    if let Some(example) = &parameter.example {
+        fields.insert(
+            "example".to_string(),
+            serde_json::Value::String(example.clone()),
+        );
+    }
     serde_json::json!({ "content": parameter.openapi_content, "fields": fields })
 }
 
@@ -2690,6 +2697,7 @@ mod tests {
             explode: None,
             allow_reserved: false,
             description: None,
+            example: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: span("handlers.rs"),

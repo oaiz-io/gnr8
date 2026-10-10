@@ -204,6 +204,17 @@ must move the minor version.
   without one (a refused JSON body, or a representation that is not JSON) is counted as a refused
   sample naming its media type. `OperationSample` gains `refused_bodies`, `RefusedScope` gains
   `BodyRepresentation` and `SampleRefusal` gains `NotJson`.
+- **An imported example of any scalar JSON type is imported.** A property `example: 7` on an integer
+  was dropped while `example: "7"` was kept; a string, number or boolean `example` is now read by one
+  rule (its text, read back as a value of the field's type), and an array, object or `null` field
+  example is reported as a diagnostic instead of vanishing. `openapi.yaml` publishes a field example
+  in the JSON kind of its integer, number or boolean type (`example: 7`, not `'7'`).
+- **A scalar parameter's `example` is its sample.** `Param` gains `example`; an imported scalar
+  parameter's Parameter Object `example` moves into it (an array or object parameter's stays as
+  declared), and `openapi.yaml` writes it back. The sampler takes it as the parameter's value, so a
+  patterned path parameter with an example gets a sample a docs page prints, and an example that
+  breaks the parameter's type or constraints fails generation with `CoreError::InvalidExample`. That
+  error, for a field or a parameter example, now names the file the example is declared in.
 - Integer samples stay within ±(2^53 − 1). Bounds such as `minimum: 9007199254740993` used to yield
   a sample the TypeScript SDK sent as `…992`; they are now a typed refusal naming the input.
 - An imported parameter's validation keywords (`minimum`, `maxLength`, `pattern`, a non-string

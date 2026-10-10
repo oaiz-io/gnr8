@@ -214,10 +214,14 @@ escaped and summaries are folded to one line.
 - An enum member is printed as declared, even when it contradicts a mapped format.
 - An error status with no declared response body keeps the contract test's generic error envelope;
   error bodies are never printed on a page.
-- A field example states only a scalar. A field whose type is an array, map, object or union has no
-  example its text can state, so declaring one is an error. A body example can state such a field.
-- `openapi.yaml` publishes a field example as the text it was declared as, so a number example
-  appears there as a string, while the sample reads it as a number.
+- A field or parameter example states only a scalar. A field whose type is an array, map, object or
+  union has no example its text can state, so declaring one is an error. A body example can state
+  such a field. An imported array, object or `null` field example is reported and not imported; an
+  imported example on an array or object parameter stays in `openapi.yaml` as declared and is not a
+  sample.
+- `openapi.yaml` publishes a field or parameter example in the JSON kind of its declared integer,
+  number or boolean type. A field whose type is a reference to such a schema publishes its example
+  as a string, while the sample reads it as a value of the referenced type.
 - A printed sample holds at most 64 array or map entries and 1024 string characters; a lower bound
   above that prints `No sample call: … above the 64 a printed sample holds`, a limit of the page
   rather than of the API.

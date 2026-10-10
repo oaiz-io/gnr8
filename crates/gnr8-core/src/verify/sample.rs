@@ -24,10 +24,11 @@
 //! # Declared examples
 //!
 //! Every input takes its value by one rule: **an input that declares an example takes that example;
-//! an input that declares none is built from its type.** Two kinds of input declare one:
+//! an input that declares none is built from its type.** Three kinds of input declare one:
 //!
 //! - a field, through its `example` (text, read as a value of the field's type the way an enum
-//!   member is: [`parse_member`]); and
+//!   member is: [`parse_member`]);
+//! - a scalar parameter, through its `example`, read the same way; and
 //! - a request body or a success reply, through the operation's first `MediaExample` for the JSON
 //!   media type the sample uses (`request_examples`, or the examples of the reply's status).
 //!
@@ -71,8 +72,8 @@ mod declared;
 pub use declared::check_declared_examples;
 pub(crate) use declared::reply_media;
 use declared::{
-    declared_body, docs_policy, examples_for, field_example, reply_example, request_origin,
-    response_origin, schema_by_id,
+    declared_body, docs_policy, examples_for, field_example, param_example, reply_example,
+    request_origin, response_origin, schema_by_id,
 };
 
 /// The most elements or entries one sampled array or map carries.
@@ -630,7 +631,7 @@ fn member_matches(member: &str, value: &Value) -> bool {
 pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, CoreError> {
     let mut params = Vec::new();
     for param in &op.params {
-        match sample_param(param, graph)? {
+        match sample_param(op, param, graph)? {
             Ok(sample) => params.push(sample),
             Err(refusal) if param.required || param.location == "path" => {
                 return Ok(Sampled::Refused(refusal));
@@ -712,6 +713,7 @@ pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, Cor
 /// non-default-style parameter has a wire form the plan would have to restate, and restating it is
 /// how a test starts asserting its own encoder instead of the SDK's.
 fn sample_param(
+    op: &Operation,
     param: &Param,
     graph: &ApiGraph,
 ) -> Result<Result<SampleParam, SampleRefusal>, CoreError> {
@@ -736,12 +738,19 @@ fn sample_param(
     if let Err(refusal) = scalar_parameter(param, graph, &subject)? {
         return Ok(Err(refusal));
     }
-    let restriction = Restriction {
-        constraints: &param.constraints,
-        format: None,
-    };
+    // The parameter is its declared example when it declares one, and is built from its type and
+    // constraints when it declares none.
     let mut sampler = Sampler::new(graph, Side::Request);
-    let value = match sampler.value(&param.schema, &restriction, &subject, 0)? {
+    let outcome = if let Some(text) = &param.example {
+        param_example(graph, op, param, text, &subject)?
+    } else {
+        let restriction = Restriction {
+            constraints: &param.constraints,
+            format: None,
+        };
+        sampler.value(&param.schema, &restriction, &subject, 0)?
+    };
+    let value = match outcome {
         Ok(value) => value,
         Err(refusal) => return Ok(Err(refusal)),
     };
@@ -1127,7 +1136,7 @@ struct Sampler<'g> {
     unmet: Vec<UnmetConstraint>,
     /// The named schemas being sampled, innermost last, each with the subject its body sits at, so
     /// a field example is named by its schema and its path inside it.
-    frames: Vec<(&'g str, String)>,
+    frames: Vec<(&'g Schema, String)>,
 }
 
 impl<'g> Sampler<'g> {
@@ -1143,7 +1152,7 @@ impl<'g> Sampler<'g> {
 
     /// Build the value of one named schema's body: a request body, a reply or an error payload.
     fn root(&mut self, schema: &'g Schema, subject: &str) -> Outcome {
-        self.frames.push((&schema.name, subject.to_string()));
+        self.frames.push((schema, subject.to_string()));
         let outcome = self.value(&schema.body, &Restriction::NONE, subject, 0);
         self.frames.pop();
         outcome
@@ -1240,7 +1249,7 @@ impl<'g> Sampler<'g> {
                         schema: schema.name.clone(),
                     }));
                 }
-                self.frames.push((&schema.name, subject.to_string()));
+                self.frames.push((schema, subject.to_string()));
                 let value = self.value(&schema.body, restriction, subject, depth + 1);
                 self.frames.pop();
                 self.visiting.remove(id);

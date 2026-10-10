@@ -605,6 +605,12 @@ pub struct Param {
     /// that has neither. It is prose only and never states structure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// A declared example value of a scalar parameter, as text read as a value of its type — the
+    /// way a field's `example` is read. The sampler takes it as the parameter's value, and a value
+    /// that breaks the parameter's type or constraints fails generation. An `OpenApi`-imported
+    /// parameter takes it from the Parameter Object's scalar `example`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<String>,
     /// Exact `OpenAPI` 3 parameter `content` object, when the source used content instead of schema.
     ///
     /// SDK generators use [`Self::schema`] for typing; the `OpenAPI` target uses this value to avoid
@@ -1040,6 +1046,7 @@ impl Param {
             explode: param.explode,
             allow_reserved: param.allow_reserved,
             description: param.description.filter(|text| !text.trim().is_empty()),
+            example: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: relativize_span(&param.span, root),

@@ -618,20 +618,29 @@ fn lower_parameter(
             }
         }
     }
-    // The typed prose is emitted at the position the Parameter Object's sorted fields give it, so a
-    // parameter documented from its source and one imported with a `description` render alike.
-    if let Some(description) = &param.description {
+    // The typed prose and example are emitted at the position the Parameter Object's sorted fields
+    // give them, so a parameter documented from its source and one imported render alike.
+    let mut insert_sorted = |key: &str, value: serde_json::Value| {
         let at = openapi_fields
             .iter()
-            .position(|(name, _)| name.as_str() > "description")
+            .position(|(name, _)| name.as_str() > key)
             .unwrap_or(openapi_fields.len());
-        openapi_fields.insert(
-            at,
-            (
-                "description".to_string(),
-                serde_json::Value::String(description.clone()),
-            ),
+        openapi_fields.insert(at, (key.to_string(), value));
+    };
+    if let Some(description) = &param.description {
+        insert_sorted(
+            "description",
+            serde_json::Value::String(description.clone()),
         );
+    }
+    if let Some(example) = &param.example {
+        let value = match example_literal(example, scalar_kind(&param.schema, schemas)) {
+            LiteralValue::Number(text) => json::number_or_string(&text),
+            LiteralValue::Bool(flag) => serde_json::Value::Bool(flag),
+            LiteralValue::String(text) => serde_json::Value::String(text),
+            LiteralValue::Null => serde_json::Value::Null,
+        };
+        insert_sorted("example", value);
     }
     Ok(Parameter {
         name: param.name.clone(),
@@ -698,6 +707,17 @@ fn write_raw_constraints(
             })
             .collect();
         object.insert("enum".to_string(), Value::Array(members));
+    }
+}
+
+/// A declared example's text as the literal `openapi.yaml` publishes: in the JSON kind of the
+/// primitive it is declared on — a number for an integer or float, a boolean for a bool — and a
+/// string otherwise, the way the sampler reads the same text.
+fn example_literal(text: &str, kind: Option<&Prim>) -> LiteralValue {
+    match kind {
+        Some(Prim::Int { .. } | Prim::Float { .. }) => LiteralValue::Number(text.to_string()),
+        Some(Prim::Bool) if text == "true" || text == "false" => LiteralValue::Bool(text == "true"),
+        _ => LiteralValue::String(text.to_string()),
     }
 }
 
@@ -1052,7 +1072,11 @@ fn lower_object(
                 prop.description = Some(desc.clone());
             }
             if let Some(example) = &field.example {
-                prop.example = Some(LiteralValue::String(example.clone()));
+                let kind = match &field.schema {
+                    Type::Primitive(prim) => Some(prim),
+                    _ => None,
+                };
+                prop.example = Some(example_literal(example, kind));
             }
             apply_field_meta(field, &mut prop);
             Ok((field.json_name.clone(), prop))

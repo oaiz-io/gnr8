@@ -1858,7 +1858,7 @@ fn a_field_example_that_violates_its_constraint_is_an_error_naming_it() {
     let (example, problem) = invalid_example(sample_operation(&graph.operations[0], &graph));
     assert_eq!(
         example,
-        "the example `Dune` of field `title` in schema `Req`"
+        "the example `Dune` of field `title` in schema `Req`, declared in `a.go`"
     );
     assert_eq!(problem, "field `title` violates `minLength`");
 }
@@ -1952,7 +1952,7 @@ fn an_example_on_a_field_the_sample_leaves_out_is_still_checked() {
     let (example, problem) = invalid_example(plan_contract_tests(&graph));
     assert_eq!(
         example,
-        "the example `long` of field `note` in schema `Req`"
+        "the example `long` of field `note` in schema `Req`, declared in `a.go`"
     );
     assert_eq!(problem, "field `note` violates `maxLength`");
 }
