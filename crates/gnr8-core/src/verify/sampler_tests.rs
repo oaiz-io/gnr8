@@ -1986,7 +1986,7 @@ fn a_declared_request_example_is_the_body() {
         .iter()
         .filter_map(|case| case.expected_body.as_ref())
         .collect();
-    assert!(!bodies.is_empty());
+    assert!(!bodies.is_empty(), "the plan sends the body in some case");
     assert!(bodies
         .iter()
         .all(|body| **body == json!({"title": "Dune", "subtitle": "A novel"})));
