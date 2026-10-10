@@ -352,6 +352,13 @@ must move the minor version.
   positive integer the divisor divides (`3` for `1.5`, `1` for `0.5` or `0.00001`). An integer
   sample under `multipleOf: 0.00001` used to be refused, because a divisor below `0.0001` found no
   step.
+- A declared integer is checked against its type's width and sign, and a float32 value against
+  the float32 range: `example: -300` on a `uint8`, or `3000000000` on an `int32`, is
+  `CoreError::InvalidExample` naming the range, where it used to reach a Go literal that does not
+  compile. A built integer sample stays inside the type's range, and a bound beyond it is refused
+  naming that bound. An integral number is an integer: a declared `5.0` (a media example's value, a
+  field or parameter example's text, an enum member) is accepted for an integer input and stated
+  as `5`, which every SDK decodes into its integer type, where it used to be an error.
 
 ## 0.18.0 — 2026-10-10
 

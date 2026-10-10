@@ -1979,6 +1979,104 @@ fn a_field_example_that_is_not_a_value_of_its_type_is_an_error() {
     }
 }
 
+/// An integer value is checked against its type's width and sign — a Go literal of the wrong range
+/// does not compile — and a float32 value against the float32 range. An integral number (`5.0`) is
+/// an integer, and the sample states it as one (`5`), which every SDK decodes into an integer.
+#[test]
+fn integer_and_float32_values_respect_their_width_and_an_integral_number_is_an_integer() {
+    let uint8 = json!({"type": "primitive", "of": {"prim": "int", "bits": 8, "signed": false}});
+    let int32 = json!({"type": "primitive", "of": {"prim": "int", "bits": 32, "signed": true}});
+    let float32 = json!({"type": "primitive", "of": {"prim": "float", "bits": 32}});
+    for (schema, text, reason) in [
+        (
+            &uint8,
+            "-300",
+            "is outside the range of an unsigned 8-bit integer",
+        ),
+        (
+            &uint8,
+            "256",
+            "is outside the range of an unsigned 8-bit integer",
+        ),
+        (
+            &int32,
+            "3000000000",
+            "is outside the range of a signed 32-bit integer",
+        ),
+        (&float32, "1e300", "is outside the range of a 32-bit float"),
+    ] {
+        let graph = probe(
+            &[],
+            None,
+            Some(&object(&[example_fld("v", schema, true, &json!({}), text)])),
+            &[],
+        );
+        let (_, problem) = invalid_example(sample_operation(&graph.operations[0], &graph));
+        assert_eq!(problem, format!("field `v` {reason}"), "{schema} {text}");
+    }
+    let mut param = query("q", &uint8, true, &json!({}));
+    param["example"] = json!("-300");
+    let graph = probe(&[param], None, None, &[]);
+    let (_, problem) = invalid_example(sample_operation(&graph.operations[0], &graph));
+    assert_eq!(
+        problem,
+        "parameter `q` is outside the range of an unsigned 8-bit integer"
+    );
+
+    // Built samples stay inside the type's range, or name the bound that pushes them out.
+    assert_eq!(param_value(&uint8, &json!({})), json!(7));
+    assert_eq!(
+        param_value(&uint8, &json!({"enum_values": ["-1", "300", "3"]})),
+        json!(3)
+    );
+    for (bounds, keyword) in [
+        (json!({"minimum": "300"}), "minimum"),
+        (json!({"maximum": "-1"}), "maximum"),
+        (json!({"exclusive_maximum": "0"}), "exclusiveMaximum"),
+    ] {
+        let graph = probe(&[query("q", &uint8, true, &bounds)], None, None, &[]);
+        assert!(
+            matches!(&refusal(&graph), SampleRefusal::Unsatisfiable { constraint, .. }
+                if constraint == keyword),
+            "{bounds}: {:?}",
+            refusal(&graph)
+        );
+    }
+
+    // An integral number is an integer: in a reply, a request body and a field example.
+    let body = object(&[fld("count", &int(), true)]);
+    let reply = documented(
+        probe(&[], None, Some(&body), &[]),
+        &json!({"responses": [{"status": 200, "examples": [
+            media_example("five", "application/json", &json!({"count": 5.0}))
+        ]}]}),
+    );
+    assert_eq!(reply_json(&reply).to_string(), "{\"count\":5}");
+    let request = documented(
+        probe(&[], Some(&body), None, &[]),
+        &json!({"request_examples": [
+            media_example("five", "application/json", &json!({"count": 5.0}))
+        ]}),
+    );
+    assert_eq!(
+        sample(&request).bodies[0].value.to_string(),
+        "{\"count\":5}"
+    );
+    let field = probe(
+        &[],
+        Some(&object(&[example_fld(
+            "count",
+            &int(),
+            true,
+            &json!({}),
+            "5.0",
+        )])),
+        None,
+        &[],
+    );
+    assert_eq!(sample(&field).bodies[0].value.to_string(), "{\"count\":5}");
+}
+
 #[test]
 fn a_field_example_makes_a_pattern_bound_input_sampleable() {
     let graph = probe(

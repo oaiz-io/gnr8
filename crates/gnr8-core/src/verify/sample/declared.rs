@@ -20,8 +20,8 @@ use crate::sdk::emit_common::{
 use crate::CoreError;
 
 use super::{
-    dangling, key_domain, parse_member, phrase, prints_alike, satisfies, DeclaredLimit, KeyDomain,
-    SampleRefusal, Side, MAX_SAFE_INTEGER, UNCONSTRAINED,
+    dangling, integer_phrase, integer_range, key_domain, parse_member, phrase, prints_alike,
+    satisfies, DeclaredLimit, KeyDomain, SampleRefusal, Side, MAX_SAFE_INTEGER, UNCONSTRAINED,
 };
 
 pub(super) fn schema_by_id<'g>(graph: &'g ApiGraph, id: &str) -> Result<&'g Schema, CoreError> {
@@ -120,15 +120,16 @@ pub(super) fn declared_body(
     subject: &str,
     origin: &str,
 ) -> Result<Result<Value, SampleRefusal>, CoreError> {
+    let mut value = example.value.clone();
     match fit(
         graph,
         side,
         &schema.body,
-        &example.value,
+        &mut value,
         &UNCONSTRAINED,
         subject,
     )? {
-        Fit::Fits => Ok(Ok(example.value.clone())),
+        Fit::Fits => Ok(Ok(value)),
         Fit::Refused(refusal) => Ok(Err(refusal)),
         Fit::Mismatch { subject, reason } => Err(CoreError::InvalidExample {
             example: origin.to_string(),
@@ -161,12 +162,12 @@ pub(super) fn field_example(
         ),
         problem: format!("field `{path}` {reason}"),
     };
-    let value = parse_example(graph, text, &field.schema, "field")?.map_err(|r| invalid(&r))?;
+    let mut value = parse_example(graph, text, &field.schema, "field")?.map_err(|r| invalid(&r))?;
     match fit(
         graph,
         side,
         &field.schema,
-        &value,
+        &mut value,
         &field.meta.constraints,
         subject,
     )? {
@@ -198,12 +199,13 @@ pub(super) fn param_example(
         ),
         problem: format!("parameter `{}` {reason}", param.name),
     };
-    let value = parse_example(graph, text, &param.schema, "parameter")?.map_err(|r| invalid(&r))?;
+    let mut value =
+        parse_example(graph, text, &param.schema, "parameter")?.map_err(|r| invalid(&r))?;
     match fit(
         graph,
         Side::Request,
         &param.schema,
-        &value,
+        &mut value,
         &param.constraints,
         subject,
     )? {
@@ -418,7 +420,7 @@ fn fit(
     graph: &ApiGraph,
     side: Side,
     ty: &Type,
-    value: &Value,
+    value: &mut Value,
     constraints: &Constraints,
     subject: &str,
 ) -> Result<Fit, CoreError> {
@@ -426,7 +428,7 @@ fn fit(
         subject: subject.to_string(),
         reason: reason.to_string(),
     };
-    let declared = |limit| {
+    let declared = |limit, value: &Value| {
         Fit::Refused(SampleRefusal::Declared {
             subject: subject.to_string(),
             value: value.to_string(),
@@ -439,6 +441,34 @@ fn fit(
     if let Type::Named(id) = ty {
         let schema = schema_by_id(graph, id)?;
         return fit(graph, side, &schema.body, value, constraints, subject);
+    }
+    // A number in an integer or float32 input must be a value of that width: a Go literal outside
+    // it does not compile. An integral number (`5.0`) is an integer, stated as one (`5`) so every
+    // SDK decodes it into its integer type.
+    match (ty, &*value) {
+        (Type::Primitive(Prim::Int { bits, signed }), Value::Number(number)) => {
+            let Some(integer) = integral(number) else {
+                return Ok(mismatch("is not an integer"));
+            };
+            let (low, high) = integer_range(*bits, *signed);
+            if !(low..=high).contains(&integer) {
+                return Ok(mismatch(&format!(
+                    "is outside the range of {}",
+                    integer_phrase(*bits, *signed)
+                )));
+            }
+            if !number.is_i64() && !number.is_u64() {
+                *value = integer_value(integer);
+            }
+        }
+        (Type::Primitive(Prim::Float { bits: 32 }), Value::Number(number))
+            if number
+                .as_f64()
+                .is_some_and(|x| x.abs() > f64::from(f32::MAX)) =>
+        {
+            return Ok(mismatch("is outside the range of a 32-bit float"));
+        }
+        _ => {}
     }
     // The JSON kind first, so a constraint is only ever read against a value of its type.
     let kind = match ty {
@@ -457,7 +487,7 @@ fn fit(
     if let (false, reason) = kind {
         return Ok(mismatch(reason));
     }
-    match (ty, value) {
+    match (ty, &*value) {
         (Type::Enum(members), Value::String(text)) if !members.contains(text) => {
             return Ok(mismatch("violates `enum`"));
         }
@@ -476,7 +506,7 @@ fn fit(
     if let Err(violation) = satisfies(value, &evaluable) {
         return Ok(mismatch(&format!("violates `{}`", violation.constraint)));
     }
-    match (ty, value) {
+    match (ty, &*value) {
         // A byte string has a different literal in every target; a request stays out of that.
         (Type::Primitive(Prim::Bytes), _) if side == Side::Request => {
             Ok(Fit::Refused(SampleRefusal::Bytes {
@@ -488,35 +518,65 @@ fn fit(
                 .as_i64()
                 .is_none_or(|n| i128::from(n).abs() > MAX_SAFE_INTEGER) =>
         {
-            Ok(declared(DeclaredLimit::Integer))
+            Ok(declared(DeclaredLimit::Integer, value))
         }
         // A call spells a request float in each language; a reply is decoded, never printed.
         (Type::Primitive(Prim::Float { bits }), _)
             if side == Side::Request && !value.as_f64().is_some_and(|x| prints_alike(x, *bits)) =>
         {
-            Ok(declared(DeclaredLimit::Float))
+            Ok(declared(DeclaredLimit::Float, value))
         }
         // Every generated call spells a free-form value as `{}`.
-        (Type::Any {}, _) if side == Side::Request && value != &json!({}) => {
-            Ok(declared(DeclaredLimit::FreeForm))
+        (Type::Any {}, _) if side == Side::Request && *value != json!({}) => {
+            Ok(declared(DeclaredLimit::FreeForm, value))
         }
         // Go sends a `time.Time` in its own spelling; Python and TypeScript send the string.
         (Type::WellKnown(WellKnown::DateTime), Value::String(text))
             if side == Side::Request && !crate::gosdk::callsite::is_canonical_rfc3339(text) =>
         {
-            Ok(declared(DeclaredLimit::DateTime))
+            Ok(declared(DeclaredLimit::DateTime, value))
         }
         _ => fit_parts(graph, side, ty, value, constraints, subject),
     }
 }
 
+/// A JSON number as the integer it is: an integer, or a finite float with no fraction.
+fn integral(number: &serde_json::Number) -> Option<i128> {
+    if let Some(integer) = number.as_i64() {
+        return Some(i128::from(integer));
+    }
+    if let Some(integer) = number.as_u64() {
+        return Some(i128::from(integer));
+    }
+    let float = number
+        .as_f64()
+        .filter(|x| x.is_finite() && x.fract() == 0.0)?;
+    // Beyond `±1e38` no integer type admits it; saturating keeps it out of every range.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "float is integral, and one beyond i128 saturates outside every integer range"
+    )]
+    Some(float as i128)
+}
+
+/// An integer inside an integer type's range as a JSON number.
+fn integer_value(integer: i128) -> Value {
+    match (i64::try_from(integer), u64::try_from(integer)) {
+        (Ok(signed), _) => json!(signed),
+        (Err(_), Ok(unsigned)) => json!(unsigned),
+        // Every integer type's range lies inside `i64 ∪ u64`.
+        (Err(_), Err(_)) => Value::Null,
+    }
+}
+
 /// Check the parts of one declared composite value: array items, map keys and values, object
-/// fields, and the union variant it is.
+/// fields, and the union variant it is. A part restated as an integer ([`fit`]) is restated in
+/// `value`.
 fn fit_parts(
     graph: &ApiGraph,
     side: Side,
     ty: &Type,
-    value: &Value,
+    value: &mut Value,
     constraints: &Constraints,
     subject: &str,
 ) -> Result<Fit, CoreError> {
@@ -527,7 +587,7 @@ fn fit_parts(
     let mut children = Children::default();
     match (ty, value) {
         (Type::Array(items), Value::Array(elements)) => {
-            for (index, element) in elements.iter().enumerate() {
+            for (index, element) in elements.iter_mut().enumerate() {
                 let path = format!("{subject}[{index}]");
                 let outcome = fit(graph, side, items, element, &UNCONSTRAINED, &path)?;
                 if let Some(mismatch) = children.take(outcome) {
@@ -549,7 +609,7 @@ fn fit_parts(
                     children.take(Fit::Refused(refusal));
                 }
             }
-            for (name, entry) in entries {
+            for (name, entry) in entries.iter_mut() {
                 let path = format!("{subject}{{{name}}}");
                 let outcome = fit(graph, side, item, entry, &UNCONSTRAINED, &path)?;
                 if let Some(mismatch) = children.take(outcome) {
@@ -567,19 +627,28 @@ fn fit_parts(
                 )));
             }
             for field in fields {
-                let outcome =
-                    fit_field(graph, side, field, entries.get(&field.json_name), subject)?;
+                let outcome = fit_field(
+                    graph,
+                    side,
+                    field,
+                    entries.get_mut(&field.json_name),
+                    subject,
+                )?;
                 if let Some(mismatch) = children.take(outcome) {
                     return Ok(mismatch);
                 }
             }
         }
-        (Type::Union(variants), _) => {
+        (Type::Union(variants), value) => {
             let mut matched = None;
             for variant in variants {
-                match fit(graph, side, variant, value, constraints, subject)? {
+                // Each variant reads its own copy, so a variant that does not match restates
+                // nothing in the value the matching one keeps.
+                let mut attempt = value.clone();
+                match fit(graph, side, variant, &mut attempt, constraints, subject)? {
                     Fit::Mismatch { .. } => {}
                     found => {
+                        *value = attempt;
                         matched = Some(found);
                         break;
                     }
@@ -607,7 +676,7 @@ fn fit_field(
     graph: &ApiGraph,
     side: Side,
     field: &Field,
-    entry: Option<&Value>,
+    entry: Option<&mut Value>,
     subject: &str,
 ) -> Result<Fit, CoreError> {
     let path = format!("{subject}.{}", field.json_name);
@@ -626,17 +695,26 @@ fn fit_field(
             subject: subject.to_string(),
             reason: format!("lacks required field `{}`", field.json_name),
         },
-        Some(Value::Null) if !nullable => Fit::Mismatch {
-            subject: path,
-            reason: "is null, and the field is not nullable".to_string(),
-        },
-        // No generated call spells a `null`; a decoder reads one.
-        Some(Value::Null) if side == Side::Request => Fit::Refused(SampleRefusal::Declared {
-            subject: path,
-            value: "null".to_string(),
-            limit: DeclaredLimit::Null,
-        }),
-        Some(entry) if !entry.is_null() => fit(
+        // An optional field left out.
+        None => Fit::Fits,
+        Some(entry) if entry.is_null() => {
+            if !nullable {
+                Fit::Mismatch {
+                    subject: path,
+                    reason: "is null, and the field is not nullable".to_string(),
+                }
+            } else if side == Side::Request {
+                // No generated call spells a `null`; a decoder reads one.
+                Fit::Refused(SampleRefusal::Declared {
+                    subject: path,
+                    value: "null".to_string(),
+                    limit: DeclaredLimit::Null,
+                })
+            } else {
+                Fit::Fits
+            }
+        }
+        Some(entry) => fit(
             graph,
             side,
             &field.schema,
@@ -644,7 +722,5 @@ fn fit_field(
             &field.meta.constraints,
             &path,
         )?,
-        // An optional field left out, or a reply's `null` where the field is nullable.
-        None | Some(_) => Fit::Fits,
     })
 }

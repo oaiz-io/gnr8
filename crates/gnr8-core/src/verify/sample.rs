@@ -1491,7 +1491,9 @@ impl<'g> Sampler<'g> {
                 Ok(checked(Value::String(candidate), constraints, subject))
             }
             Type::Primitive(Prim::Bool) => Ok(checked(Value::Bool(true), constraints, subject)),
-            Type::Primitive(Prim::Int { .. }) => Ok(integer_candidate(constraints, subject)),
+            Type::Primitive(Prim::Int { bits, signed }) => {
+                Ok(integer_candidate(constraints, *bits, *signed, subject))
+            }
             Type::Primitive(Prim::Float { bits }) => {
                 Ok(float_candidate(constraints, *bits, subject))
             }
@@ -1773,6 +1775,14 @@ fn enum_candidate(
         let Some(candidate) = parse_member(member, ty) else {
             continue;
         };
+        // A member outside the integer type's range is no value of it.
+        if let (Type::Primitive(Prim::Int { bits, signed }), Some(n)) = (ty, candidate.as_i64()) {
+            let (low, high) = integer_range(*bits, *signed);
+            if !(low..=high).contains(&i128::from(n)) {
+                last.get_or_insert("enum");
+                continue;
+            }
+        }
         // A float member is printed by every writer too, so it takes the float rule; an integer
         // member takes the integer range rule.
         let wire_refusal = match ty {
@@ -1822,6 +1832,41 @@ fn enum_candidate(
     unsatisfiable(subject, last.unwrap_or("enum"))
 }
 
+/// An integer's text: digits (`-12`), or a number with no fraction (`5.0`, `1e3`), which is the same
+/// integer. `None` for anything else or beyond `i64`.
+fn integer_text(text: &str) -> Option<i64> {
+    if !text.contains(['.', 'e', 'E']) {
+        return text.parse::<i64>().ok();
+    }
+    let (mantissa, scale) = exact_decimal(text)?;
+    if scale > 0 {
+        let power = 10_i128.checked_pow(scale.unsigned_abs())?;
+        return (mantissa % power == 0)
+            .then(|| i64::try_from(mantissa / power).ok())
+            .flatten();
+    }
+    i64::try_from(mantissa.checked_mul(10_i128.checked_pow(scale.unsigned_abs())?)?).ok()
+}
+
+/// The range of an integer type of `bits` bits, signed or not.
+pub(super) fn integer_range(bits: u16, signed: bool) -> (i128, i128) {
+    let bits = u32::from(bits.clamp(1, 64));
+    if signed {
+        (-(1_i128 << (bits - 1)), (1_i128 << (bits - 1)) - 1)
+    } else {
+        (0, (1_i128 << bits) - 1)
+    }
+}
+
+/// How a page names an integer type: `a signed 32-bit integer`, `an unsigned 8-bit integer`.
+pub(super) fn integer_phrase(bits: u16, signed: bool) -> String {
+    if signed {
+        format!("a signed {bits}-bit integer")
+    } else {
+        format!("an unsigned {bits}-bit integer")
+    }
+}
+
 /// A declared enum member as a value of the input's type, or `None` when it does not parse as one.
 fn parse_member(member: &str, ty: &Type) -> Option<Value> {
     match ty {
@@ -1833,7 +1878,7 @@ fn parse_member(member: &str, ty: &Type) -> Option<Value> {
         Type::Primitive(Prim::String) | Type::WellKnown(_) | Type::Enum(_) => {
             Some(Value::String(member.to_string()))
         }
-        Type::Primitive(Prim::Int { .. }) => member.trim().parse::<i64>().ok().map(|n| json!(n)),
+        Type::Primitive(Prim::Int { .. }) => integer_text(member.trim()).map(|n| json!(n)),
         Type::Primitive(Prim::Float { .. }) => member
             .trim()
             .parse::<f64>()
@@ -1980,46 +2025,92 @@ fn numeric_interval(
 /// The sample stays within `±(2^53 − 1)` ([`MAX_SAFE_INTEGER`]): an interval that admits integers
 /// only beyond it is a [`SampleRefusal::IntegerWire`], because TypeScript would send a different
 /// number than the page and the other SDKs.
-fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, SampleRefusal> {
+fn integer_candidate(
+    constraints: &Constraints,
+    bits: u16,
+    signed: bool,
+    subject: &str,
+) -> Result<Value, SampleRefusal> {
     const BASE: i128 = 7;
     if let Err(keyword) = numeric_interval(constraints) {
         return unsatisfiable(subject, keyword);
     }
-    // An exclusive bound at the edge of `i128` has no integer past it: no integer meets it.
-    let Some(lowest) = admissible_edge(
-        constraints
-            .minimum
-            .as_deref()
-            .and_then(|text| integer_bound(text, true))
-            .map(Some),
-        constraints
-            .exclusive_minimum
-            .as_deref()
-            .and_then(|text| integer_bound(text, false))
-            .map(|bound| bound.checked_add(1)),
-        Ord::max,
-    ) else {
-        return unsatisfiable(subject, "exclusiveMinimum");
+    // Each declared side as `(integer, keyword)`; an exclusive edge at the edge of `i128` has no
+    // integer past it, so no integer meets it.
+    let side = |inclusive: Option<&str>,
+                exclusive: Option<&str>,
+                lower: bool|
+     -> Result<Option<(i128, &'static str)>, &'static str> {
+        let (inclusive_keyword, exclusive_keyword) = if lower {
+            ("minimum", "exclusiveMinimum")
+        } else {
+            ("maximum", "exclusiveMaximum")
+        };
+        let mut edge: Option<(i128, &'static str)> = None;
+        let candidates = [
+            inclusive
+                .and_then(|text| integer_bound(text, lower))
+                .map(|bound| (Some(bound), inclusive_keyword)),
+            exclusive
+                .and_then(|text| integer_bound(text, !lower))
+                .map(|bound| {
+                    let past = if lower {
+                        bound.checked_add(1)
+                    } else {
+                        bound.checked_sub(1)
+                    };
+                    (past, exclusive_keyword)
+                }),
+        ];
+        for (bound, keyword) in candidates.into_iter().flatten() {
+            let bound = bound.ok_or(keyword)?;
+            let tighter = edge.is_none_or(|(current, _)| {
+                if lower {
+                    bound > current
+                } else {
+                    bound < current
+                }
+            });
+            if tighter {
+                edge = Some((bound, keyword));
+            }
+        }
+        Ok(edge)
     };
-    let Some(highest) = admissible_edge(
-        constraints
-            .maximum
-            .as_deref()
-            .and_then(|text| integer_bound(text, false))
-            .map(Some),
-        constraints
-            .exclusive_maximum
-            .as_deref()
-            .and_then(|text| integer_bound(text, true))
-            .map(|bound| bound.checked_sub(1)),
-        Ord::min,
-    ) else {
-        return unsatisfiable(subject, "exclusiveMaximum");
+    let lower = match side(
+        constraints.minimum.as_deref(),
+        constraints.exclusive_minimum.as_deref(),
+        true,
+    ) {
+        Ok(lower) => lower,
+        Err(keyword) => return unsatisfiable(subject, keyword),
     };
-    let chosen = match (lowest, highest) {
-        (Some(lowest), _) if BASE < lowest => lowest,
-        (_, Some(highest)) if BASE > highest => highest,
-        _ => BASE,
+    let upper = match side(
+        constraints.maximum.as_deref(),
+        constraints.exclusive_maximum.as_deref(),
+        false,
+    ) {
+        Ok(upper) => upper,
+        Err(keyword) => return unsatisfiable(subject, keyword),
+    };
+    // The type's own range bounds the sample too: a declared side beyond it is unmeetable.
+    let (type_low, type_high) = integer_range(bits, signed);
+    if let Some((_, keyword)) = lower.filter(|(bound, _)| *bound > type_high) {
+        return unsatisfiable(subject, keyword);
+    }
+    if let Some((_, keyword)) = upper.filter(|(bound, _)| *bound < type_low) {
+        return unsatisfiable(subject, keyword);
+    }
+    let lowest = lower.map_or(type_low, |(bound, _)| bound.max(type_low));
+    let highest = upper.map_or(type_high, |(bound, _)| bound.min(type_high));
+    // Declared bounds that cross each other leave `chosen` outside one of them, which the final
+    // check names.
+    let chosen = if BASE < lowest {
+        lowest
+    } else if BASE > highest {
+        highest
+    } else {
+        BASE
     };
     // Under a `multipleOf`, the admissible multiple nearest the base: one of the two multiples
     // around `chosen`, since `chosen` is the admissible integer nearest the base. A multiple beyond
@@ -2030,10 +2121,7 @@ fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, 
         Some(Some(step)) => {
             let down = chosen.div_euclid(step).checked_mul(step);
             let up = down.and_then(|down| down.checked_add(step));
-            let admissible = |candidate: &i128| {
-                lowest.is_none_or(|lowest| *candidate >= lowest)
-                    && highest.is_none_or(|highest| *candidate <= highest)
-            };
+            let admissible = |candidate: &i128| (lowest..=highest).contains(candidate);
             let Some(multiple) = [down, up]
                 .into_iter()
                 .flatten()
@@ -2057,22 +2145,6 @@ fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, 
         });
     }
     Ok(value)
-}
-
-/// The tighter of an inclusive and an exclusive integer edge, each already moved onto the
-/// admissible integer (`None` inside when an exclusive edge has no integer past it). `None` when
-/// such an edge is declared; `Some(None)` when the side is unbounded.
-fn admissible_edge(
-    inclusive: Option<Option<i128>>,
-    exclusive: Option<Option<i128>>,
-    tighter: fn(i128, i128) -> i128,
-) -> Option<Option<i128>> {
-    let mut edge = None;
-    for side in [inclusive, exclusive].into_iter().flatten() {
-        let side = side?;
-        edge = Some(edge.map_or(side, |edge| tighter(edge, side)));
-    }
-    Some(edge)
 }
 
 /// The smallest positive integer that is a multiple of the `multipleOf` text `of` — `of` itself
