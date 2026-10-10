@@ -296,6 +296,18 @@ selection:
 - TypeScript emits a discriminated `{Operation}Body` union keyed by `contentType`.
 - Python accepts a union of `(Literal[content_type], Model)` tuples.
 
+A path parameter is one scalar value (a string, number, boolean, enum member or date-time),
+percent-encoded into its segment in OpenAPI's default `simple` style. A path parameter that is an
+array, map, object or free-form value, or that declares the `label` or `matrix` style, is a
+generation error naming it. Send a list in the query instead, where `style` and `explode` apply.
+
+A number in a path, query, header or cookie parameter is written as JavaScript's
+`Number#toString` writes it, which is what the TypeScript SDK's `String(value)` already does: the
+shortest decimal that reads back as the same value, `3` rather than `3.0`, `10000000000000000`
+rather than `1e+16`, and an exponent only at `1e21` and above or below `1e-6` (`1e-7`). Go uses
+`wireNumber` in `client.go` and Python `Client._wire_number`, so the same value is the same text
+from every SDK.
+
 A `date-time` value goes on the wire as RFC 3339 with its fractional seconds. Go takes a `time.Time`
 and writes `Format(time.RFC3339Nano)`: the fraction's trailing zeros dropped, and `Z` for a zero
 offset. Python and TypeScript take the string and send it as written. A caller who passes that

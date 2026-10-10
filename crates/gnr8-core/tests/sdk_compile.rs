@@ -2949,3 +2949,126 @@ fn generated_cli_go_topic_owned_command_runs_and_is_listed() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A float parameter value and the text every SDK sends for it: JavaScript's `Number#toString`,
+/// which the TypeScript SDK's `String(value)` is, and which Go's `wireNumber` and Python's
+/// `Client._wire_number` reproduce. Each literal parses to the same double in all three languages.
+const WIRE_NUMBERS: &[(&str, &str)] = &[
+    ("3.0", "3"),
+    ("100.0", "100"),
+    ("0.1", "0.1"),
+    ("-2.5", "-2.5"),
+    ("1234.5678", "1234.5678"),
+    ("123456789.0", "123456789"),
+    ("1e16", "10000000000000000"),
+    ("1e21", "1e+21"),
+    ("0.000001", "0.000001"),
+    ("1e-7", "1e-7"),
+    ("1.5e-7", "1.5e-7"),
+    ("5e-324", "5e-324"),
+    ("1.7976931348623157e308", "1.7976931348623157e+308"),
+    ("0.0", "0"),
+];
+
+const WIRE_NUMBER_SPEC: &str = r#"openapi: 3.1.0
+info: { title: Numbers, version: 1.0.0 }
+paths:
+  /scores/{score}:
+    get:
+      operationId: getScore
+      parameters:
+        - { name: score, in: path, required: true, schema: { type: number } }
+        - { name: ratio, in: query, required: true, schema: { type: number } }
+      responses:
+        "204": { description: none }
+"#;
+
+/// A float parameter goes on the wire as the same text from Go, Python and TypeScript. Go printed
+/// `1e+16` and `1.23456789e+08`, Python `3.0`, and JavaScript `10000000000000000` and `3`.
+#[test]
+fn every_sdk_spells_a_parameter_number_alike() {
+    use std::fmt::Write as _;
+
+    if !go_available() {
+        eprintln!("skipping parameter number spelling: go toolchain unavailable");
+        return;
+    }
+    let root = unique_temp_dir("wire-numbers");
+    std::fs::write(root.join("openapi.yaml"), WIRE_NUMBER_SPEC).expect("write spec");
+    let pipeline = Pipeline::new()
+        .source(OpenApi::new().input("openapi.yaml"))
+        .target(GoSdk::new().module("example.com/numbers/sdk").to("go"))
+        .target(PySdk::new().module("example.com/scores").to("scores"));
+    let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), None)
+        .expect("pipeline must generate");
+    for artifact in &outcome.artifacts {
+        let path = root.join(&artifact.path);
+        std::fs::create_dir_all(path.parent().expect("artifact dir")).expect("create dir");
+        std::fs::write(&path, &artifact.text).expect("write artifact");
+    }
+    let operations = std::fs::read_to_string(root.join("go/operations.go")).expect("operations");
+    assert!(
+        operations.contains("wireEscape(wireNumber(float64(score), 64))")
+            && operations.contains("wireNumber(params.Ratio, 64)"),
+        "Go writes path and query numbers with wireNumber:\n{operations}"
+    );
+
+    let package = package_clause(&root.join("go"));
+    let mut go_test = format!(
+        "package {package}\n\nimport \"testing\"\n\nfunc TestWireNumber(t *testing.T) {{\n"
+    );
+    for (literal, want) in WIRE_NUMBERS {
+        let _ = write!(
+            go_test,
+            "\tif got := wireNumber({literal}, 64); got != {want:?} {{\n\t\tt.Errorf(\"wireNumber({literal}) = %q, want %q\", got, {want:?})\n\t}}\n"
+        );
+    }
+    go_test.push_str("\tif got := wireNumber(float64(float32(0.1)), 32); got != \"0.1\" {\n\t\tt.Errorf(\"float32 0.1 = %q\", got)\n\t}\n}\n");
+    std::fs::write(root.join("go/wire_number_test.go"), go_test).expect("write Go test");
+    let go = run_go(
+        &["test", "-run", "TestWireNumber", "./..."],
+        &root.join("go"),
+    );
+    assert!(go.is_ok(), "Go wireNumber: {go:?}");
+
+    let mut python = String::from("from scores.client import Client\n\nfailures = []\n");
+    for (literal, want) in WIRE_NUMBERS {
+        let _ = write!(
+            python,
+            "got = Client._parameter_scalar(float({literal:?}))\nif got != {want:?}:\n    failures.append(({literal:?}, got))\n"
+        );
+    }
+    python.push_str("assert not failures, failures\n");
+    let output = Command::new("python3")
+        .args(["-c", &python])
+        .current_dir(&root)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output();
+    match output {
+        Ok(output) => assert!(
+            output.status.success(),
+            "Python _wire_number: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) => eprintln!("skipping Python number spelling: {error}"),
+    }
+
+    // The table is JavaScript's own answer, so the TypeScript SDK's `String(value)` agrees.
+    let mut node = String::from("const failures = [];\n");
+    for (literal, want) in WIRE_NUMBERS {
+        let _ = writeln!(
+            node,
+            "if (String(Number({literal:?})) !== {want:?}) failures.push({literal:?});"
+        );
+    }
+    node.push_str("if (failures.length) { console.error(failures); process.exit(1); }\n");
+    match Command::new("node").args(["-e", &node]).output() {
+        Ok(output) => assert!(
+            output.status.success(),
+            "the table is Number#toString: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) => eprintln!("skipping the JavaScript table check: {error}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -35,8 +35,8 @@ use crate::graph::{
 };
 use crate::sdk::emit_common::PaginationNames;
 use crate::sdk::emit_common::{
-    binary_value_shape, error_response_bodies_of, is_json_object_key, join_path,
-    operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
+    binary_value_shape, check_path_parameters, error_response_bodies_of, is_json_object_key,
+    join_path, operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
     quoted_string_literal, request_body_models_of, schema_is_multipart_request, split_words,
     success_responses_of, ApiKeyLocation, BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme,
     OperationAuthScheme, RequestBodyEncoding, RequestBodyModel, SuccessResponses,
@@ -2263,11 +2263,41 @@ class Client:
             return {{key: self._wire_value(item) for key, item in value.items()}}
         return value
 
-    @staticmethod
-    def _parameter_scalar(value: Any) -> str:
+    @classmethod
+    def _parameter_scalar(cls, value: Any) -> str:
         if isinstance(value, bool):
             return \"true\" if value else \"false\"
+        if isinstance(value, float):
+            return cls._wire_number(value)
         return str(value)
+
+    @staticmethod
+    def _wire_number(value: float) -> str:
+        # The shortest decimal that reads back as `value`, laid out as JavaScript's
+        # Number#toString lays it out, as every generated SDK writes a parameter number.
+        if value != value:
+            return \"NaN\"
+        if value in (float(\"inf\"), float(\"-inf\")):
+            return \"Infinity\" if value > 0 else \"-Infinity\"
+        if value == 0:
+            return \"0\"
+        sign = \"-\" if value < 0 else \"\"
+        mantissa, _, exponent = repr(abs(value)).partition(\"e\")
+        whole, _, fraction = mantissa.partition(\".\")
+        spelled = whole + fraction
+        digits = spelled.strip(\"0\")
+        leading = len(spelled) - len(spelled.lstrip(\"0\"))
+        point = len(whole) + int(exponent or \"0\") - leading
+        if len(digits) <= point <= 21:
+            return sign + digits + \"0\" * (point - len(digits))
+        if 0 < point <= 21:
+            return sign + digits[:point] + \".\" + digits[point:]
+        if -6 < point <= 0:
+            return sign + \"0.\" + \"0\" * -point + digits
+        text = digits[:1] + (\".\" + digits[1:] if len(digits) > 1 else \"\")
+        if point > 0:
+            return f\"{{sign}}{{text}}e+{{point - 1}}\"
+        return f\"{{sign}}{{text}}e-{{1 - point}}\"
 
     def _path_segment(self, value: Any) -> str:
         return urllib.parse.quote(
@@ -2935,6 +2965,7 @@ fn emit_operation(
             ),
         });
     }
+    check_path_parameters(op, graph)?;
 
     let body_models = request_body_models_of(op, graph)?;
     let success = success_responses_of(op, graph)?;

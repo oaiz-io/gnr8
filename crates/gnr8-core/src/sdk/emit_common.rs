@@ -2518,6 +2518,74 @@ pub(crate) fn path_tokens_match(tokens: &[String], params: &[&str]) -> bool {
     token_set == param_set
 }
 
+/// Refuse a path parameter the generated SDKs cannot send as one segment.
+///
+/// Every SDK writes a path parameter as one scalar value, percent-encoded into its segment: OpenAPI's
+/// default `simple` style for a scalar, and the value the docs request line and the contract tests
+/// compute. An array, map, object or free-form path parameter has no such value, and the SDKs
+/// disagreed on what to send for one (Go `[a b]`, Python `['a', 'b']`, TypeScript `a,b`); a `label`
+/// or `matrix` style was sent as `simple`. Either is a generation error naming the parameter.
+pub(crate) fn check_path_parameters(op: &Operation, graph: &ApiGraph) -> Result<(), CoreError> {
+    fn scalar(
+        op: &Operation,
+        ty: &Type,
+        graph: &ApiGraph,
+        seen: &mut BTreeSet<String>,
+    ) -> Result<bool, CoreError> {
+        match ty {
+            Type::Primitive(_) | Type::WellKnown(_) | Type::Enum(_) => Ok(true),
+            Type::Array(_) | Type::Map { .. } | Type::Object(_) | Type::Any {} => Ok(false),
+            Type::Union(variants) => {
+                for variant in variants {
+                    if !scalar(op, variant, graph, seen)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Type::Named(ref_id) => {
+                if !seen.insert(ref_id.clone()) {
+                    return Ok(false);
+                }
+                let target = graph
+                    .schemas
+                    .iter()
+                    .find(|schema| schema.id == *ref_id)
+                    .ok_or_else(|| CoreError::SdkGen {
+                        message: format!(
+                            "operation '{}' path parameter references dangling schema '{ref_id}'",
+                            op.id
+                        ),
+                    })?;
+                scalar(op, &target.body, graph, seen)
+            }
+        }
+    }
+
+    for param in op.params.iter().filter(|param| param.location == "path") {
+        if let Some(style) = param.style.as_deref().filter(|style| *style != "simple") {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "operation '{}' path parameter '{}' declares style '{style}'; generated SDKs \
+                     send a path parameter in the `simple` style only",
+                    op.id, param.name
+                ),
+            });
+        }
+        if !scalar(op, &param.schema, graph, &mut BTreeSet::new())? {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "operation '{}' path parameter '{}' is not a scalar; generated SDKs send a \
+                     path parameter as one string, number, boolean, enum or date-time value, so \
+                     declare it as one or send the list in the query",
+                    op.id, param.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The success-response shape an SDK can represent for one operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SuccessResponses {

@@ -750,3 +750,58 @@ fn a_text_reply_declaring_a_foreign_charset_is_refused() {
     generate_spec("text-quoted", &text_spec("text/csv; charset=\\\"utf-8\\\""))
         .expect("a quoted UTF-8 charset generates");
 }
+
+fn path_spec(parameter: &str) -> String {
+    format!(
+        r#"openapi: 3.1.0
+info: {{ title: Path, version: 1.0.0 }}
+components:
+  schemas:
+    Ids: {{ type: array, items: {{ type: string }} }}
+paths:
+  /items/{{ids}}:
+    get:
+      operationId: getItems
+      parameters:
+        - {parameter}
+      responses:
+        "204": {{ description: none }}
+"#
+    )
+}
+
+/// A path parameter is one scalar segment in every SDK; one that is not — a list, directly or
+/// through an alias, or a `label`/`matrix` style — is a generation error naming it, where the
+/// three SDKs used to send three different segments.
+#[test]
+fn a_path_parameter_that_is_not_one_scalar_segment_is_refused() {
+    for (label, parameter, expected) in [
+        (
+            "path-array",
+            "{ name: ids, in: path, required: true, schema: { type: array, items: { type: string } } }",
+            "operation 'getItems' path parameter 'ids' is not a scalar",
+        ),
+        (
+            "path-alias",
+            "{ name: ids, in: path, required: true, schema: { $ref: \"#/components/schemas/Ids\" } }",
+            "operation 'getItems' path parameter 'ids' is not a scalar",
+        ),
+        (
+            "path-label",
+            "{ name: ids, in: path, required: true, style: label, schema: { type: string } }",
+            "operation 'getItems' path parameter 'ids' declares style 'label'",
+        ),
+    ] {
+        let message = generate_spec(label, &path_spec(parameter))
+            .expect_err("a non-scalar path parameter is refused")
+            .to_string();
+        assert!(message.contains(expected), "{label}: {message}");
+    }
+    generate_spec(
+        "path-scalar",
+        &path_spec(
+            "{ name: ids, in: path, required: true, style: simple, schema: { type: number } }",
+        ),
+    )
+    .expect("a scalar path parameter in the simple style generates");
+}

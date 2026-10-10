@@ -1775,12 +1775,12 @@ fn integer_bound(text: &str, lower: bool) -> Option<i128> {
 }
 
 /// Whether every writer of a sample prints `value` as the same text: the page (`serde_json`), Go
-/// (`strconv.FormatFloat(v, 'g', -1, 64)` in a query, `encoding/json` in a body), Python (`repr`)
+/// (`encoding/json` in a body; a parameter is spelled as JavaScript spells it), Python (`repr`)
 /// and JavaScript (`Number#toString`).
 ///
 /// They agree on a finite decimal that is not a whole number (Go and JavaScript print `2`, Python
-/// and `serde_json` print `2.0`), lies in `[1e-4, 1e6)` (Go's shortest `'g'` form switches to an
-/// exponent at `1e6`, and below `1e-4`), and survives a `float32` field unchanged.
+/// and `serde_json` print `2.0`), lies in `[1e-4, 1e6)` (a conservative range inside which no writer
+/// uses an exponent), and survives a `float32` field unchanged.
 fn prints_alike(value: f64) -> bool {
     let magnitude = value.abs();
     #[expect(

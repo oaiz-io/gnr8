@@ -38,8 +38,8 @@ use crate::graph::{
 };
 use crate::sdk::emit_common::PaginationNames;
 use crate::sdk::emit_common::{
-    binary_value_shape, error_response_bodies_of, is_json_object_key, join_path,
-    operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
+    binary_value_shape, check_path_parameters, error_response_bodies_of, is_json_object_key,
+    join_path, operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
     quoted_string_literal, request_body_models_of, schema_is_multipart_request, split_words,
     success_responses_of, ApiKeyLocation, BinaryValueShape, ErrorResponseBody, HttpAuthScheme,
     OperationApiKeyScheme, OperationAuthScheme, RequestBodyEncoding, RequestBodyModel,
@@ -2043,6 +2043,7 @@ fn emit_operation(
             ),
         });
     }
+    check_path_parameters(op, graph)?;
 
     let success = success_responses_of(op, graph)?;
     let error_bodies = error_response_bodies_of(op, graph)?;

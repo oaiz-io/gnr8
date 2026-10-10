@@ -32,11 +32,12 @@ use crate::graph::{
     RuntimePolicy, Schema, Type, WellKnown,
 };
 use crate::sdk::emit_common::{
-    binary_value_shape, error_response_bodies_of, join_path, operation_auth_alternatives,
-    operation_prose, path_tokens, path_tokens_match, quoted_string_literal, request_body_models_of,
-    schema_is_multipart_request, split_words, success_responses_of, ApiKeyLocation,
-    BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme, OperationAuthScheme, PaginationNames,
-    RequestBodyEncoding, RequestBodyModel, SuccessResponses, UniqueSchemaNames,
+    binary_value_shape, check_path_parameters, error_response_bodies_of, join_path,
+    operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
+    quoted_string_literal, request_body_models_of, schema_is_multipart_request, split_words,
+    success_responses_of, ApiKeyLocation, BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme,
+    OperationAuthScheme, PaginationNames, RequestBodyEncoding, RequestBodyModel, SuccessResponses,
+    UniqueSchemaNames,
 };
 use crate::CoreError;
 
@@ -1066,6 +1067,7 @@ return nil
             "encoding/json",
             "errors",
             "io",
+            "math",
             "net/http",
             "net/url",
             "sort",
@@ -1111,6 +1113,49 @@ parts = append(parts, wireEscape(key)+"="+encoded)
 }
 }
 return strings.Join(parts, "&")
+}
+
+// wireNumber writes a float parameter value as every generated SDK writes it: the shortest
+// decimal that reads back as the same value, laid out as JavaScript's Number#toString lays it out
+// (3, not 3.0; 10000000000000000, not 1e+16; 1e-7 below a millionth).
+func wireNumber(value float64, bits int) string {
+if math.IsNaN(value) {
+return "NaN"
+}
+if math.IsInf(value, 0) {
+if value > 0 {
+return "Infinity"
+}
+return "-Infinity"
+}
+if value == 0 {
+return "0"
+}
+sign := ""
+if value < 0 {
+sign = "-"
+value = -value
+}
+mantissa, exponent, _ := strings.Cut(strconv.FormatFloat(value, 'e', -1, bits), "e")
+digits := strings.Replace(mantissa, ".", "", 1)
+power, _ := strconv.Atoi(exponent)
+point := power + 1
+switch {
+case len(digits) <= point && point <= 21:
+return sign + digits + strings.Repeat("0", point-len(digits))
+case 0 < point && point <= 21:
+return sign + digits[:point] + "." + digits[point:]
+case -6 < point && point <= 0:
+return sign + "0." + strings.Repeat("0", -point) + digits
+}
+text := digits[:1]
+if len(digits) > 1 {
+text += "." + digits[1:]
+}
+if point > 0 {
+return sign + text + "e+" + strconv.Itoa(point-1)
+}
+return sign + text + "e-" + strconv.Itoa(1-point)
 }
 "##;
 
@@ -2990,8 +3035,8 @@ fn query_string_expr(
     match value_ty {
         "string" => Ok(accessor.to_string()),
         "int64" => Ok(format!("strconv.FormatInt({accessor}, 10)")),
-        "float32" => Ok(format!("strconv.FormatFloat(float64({accessor}), 'g', -1, 32)")),
-        "float64" => Ok(format!("strconv.FormatFloat({accessor}, 'g', -1, 64)")),
+        "float32" => Ok(format!("wireNumber(float64({accessor}), 32)")),
+        "float64" => Ok(format!("wireNumber({accessor}, 64)")),
         "bool" => Ok(format!("strconv.FormatBool({accessor})")),
         "time.Time" => Ok(format!("({accessor}).Format(time.RFC3339Nano)")),
         other => Err(CoreError::SdkGen {
@@ -3041,12 +3086,13 @@ fn type_resolves_to_enum(
 
 /// The stdlib import a query-param value of Go type `value_ty` needs to be URL-encoded (WR-02), if any.
 ///
-/// `string` needs nothing; the `strconv`-converted scalars need `strconv`; `time.Time` needs `time`.
+/// `string` needs nothing; the `strconv`-converted scalars need `strconv` (a float goes through
+/// `client.go`'s `wireNumber`, so it needs nothing here); `time.Time` needs `time`.
 /// Returns `None` for a type with no extra import (or an unsupported one — the error surfaces later in
 /// [`query_string_expr`] during emission, so this stays infallible for the import pre-scan).
 fn query_extra_import(value_ty: &str) -> Option<&'static str> {
     match value_ty {
-        "int64" | "float32" | "float64" | "bool" => Some("strconv"),
+        "int64" | "bool" => Some("strconv"),
         "time.Time" => Some("time"),
         _ => None,
     }
@@ -3243,6 +3289,12 @@ return []wireParameterPair{{Name: name, Value: wireParameterScalar(input)}}
 func wireParameterScalar(value any) string {
 if instant, ok := value.(time.Time); ok {
 return instant.Format(time.RFC3339Nano)
+}
+switch number := reflect.ValueOf(value); number.Kind() {
+case reflect.Float32:
+return wireNumber(number.Float(), 32)
+case reflect.Float64:
+return wireNumber(number.Float(), 64)
 }
 return fmt.Sprint(value)
 }
@@ -3563,6 +3615,7 @@ fn emit_url(
             ),
         });
     }
+    check_path_parameters(op, graph)?;
 
     if tokens.is_empty() {
         writeln!(body, "reqURL := c.baseURL + \"{abs}\"").map_err(sink)?;
@@ -3603,16 +3656,29 @@ fn path_segment_expr(op: &Operation, token: &str, graph: &ApiGraph) -> Result<St
             ),
         })?;
     let ident = lower_camel(token);
-    let text = if resolves_to_date_time(&param.schema, graph)? {
-        format!("{ident}.Format(time.RFC3339Nano)")
-    } else {
-        format!("fmt.Sprint({ident})")
+    let text = match resolve_path_alias(&param.schema, graph)? {
+        Type::WellKnown(WellKnown::DateTime) => format!("{ident}.Format(time.RFC3339Nano)"),
+        Type::Primitive(Prim::Float { bits }) => {
+            format!(
+                "wireNumber(float64({ident}), {})",
+                if *bits == 32 { 32 } else { 64 }
+            )
+        }
+        _ => format!("fmt.Sprint({ident})"),
     };
     Ok(format!("wireEscape({text})"))
 }
 
 /// Whether `schema`, through any chain of named aliases, is a `date-time` — a `time.Time` in Go.
 fn resolves_to_date_time(schema: &Type, graph: &ApiGraph) -> Result<bool, CoreError> {
+    Ok(matches!(
+        resolve_path_alias(schema, graph)?,
+        Type::WellKnown(WellKnown::DateTime)
+    ))
+}
+
+/// The type `schema` names through any chain of named aliases.
+fn resolve_path_alias<'g>(schema: &'g Type, graph: &'g ApiGraph) -> Result<&'g Type, CoreError> {
     let mut current = schema;
     let mut visited = BTreeSet::new();
     while let Type::Named(ref_id) = current {
@@ -3632,7 +3698,7 @@ fn resolves_to_date_time(schema: &Type, graph: &ApiGraph) -> Result<bool, CoreEr
             })?
             .body;
     }
-    Ok(matches!(current, Type::WellKnown(WellKnown::DateTime)))
+    Ok(current)
 }
 
 /// Emit a `<Method>Params` struct for a query-bearing operation (required → value, optional → pointer).

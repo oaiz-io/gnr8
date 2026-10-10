@@ -49,6 +49,11 @@ must move the minor version.
   section. Where the example is declared, the page keeps its name and prose. `SampleBody` and
   `SuccessSample` gain `example`, `SampleRefusal` gains `Declared`, and `CoreError` gains
   `InvalidExample`.
+- **An SDK target refuses a path parameter that is not one scalar segment.** A path parameter
+  that is an array, map, object or free-form value, or that declares the `label` or `matrix` style,
+  is now a generation error naming it. The three SDKs sent three different segments for a list
+  (Go `[a b]`, Python `['a', 'b']`, TypeScript `a%2Cb`), and sent `label` and `matrix` as `simple`.
+  Send a list in the query instead.
 - **A generated SDK method whose success reply has a schema but a non-JSON media type changes its
   return type**: a `text/*` reply returns `string` / `str`, any other returns bytes, instead of the
   schema's model (see Fixed). Code that used the model type there must use the new one.
@@ -133,6 +138,11 @@ must move the minor version.
   path spells; a path value that needs escaping no longer fails it.
 - **Go samples and contract tests compile for an optional enum, date-time or scalar body**: the call
   passes `sdk.Ptr[T](…)` instead of taking the address of a non-composite literal.
+- **A number in a path, query, header or cookie parameter is the same text from every SDK**: the
+  shortest decimal that reads back as the value, laid out as JavaScript's `Number#toString` lays it
+  out. Go printed `1e+16` and `1.23456789e+08`, and Python printed `3.0` where TypeScript sent `3`.
+  Generated Go `client.go` gains `wireNumber` and imports `math`, Go operations format float
+  parameters through it, and Python's `client.py` gains `Client._wire_number`.
 - **A Python path parameter is sent as its wire value**: a named-enum argument went out as
   `Kind._1ST` and a boolean as `True`. Path segments now go through `Client._path_segment`, which
   converts the value as query, header and cookie values already were. Generated `client.py` changes
