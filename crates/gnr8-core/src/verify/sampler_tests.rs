@@ -2442,6 +2442,28 @@ fn samples_are_multiples_of_their_multiple_of() {
     );
 }
 
+/// An integer sample under a decimal `multipleOf` is a multiple of the smallest positive integer
+/// the divisor divides: every integer when it divides 1, however small it is.
+#[test]
+fn an_integer_under_a_decimal_multiple_of_takes_the_smallest_integer_step() {
+    for (of, expected) in [
+        ("0.00001", 7),
+        ("1e-7", 7),
+        ("0.5", 7),
+        ("0.3", 6),
+        ("1.5", 6),
+        ("2.5", 5),
+        ("0.0004", 7),
+        ("1e-400", 7),
+    ] {
+        assert_eq!(
+            param_value(&int(), &json!({"multiple_of": of})),
+            json!(expected),
+            "multipleOf {of}"
+        );
+    }
+}
+
 /// `uniqueItems` is modelled: [`satisfies`] evaluates it, and a sampled array of one element meets
 /// it. The sampler repeats one item to reach `minItems`, so above one element it records the
 /// constraint unmet — sent by a contract case, refused by a docs page — never a silent violation.

@@ -639,13 +639,15 @@ pub fn satisfies(value: &Value, constraints: &Constraints) -> Result<(), Violati
     Ok(())
 }
 
-/// Whether `value` is a multiple of the `multipleOf` text `of`. An integer against an integer
-/// divisor divides exactly; anything else divides through `f64`, within rounding of the quotient. A
-/// divisor that is not a positive number admits nothing.
+/// Whether `value` is a multiple of the `multipleOf` text `of`. An integer divides exactly; any
+/// other number divides through `f64`, within rounding of the quotient. A divisor that is not a
+/// positive number admits nothing.
 fn is_multiple(value: &Value, of: &str) -> bool {
     let of = of.trim();
-    if let (Some(integer), Ok(divisor)) = (value.as_i64(), of.parse::<i128>()) {
-        return divisor > 0 && i128::from(integer) % divisor == 0;
+    // An integer is a multiple of `of` exactly when it is a multiple of the smallest positive
+    // integer `of` divides ([`integer_step`]), read exactly from the decimal text.
+    if let Some(integer) = value.as_i64() {
+        return integer_step(of).is_some_and(|step| i128::from(integer) % step == 0);
     }
     let (Some(number), Ok(divisor)) = (value.as_f64(), of.parse::<f64>()) else {
         return false;
@@ -2074,27 +2076,54 @@ fn admissible_edge(
 }
 
 /// The smallest positive integer that is a multiple of the `multipleOf` text `of` — `of` itself
-/// for an integer, `2` for `0.5` — or `None` when there is none a sample could use.
+/// for an integer, `3` for `1.5`, `1` for any divisor of 1 such as `0.5` or `0.00001` — or `None`
+/// when `of` is not a positive decimal or the step overflows.
+///
+/// The text is read exactly, as the decimal `m / 10^k` it spells, so the step is
+/// `m / gcd(m, 10^k)`: no float rounding decides whether a small divisor divides an integer.
 fn integer_step(of: &str) -> Option<i128> {
-    let of = of.trim();
-    if let Ok(step) = of.parse::<i128>() {
-        return (step > 0).then_some(step);
+    let (mantissa, scale) = exact_decimal(of.trim())?;
+    if mantissa <= 0 {
+        return None;
     }
-    let divisor = of
-        .parse::<f64>()
-        .ok()
-        .filter(|d| d.is_finite() && *d > 0.0)?;
-    (1..=10_000_u32).find_map(|factor| {
-        let multiple = f64::from(factor) * divisor;
-        if (multiple - multiple.round()).abs() > 1e-9 || multiple.round() < 1.0 {
-            return None;
+    if scale <= 0 {
+        return mantissa.checked_mul(10_i128.checked_pow(scale.unsigned_abs())?);
+    }
+    // `gcd(m, 10^k)` is `2^min(a, k) · 5^min(b, k)` for the powers of 2 and 5 in `m`, so dividing
+    // them out (each at most `k` times) never builds `10^k`, however large `k` is.
+    let mut step = mantissa;
+    for prime in [2, 5] {
+        let mut left = scale;
+        while left > 0 && step % prime == 0 {
+            step /= prime;
+            left -= 1;
         }
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "multiple is a positive whole number of at most 10_000 times a finite divisor"
-        )]
-        Some(multiple.round() as i128)
-    })
+    }
+    Some(step)
+}
+
+/// A decimal text (`12`, `-0.25`, `1.5e-3`) as `(m, k)` with value `m / 10^k`; `None` for anything
+/// else or a mantissa beyond `i128`.
+fn exact_decimal(text: &str) -> Option<(i128, i32)> {
+    let (number, exponent) = match text.split_once(['e', 'E']) {
+        Some((number, exponent)) => (number, exponent.parse::<i32>().ok()?),
+        None => (text, 0),
+    };
+    let (negative, number) = match number.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, number.strip_prefix('+').unwrap_or(number)),
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    let mut mantissa: i128 = 0;
+    for digit in whole.chars().chain(fraction.chars()) {
+        let digit = i128::from(digit.to_digit(10)?);
+        mantissa = mantissa.checked_mul(10)?.checked_add(digit)?;
+    }
+    let scale = i32::try_from(fraction.len()).ok()?.checked_sub(exponent)?;
+    Some((if negative { -mantissa } else { mantissa }, scale))
 }
 
 /// A numeric bound as the integer nearest it on the admissible side: `ceil` for a lower bound,

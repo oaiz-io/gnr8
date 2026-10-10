@@ -348,6 +348,10 @@ must move the minor version.
   used to be answered with the generic `contract_test_error` envelope, a body the model does not
   describe; that envelope now answers only a status that declares no body. A refused error model
   is counted only when no other operation supplies a case for that status.
+- An integer under a decimal `multipleOf` is read exactly: it must be a multiple of the smallest
+  positive integer the divisor divides (`3` for `1.5`, `1` for `0.5` or `0.00001`). An integer
+  sample under `multipleOf: 0.00001` used to be refused, because a divisor below `0.0001` found no
+  step.
 
 ## 0.18.0 — 2026-10-10
 
