@@ -575,13 +575,10 @@ fn html_start(text: &str, interrupts_paragraph: bool) -> Option<HtmlEnd> {
     if starts_block_level_tag(text) {
         return Some(HtmlEnd::BlankLine);
     }
-    if !interrupts_paragraph {
-        if let Some((name, after)) = complete_tag(text) {
-            let raw = ["pre", "script", "style", "textarea"];
-            if !raw.iter().any(|tag| name.eq_ignore_ascii_case(tag)) && is_blank(after) {
-                return Some(HtmlEnd::BlankLine);
-            }
-        }
+    // An opening raw-text tag is type 1, matched above, so only its closing tag reaches type 7 —
+    // which takes it, as cmark, commonmark.js and markdown-it all do.
+    if !interrupts_paragraph && complete_tag(text).is_some_and(is_blank) {
+        return Some(HtmlEnd::BlankLine);
     }
     None
 }
@@ -668,8 +665,8 @@ fn starts_block_level_tag(text: &str) -> bool {
 }
 
 /// A complete open tag (`<name attr="v" …>` or `/>`) or closing tag (`</name>`) at the start of
-/// `text`, as `CommonMark`'s raw-HTML grammar spells one: its tag name and the text after it.
-fn complete_tag(text: &str) -> Option<(&str, &str)> {
+/// `text`, as `CommonMark`'s raw-HTML grammar spells one: the text after it.
+fn complete_tag(text: &str) -> Option<&str> {
     let bytes = text.as_bytes();
     let is_space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t'));
     let skip_spaces = |mut at: usize| {
@@ -690,17 +687,16 @@ fn complete_tag(text: &str) -> Option<(&str, &str)> {
     {
         at += 1;
     }
-    let name = &text[start..at];
     if closing {
         at = skip_spaces(at);
-        return (bytes.get(at) == Some(&b'>')).then(|| (name, &text[at + 1..]));
+        return (bytes.get(at) == Some(&b'>')).then(|| &text[at + 1..]);
     }
     loop {
         let spaced = is_space(at);
         at = skip_spaces(at);
         match bytes.get(at)? {
-            b'>' => return Some((name, &text[at + 1..])),
-            b'/' if bytes.get(at + 1) == Some(&b'>') => return Some((name, &text[at + 2..])),
+            b'>' => return Some(&text[at + 1..]),
+            b'/' if bytes.get(at + 1) == Some(&b'>') => return Some(&text[at + 2..]),
             byte if spaced && (byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':')) => {
                 at += 1;
                 while bytes.get(at).is_some_and(|byte| {
@@ -859,8 +855,9 @@ mod tests {
         assert!(fails("<span>text</span>\n```").contains("fenced code block"));
         assert!(fails("<span\n```").contains("fenced code block"));
         assert!(fails("<a href=>\n```").contains("fenced code block"));
-        // A raw-text tag name is type 1 or nothing, never type 7.
-        assert!(fails("</script>\n```").contains("fenced code block"));
+        // An opening raw-text tag is type 1; its closing tag alone on a line is type 7.
+        passes("</script>\n```");
+        assert!(fails("<script>\n```").contains("an HTML block"));
     }
 
     /// Only spaces and tabs are blank, as `CommonMark` defines a blank line: other Unicode
