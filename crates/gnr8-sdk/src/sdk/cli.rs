@@ -48,7 +48,7 @@ pub struct SdkCli {
     /// deleted because gnr8 never emitted it.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub emit_main: bool,
-    /// Commands the generated dispatcher names whose implementation is hand-owned.
+    /// Root commands the generated dispatcher names whose implementation is hand-owned.
     ///
     /// Each entry becomes a root dispatch arm that calls a function in `package cli`. gnr8 never
     /// writes that function, so a file the user adds for it is not in the ownership manifest and
@@ -66,22 +66,24 @@ pub struct SdkCli {
     pub views: Vec<crate::sdk::cli_spec::CliView>,
 }
 
-/// One hand-owned command the generated dispatcher names.
+/// One hand-owned command the generated dispatcher names, at the root ([`SdkCli::owned_command`])
+/// or under a topic ([`CliTopic::owned_command`](crate::sdk::CliTopic::owned_command)).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OwnedCommand {
     /// Invocation name (`login`, `status`). Kebab-case, like every other command.
     pub name: String,
-    /// One-line summary for root help. Absent means the name stands alone.
+    /// One-line summary for the help page that lists it. Absent means the name stands alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     /// Go function in `package cli` the dispatcher calls. Absent means `run` plus the exported
-    /// form of [`Self::name`] (`login` → `runLogin`).
+    /// form of [`Self::name`] (`login` → `runLogin`), with the exported topic name between them
+    /// under a topic (`db types` → `runDbTypes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub function: Option<String>,
 }
 
 impl OwnedCommand {
-    /// A hand-owned root command invoked as `name`.
+    /// A hand-owned command invoked as `name`.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -91,14 +93,16 @@ impl OwnedCommand {
         }
     }
 
-    /// The one line root help prints beside this command.
+    /// The one line help prints beside this command.
     #[must_use]
     pub fn summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = Some(summary.into());
         self
     }
 
-    /// The Go function in `package cli` the dispatcher calls (`runLogin`).
+    /// The Go function in `package cli` the dispatcher calls (`runLogin`). It must be an ASCII Go
+    /// identifier that no other owned command calls and the generated CLI does not already use (a
+    /// declaration, an import, a Go predeclared name, `_` or `init`).
     #[must_use]
     pub fn function(mut self, function: impl Into<String>) -> Self {
         self.function = Some(function.into());
@@ -177,6 +181,10 @@ impl SdkCli {
     }
 
     /// A retired invocation that names its replacement and exits 2.
+    ///
+    /// The retired path is matched before dispatch, so it must be a path the CLI no longer runs:
+    /// no flag tokens, not a live command or a prefix of one, and not an extension of a live
+    /// command that takes arguments.
     #[must_use]
     pub fn rename_error(mut self, error: crate::sdk::cli_spec::CliRenameError) -> Self {
         self.rename_errors.push(error);
@@ -260,6 +268,31 @@ mod tests {
         assert_eq!(back.owned_commands[0].name, "login");
         assert_eq!(back.topics[0].name, "books");
         assert_eq!(back.rename_errors[0].to, "books list");
+    }
+
+    #[test]
+    fn topic_owned_command_serde_round_trips() {
+        let cli = SdkCli::new("oaiz").topic(
+            crate::sdk::CliTopic::new("db")
+                .command(crate::sdk::CliCommand::operation("listDatabases", "list"))
+                .owned_command(OwnedCommand::new("types").summary("Write TypeScript types")),
+        );
+        let json = serde_json::to_string(&cli).expect("serialize");
+        assert!(json.contains("\"owned_commands\""), "{json}");
+        let back: SdkCli = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cli, back);
+        assert_eq!(back.topics[0].owned_commands[0].name, "types");
+    }
+
+    #[test]
+    fn topic_without_owned_commands_serializes_without_the_field() {
+        let topic = crate::sdk::CliTopic::new("books")
+            .command(crate::sdk::CliCommand::operation("listBooks", "list"));
+        let json = serde_json::to_string(&topic).expect("serialize");
+        assert!(!json.contains("owned_commands"), "{json}");
+        let back: crate::sdk::CliTopic =
+            serde_json::from_str(r#"{"name":"books"}"#).expect("deserialize");
+        assert!(back.owned_commands.is_empty(), "{:?}", back.owned_commands);
     }
 
     #[test]

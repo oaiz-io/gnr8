@@ -2896,3 +2896,56 @@ fn generated_cli_go_help_lists_the_request_body() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The hand-owned function a topic owned command names; gnr8 never writes it.
+const GO_TOPIC_OWNED_STUB: &str = r#"package cli
+
+import (
+	"fmt"
+	"strings"
+)
+
+func runBooksStats(args []string, opts Options) int {
+	_ = opts
+	fmt.Printf("stats ran with %s\n", strings.Join(args, ","))
+	return 0
+}
+"#;
+
+#[test]
+fn generated_cli_go_topic_owned_command_runs_and_is_listed() {
+    if !go_available() {
+        eprintln!("skipping generated Go CLI topic owned command: go toolchain unavailable");
+        return;
+    }
+    let mut cli = cli_spec();
+    cli.topics[0] = cli.topics[0]
+        .clone()
+        .owned_command(OwnedCommand::new("stats").summary("Count books per genre"));
+    let dir = materialize_go_cli_with("cli-topic-owned", &cli_spec_graph(), cli);
+    std::fs::write(
+        dir.join("cmd/bookstore/internal/cli/stats.go"),
+        GO_TOPIC_OWNED_STUB,
+    )
+    .expect("write hand-owned stub");
+    run_go(&["vet", "./..."], &dir).expect("go vet with a topic owned command must be clean");
+    run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
+        .expect("go build ./cmd/bookstore must succeed with a topic owned command");
+
+    let (code, stdout, stderr) = run_cli(&dir, "bookstore", &["books", "stats", "a", "b"], &[]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert_eq!(stdout, "stats ran with a,b\n");
+
+    let (code, stdout, stderr) = run_cli(&dir, "bookstore", &["books", "--help"], &[]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(stdout.contains("stats"), "{stdout}");
+    assert!(stdout.contains("Count books per genre"), "{stdout}");
+
+    let (code, _, stderr) = run_cli(&dir, "bookstore", &["books", "stat"], &[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("Did you mean `bookstore books stats`?"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

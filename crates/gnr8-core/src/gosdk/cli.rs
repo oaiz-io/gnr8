@@ -139,12 +139,28 @@ fn command_files<'a>(
     Ok(files)
 }
 
-fn owned_function(command: &OwnedCommand) -> String {
+/// The Go function a hand-owned command's dispatch arm calls: its declared function, otherwise
+/// `run` + the exported topic (when it sits under one) + the exported name.
+fn owned_function(command: &OwnedCommand, topic: Option<&str>) -> String {
     command
         .function
         .clone()
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("run{}", exported(&command.name)))
+        .unwrap_or_else(|| {
+            format!(
+                "run{}{}",
+                topic.map(exported).unwrap_or_default(),
+                exported(&command.name)
+            )
+        })
+}
+
+/// The hand-owned commands declared under the topic `group`, in declaration order.
+fn topic_owned_commands<'a>(cli: &'a SdkCli, group: &str) -> &'a [OwnedCommand] {
+    cli.topics
+        .iter()
+        .find(|topic| topic.name == group)
+        .map_or(&[], |topic| topic.owned_commands.as_slice())
 }
 
 fn check_owned_command_names(cli: &SdkCli, ops: &[&Operation]) -> Result<(), CoreError> {
@@ -181,6 +197,189 @@ fn check_owned_command_names(cli: &SdkCli, ops: &[&Operation]) -> Result<(), Cor
                 message: format!(
                     "CLI {:?} owned command {:?} collides with operation command {:?}; rename one",
                     cli.program, command.name, command.name
+                ),
+            });
+        }
+    }
+    for topic in &cli.topics {
+        check_topic_owned_command_names(cli, topic, &groups, ops)?;
+    }
+    check_owned_command_functions(cli)
+}
+
+/// Each hand-owned command calls its own Go function. Two invocations that call one function are
+/// two names for one command, and a derived name can meet another one silently: root `db-types`
+/// and topic `db` command `types` both derive `runDbTypes`.
+fn check_owned_command_functions(cli: &SdkCli) -> Result<(), CoreError> {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for (invocation, function) in owned_functions(cli) {
+        if let Some(first) = seen.get(&function) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned commands {first:?} and {invocation:?} both call Go function \
+                     {function:?}; give one of them its own OwnedCommand::function",
+                    cli.program
+                ),
+            });
+        }
+        seen.insert(function, invocation);
+    }
+    Ok(())
+}
+
+/// Every hand-owned command's invocation and the Go function its dispatch arm calls, root
+/// commands first, then each topic's in declaration order.
+fn owned_functions(cli: &SdkCli) -> Vec<(String, String)> {
+    let root = cli
+        .owned_commands
+        .iter()
+        .map(|command| (command.name.clone(), owned_function(command, None)));
+    let topics = cli.topics.iter().flat_map(|topic| {
+        topic.owned_commands.iter().map(|command| {
+            (
+                format!("{} {}", topic.name, command.name),
+                owned_function(command, Some(&topic.name)),
+            )
+        })
+    });
+    root.chain(topics).collect()
+}
+
+/// Go's predeclared identifiers. Generated code calls `len`, `copy`, `append` and names `string`
+/// and `error`, so a package-level function that shadows one breaks it.
+const GO_PREDECLARED: &[&str] = &[
+    "any",
+    "append",
+    "bool",
+    "byte",
+    "cap",
+    "clear",
+    "close",
+    "comparable",
+    "complex",
+    "complex128",
+    "complex64",
+    "copy",
+    "delete",
+    "error",
+    "false",
+    "float32",
+    "float64",
+    "imag",
+    "int",
+    "int16",
+    "int32",
+    "int64",
+    "int8",
+    "iota",
+    "len",
+    "make",
+    "max",
+    "min",
+    "new",
+    "nil",
+    "panic",
+    "print",
+    "println",
+    "real",
+    "recover",
+    "rune",
+    "string",
+    "true",
+    "uint",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint8",
+    "uintptr",
+];
+
+/// A hand-owned command's function is written by the user, so the generated package must not
+/// already use that name: `function("complete")` would call the completion handler, an imported
+/// package name or a predeclared one would be shadowed, and `_` or `init` is not callable.
+fn check_owned_functions_not_generated(
+    cli: &SdkCli,
+    package: &str,
+    files: &[SdkFile],
+) -> Result<(), CoreError> {
+    let main = main_file(&cli.program);
+    let mut used: BTreeSet<String> = files
+        .iter()
+        .filter(|file| file.name != main)
+        .flat_map(|file| super::decls::package_names(&file.contents))
+        .collect();
+    used.extend(
+        GO_PREDECLARED
+            .iter()
+            .chain(&["_", "init", package])
+            .map(|name| (*name).to_string()),
+    );
+    for (invocation, function) in owned_functions(cli) {
+        if used.contains(&function) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned command {invocation:?} calls Go function {function:?}, a name \
+                     the generated CLI already uses (a declaration, an import, a Go predeclared \
+                     name, `_` or `init`); give it another OwnedCommand::function",
+                    cli.program
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A topic-owned command needs the topic's dispatcher, which exists only when the topic has a
+/// generated command, and must not shadow a verb or sub-noun that dispatcher already routes.
+fn check_topic_owned_command_names(
+    cli: &SdkCli,
+    topic: &gnr8::sdk::CliTopic,
+    groups: &BTreeSet<String>,
+    ops: &[&Operation],
+) -> Result<(), CoreError> {
+    if topic.owned_commands.is_empty() {
+        return Ok(());
+    }
+    if !groups.contains(&topic.name) {
+        return Err(CoreError::SdkGen {
+            message: format!(
+                "CLI {:?} topic {:?} declares owned commands but has no generated command; a \
+                 topic owned command needs the topic's generated dispatcher",
+                cli.program, topic.name
+            ),
+        });
+    }
+    let mut verbs: BTreeSet<String> = BTreeSet::new();
+    let mut sub_nouns: BTreeSet<String> = BTreeSet::new();
+    for op in ops.iter().copied() {
+        if command_topic(cli, op).as_deref() != Some(topic.name.as_str()) {
+            continue;
+        }
+        match command_sub_noun(cli, op) {
+            Some(sub) => {
+                sub_nouns.insert(sub);
+            }
+            None => {
+                verbs.insert(command_verb(cli, op));
+            }
+        }
+    }
+    for command in &topic.owned_commands {
+        if verbs.contains(&command.name) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned command {:?} collides with operation command {:?} under \
+                     topic {:?}; rename one",
+                    cli.program, command.name, command.name, topic.name
+                ),
+            });
+        }
+        if sub_nouns.contains(&command.name) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned command {:?} collides with sub-noun {:?} under topic {:?}; \
+                     rename one",
+                    cli.program, command.name, command.name, topic.name
                 ),
             });
         }
@@ -275,6 +474,7 @@ pub(crate) fn emit_cli(
         })?);
     }
     files.sort_by(|left, right| left.name.cmp(&right.name));
+    check_owned_functions_not_generated(cli, package, &files)?;
     Ok(files)
 }
 
@@ -4044,7 +4244,12 @@ fn emit_main(
     writeln!(out, "return complete(args[1:])").map_err(sink)?;
     for command in &cli.owned_commands {
         writeln!(out, "case {}:", quoted_string_literal(&command.name)).map_err(sink)?;
-        writeln!(out, "return {}(args[1:], active)", owned_function(command)).map_err(sink)?;
+        writeln!(
+            out,
+            "return {}(args[1:], active)",
+            owned_function(command, None)
+        )
+        .map_err(sink)?;
     }
     for op in &ungrouped {
         writeln!(
@@ -4174,6 +4379,15 @@ fn emit_help_tables(
             )
             .map_err(sink)?;
             writeln!(out, "commands: []cliCommand{{").map_err(sink)?;
+            for command in topic_owned_commands(cli, group) {
+                writeln!(
+                    out,
+                    "{{name: {}, summary: {}}},",
+                    quoted_string_literal(&command.name),
+                    quoted_string_literal(command.summary.as_deref().unwrap_or_default())
+                )
+                .map_err(sink)?;
+            }
             let mut seen_subs: BTreeSet<String> = BTreeSet::new();
             for op in ops {
                 if let Some(sub) = command_sub_noun(cli, op) {
@@ -4551,6 +4765,15 @@ fn emit_group_dispatch(
     writeln!(out, "case \"-h\", \"-help\", \"--help\":").map_err(sink)?;
     writeln!(out, "printGroupUsage(os.Stdout, group)").map_err(sink)?;
     writeln!(out, "return 0").map_err(sink)?;
+    for command in topic_owned_commands(cli, group) {
+        writeln!(out, "case {}:", quoted_string_literal(&command.name)).map_err(sink)?;
+        writeln!(
+            out,
+            "return {}(args[1:], active)",
+            owned_function(command, Some(group))
+        )
+        .map_err(sink)?;
+    }
     for op in &direct {
         writeln!(
             out,

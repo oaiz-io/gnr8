@@ -1316,6 +1316,31 @@ mod tests {
         ));
     }
 
+    /// A hand-owned command runs code gnr8 never wrote, so its `--help` is not planned, whether it
+    /// sits at the root or under a topic; the topic page that lists it still is.
+    #[test]
+    fn cli_help_plan_leaves_out_root_and_topic_owned_commands() {
+        use gnr8::sdk::prelude::*;
+        let graph = catalog_graph();
+        let topic = || {
+            CliTopic::new("catalogue").command(
+                CliCommand::operation("listItems", "browse").example("catalog catalogue browse"),
+            )
+        };
+        let generated = SdkCli::new("catalog").topic(topic());
+        let owned = SdkCli::new("catalog")
+            .owned_command("login")
+            .topic(topic().owned_command("stats"));
+        let plan = super::plan_cli_help(&graph, &owned).unwrap().invocations;
+        assert_eq!(
+            plan,
+            super::plan_cli_help(&graph, &generated)
+                .unwrap()
+                .invocations
+        );
+        assert!(plan.contains(&vec!["catalogue".to_string()]));
+    }
+
     #[test]
     fn every_class_is_sampled_from_one_small_graph() {
         let plan = plan_contract_tests(&catalog_graph()).expect("plan");

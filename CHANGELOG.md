@@ -11,6 +11,9 @@ must move the minor version.
 
 ### Breaking
 
+- **`BuiltinTarget` gains `StaticDocs`.** Rust code that matches `BuiltinTarget` exhaustively needs
+  an arm. The host/worker protocol is now version 9, so a worker and CLI cannot silently disagree
+  about the stage-plan shape.
 - **Go extraction no longer reads `enums:"…"` / `enum:"…"` struct tags.** That spelling belongs to
   another generator, and no Go runtime consumes it. A field or bound parameter that stated its enum
   only that way now publishes a plain string, with no enum and no diagnostic. State the enum with
@@ -26,6 +29,27 @@ must move the minor version.
   (each refused sample, with its operation, scope and reason); `SampleParam` gains `required` and
   `unmet`, and `SampleBody` gains `unmet`. Code that builds these structs literally needs the new
   fields.
+
+### Added
+
+- `StaticDocs::new().to(dir)` writes a deterministic Markdown reference — index, group, operation and
+  schema pages, and `llms.txt` — with an HTTP example and a Go call on every operation page. Names
+  are spelled by the Go SDK emitter's own functions, and every sample value — request and canned
+  response — satisfies the declared constraints and any format gnr8 maps to a well-known scalar (an
+  enum member is printed as declared). An operation or SDK with no sample prints the reason, and so
+  does a canned reply that is refused. An operation with no reply to show — a file download, no
+  success status, or a first success status outside 2xx — prints neither a reply nor a note.
+  Generation fails on a missing page or broken internal link.
+- Python and TypeScript calls on operation pages, for SDK targets that emit package metadata; CLI
+  invocations for operations a generated CLI wraps.
+- `gnr8 verify` checks every docs code sample against the SDK it documents. Go and TypeScript
+  samples are compiled, and Python samples are executed against a stub transport. It also checks
+  that each sample appears unchanged in its page, and it reports skipped toolchains explicitly.
+- `errors.md`, `authentication.md`, per-page diagnostics and pagination sections. `gnr8 verify` runs
+  each sample's call against a fake transport and asserts it sends the request printed on the page,
+  with credentials and base URL substituted. The transport answers with the reply the page prints,
+  and the call must succeed on it; an operation whose page prints no reply is answered with an empty
+  `400`, and the call must raise the SDK's typed error with that status.
 
 ### Changed
 
@@ -44,6 +68,22 @@ must move the minor version.
 
 ### Fixed
 
+- Contract-test sample values — request inputs and canned success replies — now satisfy declared
+  `enum`, length, range, item-count and property-count constraints, and a string `format` gnr8 maps
+  to a well-known scalar, except that an enum member is sent as declared even where it contradicts
+  that format; other formats remain annotations. Enum-keyed map samples use an enum member as the
+  key. Generated `contract_test.*` files change for operations whose inputs or responses declare
+  constraints. A float sample is always a decimal every generated language prints alike (never a
+  whole number), so a contract test no longer compares `1.0` with the `1` a Go or TypeScript client
+  sends.
+- Parameters imported from an OpenAPI document keep their `minimum`, `maxLength` and other
+  constraints as typed facts, and OpenAPI 3.0 / Swagger 2
+  `exclusiveMinimum: true` / `exclusiveMaximum: true` import as the exclusive bound instead of the
+  string `"true"`.
+- A generated TypeScript SDK with bearer or basic authentication compiles under
+  `exactOptionalPropertyTypes`.
+- The operations a schema reaches now include those that reach it through an alternative request
+  body or a response header, as the schema's own direction analysis already did.
 - **Every generated client encodes a path segment, a query name and value, and a cookie with the
   rule the docs page and the contract test spell them with**: every byte but an RFC 3986 unreserved
   one becomes `%XX`. Go used `url.PathEscape` (leaving `+ $ & = @ :`) and wrote a query space as
@@ -112,6 +152,44 @@ must move the minor version.
   the `$ref` (the tighter bound wins), and a reference that does not resolve is a
   `request.parameter.unresolved` diagnostic instead of silently importing no constraints.
 
+## 0.18.0 — 2026-10-10
+
+### Breaking
+
+- **`CliTopic` gains `owned_commands`.** Older serialized configs remain readable because the field
+  defaults to empty, but Rust code that constructs `CliTopic` with a struct literal, or matches it
+  exhaustively, must account for it.
+- **Generation refuses CLI configs that produced a broken CLI.** Two owned commands that call one
+  Go function, an `OwnedCommand::function` the generated CLI already uses, and a `rename_error` that
+  reaches a live command are now generation errors (see Fixed). A config that generated with any of
+  them must change.
+
+### Added
+
+- **Hand-owned commands inside generated topics.** `CliTopic::owned_command` names a Go command
+  under a declared topic whose implementation is hand-owned. The topic's dispatcher calls
+  `run<Topic><Name>` (or `OwnedCommand::function`), and its help page and typo hints list it first.
+  Generation refuses a topic with no generated command, a name equal to one of the topic's verbs or
+  sub-nouns, and topic owned commands on `PySdk`. Configs without the new field emit identical
+  output.
+
+### Fixed
+
+- **`OwnedCommand::function` must be an ASCII Go identifier.** The dispatcher emits the function
+  name as Go source, so generation now refuses a value that is not an identifier, is a keyword, or
+  uses non-ASCII letters (gnr8 emits ASCII identifiers only), at the root and under a topic.
+- **`OwnedCommand::function` must not be a name the generated CLI already uses.** A declared name
+  (`complete`, `Run`), an imported package (`strings`, `json`), a Go predeclared name (`len`,
+  `string`), `_` or `init` called gnr8's own code, shadowed it, or was not callable, so `cli.go` did
+  not compile; generation now refuses it.
+- **Two owned commands may not call one Go function.** Root `db-types` and topic `db` command `types`
+  both derive `runDbTypes`; generation now refuses that and an explicit shared function.
+- **`rename_error` must not reach a live command.** A retired path is matched before dispatch, so a
+  path that was a live command or a prefix of one (`books`, `help`) made that command unreachable, a
+  flag token (`--help`) hid help or version output, and one that extended a command taking arguments
+  captured them. Generation now refuses these, and a retired path that an earlier one already
+  matches, in the Go and Python CLIs.
+
 ## 0.17.2 — 2026-10-10
 
 ### Added
@@ -123,56 +201,6 @@ must move the minor version.
   path that already lists it, and fields bound as flags through `body_fields` are left out.
 - `help --json` carries `body: {schema, fields}` for each command that takes `--body`, in generated
   Go and Python CLIs.
-
-### Breaking
-
-- **`BuiltinTarget` gains `StaticDocs`.** Rust code that matches `BuiltinTarget` exhaustively needs
-  an arm. The host/worker protocol is now version 9, so a worker and CLI cannot silently disagree
-  about the stage-plan shape.
-
-### Added
-
-- `StaticDocs::new().to(dir)` writes a deterministic Markdown reference — index, group, operation and
-  schema pages, and `llms.txt` — with an HTTP example and a Go call on every operation page. Names
-  are spelled by the Go SDK emitter's own functions, and every sample value — request and canned
-  response — satisfies the declared constraints and any format gnr8 maps to a well-known scalar (an
-  enum member is printed as declared). An operation or SDK with no sample prints the reason, and so
-  does a canned reply that is refused. An operation with no reply to show — a file download, no
-  success status, or a first success status outside 2xx — prints neither a reply nor a note.
-  Generation fails on a missing page or broken internal link.
-- Python and TypeScript calls on operation pages, for SDK targets that emit package metadata; CLI
-  invocations for operations a generated CLI wraps.
-- `gnr8 verify` checks every docs code sample against the SDK it documents. Go and TypeScript
-  samples are compiled, and Python samples are executed against a stub transport. It also checks
-  that each sample appears unchanged in its page, and it reports skipped toolchains explicitly.
-- `errors.md`, `authentication.md`, per-page diagnostics and pagination sections. `gnr8 verify` runs
-  each sample's call against a fake transport and asserts it sends the request printed on the page,
-  with credentials and base URL substituted. The transport answers with the reply the page prints,
-  and the call must succeed on it; an operation whose page prints no reply is answered with an empty
-  `400`, and the call must raise the SDK's typed error with that status.
-
-### Fixed
-
-- Contract-test sample values — request inputs and canned success replies — now satisfy declared
-  `enum`, length, range, item-count and property-count constraints, and a string `format` gnr8 maps
-  to a well-known scalar, except that an enum member is sent as declared even where it contradicts
-  that format; other formats remain annotations. No value is sent for a `pattern`, which gnr8 never
-  synthesizes and which imported specs carry most often, or for bounds no value can meet. In the
-  generated contract tests, the affected operation or case is skipped, silently. A refused optional
-  reply field is left out of the canned reply instead, so only a refused required field costs a
-  case. Enum-keyed map samples use an enum member as the key. Generated `contract_test.*` files
-  change for operations whose inputs or responses declare constraints, and suites over patterned
-  models can lose cases. A float sample is always a decimal every generated language prints alike
-  (never a whole number), so a contract test no longer compares `1.0` with the `1` a Go or
-  TypeScript client sends.
-- Parameters imported from an OpenAPI document keep their `minimum`, `maxLength` and other
-  constraints as typed facts (`openapi.yaml` output is unchanged), and OpenAPI 3.0 / Swagger 2
-  `exclusiveMinimum: true` / `exclusiveMaximum: true` import as the exclusive bound instead of the
-  string `"true"`.
-- A generated TypeScript SDK with bearer or basic authentication compiles under
-  `exactOptionalPropertyTypes`.
-- The operations a schema reaches now include those that reach it through an alternative request
-  body or a response header, as the schema's own direction analysis already did.
 
 ## 0.17.1 — 2026-10-07
 

@@ -15,9 +15,11 @@
 pub(crate) mod callsite;
 mod cli;
 mod contract;
+mod decls;
 mod emit;
 mod gofmt;
 
+pub(crate) use emit::is_go_identifier;
 pub(crate) use gofmt::{Formatter, FormatterIdentity};
 
 use std::collections::BTreeMap;

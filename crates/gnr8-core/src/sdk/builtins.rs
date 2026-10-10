@@ -3924,7 +3924,11 @@ fn validate_cli_program(target: &str, program: &str) -> Result<(), CoreError> {
 /// without `pyproject.toml` there is nowhere for `[project.scripts]` to go.
 fn validate_pysdk_cli(cli: &gnr8::sdk::SdkCli, package_metadata: bool) -> Result<(), CoreError> {
     validate_cli_program("PySdk", &cli.program)?;
-    if !cli.emit_main || !cli.owned_commands.is_empty() {
+    let topic_owned = cli
+        .topics
+        .iter()
+        .any(|topic| !topic.owned_commands.is_empty());
+    if !cli.emit_main || !cli.owned_commands.is_empty() || topic_owned {
         return Err(CoreError::Config {
             message: "hand-owned main and owned commands are a Go CLI library seam; PySdk::cli \
                       does not emit them"
@@ -3947,16 +3951,42 @@ fn validate_pysdk_cli(cli: &gnr8::sdk::SdkCli, package_metadata: bool) -> Result
 /// intentional and documented on [`GoSdk::cli`].
 fn validate_gosdk_cli(cli: &gnr8::sdk::SdkCli) -> Result<(), CoreError> {
     validate_cli_program("GoSdk", &cli.program)?;
+    validate_owned_commands("SdkCli::owned_command", "", &cli.owned_commands)?;
+    for topic in &cli.topics {
+        validate_owned_commands(
+            "CliTopic::owned_command",
+            &format!(" in topic {:?}", topic.name),
+            &topic.owned_commands,
+        )?;
+    }
+    Ok(())
+}
+
+/// Validate the hand-owned commands of one dispatcher level: usable names, each named once,
+/// function names that are Go identifiers, and single-line summaries.
+fn validate_owned_commands(
+    target: &str,
+    scope: &str,
+    commands: &[gnr8::sdk::OwnedCommand],
+) -> Result<(), CoreError> {
     let mut seen = BTreeSet::new();
-    for command in &cli.owned_commands {
-        validate_cli_program("SdkCli::owned_command", &command.name)?;
+    for command in commands {
+        validate_cli_program(target, &command.name)?;
         if !seen.insert(command.name.as_str()) {
             return Err(CoreError::Config {
-                message: format!("SdkCli::owned_command names {:?} twice", command.name),
+                message: format!("{target} names {:?} twice{scope}", command.name),
             });
         }
         if let Some(function) = &command.function {
             validate_metadata_value("owned command function", function)?;
+            if !crate::gosdk::is_go_identifier(function) {
+                return Err(CoreError::Config {
+                    message: format!(
+                        "{target} function {function:?}{scope} is not a Go identifier (need an \
+                         ASCII letter or '_', then letters, digits or '_', and not a keyword)"
+                    ),
+                });
+            }
         }
         if let Some(summary) = &command.summary {
             validate_metadata_value("owned command summary", summary)?;
