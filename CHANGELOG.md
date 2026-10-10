@@ -359,6 +359,9 @@ must move the minor version.
   naming that bound. An integral number is an integer: a declared `5.0` (a media example's value, a
   field or parameter example's text, an enum member) is accepted for an integer input and stated
   as `5`, which every SDK decodes into its integer type, where it used to be an error.
+- A field typed by a named scalar alias publishes its example in the alias's JSON kind
+  (`example: 3` for a field typed `Size`, an integer), as a parameter's example already was. It
+  was published as the string `'3'`.
 
 ## 0.18.0 — 2026-10-10
 

@@ -6605,6 +6605,8 @@ components:
         flag: { type: boolean, example: true }
         name: { type: string, example: "7" }
         tags: { type: array, items: { type: string }, example: [a] }
+        size: { $ref: "#/components/schemas/Size", example: 3 }
+    Size: { type: integer }
 "##;
 
     /// D-EX: a declared scalar example of every JSON type is imported by one rule — its text, read
@@ -6675,6 +6677,8 @@ components:
         assert_eq!(property("ratio"), Some(serde_json::json!(1.5)));
         assert_eq!(property("flag"), Some(serde_json::json!(true)));
         assert_eq!(property("name"), Some(serde_json::json!("7")));
+        // A field typed by a named scalar alias publishes its example in the alias's JSON kind.
+        assert_eq!(property("size"), Some(serde_json::json!(3)));
         let parameters = emitted
             .pointer("/paths/~1items~1{code}/get/parameters")
             .and_then(Value::as_array)

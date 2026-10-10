@@ -432,7 +432,7 @@ fn lower_operation(
 
     let request_body = lower_request_body(op, docs, ref_to_name)?;
 
-    let responses = lower_responses(op, docs, ref_to_name)?;
+    let responses = lower_responses(op, docs, ref_to_name, schemas)?;
     let operation_security = if let Some(policy) = exact_security {
         policy
             .alternatives
@@ -580,7 +580,12 @@ fn lower_parameter(
     ref_to_name: &BTreeMap<&str, &str>,
     schemas: &[crate::graph::Schema],
 ) -> Result<Parameter, crate::CoreError> {
-    let mut schema = lower_schema_type(&param.schema, ref_to_name, SchemaDirections::REQUEST)?;
+    let mut schema = lower_schema_type(
+        &param.schema,
+        ref_to_name,
+        schemas,
+        SchemaDirections::REQUEST,
+    )?;
     apply_constraints(&param.constraints, &mut schema);
     if let Some(items) = &mut schema.items {
         apply_constraints(&param.item_constraints, items);
@@ -806,11 +811,12 @@ fn lower_responses(
     op: &GraphOp,
     docs: Option<&OperationDocsPolicy>,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
 ) -> Result<Vec<(String, ResponseObj)>, crate::CoreError> {
     let responses = op
         .responses
         .iter()
-        .map(|resp| lower_response(op, resp, docs, ref_to_name))
+        .map(|resp| lower_response(op, resp, docs, ref_to_name, schemas))
         .collect::<Result<Vec<_>, crate::CoreError>>()?;
     if responses.is_empty() {
         return Err(crate::CoreError::Lowering {
@@ -828,6 +834,7 @@ fn lower_response(
     resp: &crate::graph::Response,
     docs: Option<&OperationDocsPolicy>,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
 ) -> Result<(String, ResponseObj), crate::CoreError> {
     let response_docs = docs.and_then(|policy| {
         policy
@@ -905,7 +912,12 @@ fn lower_response(
         .map(|header| {
             Ok(model::ResponseHeader {
                 name: header.name.clone(),
-                schema: lower_schema_type(&header.schema, ref_to_name, SchemaDirections::RESPONSE)?,
+                schema: lower_schema_type(
+                    &header.schema,
+                    ref_to_name,
+                    schemas,
+                    SchemaDirections::RESPONSE,
+                )?,
             })
         })
         .collect::<Result<Vec<_>, crate::CoreError>>()?;
@@ -1032,7 +1044,7 @@ fn build_component_schemas(
         .iter()
         .map(|schema| {
             let reached = directions_of(directions, &schema.id);
-            let object = lower_named_schema(schema, ref_to_name, reached)?;
+            let object = lower_named_schema(schema, ref_to_name, schemas, reached)?;
             Ok((schema.name.clone(), object))
         })
         .collect()
@@ -1045,6 +1057,7 @@ fn build_component_schemas(
 fn lower_named_schema(
     schema: &Schema,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
     directions: SchemaDirections,
 ) -> Result<SchemaObject, crate::CoreError> {
     match &schema.body {
@@ -1053,7 +1066,7 @@ fn lower_named_schema(
             enum_values: members.clone(),
             ..SchemaObject::default()
         }),
-        Type::Object(fields) => lower_object(fields, ref_to_name, directions),
+        Type::Object(fields) => lower_object(fields, ref_to_name, schemas, directions),
         // Named aliases lower exactly like inline field schemas, but live under components so other
         // schemas and SDK model split layouts can reference them by name.
         Type::Primitive(_)
@@ -1062,7 +1075,7 @@ fn lower_named_schema(
         | Type::Map { .. }
         | Type::Union(_)
         | Type::Named(_)
-        | Type::Any {} => lower_schema_type(&schema.body, ref_to_name, directions),
+        | Type::Any {} => lower_schema_type(&schema.body, ref_to_name, schemas, directions),
     }
 }
 
@@ -1073,6 +1086,7 @@ fn lower_named_schema(
 fn lower_object(
     fields: &[Field],
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
     directions: SchemaDirections,
 ) -> Result<SchemaObject, crate::CoreError> {
     let mut required: Vec<String> = fields
@@ -1089,6 +1103,7 @@ fn lower_object(
                 &field.schema,
                 directions.field_is_nullable(field),
                 ref_to_name,
+                schemas,
                 directions,
             )?;
             // Attach field-owned keywords to the property schema whatever its shape. OpenAPI 3.1
@@ -1099,10 +1114,8 @@ fn lower_object(
                 prop.description = Some(desc.clone());
             }
             if let Some(example) = &field.example {
-                let kind = match &field.schema {
-                    Type::Primitive(prim) => Some(prim),
-                    _ => None,
-                };
+                // The JSON kind of the field's type, through named aliases, as a parameter's is.
+                let kind = scalar_kind(&field.schema, schemas);
                 prop.example = Some(example_literal(example, kind));
             }
             apply_field_meta(field, &mut prop);
@@ -1160,9 +1173,10 @@ fn lower_field_schema(
     ty: &Type,
     nullable: bool,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
     directions: SchemaDirections,
 ) -> Result<SchemaObject, crate::CoreError> {
-    let lowered = lower_schema_type(ty, ref_to_name, directions)?;
+    let lowered = lower_schema_type(ty, ref_to_name, schemas, directions)?;
     if !nullable {
         return Ok(lowered);
     }
@@ -1198,6 +1212,7 @@ fn null_schema() -> SchemaObject {
 fn lower_schema_type(
     ty: &Type,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
     directions: SchemaDirections,
 ) -> Result<SchemaObject, crate::CoreError> {
     match ty {
@@ -1213,7 +1228,12 @@ fn lower_schema_type(
         )),
         Type::Array(items) => Ok(SchemaObject {
             type_name: Some("array".to_string()),
-            items: Some(Box::new(lower_schema_type(items, ref_to_name, directions)?)),
+            items: Some(Box::new(lower_schema_type(
+                items,
+                ref_to_name,
+                schemas,
+                directions,
+            )?)),
             ..SchemaObject::default()
         }),
         // OpenAPI object keys are strings. Reject maps whose source key cannot be represented rather
@@ -1232,6 +1252,7 @@ fn lower_schema_type(
                 additional_properties_schema: Some(Box::new(lower_schema_type(
                     value,
                     ref_to_name,
+                    schemas,
                     directions,
                 )?)),
                 ..SchemaObject::default()
@@ -1240,7 +1261,7 @@ fn lower_schema_type(
         Type::Named(ref_id) => Ok(SchemaObject::reference(resolve_ref(ref_id, ref_to_name)?)),
         // An inline (anonymous) object lowers to a full object schema with its own properties, in the
         // same positions as the schema that carries it.
-        Type::Object(fields) => lower_object(fields, ref_to_name, directions),
+        Type::Object(fields) => lower_object(fields, ref_to_name, schemas, directions),
         Type::Enum(members) => Ok(SchemaObject {
             type_name: Some("string".to_string()),
             enum_values: members.clone(),
@@ -1250,7 +1271,7 @@ fn lower_schema_type(
         Type::Union(variants) => {
             let one_of = variants
                 .iter()
-                .map(|variant| lower_schema_type(variant, ref_to_name, directions))
+                .map(|variant| lower_schema_type(variant, ref_to_name, schemas, directions))
                 .collect::<Result<Vec<_>, crate::CoreError>>()?;
             Ok(SchemaObject {
                 one_of,
