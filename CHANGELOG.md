@@ -362,6 +362,9 @@ must move the minor version.
 - A field typed by a named scalar alias publishes its example in the alias's JSON kind
   (`example: 3` for a field typed `Size`, an integer), as a parameter's example already was. It
   was published as the string `'3'`.
+- A docs page whose first request representation leaves a constraint unmet (an unmet `pattern`,
+  say) takes the first representation that meets every constraint instead of refusing the
+  operation or dropping the body.
 
 ## 0.18.0 — 2026-10-10
 

@@ -2430,6 +2430,42 @@ fn two_bodies(second: &Value) -> ApiGraph {
     graph
 }
 
+/// A docs page reads every representation the way it reads the first: one that leaves a constraint
+/// unmet is not the page's body, and the first that meets them all is — the call sends whichever it
+/// selects.
+#[test]
+fn a_docs_page_takes_the_first_representation_that_meets_every_constraint() {
+    let mut graph = probe(
+        &[],
+        Some(&object(&[meta_fld(
+            "name",
+            &string(),
+            true,
+            &json!({"constraints": {"pattern": "^x"}}),
+        )])),
+        None,
+        &[schema("Second", &object(&[fld("id", &string(), true)]))],
+    );
+    graph.operations[0].request_body_variants = serde_json::from_value(json!([
+        {"content_type": "application/vnd.t+json", "body": {"ref_id": "t.Second"}}
+    ]))
+    .unwrap();
+    for required in [false, true] {
+        graph.operations[0].request_body_required = required;
+        let Sampled::Sample(page) = docs(&graph) else {
+            panic!("the second representation is sampleable");
+        };
+        assert_eq!(
+            page.bodies
+                .iter()
+                .map(|body| body.content_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["application/vnd.t+json"],
+            "required: {required}"
+        );
+    }
+}
+
 /// D-P: a refused second request representation is recorded and counted, and the representation
 /// that can be sampled still gets its body-selection case — never a silent loss of both.
 #[test]

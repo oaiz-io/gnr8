@@ -117,8 +117,10 @@ impl Sampled {
     /// A page promises values that satisfy the schema, so an input whose sample left a constraint
     /// unmet is refused exactly as an unsampleable one is: a path or required parameter, or the
     /// required body, refuses the operation; an optional parameter or an optional body is left out
-    /// of the call; a reply with an unmet constraint is a refused reply. A contract case reads the
-    /// sample itself, unmet constraints and all.
+    /// of the call; a reply with an unmet constraint is a refused reply. A request representation
+    /// with an unmet constraint is dropped, so the page's body is the first representation that
+    /// meets them all, and the body counts as refused only when none does. A contract case reads
+    /// the sample itself, unmet constraints and all.
     #[must_use]
     pub fn for_docs(self) -> Self {
         let Self::Sample(mut sample) = self else {
@@ -136,17 +138,22 @@ impl Sampled {
             }
         }
         sample.params = params;
-        if let Some(body) = sample.bodies.first() {
-            if let Some(unmet) = body.unmet.first() {
-                if sample.body_required {
-                    return Self::Refused(SampleRefusal::BodyRefused {
-                        content_type: body.content_type.clone(),
-                        inner: Box::new(SampleRefusal::Unmet(unmet.clone())),
-                    });
-                }
-                // An optional body is simply left out of the call.
-                sample.bodies.clear();
+        // Every representation is read alike: one with an unmet constraint is not the page's body,
+        // and the page takes the first that meets them all.
+        let first_unmet = sample.bodies.first().and_then(|body| {
+            body.unmet
+                .first()
+                .map(|unmet| (body.content_type.clone(), unmet.clone()))
+        });
+        sample.bodies.retain(|body| body.unmet.is_empty());
+        if let (true, Some((content_type, unmet))) = (sample.bodies.is_empty(), first_unmet) {
+            if sample.body_required {
+                return Self::Refused(SampleRefusal::BodyRefused {
+                    content_type,
+                    inner: Box::new(SampleRefusal::Unmet(unmet)),
+                });
             }
+            // An optional body is simply left out of the call.
         }
         if let SuccessOutcome::Sample(reply) = &sample.reply {
             if let Some(unmet) = reply.unmet.first() {
