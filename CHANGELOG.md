@@ -25,6 +25,8 @@ must move the minor version.
   does a canned reply that is refused. An operation with no reply to show — a file download, no
   success status, or a first success status outside 2xx — prints neither a reply nor a note.
   Generation fails on a missing page or broken internal link.
+- Python and TypeScript calls on operation pages, for SDK targets that emit package metadata; CLI
+  invocations for operations a generated CLI wraps.
 
 ### Fixed
 

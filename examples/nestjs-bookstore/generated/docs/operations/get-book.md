@@ -1,0 +1,66 @@
+# `getBook`
+
+`GET /books/{bookId}`
+
+Fetch one book by its identifier.
+
+Returns the book when it is in stock, and an out-of-stock notice otherwise.
+
+## Parameters
+
+### Path
+
+| Name | Type | Required | Default | Constraints | Description |
+| --- | --- | --- | --- | --- | --- |
+| `bookId` | `number` | yes |  |  |  |
+
+### Query
+
+| Name | Type | Required | Default | Constraints | Description |
+| --- | --- | --- | --- | --- | --- |
+| `fmt` | [`BookFormat`](../schemas/book-format.md) | no |  |  |  |
+
+## Responses
+
+| Status | Body | Media types | Headers | Description |
+| --- | --- | --- | --- | --- |
+| `200` | [`BookOrError`](../schemas/book-or-error.md) | `application/json` |  |  |
+
+## Example
+
+Values are sampled from the schema and satisfy its declared constraints. Credentials are placeholders — `{apiKey}`, `{token}`, `{base64(username:password)}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+GET /books/1.5?fmt=hardcover HTTP/1.1
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "author": {
+    "bio": "gnr8",
+    "name": "gnr8"
+  },
+  "format": "hardcover",
+  "id": 1.5,
+  "rating": 1.5,
+  "tags": [
+    "gnr8"
+  ],
+  "title": "gnr8"
+}
+```
+
+### TypeScript — `example.com/bookstore/sdk`
+
+```ts
+import { Client } from "@example/bookstore-sdk";
+
+const client = new Client({ baseUrl });
+const result = await client.getBook(1.5, { fmt: "hardcover" });
+console.log(result);
+```

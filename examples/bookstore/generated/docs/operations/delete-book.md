@@ -59,3 +59,11 @@ if err != nil {
 }
 fmt.Printf("%+v\n", result)
 ```
+
+### CLI — `bookstore`
+
+`bookstore books delete`
+
+```sh
+bookstore books delete 1 --yes
+```

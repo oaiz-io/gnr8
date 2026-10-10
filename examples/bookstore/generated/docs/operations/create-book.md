@@ -81,3 +81,11 @@ if err != nil {
 }
 fmt.Printf("%+v\n", result)
 ```
+
+### CLI — `bookstore`
+
+`bookstore books create`
+
+```sh
+bookstore books create --title Dune --author Herbert --genre fiction
+```

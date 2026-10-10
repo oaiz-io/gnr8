@@ -85,3 +85,11 @@ if err != nil {
 }
 fmt.Printf("%+v\n", result)
 ```
+
+### CLI — `bookstore`
+
+`bookstore books update`
+
+```sh
+bookstore books update 1 --title Dune
+```

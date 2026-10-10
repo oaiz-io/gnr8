@@ -47,6 +47,7 @@ fn main() -> std::process::ExitCode {
                     .to("generated/sdk")
                     .cli(bookstore_cli()),
             )
+            .target(StaticDocs::new().to("generated/docs"))
             .post(Header::generated()),
     )
 }

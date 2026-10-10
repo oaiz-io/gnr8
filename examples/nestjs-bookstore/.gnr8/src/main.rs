@@ -39,6 +39,7 @@ fn main() -> std::process::ExitCode {
                     .package(SdkPackageMetadata::new().registry_name("@example/bookstore-sdk"))
                     .to("generated/sdk"),
             )
+            .target(StaticDocs::new().to("generated/docs"))
             .post(Header::generated()),
     )
 }

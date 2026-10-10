@@ -77,3 +77,11 @@ if err != nil {
 }
 fmt.Printf("%+v\n", result)
 ```
+
+### CLI — `bookstore`
+
+`bookstore books list`
+
+```sh
+bookstore books list
+```
