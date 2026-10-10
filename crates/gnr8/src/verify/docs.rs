@@ -574,8 +574,8 @@ fn wire_tsconfig(package: &str, sdk_output_path: &str, unit_file: &str) -> Strin
     let index = format!("./{}/index.ts", sdk_output_path.trim_end_matches('/'));
     serde_json::json!({
         "compilerOptions": {
-            "module": "commonjs",
-            "moduleResolution": "node",
+            "module": "node16",
+            "moduleResolution": "node16",
             "target": "es2022",
             "lib": ["es2022", "dom"],
             "strict": true,
@@ -614,8 +614,8 @@ fn tsconfig(package: &str, sdk_output_path: &str, unit_file: &str) -> String {
             "exactOptionalPropertyTypes": true,
             "noUncheckedIndexedAccess": true,
             "target": "es2022",
-            "module": "esnext",
-            "moduleResolution": "bundler",
+            "module": "node16",
+            "moduleResolution": "node16",
             "lib": ["es2022", "dom"],
             "paths": { package: [index] }
         },
@@ -934,7 +934,7 @@ mod tests {
             "{}",
             reason.message
         );
-        assert!(runner.programs.is_empty());
+        assert!(runner.programs.is_empty(), "{:?}", runner.programs);
     }
 
     #[test]

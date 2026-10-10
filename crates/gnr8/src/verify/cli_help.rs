@@ -731,7 +731,7 @@ pub(super) mod tests {
                 assert_eq!(report.status, status, "{report:?}");
                 assert_eq!(report.reason.unwrap().code, kind);
                 assert_eq!(runner.calls.len(), 1);
-                assert!(report.commands.is_empty());
+                assert!(report.commands.is_empty(), "{:?}", report.commands);
             }
         }
         let mut runner = FakeRunner::default();
