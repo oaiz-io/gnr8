@@ -251,10 +251,20 @@ must move the minor version.
   request line already carry; the imported servers now drop it (`https://api.example.com/v1` is
   published as `https://api.example.com`), so `openapi.yaml`, an SDK built with a listed server as
   its base URL, and the docs page no longer resolve to `/v1/v1/…`. A server with a different path
-  cannot be represented beside that base path and is reported as a diagnostic.
+  cannot be represented beside that base path and is reported as a diagnostic. That includes a root
+  server beside a base path that is not the root. A server's path is read with each server
+  variable replaced by its declared `default`, so `https://api.example.com/{version}` with
+  `version: {default: v1}` gives the base path `/v1` instead of a `/{version}` segment no
+  operation declares. A path variable with no default is reported, and its server is not used for
+  the base path. A version 1 artifact never held server variables, so a first server whose path
+  is templated reports its operations' paths once after upgrading.
 - A non-string parameter enum (`type: integer, enum: [1, 2, 3]`) imports as a constraint, so samples
   and docs pick a member; a mixed enum keeps its members of the declared type instead of losing all
-  of them. A string enum stays the parameter's type.
+  of them. A string enum stays the parameter's type. That includes a `type: string` enum with
+  members of another kind (`[a, 1, null, b]`), which is the enum of its string members. Before,
+  such an enum imported as a plain string the first time and as an enum when its published form
+  was imported again, so its SDK type changed between generations. The same rule applies to a
+  schema field, which used to lose such an enum entirely.
 - A `$ref`'d parameter schema keeps the referenced schema's bounds together with any keyword beside
   the `$ref` (the tighter bound wins), and a reference that does not resolve is a
   `request.parameter.unresolved` diagnostic instead of silently importing no constraints. A fact

@@ -597,55 +597,73 @@ impl Importer {
     /// The base path (the first server's path, or Swagger 2's `basePath`) is the one place a path
     /// prefix lives: every operation path, `openapi.yaml`'s paths, the SDKs and the docs request
     /// line carry it. A server that kept it too would put it on the wire twice
-    /// (`https://api.example.com/v1` + `/v1/items`), so it is taken off the server URL. A server
-    /// with a different path cannot be represented beside that base path, and says so.
+    /// (`https://api.example.com/v1` + `/v1/items`), so it is taken off the server URL. A server's
+    /// path is read with its variables resolved ([`server_path`]). A server with any other path —
+    /// the root included, beside a base path that is not — cannot be represented beside that base
+    /// path, and says so.
     fn import_servers(&mut self) -> Vec<crate::graph::OpenApiServer> {
-        let declared: Vec<crate::graph::OpenApiServer> = if self.version == SpecVersion::Swagger2 {
-            let Some(host) = self.root.get("host").and_then(Value::as_str) else {
-                return Vec::new();
-            };
-            self.root
-                .get("schemes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(|scheme| crate::graph::OpenApiServer {
-                    url: format!("{scheme}://{host}"),
-                    description: None,
-                })
-                .collect()
-        } else {
-            self.root
-                .get("servers")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|server| {
-                    let server = server.as_object()?;
-                    Some(crate::graph::OpenApiServer {
-                        url: server.get("url")?.as_str()?.to_string(),
-                        description: server
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .map(ToString::to_string),
+        let declared: Vec<(crate::graph::OpenApiServer, Result<String, String>)> =
+            if self.version == SpecVersion::Swagger2 {
+                let Some(host) = self.root.get("host").and_then(Value::as_str) else {
+                    return Vec::new();
+                };
+                self.root
+                    .get("schemes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|scheme| {
+                        (
+                            crate::graph::OpenApiServer {
+                                url: format!("{scheme}://{host}"),
+                                description: None,
+                            },
+                            Ok("/".to_string()),
+                        )
                     })
-                })
-                .collect()
-        };
+                    .collect()
+            } else {
+                self.root
+                    .get("servers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|server| {
+                        let object = server.as_object()?;
+                        Some((
+                            crate::graph::OpenApiServer {
+                                url: object.get("url")?.as_str()?.to_string(),
+                                description: object
+                                    .get("description")
+                                    .and_then(Value::as_str)
+                                    .map(ToString::to_string),
+                            },
+                            server_path(server)?,
+                        ))
+                    })
+                    .collect()
+            };
         let base_path = self.base_path();
         let mut servers = Vec::with_capacity(declared.len());
-        for mut server in declared {
-            let path = server_url_path(&server.url);
-            if path == base_path && base_path != "/" {
-                server.url = server_url_without_path(&server.url);
-            } else if path != "/" {
-                self.warn(format!(
+        for (mut server, path) in declared {
+            match path {
+                Ok(path) if path == base_path => {
+                    if base_path != "/" {
+                        server.url = server_url_without_path(&server.url);
+                    }
+                }
+                Ok(path) => self.warn(format!(
                     "server '{}' has path '{path}', but every generated path carries the base path \
                      '{base_path}' taken from the first server; this server's paths are not \
                      representable",
                     server.url
-                ));
+                )),
+                Err(variable) => self.warn(format!(
+                    "server '{}' uses variable '{variable}' in its path with no declared default, \
+                     so its path is unknown; this server's paths are not representable",
+                    server.url
+                )),
             }
             servers.push(server);
         }
@@ -737,9 +755,9 @@ impl Importer {
             .get("servers")
             .and_then(Value::as_array)
             .and_then(|servers| servers.first())
-            .and_then(|server| server.get("url"))
-            .and_then(Value::as_str)
-            .map_or_else(|| "/".to_string(), server_url_path)
+            .and_then(server_path)
+            .and_then(Result::ok)
+            .unwrap_or_else(|| "/".to_string())
     }
 
     #[expect(
@@ -2632,17 +2650,30 @@ struct EnumValues {
     nullable: bool,
 }
 
+/// A schema's enum as a string enum type: its string members, sorted and once each, and whether a
+/// `null` member makes it nullable.
+///
+/// Without a declared `type`, every member must be a string. With `type: string`, the string
+/// members are the type and a member of another kind is left out, since it can never validate —
+/// so an enum's published form (its string members) imports to the same type as its source, and
+/// the SDK type it gets is the same every generation. With `type: string` and no string member,
+/// there is no string enum.
 fn string_enum_values(schema: &Value) -> Option<EnumValues> {
     let values = schema.get("enum")?.as_array()?;
+    let declared_string = schema_type(schema).0.as_deref() == Some("string");
     let mut enum_values = Vec::new();
     let mut nullable = false;
+    let mut other_kind = false;
     for value in values {
-        if value.is_null() {
-            nullable = true;
-        } else {
-            let member = value.as_str()?;
-            enum_values.push(member.to_string());
+        match value {
+            Value::Null => nullable = true,
+            Value::String(member) => enum_values.push(member.clone()),
+            _ if declared_string => other_kind = true,
+            _ => return None,
         }
+    }
+    if other_kind && enum_values.is_empty() {
+        return None;
     }
     enum_values.sort();
     enum_values.dedup();
@@ -3323,6 +3354,35 @@ fn imported_from_openapi(graph: &ApiGraph) -> bool {
     };
     let document = document_span(first.provenance.file.clone());
     graph.operations.iter().all(|op| op.provenance == document)
+}
+
+/// An `OpenAPI` 3 Server Object's path, normalized, with every `{variable}` in it replaced by the
+/// `default` its `variables` declare — the value a client uses when it chooses none. `Err` names a
+/// variable with no declared default, whose path is unknown; `None` when the server has no URL.
+fn server_path(server: &Value) -> Option<Result<String, String>> {
+    let url = server.get("url")?.as_str()?;
+    let template = server_url_path(url);
+    let mut path = String::with_capacity(template.len());
+    let mut rest = template.as_str();
+    while let Some(start) = rest.find('{') {
+        let Some(length) = rest[start..].find('}') else {
+            break;
+        };
+        let name = &rest[start + 1..start + length];
+        let Some(default) = server
+            .get("variables")
+            .and_then(|variables| variables.get(name))
+            .and_then(|variable| variable.get("default"))
+            .and_then(Value::as_str)
+        else {
+            return Some(Err(name.to_string()));
+        };
+        path.push_str(&rest[..start]);
+        path.push_str(default);
+        rest = &rest[start + length + 1..];
+    }
+    path.push_str(rest);
+    Some(Ok(normalize_path(&path)))
 }
 
 /// A server URL with its path taken off: the scheme and host of an absolute URL, `/` for a
@@ -5960,7 +6020,7 @@ paths:
 
     /// A non-string enum is a constraint the sampler reads; members of another kind can never
     /// validate and `null` is no wire value, so a mixed enum keeps exactly its members of the
-    /// declared type. A string enum is the parameter's type, as before.
+    /// declared type. A string enum — a string-typed mixed one included — is the parameter's type.
     #[test]
     fn non_string_parameter_enums_import_as_constraints() {
         let graph = import_yaml(
@@ -5990,7 +6050,15 @@ paths:
         assert_eq!(param("n").constraints.enum_values, vec!["1", "2", "3"]);
         assert_eq!(param("ratio").constraints.enum_values, vec!["0.5", "1.5"]);
         assert_eq!(param("flag").constraints.enum_values, vec!["true"]);
-        assert_eq!(param("mixed").constraints.enum_values, vec!["a", "b"]);
+        // A string-typed enum is the type, made of its string members.
+        assert!(
+            param("mixed").constraints.enum_values.is_empty(),
+            "the string members are the type, not a constraint"
+        );
+        assert_eq!(
+            param("mixed").schema,
+            Type::Enum(vec!["a".to_string(), "b".to_string()])
+        );
         assert!(
             param("kind").constraints.enum_values.is_empty(),
             "a string enum stays the parameter's type, not a constraint"
@@ -6142,6 +6210,95 @@ paths:
             swagger.openapi_metadata.servers[0].url,
             "https://api.example.com"
         );
+    }
+
+    /// A server's path is read with each server variable replaced by its declared default, so a
+    /// templated first server gives a concrete base path rather than a `{version}` segment no
+    /// operation declares. A root server beside a non-root base path cannot be represented either,
+    /// and says so as every other path that differs from the base path does.
+    #[test]
+    fn server_paths_resolve_variables_and_every_other_path_is_reported() {
+        let graph = import_yaml(
+            r#"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+servers:
+  - url: "https://a.example.com/{version}"
+    variables: { version: { default: v1 } }
+  - url: "https://{region}.example.com/v1"
+    variables: { region: { default: eu } }
+  - url: "https://c.example.com"
+  - url: "https://d.example.com/{stage}"
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses: { "204": { description: none } }
+"#,
+        );
+        assert_eq!(graph.base_path, "/v1");
+        let urls: Vec<&str> = graph
+            .openapi_metadata
+            .servers
+            .iter()
+            .map(|server| server.url.as_str())
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://a.example.com",
+                "https://{region}.example.com",
+                "https://c.example.com",
+                "https://d.example.com/{stage}"
+            ]
+        );
+        let messages: Vec<&str> = graph
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("server 'https://c.example.com' has path '/'")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message
+                .contains("server 'https://d.example.com/{stage}' uses variable 'stage'")),
+            "{messages:?}"
+        );
+        let yaml = to_openapi(&graph, "P", &graph.base_path, &graph.security).unwrap();
+        assert!(yaml.contains("  '/v1/items':\n"), "{yaml}");
+    }
+
+    /// A string-typed enum is the type, made of its string members: a member of another kind can
+    /// never validate. Its published form imports to the same type, so the SDK type a mixed enum
+    /// gets does not change from one generation to the next.
+    #[test]
+    fn a_mixed_string_enum_imports_to_the_same_type_every_generation() {
+        let source = r#"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - { name: mixed, in: query, schema: { type: string, enum: [a, 1, null, b] } }
+      responses: { "204": { description: none } }
+"#;
+        let first = import_yaml(source);
+        let mixed = &first.operations[0].params[0];
+        assert_eq!(
+            mixed.schema,
+            Type::Enum(vec!["a".to_string(), "b".to_string()])
+        );
+        let published = to_openapi(&first, "P", "/", &first.security).unwrap();
+        let second = import_yaml(&published);
+        assert_eq!(second.operations[0].params[0].schema, mixed.schema);
+        let republished = to_openapi(&second, "P", "/", &second.security).unwrap();
+        assert_eq!(republished, published);
     }
 
     const EXAMPLES: &str = r##"
