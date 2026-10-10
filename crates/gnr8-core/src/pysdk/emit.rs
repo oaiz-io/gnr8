@@ -969,8 +969,17 @@ fn decode_expr(schema: &Type, graph: &ApiGraph, value_var: &str) -> String {
 /// dicts, and unions alike, so the encode has to descend through the same containers or the round trip
 /// stops being one. (This is not [`decode_expr`], which serves the dataclass style and stops where a
 /// hand-written constructor call stops.)
-fn encode_expr(schema: &Type, graph: &ApiGraph, value_var: &str) -> Option<String> {
-    encode_expr_at(schema, graph, value_var, 0)
+///
+/// A dataclass's `to_dict` encodes through the same expression, so a nested dataclass goes out by its
+/// own wire names too. Only the union discriminator differs by style: a Pydantic model is a
+/// `BaseModel`; a dataclass is told apart by the `to_dict` every generated dataclass owns.
+fn encode_expr(
+    schema: &Type,
+    graph: &ApiGraph,
+    value_var: &str,
+    model_style: PyModelStyle,
+) -> Option<String> {
+    encode_expr_at(schema, graph, value_var, 0, model_style)
 }
 
 /// `depth` scopes the comprehension bindings, so a container nested in a container does not iterate
@@ -980,18 +989,19 @@ fn encode_expr_at(
     graph: &ApiGraph,
     value_var: &str,
     depth: usize,
+    model_style: PyModelStyle,
 ) -> Option<String> {
     match schema {
         Type::Named(_) => is_model_ref(schema, graph).then(|| format!("{value_var}.to_dict()")),
         Type::Array(items) => {
             let item = comprehension_binding("_item", depth);
-            let encoded = encode_expr_at(items, graph, &item, depth + 1)?;
+            let encoded = encode_expr_at(items, graph, &item, depth + 1, model_style)?;
             Some(format!("[{encoded} for {item} in {value_var}]"))
         }
         Type::Map { value, .. } => {
             let key = comprehension_binding("_key", depth);
             let item = comprehension_binding("_value", depth);
-            let encoded = encode_expr_at(value, graph, &item, depth + 1)?;
+            let encoded = encode_expr_at(value, graph, &item, depth + 1, model_style)?;
             Some(format!(
                 "{{{key}: {encoded} for {key}, {item} in {value_var}.items()}}"
             ))
@@ -1010,13 +1020,16 @@ fn encode_expr_at(
                 .count();
             let encodable = variants
                 .iter()
-                .filter(|variant| encode_expr_at(variant, graph, value_var, depth).is_some())
+                .filter(|variant| {
+                    encode_expr_at(variant, graph, value_var, depth, model_style).is_some()
+                })
                 .count();
-            (models > 0 && models == encodable).then(|| {
-                format!(
-                    "{value_var}.to_dict() if isinstance({value_var}, BaseModel) else {value_var}"
-                )
-            })
+            let is_model = match model_style {
+                PyModelStyle::Pydantic => format!("isinstance({value_var}, BaseModel)"),
+                PyModelStyle::Dataclass => format!("hasattr({value_var}, \"to_dict\")"),
+            };
+            (models > 0 && models == encodable)
+                .then(|| format!("{value_var}.to_dict() if {is_model} else {value_var}"))
         }
         Type::Primitive(_)
         | Type::WellKnown(_)
@@ -1277,7 +1290,12 @@ impl<'a> ToDictRepair<'a> {
         graph: &ApiGraph,
         directions: SchemaDirections,
     ) -> Option<Self> {
-        let encode = encode_expr(&field.field.schema, graph, &format!("self.{}", field.ident));
+        let encode = encode_expr(
+            &field.field.schema,
+            graph,
+            &format!("self.{}", field.ident),
+            PyModelStyle::Pydantic,
+        );
         let optional = directions.model_field_is_optional(field.field);
         let nullable = directions.field_is_nullable(field.field);
         let repair = Self {
@@ -1309,6 +1327,9 @@ fn emit_dataclass(
         )
         .map_err(sink)?;
         writeln!(out, "        return cls()").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+        writeln!(out, "    def to_dict(self) -> dict[str, Any]:").map_err(sink)?;
+        writeln!(out, "        return {{}}").map_err(sink)?;
         return Ok(());
     }
     // Partition preserving each group's (already-sorted) relative order: required (no default) first,
@@ -1393,6 +1414,76 @@ fn emit_dataclass(
         }
     }
     writeln!(out, "        )").map_err(sink)?;
+    emit_dataclass_to_dict(out, &emissions, graph, directions)
+}
+
+/// Emit a dataclass's `to_dict`: the payload the client sends for it, keyed by each field's wire name
+/// (`class`, never the `class_` attribute), with an unset omittable field left out — the wire the
+/// Pydantic style's `model_dump(by_alias=True, exclude_unset=True)` produces. A field the payload
+/// always carries keeps an explicit `None`; a nested model is encoded through its own `to_dict`.
+///
+/// A dataclass cannot tell an omittable field left unset from one set to `None`, so `None` is the
+/// absent key.
+fn emit_dataclass_to_dict(
+    out: &mut String,
+    emissions: &[PyFieldEmission<'_>],
+    graph: &ApiGraph,
+    directions: SchemaDirections,
+) -> Result<(), CoreError> {
+    let encoded = |emission: &PyFieldEmission<'_>| {
+        let attribute = format!("self.{}", emission.ident);
+        encode_expr(
+            &emission.field.schema,
+            graph,
+            &attribute,
+            PyModelStyle::Dataclass,
+        )
+        .map_or(attribute.clone(), |expr| {
+            if directions.field_is_nullable(emission.field) {
+                format!("{expr} if {attribute} is not None else None")
+            } else {
+                expr
+            }
+        })
+    };
+    let (required, optional): (Vec<&PyFieldEmission<'_>>, Vec<&PyFieldEmission<'_>>) = emissions
+        .iter()
+        .partition(|emission| !directions.model_field_is_optional(emission.field));
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "    def to_dict(self) -> dict[str, Any]:").map_err(sink)?;
+    if required.is_empty() {
+        writeln!(out, "        _data: dict[str, Any] = {{}}").map_err(sink)?;
+    } else {
+        writeln!(out, "        _data: dict[str, Any] = {{").map_err(sink)?;
+        for emission in required {
+            writeln!(
+                out,
+                "            {}: {},",
+                py_string_literal(&emission.field.json_name),
+                encoded(emission)
+            )
+            .map_err(sink)?;
+        }
+        writeln!(out, "        }}").map_err(sink)?;
+    }
+    for emission in optional {
+        let attribute = format!("self.{}", emission.ident);
+        let value = encode_expr(
+            &emission.field.schema,
+            graph,
+            &attribute,
+            PyModelStyle::Dataclass,
+        )
+        .unwrap_or_else(|| attribute.clone());
+        writeln!(out, "        if {attribute} is not None:").map_err(sink)?;
+        writeln!(
+            out,
+            "            _data[{}] = {value}",
+            py_string_literal(&emission.field.json_name)
+        )
+        .map_err(sink)?;
+    }
+    writeln!(out, "        return _data").map_err(sink)?;
     Ok(())
 }
 
@@ -1777,7 +1868,7 @@ pub(crate) fn emit_client_with_models(
 ) -> String {
     let body_value = match model_style {
         PyModelStyle::Pydantic => "        if isinstance(body, BaseModel):\n            mode = \"python\" if body_encoding == \"multipart\" else \"json\"\n            body = body.model_dump(mode=mode, by_alias=True, exclude_unset=True)\n        return self._wire_value(body)\n",
-        PyModelStyle::Dataclass => "        if body is not None and dataclasses.is_dataclass(body):\n            body = dataclasses.asdict(body)\n        return self._wire_value(body)\n",
+        PyModelStyle::Dataclass => "        if body is not None and dataclasses.is_dataclass(body):\n            body = body.to_dict()\n        return self._wire_value(body)\n",
     };
 
     // --- Import header, assembled per file in canonical isort order (no unused imports, F401-clean). ---
@@ -5327,6 +5418,56 @@ mod tests {
             assert!(
                 !out.contains("(**_data)"),
                 "must not splat the raw dict:\n{out}"
+            );
+        }
+
+        // A dataclass sends what the Pydantic style sends: each key by its wire name (`class`, never
+        // the `class_` attribute), an unset omittable field left out rather than sent as `null`, and a
+        // nested model through its own `to_dict` — the client no longer reaches for `asdict`.
+        #[test]
+        fn dataclass_to_dict_uses_wire_names_and_omits_unset_optionals() {
+            let facts = br#"{
+              "module": "app", "routes": [],
+              "schemas": [
+                { "id": "app.models.Inner", "name": "Inner",
+                  "body": { "type": "object", "of": [] },
+                  "span": { "file": "/root/m.py", "start_line": 1, "end_line": 1 } },
+                { "id": "app.models.Thing", "name": "Thing",
+                  "body": { "type": "object", "of": [
+                    { "json_name": "class", "serializer_may_omit": false, "deserializer_accepts_absent": false, "deserializer_accepts_null": false, "serializer_may_emit_null": false, "validator_requires_presence": true, "validator_rejects_null": true,
+                      "schema": { "type": "primitive", "of": { "prim": "string" } },
+                      "description": null, "example": null },
+                    { "json_name": "from", "serializer_may_omit": true, "deserializer_accepts_absent": true, "deserializer_accepts_null": false, "serializer_may_emit_null": false, "validator_requires_presence": false, "validator_rejects_null": true,
+                      "schema": { "type": "primitive", "of": { "prim": "string" } },
+                      "description": null, "example": null },
+                    { "json_name": "inner", "serializer_may_omit": true, "deserializer_accepts_absent": true, "deserializer_accepts_null": false, "serializer_may_emit_null": false, "validator_requires_presence": false, "validator_rejects_null": true,
+                      "schema": { "type": "array", "of": { "type": "named", "of": "app.models.Inner" } },
+                      "description": null, "example": null }
+                  ] },
+                  "span": { "file": "/root/m.py", "start_line": 2, "end_line": 2 } }
+              ],
+              "diagnostics": [] }"#;
+            let out =
+                emit_models_with_style(&graph_from(facts), "pkg", PyModelStyle::Dataclass).unwrap();
+            assert!(
+                out.contains(
+                    "    def to_dict(self) -> dict[str, Any]:\n        _data: dict[str, Any] = {\n            \"class\": self.class_,\n        }\n"
+                ),
+                "{out}"
+            );
+            assert!(
+                out.contains("        if self.from_ is not None:\n            _data[\"from\"] = self.from_\n"),
+                "{out}"
+            );
+            assert!(
+                out.contains(
+                    "            _data[\"inner\"] = [_item.to_dict() for _item in self.inner]\n"
+                ),
+                "{out}"
+            );
+            assert!(
+                out.contains("    def to_dict(self) -> dict[str, Any]:\n        return {}\n"),
+                "an empty dataclass encodes as an empty object:\n{out}"
             );
         }
 
