@@ -909,7 +909,7 @@ impl<'a> Writer<'a> {
                 page.text.push_str("\n\n");
                 line += 2;
             }
-            let lines = text.split('\n').count();
+            let lines = structure::lines(&text).len();
             match kind {
                 Kind::Gnr8 => page.landmarks.push((line, Landmark::Block)),
                 Kind::Fenced => {
@@ -1105,5 +1105,35 @@ mod tests {
             ]
         );
         assert_eq!((page.prose[0].start, page.prose[0].end), (2, 7));
+    }
+
+    /// `\r\n`, `\r` and `\n` each end a line, as `CommonMark` reads them: the writer counts the
+    /// lines rung 0 scans, and a lone `\r` in prose opens or closes a fence like a newline.
+    #[test]
+    fn every_commonmark_line_ending_ends_a_line() {
+        let render = |prose: &str| {
+            let mut writer = Writer::new("operations/op.md", None);
+            writer.heading(1, &super::Inline::text("t"));
+            writer.prose("operation `op`", prose);
+            writer.code("http", "GET / HTTP/1.1\n");
+            writer.finish()
+        };
+        let page = render("a\r\nb\rc");
+        assert_eq!((page.prose[0].start, page.prose[0].end), (2, 5));
+        assert_eq!(
+            page.landmarks,
+            vec![
+                (0, super::Landmark::Block),
+                (6, super::Landmark::Block),
+                (8, super::Landmark::FenceClose)
+            ]
+        );
+        super::structure::check("operations/op.md", &page).unwrap();
+        super::structure::check("operations/op.md", &render("~~~\rcode\r~~~")).unwrap();
+        super::structure::check("operations/op.md", &render("~~~\r\ncode\r\n~~~")).unwrap();
+        let err = super::structure::check("operations/op.md", &render("Text.\r```"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fenced code block"), "{err}");
     }
 }

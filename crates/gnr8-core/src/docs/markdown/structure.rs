@@ -56,7 +56,7 @@ pub(crate) struct RenderedPage {
 pub(crate) fn check(path: &str, page: &RenderedPage) -> Result<(), CoreError> {
     let mut scanner = Scanner::default();
     let mut landmarks = page.landmarks.iter().peekable();
-    let lines: Vec<&str> = page.text.split('\n').collect();
+    let lines = lines(&page.text);
     for (number, line) in lines.iter().enumerate() {
         let landmark = landmarks
             .next_if(|(at, _)| *at == number)
@@ -199,7 +199,7 @@ struct Scanner {
 
 impl Scanner {
     fn line(&mut self, number: usize, line: &str) -> Outcome {
-        let line = expand_tabs(line.trim_end_matches('\r'));
+        let line = expand_tabs(line);
         let mut rest = line.as_str();
         // Match the open containers, outermost first.
         let mut matched = 0;
@@ -210,7 +210,7 @@ impl Scanner {
                     None => break,
                 },
                 Container::Item { offset } => {
-                    if rest.trim().is_empty() {
+                    if is_blank(rest) {
                         rest = "";
                     } else if indent_of(rest) >= *offset {
                         rest = &rest[*offset..];
@@ -251,7 +251,7 @@ impl Scanner {
                 end: HtmlEnd::BlankLine,
                 ..
             } => {
-                if !rest.trim().is_empty() {
+                if !is_blank(rest) {
                     return Outcome::Inside;
                 }
                 self.leaf = Leaf::None;
@@ -270,7 +270,7 @@ impl Scanner {
     /// Open the blocks `rest` starts; returns whether it continued a block already open.
     fn open_blocks(&mut self, number: usize, mut rest: &str) -> bool {
         loop {
-            if rest.trim().is_empty() {
+            if is_blank(rest) {
                 if self.leaf == Leaf::Paragraph {
                     self.leaf = Leaf::None;
                 }
@@ -306,7 +306,7 @@ impl Scanner {
             if let Some(width) = list_marker(text, self.leaf == Leaf::Paragraph) {
                 let content = &text[width..];
                 let spaces = content.len() - content.trim_start_matches(' ').len();
-                let spaces = if content.trim().is_empty() || spaces > 4 {
+                let spaces = if is_blank(content) || spaces > 4 {
                     1
                 } else {
                     spaces
@@ -358,6 +358,40 @@ impl Scanner {
     }
 }
 
+/// The lines of `text`, split at `\r\n`, `\r` or `\n` — each a line ending to `CommonMark`. The
+/// writer counts a page's lines with the same function, so a landmark names the line scanned.
+pub(crate) fn lines(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\n' => {
+                out.push(&text[start..at]);
+                start = at + 1;
+            }
+            b'\r' => {
+                out.push(&text[start..at]);
+                if bytes.get(at + 1) == Some(&b'\n') {
+                    at += 1;
+                }
+                start = at + 1;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    out.push(&text[start..]);
+    out
+}
+
+/// A blank line or rest of one, as `CommonMark` defines it: nothing but spaces and tabs. Other
+/// Unicode whitespace is text.
+fn is_blank(text: &str) -> bool {
+    text.bytes().all(|byte| byte == b' ' || byte == b'\t')
+}
+
 /// Tabs expanded to the next stop of four columns, as `CommonMark` measures indentation.
 fn expand_tabs(line: &str) -> String {
     if !line.contains('\t') {
@@ -394,7 +428,7 @@ fn strip_quote_marker(text: &str) -> Option<&str> {
 
 /// A line that continues an open paragraph lazily: not blank, and starting no other block.
 fn is_lazy_continuation(text: &str) -> bool {
-    if text.trim().is_empty() {
+    if is_blank(text) {
         return false;
     }
     let indent = indent_of(text).min(3);
@@ -431,7 +465,7 @@ fn list_marker(text: &str, interrupts_paragraph: bool) -> Option<usize> {
     };
     match bytes.get(width) {
         None if !interrupts_paragraph => Some(width),
-        Some(b' ') if !(interrupts_paragraph && text[width..].trim().is_empty()) => Some(width),
+        Some(b' ') if !(interrupts_paragraph && is_blank(&text[width..])) => Some(width),
         _ => None,
     }
 }
@@ -459,7 +493,7 @@ fn closes_fence(text: &str, fence: char, length: usize) -> bool {
     }
     let text = &text[indent..];
     let run = text.chars().take_while(|ch| *ch == fence).count();
-    run >= length && text[run..].trim().is_empty()
+    run >= length && is_blank(&text[run..])
 }
 
 fn is_atx_heading(text: &str) -> bool {
@@ -487,7 +521,7 @@ fn is_thematic_break(text: &str) -> bool {
 }
 
 fn is_setext_underline(text: &str) -> bool {
-    let trimmed = text.trim_end();
+    let trimmed = text.trim_end_matches([' ', '\t']);
     let Some(mark) = trimmed.chars().next().filter(|ch| matches!(ch, '=' | '-')) else {
         return false;
     };
@@ -531,9 +565,7 @@ fn html_start(text: &str, interrupts_paragraph: bool) -> Option<HtmlEnd> {
     if !interrupts_paragraph {
         if let Some((name, after)) = complete_tag(text) {
             let raw = ["pre", "script", "style", "textarea"];
-            if !raw.iter().any(|tag| name.eq_ignore_ascii_case(tag))
-                && after.trim_matches([' ', '\t']).is_empty()
-            {
+            if !raw.iter().any(|tag| name.eq_ignore_ascii_case(tag)) && is_blank(after) {
                 return Some(HtmlEnd::BlankLine);
             }
         }
@@ -805,6 +837,16 @@ mod tests {
         assert!(fails("<a href=>\n```").contains("fenced code block"));
         // A raw-text tag name is type 1 or nothing, never type 7.
         assert!(fails("</script>\n```").contains("fenced code block"));
+    }
+
+    /// Only spaces and tabs are blank, as `CommonMark` defines a blank line: other Unicode
+    /// whitespace is text.
+    #[test]
+    fn only_spaces_and_tabs_make_a_line_blank() {
+        // The em-space line is HTML, so the fence line after it is HTML too.
+        passes("<div>\n\u{2003}\n```");
+        // A no-break space after a fence's run is no closing fence.
+        assert!(fails("```\ncode\n```\u{a0}").contains("fenced code block"));
     }
 
     /// An opener is recognised by its ASCII bytes, wherever the first multibyte character after it
