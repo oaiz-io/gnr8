@@ -1,0 +1,15 @@
+# Bookstore Orders API
+
+## Operations
+
+- [list_orders](operations/list-orders.md): List orders, optionally narrowed to one stock status.
+- [create_order](operations/create-order.md): Place a new order.
+- [create_order_raw](operations/create-order-raw.md): Place an order from a raw, unvalidated payload.
+- [get_order](operations/get-order.md): Fetch one order by its identifier.
+
+## Schemas
+
+- [Availability](schemas/availability.md)
+- [OrderConfirmation](schemas/order-confirmation.md)
+- [OrderInput](schemas/order-input.md)
+- [Price](schemas/price.md)
