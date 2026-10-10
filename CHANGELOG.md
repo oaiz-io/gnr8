@@ -124,8 +124,11 @@ must move the minor version.
   for every operation with a path parameter.
 - **Python dataclass models send their wire names and leave unset optional fields out.** Every
   generated dataclass owns a `to_dict`, and the client sends it instead of `dataclasses.asdict`, which
-  sent `class_` for `class` and `null` for every unset optional. Generated dataclass `models.py`
-  changes for every object model.
+  sent `class_` for `class` and `null` for every unset optional. `to_dict` and `from_dict` follow
+  one walk of each field's type, so each reads back what the other writes: `from_dict` now rebuilds
+  a nested model in map values and nested lists too, where it used to stop at a model or a list of
+  models. A union field holds its JSON value both ways, because nothing in its type says which
+  variant a JSON object is. Generated dataclass `models.py` changes for every object model.
 - **A TypeScript JSON request body that is a string is sent JSON-encoded** (`"hello"`, not `hello`):
   each operation encodes its JSON body with `JSON.stringify`. Generated TypeScript operations with a
   JSON body change.

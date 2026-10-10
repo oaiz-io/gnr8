@@ -931,109 +931,64 @@ fn resolve_named<'g>(schema: &Type, graph: &'g ApiGraph) -> Option<&'g crate::gr
     }
 }
 
-/// Build the Python expression that decodes a single from-dict value `v` into a field's advertised type.
+/// Where a field's type holds generated models: the one shape walk both halves of a model's dict
+/// conversion render from, so `from_dict` rebuilds a model exactly where `to_dict` encodes one.
 ///
-/// `v` is the bound raw JSON value for this field. The decode is RECURSIVE for nested dataclasses
-/// (CR-04 #2): a named object-schema field becomes `Model.from_dict(v)`, a list-of-named-object becomes
-/// a comprehension, and every other shape (scalar, enum value, union, map, Any) passes through unchanged
-/// (the str-enum mixin accepts the raw value; a union/map has no single concrete constructor). One
-/// deterministic mapping per field type, no fallback (rule 3).
-fn decode_expr(schema: &Type, graph: &ApiGraph, value_var: &str) -> String {
-    match schema {
-        // A named ref to an OBJECT schema → recurse via its from_dict; a named enum (str mixin) or any
-        // other named alias passes the raw value through.
-        Type::Named(_) => match resolve_named(schema, graph) {
-            Some(target) if matches!(target.body, Type::Object(_)) => {
-                format!("{}.from_dict({value_var})", target.name)
-            }
-            _ => value_var.to_string(),
-        },
-        // A list whose items are a named object schema → decode each element recursively.
-        Type::Array(items) => match resolve_named(items, graph) {
-            Some(target) if matches!(target.body, Type::Object(_)) => format!(
-                "[{}.from_dict(_item) for _item in {value_var}]",
-                target.name
-            ),
-            _ => value_var.to_string(),
-        },
-        // Scalars, well-known, maps, Any, inline enums/unions, inline objects: pass through. A union has
-        // no single constructor; an inline enum value is already the wire string.
-        _ => value_var.to_string(),
-    }
+/// The walk descends into the containers the style's `from_dict` rebuilds a model inside, and no
+/// further:
+///
+/// - **Dataclass.** The generated `from_dict` decides from the field's static type alone, so it
+///   reaches a model through list items and map values. A union is not walked: its static type
+///   does not say which variant a JSON object is, and the SDK does not invent a discriminator the
+///   source did not declare, so a union field holds its JSON value in both directions — `from_dict`
+///   keeps the decoded value, and `to_dict` sends what the field holds.
+/// - **Pydantic.** `from_dict` is `model_validate`, which also rebuilds a union's model variant, so
+///   the walk reaches one there too and tells it apart at runtime by `BaseModel`: the variants
+///   `model_validate` built a model for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NestedModels<'g> {
+    /// The value is the generated model class named here.
+    Model(&'g str),
+    /// Every item of a list holds models in this shape.
+    List(Box<NestedModels<'g>>),
+    /// Every value of a map holds models in this shape.
+    Map(Box<NestedModels<'g>>),
+    /// A union with model variants beside plain JSON ones (Pydantic only).
+    Union,
 }
 
-/// The Python expression that re-encodes every nested model below this field through its own
-/// `to_dict`, or `None` when nothing below it owns a rule of its own.
-///
-/// `model_dump` walks nested models itself, so [`emit_pydantic_model`]'s `to_dict` would otherwise
-/// apply its required-nullable repair only at the top level and hand back a dict its own `from_dict`
-/// rejects further down. What has to be reached is therefore whatever `model_validate` RECONSTRUCTS —
-/// `from_dict` is `model_validate` for a Pydantic model, and it builds nested models inside lists,
-/// dicts, and unions alike, so the encode has to descend through the same containers or the round trip
-/// stops being one. (This is not [`decode_expr`], which serves the dataclass style and stops where a
-/// hand-written constructor call stops.)
-///
-/// A dataclass's `to_dict` encodes through the same expression, so a nested dataclass goes out by its
-/// own wire names too. Only the union discriminator differs by style: a Pydantic model is a
-/// `BaseModel`; a dataclass is told apart by the `to_dict` every generated dataclass owns.
-fn encode_expr(
+/// The models `schema` holds, or `None` when it holds none the style's `from_dict` rebuilds.
+fn nested_models<'g>(
     schema: &Type,
-    graph: &ApiGraph,
-    value_var: &str,
+    graph: &'g ApiGraph,
     model_style: PyModelStyle,
-) -> Option<String> {
-    encode_expr_at(schema, graph, value_var, 0, model_style)
-}
-
-/// `depth` scopes the comprehension bindings, so a container nested in a container does not iterate
-/// over the name its parent bound.
-fn encode_expr_at(
-    schema: &Type,
-    graph: &ApiGraph,
-    value_var: &str,
-    depth: usize,
-    model_style: PyModelStyle,
-) -> Option<String> {
+) -> Option<NestedModels<'g>> {
     match schema {
-        Type::Named(_) => is_model_ref(schema, graph).then(|| format!("{value_var}.to_dict()")),
-        Type::Array(items) => {
-            let item = comprehension_binding("_item", depth);
-            let encoded = encode_expr_at(items, graph, &item, depth + 1, model_style)?;
-            Some(format!("[{encoded} for {item} in {value_var}]"))
+        Type::Named(_) => {
+            let target = resolve_named(schema, graph)?;
+            matches!(target.body, Type::Object(_)).then_some(NestedModels::Model(&target.name))
         }
-        Type::Map { value, .. } => {
-            let key = comprehension_binding("_key", depth);
-            let item = comprehension_binding("_value", depth);
-            let encoded = encode_expr_at(value, graph, &item, depth + 1, model_style)?;
-            Some(format!(
-                "{{{key}: {encoded} for {key}, {item} in {value_var}.items()}}"
-            ))
-        }
-        // A union is the one shape whose STATIC type does not say which variant a value holds, so the
-        // discriminator has to be a runtime one — and `BaseModel` is exactly the set of variants that
-        // own a `to_dict` (an enum member and a string alias are not one), and the single name every
-        // Pydantic model file already imports (`model_header`), so it needs no schema name in scope
-        // that a split layout keeps behind `TYPE_CHECKING`. A container variant would need its own
+        Type::Array(items) => nested_models(items, graph, model_style)
+            .map(|items| NestedModels::List(Box::new(items))),
+        Type::Map { value, .. } => nested_models(value, graph, model_style)
+            .map(|values| NestedModels::Map(Box::new(values))),
+        // Every model-bearing variant has to BE a model: a container variant would need its own
         // comprehension, which no single expression can select between, so a union carrying one is
-        // left alone rather than half-repaired.
-        Type::Union(variants) => {
-            let models = variants
-                .iter()
-                .filter(|variant| is_model_ref(variant, graph))
-                .count();
-            let encodable = variants
-                .iter()
-                .filter(|variant| {
-                    encode_expr_at(variant, graph, value_var, depth, model_style).is_some()
-                })
-                .count();
-            let is_model = match model_style {
-                PyModelStyle::Pydantic => format!("isinstance({value_var}, BaseModel)"),
-                PyModelStyle::Dataclass => format!("hasattr({value_var}, \"to_dict\")"),
-            };
-            (models > 0 && models == encodable)
-                .then(|| format!("{value_var}.to_dict() if {is_model} else {value_var}"))
-        }
+        // left to `model_validate` and `model_dump` rather than half-repaired.
+        Type::Union(variants) => match model_style {
+            PyModelStyle::Dataclass => None,
+            PyModelStyle::Pydantic => {
+                let shapes: Vec<NestedModels<'g>> = variants
+                    .iter()
+                    .filter_map(|variant| nested_models(variant, graph, model_style))
+                    .collect();
+                (!shapes.is_empty()
+                    && shapes
+                        .iter()
+                        .all(|shape| matches!(shape, NestedModels::Model(_))))
+                .then_some(NestedModels::Union)
+            }
+        },
         Type::Primitive(_)
         | Type::WellKnown(_)
         | Type::Enum(_)
@@ -1042,10 +997,77 @@ fn encode_expr_at(
     }
 }
 
-/// Whether `schema` is a `$ref` to an object schema — the shapes that get a generated model class, and
-/// so the only ones that own a `to_dict` of their own.
-fn is_model_ref(schema: &Type, graph: &ApiGraph) -> bool {
-    resolve_named(schema, graph).is_some_and(|target| matches!(target.body, Type::Object(_)))
+/// Build the Python expression that decodes a dataclass field's raw JSON value `value_var` into the
+/// field's advertised type: each model [`nested_models`] finds is rebuilt through its own
+/// `from_dict`, and a field holding none passes the value through unchanged (an enum's str mixin
+/// accepts the raw value). [`encode_expr`] renders the encode half from the same walk.
+fn decode_expr(schema: &Type, graph: &ApiGraph, value_var: &str) -> String {
+    nested_models(schema, graph, PyModelStyle::Dataclass).map_or_else(
+        || value_var.to_string(),
+        |shape| decode_nested(&shape, value_var, 0),
+    )
+}
+
+fn decode_nested(shape: &NestedModels<'_>, value_var: &str, depth: usize) -> String {
+    match shape {
+        NestedModels::Model(name) => format!("{name}.from_dict({value_var})"),
+        NestedModels::List(items) => {
+            let item = comprehension_binding("_item", depth);
+            let decoded = decode_nested(items, &item, depth + 1);
+            format!("[{decoded} for {item} in {value_var}]")
+        }
+        NestedModels::Map(values) => {
+            let key = comprehension_binding("_key", depth);
+            let item = comprehension_binding("_value", depth);
+            let decoded = decode_nested(values, &item, depth + 1);
+            format!("{{{key}: {decoded} for {key}, {item} in {value_var}.items()}}")
+        }
+        // The dataclass walk never yields a union: a union field keeps the JSON value as decoded.
+        NestedModels::Union => value_var.to_string(),
+    }
+}
+
+/// The Python expression that re-encodes every nested model below this field through its own
+/// `to_dict`, or `None` when nothing below it owns a rule of its own.
+///
+/// It is rendered from [`nested_models`], the walk `from_dict` decodes by, so a model's `to_dict`
+/// encodes exactly the positions its `from_dict` rebuilds a model in. For Pydantic that matters
+/// because `model_dump` walks nested models itself, so [`emit_pydantic_model`]'s `to_dict` would
+/// otherwise apply its required-nullable repair only at the top level and hand back a dict its own
+/// `from_dict` rejects further down. For a dataclass it is what sends a nested model by its own wire
+/// names, and what keeps `to_dict` from calling `to_dict` on a value `from_dict` left as JSON.
+fn encode_expr(
+    schema: &Type,
+    graph: &ApiGraph,
+    value_var: &str,
+    model_style: PyModelStyle,
+) -> Option<String> {
+    nested_models(schema, graph, model_style).map(|shape| encode_nested(&shape, value_var, 0))
+}
+
+/// `depth` scopes the comprehension bindings, so a container nested in a container does not iterate
+/// over the name its parent bound.
+fn encode_nested(shape: &NestedModels<'_>, value_var: &str, depth: usize) -> String {
+    match shape {
+        NestedModels::Model(_) => format!("{value_var}.to_dict()"),
+        NestedModels::List(items) => {
+            let item = comprehension_binding("_item", depth);
+            let encoded = encode_nested(items, &item, depth + 1);
+            format!("[{encoded} for {item} in {value_var}]")
+        }
+        NestedModels::Map(values) => {
+            let key = comprehension_binding("_key", depth);
+            let item = comprehension_binding("_value", depth);
+            let encoded = encode_nested(values, &item, depth + 1);
+            format!("{{{key}: {encoded} for {key}, {item} in {value_var}.items()}}")
+        }
+        // `BaseModel` is exactly the set of variants `model_validate` built a model for, and the one
+        // name every Pydantic model file already imports (`model_header`), so it needs no schema
+        // name in scope that a split layout keeps behind `TYPE_CHECKING`.
+        NestedModels::Union => {
+            format!("{value_var}.to_dict() if isinstance({value_var}, BaseModel) else {value_var}")
+        }
+    }
 }
 
 /// The name a comprehension at `depth` binds. Depth zero keeps the bare name, so the common one-level

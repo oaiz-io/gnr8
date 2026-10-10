@@ -2613,3 +2613,170 @@ fn generated_cli_python_command_spec_keeps_the_output_contract() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A model nested in every shape a field's type can carry it in: inside a list, a list of lists
+/// and a map, and as one variant of a union.
+const NESTED_MODELS_SPEC: &str = r##"openapi: 3.1.0
+info: { title: Nested, version: 1.0.0 }
+components:
+  schemas:
+    Inner:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+    Holder:
+      type: object
+      required: [list]
+      properties:
+        list: { type: array, items: { $ref: "#/components/schemas/Inner" } }
+        nested: { type: array, items: { type: array, items: { $ref: "#/components/schemas/Inner" } } }
+        by_key: { type: object, additionalProperties: { $ref: "#/components/schemas/Inner" } }
+        choice:
+          oneOf:
+            - { $ref: "#/components/schemas/Inner" }
+            - { type: string }
+paths:
+  /h:
+    post:
+      operationId: postH
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Holder" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Holder" }
+"##;
+
+/// Generate the Python SDK for `spec` in `style` into a fresh dir as the importable `bookstore`
+/// package, returning the dir.
+fn materialize_spec_sdk(label: &str, spec: &str, style: PyModelStyle) -> PathBuf {
+    use gnr8_engine::sdk::prelude::*;
+
+    let dir = unique_temp_dir(label);
+    std::fs::write(dir.join("openapi.yaml"), spec).expect("write spec");
+    let target = PySdk::new()
+        .module(format!("example.com/{PACKAGE}"))
+        .to(PACKAGE);
+    let target = match style {
+        PyModelStyle::Dataclass => target.dataclasses(),
+        PyModelStyle::Pydantic => target.pydantic(),
+    };
+    let pipeline = Pipeline::new()
+        .source(OpenApi::new().input("openapi.yaml"))
+        .target(target);
+    let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&dir), None)
+        .expect("pipeline must generate");
+    for artifact in &outcome.artifacts {
+        let path = dir.join(&artifact.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &artifact.text).expect("write artifact");
+    }
+    dir
+}
+
+/// Decode a payload carrying a model in every shape, and encode it back.
+const NESTED_PAYLOAD: &str = r#"
+import json
+import bookstore
+
+payload = {
+    "list": [{"label": "a"}],
+    "nested": [[{"label": "b"}]],
+    "by_key": {"k": {"label": "c"}},
+    "choice": {"label": "e"},
+}
+decoded = bookstore.Holder.from_dict(payload)
+assert isinstance(decoded.list_[0], bookstore.Inner), decoded.list_
+assert isinstance(decoded.nested[0][0], bookstore.Inner), decoded.nested
+assert isinstance(decoded.by_key["k"], bookstore.Inner), decoded.by_key
+assert decoded.to_dict() == payload, decoded.to_dict()
+json.dumps(decoded.to_dict())
+"#;
+
+/// Dataclass style: `from_dict` rebuilds a model wherever the field's type names one — through a
+/// named alias, list items and map values — and `to_dict` encodes exactly those positions back. A
+/// union holds its JSON value in both directions.
+const NESTED_DATACLASS_DRIVER: &str = r#"
+assert decoded.choice == {"label": "e"}, decoded.choice
+
+built = bookstore.Holder(
+    list_=[bookstore.Inner(label="a")],
+    nested=[[bookstore.Inner(label="b")]],
+    by_key={"k": bookstore.Inner(label="c")},
+    choice={"label": "e"},
+)
+assert built.to_dict() == payload, built.to_dict()
+json.dumps(built.to_dict())
+"#;
+
+/// Pydantic style: `model_validate` rebuilds every nested model, a union variant included, and
+/// `to_dict` re-encodes each through its own `to_dict`.
+const NESTED_PYDANTIC_DRIVER: &str = r#"
+assert isinstance(decoded.choice, bookstore.Inner), decoded.choice
+
+built = bookstore.Holder(
+    list=[bookstore.Inner(label="a")],
+    nested=[[bookstore.Inner(label="b")]],
+    by_key={"k": bookstore.Inner(label="c")},
+    choice=bookstore.Inner(label="e"),
+)
+assert built.to_dict() == payload, built.to_dict()
+json.dumps(built.to_dict())
+"#;
+
+/// `to_dict` and `from_dict` walk the same shapes, so each reads back what the other writes, and a
+/// model reached through a named alias, a nested list or a map is encoded rather than handed to
+/// `json` as an object it cannot serialize.
+#[test]
+fn nested_models_round_trip_through_every_shape_in_both_styles() {
+    if !python_available() {
+        eprintln!("skipping nested model round trip: python3 toolchain unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "nested-dataclass",
+        NESTED_MODELS_SPEC,
+        PyModelStyle::Dataclass,
+    );
+    let driver = dir.join("nested_driver.py");
+    std::fs::write(
+        &driver,
+        format!("{NESTED_PAYLOAD}{NESTED_DATACLASS_DRIVER}"),
+    )
+    .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let models = std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "dataclass nested models must round trip: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if !pydantic_v2_available() {
+        eprintln!("skipping Pydantic nested model round trip: Pydantic v2 unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "nested-pydantic",
+        NESTED_MODELS_SPEC,
+        PyModelStyle::Pydantic,
+    );
+    let driver = dir.join("nested_driver.py");
+    std::fs::write(&driver, format!("{NESTED_PAYLOAD}{NESTED_PYDANTIC_DRIVER}"))
+        .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let models = std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "Pydantic nested models must round trip: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
