@@ -1124,16 +1124,7 @@ impl Importer {
         name: &str,
     ) -> (Constraints, Constraints) {
         let own = self.take_schema_constraints(raw, operation_id, name, "parameter");
-        let items = raw.as_object_mut().and_then(|object| {
-            if object.contains_key("items") {
-                object.get_mut("items")
-            } else {
-                object
-                    .get_mut("additionalProperties")
-                    .filter(|value| value.is_object())
-            }
-        });
-        let items = match items {
+        let items = match parameter_items_mut(raw) {
             Some(items) => self.take_schema_constraints(items, operation_id, name, "item"),
             None => Constraints::default(),
         };
@@ -2952,6 +2943,62 @@ fn normalize_path(path: &str) -> String {
         "/".to_string()
     } else {
         format!("/{}", trimmed.trim_matches('/'))
+    }
+}
+
+/// The raw schema of an array or map parameter's items: `items`, or an object `additionalProperties`.
+fn parameter_items_mut(raw: &mut Value) -> Option<&mut Value> {
+    let object = raw.as_object_mut()?;
+    if object.contains_key("items") {
+        object.get_mut("items")
+    } else {
+        object
+            .get_mut("additionalProperties")
+            .filter(|value| value.is_object())
+    }
+}
+
+/// Read a graph that graph-artifact schema version 1 wrote the way version 2 represents it.
+///
+/// Version 1 kept an imported parameter's validation keywords in the raw schema the graph holds for
+/// it, and kept the base path on the imported servers too. This applies the importer's own two
+/// rules to that graph: [`take_constraints`] moves each kept raw schema's keywords (and its items')
+/// into typed constraints, and a server whose path is the base path loses it. A keyword beside a
+/// `$ref` moves; the bounds of the schema a `$ref` names were never in a version 1 graph and stay
+/// unknown.
+pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
+    for operation in &mut graph.operations {
+        for param in &mut operation.params {
+            if param.openapi_content.is_some() {
+                continue;
+            }
+            let Some((_, raw)) = param
+                .openapi_fields
+                .iter_mut()
+                .find(|(field, _)| field == "schema")
+            else {
+                continue;
+            };
+            let own = raw
+                .as_object_mut()
+                .map(take_constraints)
+                .unwrap_or_default();
+            let items = parameter_items_mut(raw)
+                .and_then(Value::as_object_mut)
+                .map(take_constraints)
+                .unwrap_or_default();
+            param.constraints = tighter_constraints(own, std::mem::take(&mut param.constraints));
+            param.item_constraints =
+                tighter_constraints(items, std::mem::take(&mut param.item_constraints));
+        }
+    }
+    let base_path = normalize_path(&graph.base_path);
+    if base_path != "/" {
+        for server in &mut graph.openapi_metadata.servers {
+            if server_url_path(&server.url) == base_path {
+                server.url = server_url_without_path(&server.url);
+            }
+        }
     }
 }
 
@@ -5082,6 +5129,57 @@ components:
         assert_eq!(ids.item_constraints.minimum.as_deref(), Some("0"));
     }
 
+    /// A graph that artifact schema version 1 wrote — the parameter's raw schema still holding its
+    /// keywords, the first server still holding the base path — reads exactly as this importer
+    /// represents the same document, so `gnr8 changes` against such a base reports no change.
+    #[test]
+    fn a_version_1_graph_upgrades_to_the_graph_this_importer_writes() {
+        let limit_schema = serde_json::json!({
+            "type": "integer", "minimum": 1, "maximum": 5, "exclusiveMaximum": true});
+        let ids_schema = serde_json::json!({
+            "type": "array", "maxItems": 3, "items": {"type": "integer", "minimum": 0}});
+        let doc = serde_json::json!({
+            "openapi": "3.0.3",
+            "info": {"title": "P", "version": "1"},
+            "servers": [{"url": "https://api.example.com/v1"}],
+            "paths": {"/items": {"get": {
+                "operationId": "listItems",
+                "parameters": [
+                    {"name": "limit", "in": "query", "schema": limit_schema},
+                    {"name": "ids", "in": "query", "schema": ids_schema}
+                ],
+                "responses": {"204": {"description": "none"}}
+            }}}
+        });
+        let current = import_openapi_document(
+            std::path::Path::new("."),
+            std::path::PathBuf::from("openapi.json"),
+            &doc.to_string(),
+        )
+        .expect("imports");
+        let mut version_1 = current.clone();
+        version_1.openapi_metadata.servers[0].url = "https://api.example.com/v1".to_string();
+        for param in &mut version_1.operations[0].params {
+            param.constraints = super::Constraints::default();
+            param.item_constraints = super::Constraints::default();
+            let raw = match param.name.as_str() {
+                "limit" => limit_schema.clone(),
+                _ => ids_schema.clone(),
+            };
+            for (field, value) in &mut param.openapi_fields {
+                if field == "schema" {
+                    *value = raw.clone();
+                }
+            }
+        }
+        assert_ne!(
+            version_1, current,
+            "the version 1 shape must differ before the upgrade"
+        );
+        super::upgrade_graph_from_artifact_v1(&mut version_1);
+        assert_eq!(version_1, current);
+    }
+
     fn import_yaml(text: &str) -> crate::graph::ApiGraph {
         import_openapi_document(
             std::path::Path::new("."),
@@ -5252,7 +5350,10 @@ paths:
         assert_eq!(param("ratio").constraints.enum_values, vec!["0.5", "1.5"]);
         assert_eq!(param("flag").constraints.enum_values, vec!["true"]);
         assert_eq!(param("mixed").constraints.enum_values, vec!["a", "b"]);
-        assert!(param("kind").constraints.enum_values.is_empty());
+        assert!(
+            param("kind").constraints.enum_values.is_empty(),
+            "a string enum stays the parameter's type, not a constraint"
+        );
         assert!(matches!(param("kind").schema, Type::Enum(_)));
         assert_eq!(
             emitted_parameter_schema(&graph, "n"),

@@ -413,7 +413,10 @@ fn pattern_is_recorded_unmet_and_refused_only_by_docs() {
         None,
         &[],
     );
-    assert!(sample(&number).params[0].unmet.is_empty());
+    assert!(
+        sample(&number).params[0].unmet.is_empty(),
+        "the number sample should meet every constraint"
+    );
     assert!(matches!(docs(&number), Sampled::Sample(_)));
 }
 
@@ -1165,7 +1168,10 @@ fn a_patterned_declared_error_model_keeps_its_typed_error_case() {
         typed_error_404(&graph),
         Some(("first".to_string(), "{\"code\":\"gnr8\"}".to_string()))
     );
-    assert!(plan_contract_tests(&graph).unwrap().refused.is_empty());
+    assert!(
+        plan_contract_tests(&graph).unwrap().refused.is_empty(),
+        "no sample should be refused"
+    );
 }
 
 #[test]
@@ -1657,7 +1663,7 @@ fn a_pattern_drops_no_contract_case() {
 fn the_plan_counts_every_refused_sample() {
     let refused_path = path_and_reply(&unmeetable(), &json!({}));
     let plan = plan_contract_tests(&refused_path).unwrap();
-    assert!(plan.cases.is_empty());
+    assert!(plan.cases.is_empty(), "the plan should hold no cases");
     assert_eq!(plan.refused.len(), 1);
     assert_eq!(plan.refused[0].operation_id, "getItem");
     assert_eq!(plan.refused[0].scope, RefusedScope::Operation);
