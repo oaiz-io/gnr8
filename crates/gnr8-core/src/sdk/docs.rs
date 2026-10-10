@@ -72,7 +72,7 @@ fn sdk_readme(model: &DocsModel, sdk: SiblingSdk<'_>) -> String {
          `.gnr8/src/main.rs` or the source service, then run `gnr8 generate`.\n\n\
          ## Package\n\n\
          - Language: {name}\n",
-        title = model.api.title.trim(),
+        title = crate::docs::markdown::escape::literal(&model.api.title),
     );
     if let Some(identity) = identity {
         let _ = writeln!(text, "- Import: {}", code_span(identity.import()));

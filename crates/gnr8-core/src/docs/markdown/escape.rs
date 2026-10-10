@@ -26,13 +26,38 @@ pub(crate) fn json_string(text: &str) -> String {
     out
 }
 
-/// Text inside a Markdown link's `[label]`: brackets and backslashes escaped, whitespace collapsed,
-/// so a name can never close the label early.
-pub(crate) fn link_label(text: &str) -> String {
-    one_line(text)
-        .replace('\\', "\\\\")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
+/// A name printed as itself wherever inline Markdown is read — a title, a group name, a link's
+/// `[label]`: whitespace runs collapsed so it stays on its line, and every ASCII punctuation
+/// character Markdown could read as syntax where it stands backslash-escaped. A backtick then opens
+/// no code span that could swallow a link, a bracket never closes a label early, `<b>` is no tag,
+/// `&amp;` no entity, and a `#` after a space no closing sequence of a heading.
+///
+/// What `CommonMark` reads as plain text where it stands stays as written, so an identifier keeps
+/// its spelling: an `_` between two letters or digits can neither open nor close emphasis, a `>`
+/// past the start of the line opens no quote, and a `#` inside a word closes no heading.
+pub(crate) fn literal(text: &str) -> String {
+    let folded = one_line(text);
+    let chars: Vec<char> = folded.chars().collect();
+    let mut out = String::with_capacity(folded.len());
+    for (index, ch) in chars.iter().copied().enumerate() {
+        let before = index.checked_sub(1).and_then(|at| chars.get(at)).copied();
+        let after = chars.get(index + 1).copied();
+        let syntax = match ch {
+            '\\' | '`' | '*' | '[' | ']' | '<' | '&' | '~' => true,
+            '_' => {
+                !(before.is_some_and(char::is_alphanumeric)
+                    && after.is_some_and(char::is_alphanumeric))
+            }
+            '>' => before.is_none(),
+            '#' => before.is_none_or(char::is_whitespace),
+            _ => false,
+        };
+        if syntax {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Text folded to one line: whitespace runs collapsed to single spaces, so a multi-line description
@@ -93,7 +118,7 @@ pub(crate) fn table_row(cells: &[String]) -> String {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{code_block, code_span, json_string, link_label, one_line, table_row};
+    use super::{code_block, code_span, json_string, literal, one_line, table_row};
 
     #[test]
     fn json_strings_and_link_labels_escape_what_would_end_them() {
@@ -101,7 +126,13 @@ mod tests {
         for text in ["plain", "quote\"", "tab\tend", "é"] {
             assert_eq!(json_string(text), serde_json::to_string(text).unwrap());
         }
-        assert_eq!(link_label("a]b [c]\nd"), "a\\]b \\[c\\] d");
+        assert_eq!(literal("a]b [c]\nd"), "a\\]b \\[c\\] d");
+        assert_eq!(
+            literal("a`b <i> &amp; x_y _z_ *z* ~w~ | C# #"),
+            "a\\`b \\<i> \\&amp; x_y \\_z\\_ \\*z\\* \\~w\\~ | C# \\#"
+        );
+        assert_eq!(literal("> quoted > not"), "\\> quoted > not");
+        assert_eq!(literal("C:\\dir"), "C:\\\\dir");
     }
 
     #[test]

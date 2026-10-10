@@ -18,7 +18,7 @@ use crate::docs::model::{
 use crate::verify::ContractTestLanguage;
 use crate::CoreError;
 
-use super::escape::{code_block, code_span, link_label, one_line, table_row};
+use super::escape::{code_block, code_span, literal, one_line, table_row};
 use super::structure::{self, Landmark, ProseSpan, RenderedPage};
 
 /// `## Servers` on the index.
@@ -110,9 +110,9 @@ pub(crate) fn site(model: &DocsModel) -> Result<BTreeMap<String, String>, CoreEr
     })?;
     for group in &model.groups {
         emit(&group.page, &|w| {
-            w.heading(1, &Inline::text(group.name.clone()));
+            w.heading(1, &Inline::text(literal(&group.name)));
             if let Some(summary) = &group.summary {
-                w.paragraph(&Inline::text(one_line(summary)));
+                w.prose(&group_summary_origin(&group.name), &one_line(summary));
             }
             w.heading(2, &Inline::text(OPERATIONS));
             w.list(&operation_entries(model, &group.operations));
@@ -163,7 +163,7 @@ pub(crate) fn sdk_reference(model: &DocsModel, path: &str) -> Result<String, Cor
         .first()
         .map_or("", |sdk| language_name(sdk.language));
     w.push(
-        format!("# {} {language} SDK reference", model.api.title.trim()),
+        format!("# {} {language} SDK reference", literal(&model.api.title)),
         Kind::Gnr8,
     );
     let generated = match model.sdks.first().and_then(|sdk| sdk.identity.as_ref()) {
@@ -245,7 +245,7 @@ fn auth_page(w: &mut Writer<'_>, model: &DocsModel, auth: &AuthDoc) {
 
 fn index(w: &mut Writer<'_>, model: &DocsModel) {
     let api = &model.api;
-    w.heading(1, &Inline::text(api.title.trim()));
+    w.heading(1, &Inline::text(literal(&api.title)));
     if let Some(description) = &api.description {
         w.prose(description.origin(), description.text().trim_end());
     }
@@ -283,10 +283,10 @@ fn index(w: &mut Writer<'_>, model: &DocsModel) {
         for group in &model.groups {
             w.heading(
                 3,
-                &Inline::link(group.page.clone(), Inline::text(link_label(&group.name))),
+                &Inline::link(group.page.clone(), Inline::text(literal(&group.name))),
             );
             if let Some(summary) = &group.summary {
-                w.paragraph(&Inline::text(one_line(summary)));
+                w.prose(&group_summary_origin(&group.name), &one_line(summary));
             }
             w.list(&operation_entries(model, &group.operations));
         }
@@ -315,6 +315,11 @@ fn index(w: &mut Writer<'_>, model: &DocsModel) {
         w.list(&items);
     }
     diagnostics(w, &model.api_diagnostics);
+}
+
+/// What a group's summary is blamed as when it breaks a page's structure.
+fn group_summary_origin(name: &str) -> String {
+    format!("the summary of group `{name}`")
 }
 
 /// The reference pages this run emits, as `(label, page)`, in index order.
@@ -397,7 +402,7 @@ fn operation(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result
     if let Some((name, page)) = &op.group {
         line.push(Inline::Seq(vec![
             Inline::text("Group: "),
-            Inline::link(page.clone(), Inline::text(link_label(name))),
+            Inline::link(page.clone(), Inline::text(literal(name))),
         ]));
     }
     if !op.tags.is_empty() {
@@ -708,7 +713,7 @@ fn schema_page(w: &mut Writer<'_>, model: &DocsModel, schema: &SchemaDoc) {
 /// Every label is escaped so a name cannot close its link early, and every summary is one line.
 fn llms_txt(model: &DocsModel) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# {}", one_line(&model.api.title));
+    let _ = writeln!(out, "# {}", literal(&model.api.title));
     if let Some(description) = model
         .api
         .description
@@ -736,7 +741,7 @@ fn llms_txt(model: &DocsModel) -> String {
         }
     };
     for group in &model.groups {
-        let _ = writeln!(out, "\n## {}\n", one_line(&group.name));
+        let _ = writeln!(out, "\n## {}\n", literal(&group.name));
         let summary = group.summary.as_deref().map(one_line);
         let _ = writeln!(
             out,
@@ -774,7 +779,7 @@ fn llms_txt(model: &DocsModel) -> String {
 }
 
 fn llms_line(label: &str, page: &str, summary: Option<&str>) -> String {
-    let label = link_label(label);
+    let label = literal(label);
     match summary {
         Some(summary) => format!("- [{label}]({page}): {summary}"),
         None => format!("- [{label}]({page})"),

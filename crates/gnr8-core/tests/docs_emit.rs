@@ -1935,6 +1935,46 @@ fn prose_that_breaks_the_page_structure_stops_generation() {
     }
 }
 
+/// A title and a group name are names, printed as themselves: every character Markdown could read
+/// as syntax is escaped, so a backtick cannot open a code span that swallows a link and a `<b>`
+/// is no tag. A group summary is the user's prose; one that breaks the page is blamed on its group.
+#[test]
+fn titles_and_group_names_print_as_themselves() {
+    let mut value = bookstore_json();
+    value["title"] = json!("_Books_ API <b>`v2`</b> #");
+    for op in value["operations"].as_array_mut().unwrap() {
+        if op["group"] == json!("books") {
+            op["group"] = json!("bo`oks");
+        }
+    }
+    value["group_docs"] = json!([{"name": "bo`oks", "summary": "Browse `the` catalogue"}]);
+    let pages = render(&graph_of(value.clone()), &[]);
+    let index = page(&pages, "index.md");
+    assert!(
+        index.starts_with("# \\_Books\\_ API \\<b>\\`v2\\`\\</b> \\#\n"),
+        "{index}"
+    );
+    assert!(
+        index.contains("### [bo\\`oks](groups/bo-oks.md)\n\nBrowse `the` catalogue\n"),
+        "{index}"
+    );
+    assert!(
+        page(&pages, "groups/bo-oks.md").starts_with("# bo\\`oks\n\nBrowse `the` catalogue\n"),
+        "{}",
+        page(&pages, "groups/bo-oks.md")
+    );
+    assert!(
+        page(&pages, "llms.txt").starts_with("# \\_Books\\_ API"),
+        "{}",
+        page(&pages, "llms.txt")
+    );
+
+    value["group_docs"] = json!([{"name": "bo`oks", "summary": "```"}]);
+    let err = try_render(&graph_of(value), &[]).unwrap_err().to_string();
+    assert!(err.contains("the summary of group `bo`oks`"), "{err}");
+    assert!(!err.contains("text gnr8 rendered"), "{err}");
+}
+
 /// Prose is the user's and stays verbatim: its own headings and its blank-line runs are printed as
 /// written, and a fence it closes — even one inside a quote or a list item
 /// that ends before gnr8's next section — leaves the page intact.
