@@ -1,0 +1,109 @@
+openapi: 3.1.0
+info:
+  title: Wire
+  version: 1.0.0
+  description: Values every generated SDK has to put on the wire exactly as the page prints them.
+components:
+  schemas:
+    Kind:
+      type: string
+      enum: ["1st", "a+b"]
+    Special:
+      type: string
+      enum: ["a+b$c&d=e@f:g!h'i(j)k*l m/n;o,p~q"]
+    Thing:
+      type: object
+      required: [name, class]
+      properties:
+        name: { type: string }
+        class: { type: string }
+        from: { type: string }
+        note: { type: string }
+        kind: { $ref: "#/components/schemas/Kind" }
+paths:
+  /kinds/{kind}/{special}/{when}/{flag}/{count}:
+    get:
+      operationId: getKind
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Kind" }
+        - name: special
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Special" }
+        - name: when
+          in: path
+          required: true
+          schema: { type: string, format: date-time }
+        - name: flag
+          in: path
+          required: true
+          schema: { type: boolean }
+        - name: count
+          in: path
+          required: true
+          schema: { type: integer, minimum: 3, maximum: 3 }
+        - name: q
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/Special" }
+        - name: qk
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/Kind" }
+        - name: since
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: X-Kind
+          in: header
+          required: true
+          schema: { $ref: "#/components/schemas/Kind" }
+        - name: sess
+          in: cookie
+          required: true
+          schema: { $ref: "#/components/schemas/Kind" }
+      responses:
+        "204": { description: none }
+  /things:
+    post:
+      operationId: createThing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Thing" }
+      responses:
+        "204": { description: none }
+  /text:
+    post:
+      operationId: postText
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string, enum: ["hello world"] }
+      responses:
+        "204": { description: none }
+  /optional-kind:
+    post:
+      operationId: postOptionalKind
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Kind" }
+      responses:
+        "204": { description: none }
+  /optional-when:
+    post:
+      operationId: postOptionalWhen
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: string, format: date-time }
+      responses:
+        "204": { description: none }

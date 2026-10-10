@@ -17,6 +17,7 @@ use gnr8_engine::sdk::prelude::*;
 pub(crate) const GOALSERVICE: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/goalservice");
 pub(crate) const DOCS_EDGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/docs-edge");
+pub(crate) const DOCS_WIRE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/docs-wire");
 pub(crate) const GIN_REGRESSION: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../fixtures/gin-contract-regression"
@@ -142,6 +143,27 @@ pub(crate) fn docs_edge(targets: impl FnOnce(Pipeline) -> Pipeline) -> DocsRun {
     let pipeline = targets(Pipeline::new().source(OpenApi::new().input("openapi.yaml")))
         .target(StaticDocs::new().to(DOCS_DIR));
     generate(DOCS_EDGE, &pipeline)
+}
+
+/// The docs-wire fixture: an imported `OpenAPI` document whose sampled values every generated SDK
+/// has to put on the wire exactly as the page prints them — reserved characters in path and query
+/// values, enum, date-time, boolean and integer path parameters, keyword-named and unset optional
+/// body fields, a bare JSON string body, and optional non-object bodies. Needs no toolchain.
+pub(crate) fn docs_wire(targets: impl FnOnce(Pipeline) -> Pipeline) -> DocsRun {
+    let pipeline = targets(Pipeline::new().source(OpenApi::new().input("openapi.yaml")))
+        .target(StaticDocs::new().to(DOCS_DIR));
+    generate(DOCS_WIRE, &pipeline)
+}
+
+/// An `OpenAPI` document written inline, the SDK targets `targets` adds, then the docs target.
+pub(crate) fn docs_from_spec(spec: &str, targets: impl FnOnce(Pipeline) -> Pipeline) -> DocsRun {
+    let fixture = temp_dir("spec");
+    std::fs::write(fixture.join("openapi.yaml"), spec).expect("write the spec");
+    let pipeline = targets(Pipeline::new().source(OpenApi::new().input("openapi.yaml")))
+        .target(StaticDocs::new().to(DOCS_DIR));
+    let run = generate(&fixture.to_string_lossy(), &pipeline);
+    let _ = std::fs::remove_dir_all(&fixture);
+    run
 }
 
 fn run(fixture: &str, pipeline: &Pipeline) -> Option<DocsRun> {

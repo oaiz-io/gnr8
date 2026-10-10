@@ -391,7 +391,12 @@ fn python_wire(run: &DocsRun, py: &PySdk) -> (Vec<WireRecord>, usize) {
     std::fs::write(dir.join(&unit.file_name), &unit.text).unwrap();
     let wire = dir.join("wire.json");
     let output = Command::new("python3")
-        .args(["-m", "unittest", "-v", "snippets.DocsWire"])
+        .args([
+            "-m",
+            "unittest",
+            "-v",
+            &format!("{}.DocsWire", unit.file_name.trim_end_matches(".py")),
+        ])
         .current_dir(&dir)
         .env(WIRE_ENV, &wire)
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -444,48 +449,15 @@ fn python_snippet_call_sends_the_page_request() {
     }
 }
 
-/// The dataclass-style Python SDK serializes with `dataclasses.asdict`, so every unset optional
-/// field goes out as an explicit `null` — a real difference from the request the page prints, which
-/// rung 3 names on the body alone, and only as added null keys (a known limitation, disclosed in the
-/// changelog and the docs guide).
+/// Rung 3 for the dataclass-style Python SDK: its models serialize through their own `to_dict`, so an
+/// unset optional field is left out exactly as the page leaves it out — no explicit `null` — and
+/// every sample sends the page's request byte for byte, as the Pydantic style does.
 #[test]
-fn python_dataclass_rung_three_names_the_null_body_keys() {
+fn python_dataclass_snippet_call_sends_the_page_request() {
     let Some((run, py)) = python_run() else {
         return;
     };
-    let (records, entries) = python_wire(&run, &py);
-    assert_eq!(records.len(), entries);
-    let pages = run.pages();
-    let mut bodies_with_nulls = 0;
-    for record in &records {
-        let page = page_of(&pages, &record.operation);
-        match check_wire(page, record, ContractTestLanguage::Python) {
-            Ok(()) => {}
-            Err(field) => {
-                assert!(field.starts_with("body:"), "{}: {field}", record.operation);
-                let mut sent: serde_json::Value =
-                    serde_json::from_str(record.body.as_deref().unwrap()).unwrap();
-                strip_nulls(&mut sent);
-                let mut without_nulls = record.clone();
-                without_nulls.body = Some(sent.to_string());
-                check_wire(page, &without_nulls, ContractTestLanguage::Python).unwrap_or_else(
-                    |field| panic!("{}: beyond the nulls: {field}", record.operation),
-                );
-                bodies_with_nulls += 1;
-            }
-        }
-    }
-    assert!(
-        bodies_with_nulls > 0,
-        "the dataclass SDK's nulls are visible to rung 3"
-    );
-}
-
-fn strip_nulls(value: &mut serde_json::Value) {
-    if let serde_json::Value::Object(map) = value {
-        map.retain(|_, entry| !entry.is_null());
-        map.values_mut().for_each(strip_nulls);
-    }
+    assert_python_records_match(&run, &py);
 }
 
 #[test]
@@ -722,4 +694,306 @@ fn docs_edge_samples_send_the_page_request_in_python() {
         )
         .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
     }
+}
+
+/// The docs-wire fixture through Go: every value a page prints — reserved characters, an enum, a
+/// `date-time`, a boolean and an integer in the path; reserved characters and a space in the query;
+/// an optional enum or `date-time` body the call passes by pointer — vets as printed, reaches the
+/// wire byte for byte as the page prints it (rung 3 compares the raw query string), and passes the
+/// SDK's own contract test, whose expected path is spelled by the same encoder as the page.
+#[test]
+fn docs_wire_samples_vet_send_the_page_request_and_pass_the_contract_test_in_go() {
+    if !docs_pipeline::go_available() {
+        return;
+    }
+    let go = GoSdk::new().module("example.com/wire/sdk").to(SDK_DIR);
+    let run = docs_pipeline::docs_wire(|pipeline| pipeline.target(go.clone()));
+    go_rungs_two_and_three(&run, &go, "wire-go");
+    let dir = temp_dir("wire-go-contract");
+    run.write_dir(&go.dir, &dir);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "./..."])
+        .current_dir(&dir)
+        .env("GOFLAGS", "-mod=mod")
+        .env("GOWORK", "off")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The docs-wire fixture through TypeScript: the same values reach the wire as the page prints them —
+/// `encodeURIComponent` alone leaves `! ' ( ) *` and `URLSearchParams` writes a space as `+` — and a
+/// JSON string body goes out JSON-encoded, quotes and all.
+#[test]
+fn docs_wire_samples_typecheck_and_send_the_page_request_in_typescript() {
+    if !typescript_available() {
+        return;
+    }
+    let ts = TsSdk::new()
+        .module("wire")
+        .package(SdkPackageMetadata::new().registry_name("@example/wire-sdk"))
+        .to("generated/ts");
+    let run = docs_pipeline::docs_wire(|pipeline| pipeline.target(ts.clone()));
+    let unit = compile_unit(&run.graph, SiblingSdk::TypeScript(&ts))
+        .unwrap()
+        .unwrap();
+    let output = run_tsc(&run, &unit.text, &unit.identity);
+    assert!(
+        output.status.success(),
+        "{}\n--- snippets.ts ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        unit.text
+    );
+    typescript_rung_three(&run, &ts);
+}
+
+/// Run a Python SDK's own contract test, from the directory that holds the package.
+fn run_python_contract_test(run: &DocsRun, py: &PySdk, package: &str) {
+    let dir = temp_dir("python-contract");
+    run.write_dir(&py.dir, &dir.join(package));
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "-v", &format!("{package}.contract_test")])
+        .current_dir(&dir)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every record of a Python rung-3 run equals its page.
+fn assert_python_records_match(run: &DocsRun, py: &PySdk) {
+    let (records, entries) = python_wire(run, py);
+    assert_eq!(records.len(), entries);
+    let pages = run.pages();
+    for record in &records {
+        check_wire(
+            page_of(&pages, &record.operation),
+            record,
+            ContractTestLanguage::Python,
+        )
+        .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
+    }
+}
+
+/// The docs-wire fixture through the dataclass-style Python SDK: an enum path parameter goes out as
+/// its wire value (never `Kind._1ST`), a boolean as `true`, and a body leaves unset optional fields
+/// out and spells keyword-named fields by their wire names (`class`, never `class_`).
+#[test]
+fn docs_wire_samples_send_the_page_request_in_python_dataclasses() {
+    if !python_available() {
+        return;
+    }
+    let py = PySdk::new()
+        .module("example.com/wire/sdk")
+        .dataclasses()
+        .to("generated/py");
+    let run = docs_pipeline::docs_wire(|pipeline| pipeline.target(py.clone()));
+    assert_python_records_match(&run, &py);
+    run_python_contract_test(&run, &py, "sdk");
+}
+
+/// The docs-wire fixture through the default (pydantic) Python SDK.
+#[test]
+fn docs_wire_samples_send_the_page_request_in_python_pydantic() {
+    if !python_available() || !pydantic_available() {
+        eprintln!("skipping: python3 with pydantic is not available");
+        return;
+    }
+    let py = PySdk::new()
+        .module("example.com/wire/sdk")
+        .to("generated/py");
+    let run = docs_pipeline::docs_wire(|pipeline| pipeline.target(py.clone()));
+    assert_python_records_match(&run, &py);
+    run_python_contract_test(&run, &py, "sdk");
+}
+
+/// Every name a Go compile unit binds or imports, read off the unit's own text: import names, the
+/// left side of every `:=`, every `var`, and every receiver and parameter name of every `func`.
+fn go_bound_names(text: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut in_imports = false;
+    for line in text.lines().map(str::trim) {
+        if line == "import (" {
+            in_imports = true;
+        } else if in_imports {
+            if line == ")" {
+                in_imports = false;
+            } else if !line.is_empty() {
+                let name = match line.split_once(' ') {
+                    Some((alias, _)) => alias,
+                    None => line.trim_matches('"').rsplit('/').next().unwrap(),
+                };
+                names.insert(name.to_string());
+            }
+        } else if let Some((left, _)) = line.split_once(" := ") {
+            let left = left.trim_start_matches("if ").trim_start_matches("for ");
+            names.extend(left.split(',').map(|name| name.trim().to_string()));
+        } else if let Some(rest) = line.strip_prefix("var ") {
+            names.insert(rest.split_whitespace().next().unwrap().to_string());
+        }
+        if let Some(rest) = line.strip_prefix("func ") {
+            for group in rest.split('(').skip(1) {
+                let params = group.split(')').next().unwrap();
+                for param in params.split(',') {
+                    if let Some(name) = param.split_whitespace().next() {
+                        names.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// An SDK package may be named after any name the Go compile unit binds or imports — `errors`, which
+/// the unit imports for its typed-error check, `outcome`, which its harness binds beside the call,
+/// `time`, which a date-time sample imports, `client`, which every sample binds — and the unit still
+/// vets: the sample imports the SDK under an alias instead. The names are read off the units
+/// themselves (docs-edge carries the typed-error branch, docs-wire the date-time import), so a harness
+/// that grows a local is held to this too. Every package lives in one module, so one `go vet` checks
+/// them all.
+#[test]
+fn go_units_vet_with_the_sdk_package_named_after_every_name_they_bind() {
+    if !docs_pipeline::go_available() {
+        return;
+    }
+    type Fixture = fn(&dyn Fn(Pipeline) -> Pipeline) -> DocsRun;
+    let fixtures: [(&str, Fixture); 2] = [
+        ("edge", |targets| docs_pipeline::docs_edge(targets)),
+        ("wire", |targets| docs_pipeline::docs_wire(targets)),
+    ];
+    let mut names = std::collections::BTreeSet::new();
+    for (_, fixture) in fixtures {
+        let probe = GoSdk::new().module("example.com/names/sdk").to(SDK_DIR);
+        let run = fixture(&|pipeline| pipeline.target(probe.clone()));
+        let text = compile_unit(&run.graph, SiblingSdk::Go(&probe))
+            .unwrap()
+            .unwrap()
+            .text;
+        names.extend(go_bound_names(&text).into_iter().filter(|name| {
+            name.starts_with(|c: char| c.is_ascii_lowercase())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && !matches!(
+                    name.as_str(),
+                    "if" | "for" | "func" | "var" | "return" | "range"
+                )
+        }));
+    }
+    for required in [
+        "errors",
+        "outcome",
+        "time",
+        "client",
+        "json",
+        "http",
+        "transport",
+    ] {
+        assert!(
+            names.contains(required),
+            "{required} is bound by the unit but was not read off it: {names:?}"
+        );
+    }
+    let dir = temp_dir("go-names");
+    std::fs::write(dir.join("go.mod"), "module example.com/names\n\ngo 1.21\n").unwrap();
+    for (label, fixture) in fixtures {
+        for name in &names {
+            let go = GoSdk::new()
+                .module(format!("example.com/names/{label}/{name}"))
+                .to(SDK_DIR);
+            let run = fixture(&|pipeline| pipeline.target(go.clone()));
+            let unit = compile_unit(&run.graph, SiblingSdk::Go(&go))
+                .unwrap()
+                .unwrap();
+            let package = dir.join(label).join(name);
+            run.write_dir(&go.dir, &package);
+            let _ = std::fs::remove_file(package.join("go.mod"));
+            let _ = std::fs::remove_file(package.join("go.sum"));
+            std::fs::write(package.join(&unit.file_name), &unit.text).unwrap();
+        }
+    }
+    let output = Command::new("go")
+        .args(["vet", "./..."])
+        .current_dir(&dir)
+        .env("GOFLAGS", "-mod=mod")
+        .env("GOWORK", "off")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "go vet failed for an SDK package named after a name the unit binds:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Python SDK whose package is named `snippets` and whose models are named after the unit's own
+/// test classes (`DocsWire`, `DocsSnippets`) still runs at rungs 2 and 3: the unit's file name has an
+/// underscore no package name can have, and each sample's models are imported inside the function
+/// that runs it, never into the module namespace the harness's classes live in.
+#[test]
+fn python_unit_runs_with_a_package_and_models_named_after_its_own_names() {
+    if !python_available() {
+        return;
+    }
+    let spec = r##"openapi: 3.1.0
+info: { title: Names, version: 1.0.0 }
+components:
+  schemas:
+    DocsWire:
+      type: object
+      required: [name]
+      properties: { name: { type: string } }
+    DocsSnippets:
+      type: object
+      required: [name]
+      properties: { name: { type: string } }
+paths:
+  /wires:
+    post:
+      operationId: createWire
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DocsWire" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocsSnippets" }
+"##;
+    let py = PySdk::new()
+        .module("example.com/names/snippets")
+        .dataclasses()
+        .to("generated/py");
+    let run = docs_pipeline::docs_from_spec(spec, |pipeline| pipeline.target(py.clone()));
+    let unit = compile_unit(&run.graph, SiblingSdk::Python(&py))
+        .unwrap()
+        .unwrap();
+    assert_eq!(unit.identity, "snippets");
+    assert!(unit.text.contains("DocsWire(name="), "{}", unit.text);
+    let output = run_python_unit(&run, &unit.text, &unit.file_name, &unit.identity);
+    assert!(
+        output.status.success(),
+        "{}\n--- {} ---\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        unit.file_name,
+        unit.text
+    );
+    assert_python_records_match(&run, &py);
 }
