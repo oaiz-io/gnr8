@@ -16,12 +16,12 @@ use std::fmt::Write as _;
 use serde_json::Value;
 
 use crate::graph::{ApiGraph, Operation, Type};
-use crate::sdk::emit_common::{CallInputs, Qualify};
+use crate::sdk::emit_common::{success_responses_of, CallInputs, Qualify};
 use crate::verify::{CaseOutcome, ContractCase, ContractTestPlan, DecodedField};
 use crate::CoreError;
 
 use super::callsite::{render_call, ts_key, ts_object};
-use super::emit::{is_ident, ts_string_literal};
+use super::emit::{is_ident, return_admits_undefined, ts_string_literal};
 use super::ERROR_TYPE;
 
 /// The file name the TypeScript SDK's contract test is emitted at.
@@ -246,7 +246,7 @@ fn emit_case(graph: &ApiGraph, op: &Operation, case: &ContractCase) -> Result<St
             writeln!(out, "      void result;").map_err(sink)?;
             emit_wire_assertions(&mut out, case)?;
             if let Some(field) = field {
-                emit_field_assertion(&mut out, graph, case, field)?;
+                emit_field_assertion(&mut out, graph, op, case, field)?;
             }
         }
         CaseOutcome::TypedError { status } | CaseOutcome::Redirect { status } => {
@@ -302,6 +302,7 @@ fn emit_wire_assertions(out: &mut String, case: &ContractCase) -> Result<(), Cor
 fn emit_field_assertion(
     out: &mut String,
     graph: &ApiGraph,
+    op: &Operation,
     case: &ContractCase,
     field: &DecodedField,
 ) -> Result<(), CoreError> {
@@ -313,6 +314,21 @@ fn emit_field_assertion(
     };
     if !model_has_field(graph, model, &field.json_name) {
         return Ok(());
+    }
+    // A method that can resolve to `undefined` returns `Model | undefined`, so the read below is
+    // only well-typed once the case has asserted the reply decoded.
+    if return_admits_undefined(&success_responses_of(op, graph)?) {
+        writeln!(out, "      if (result === undefined) {{").map_err(sink)?;
+        writeln!(
+            out,
+            "        throw new Error({});",
+            ts_string_literal(&format!(
+                "expected the {} reply decoded, got undefined",
+                case.response.status
+            ))
+        )
+        .map_err(sink)?;
+        writeln!(out, "      }}").map_err(sink)?;
     }
     let access = ts_property_read("result", &field.json_name);
     match &field.value {

@@ -102,6 +102,10 @@ must move the minor version.
   constraints as typed facts, and OpenAPI 3.0 / Swagger 2
   `exclusiveMinimum: true` / `exclusiveMaximum: true` import as the exclusive bound instead of the
   string `"true"`.
+- **The generated TypeScript contract test compiles under `--strict` when the method may return
+  `undefined`** (a JSON model beside a bodyless success, a redirect, or a reply the method does not
+  return). A case that read a decoded field off the result failed with TS18048; it now asserts the
+  reply decoded before reading it.
 - A generated TypeScript SDK with bearer or basic authentication compiles under
   `exactOptionalPropertyTypes`.
 - The operations a schema reaches now include those that reach it through an alternative request

@@ -1980,6 +1980,18 @@ fn fetch_transport_owns_parameter(param: &Param) -> bool {
     )
 }
 
+/// Whether an operation's method can resolve to `undefined`: a declared success with no body the
+/// method returns (a bodyless status, or one answering a body the return type does not carry), or
+/// a declared redirect, which browser Fetch surfaces as an opaque success. The method's return type
+/// and the contract test's narrowing both read this one answer.
+pub(crate) fn return_admits_undefined(success: &SuccessResponses) -> bool {
+    success.has_bodyless_alternative()
+        || success
+            .statuses
+            .iter()
+            .any(|status| (300..400).contains(status))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one operation emitter keeps signature, path, query, dispatch, and split-mode wrappers in one deterministic pass"
@@ -2045,11 +2057,7 @@ fn emit_operation(
         })
         .collect();
     let return_model = success.body_model.clone();
-    let has_redirect = success
-        .statuses
-        .iter()
-        .any(|status| (300..400).contains(status));
-    let has_empty_wire_outcome = success.has_bodyless_alternative() || has_redirect;
+    let has_empty_wire_outcome = return_admits_undefined(&success);
     // A typed body/response references a model symbol re-exported from ./models; reference it through the
     // `models` namespace import so client.ts has no per-name import to compute (determinism).
     let return_ty = if success.has_binary_body() {
