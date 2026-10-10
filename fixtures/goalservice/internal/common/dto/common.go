@@ -14,11 +14,11 @@ package dto
 import "github.com/google/uuid"
 
 // HttpError is the standard error envelope returned on 4xx responses.
-// It demonstrates example tags and omitempty optionality on a []string field.
+// It demonstrates scalar example tags and omitempty optionality on a []string field.
 type HttpError struct {
 	Message string   `json:"message" example:"error message" binding:"required"`
 	Slug    string   `json:"slug,omitempty" example:"error-slug"`
-	Hints   []string `json:"hints,omitempty" example:"hint 1,hint 2"`
+	Hints   []string `json:"hints,omitempty"`
 }
 
 // CommandMessage is a minimal success envelope.

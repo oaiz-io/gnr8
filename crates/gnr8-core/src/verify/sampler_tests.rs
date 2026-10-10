@@ -1766,3 +1766,354 @@ fn integer_samples_stay_within_the_safe_range() {
         SuccessOutcome::Refused(SampleRefusal::IntegerWire { .. })
     ));
 }
+
+// D-EX: declared examples are inputs to the one sampler.
+
+/// A field declaring `example`, with `meta` on it.
+fn example_fld(name: &str, schema: &Value, required: bool, meta: &Value, example: &str) -> Value {
+    let mut field = meta_fld(name, schema, required, meta);
+    field["example"] = json!(example);
+    field
+}
+
+/// The probe graph with `docs` as the probe operation's documentation policy.
+fn documented(mut graph: ApiGraph, docs: &Value) -> ApiGraph {
+    let mut policy = docs.clone();
+    policy["operation_id"] = json!("probe");
+    graph.operation_docs = vec![serde_json::from_value(policy).expect("policy deserializes")];
+    graph
+}
+
+fn media_example(name: &str, content_type: &str, value: &Value) -> Value {
+    json!({"name": name, "content_type": content_type, "value": value})
+}
+
+/// The declared-example error a sample or a plan stops with, as `(example, problem)`.
+fn invalid_example<T: std::fmt::Debug>(result: Result<T, crate::CoreError>) -> (String, String) {
+    match result {
+        Err(crate::CoreError::InvalidExample { example, problem }) => (example, problem),
+        other => panic!("expected an invalid declared example, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_field_example_is_the_value_when_it_satisfies_every_constraint() {
+    let graph = probe(
+        &[],
+        Some(&object(&[
+            example_fld(
+                "title",
+                &string(),
+                true,
+                &json!({"constraints": {"min_length": 2}}),
+                "Dune",
+            ),
+            example_fld(
+                "year",
+                &int(),
+                true,
+                &json!({"constraints": {"minimum": "1"}}),
+                "1965",
+            ),
+            example_fld("price", &float(), true, &json!({}), "9.5"),
+        ])),
+        Some(&object(&[example_fld(
+            "title",
+            &string(),
+            true,
+            &json!({}),
+            "Dune",
+        )])),
+        &[],
+    );
+    let sample = sample(&graph);
+    assert_eq!(
+        sample.bodies[0].value,
+        json!({"title": "Dune", "year": 1965, "price": 9.5})
+    );
+    assert_eq!(sample.bodies[0].example, None);
+    assert_eq!(reply_json(&graph), json!({"title": "Dune"}));
+}
+
+#[test]
+fn a_field_example_that_violates_its_constraint_is_an_error_naming_it() {
+    let graph = probe(
+        &[],
+        Some(&object(&[example_fld(
+            "title",
+            &string(),
+            true,
+            &json!({"constraints": {"min_length": 5}}),
+            "Dune",
+        )])),
+        None,
+        &[],
+    );
+    let (example, problem) = invalid_example(sample_operation(&graph.operations[0], &graph));
+    assert_eq!(
+        example,
+        "the example `Dune` of field `title` in schema `Req`"
+    );
+    assert_eq!(problem, "field `title` violates `minLength`");
+}
+
+#[test]
+fn a_field_example_that_is_not_a_value_of_its_type_is_an_error() {
+    for (schema, text, reason) in [
+        (int(), "abc", "is not an integer"),
+        (float(), "1.5x", "is not a number"),
+        (
+            json!({"type": "primitive", "of": {"prim": "bool"}}),
+            "yes",
+            "is not a boolean",
+        ),
+        (
+            json!({"type": "enum", "of": ["a", "b"]}),
+            "c",
+            "violates `enum`",
+        ),
+        (
+            json!({"type": "well_known", "of": "date_time"}),
+            "yesterday",
+            "is not an RFC 3339 date-time",
+        ),
+        (
+            array(&string()),
+            "a,b",
+            "is an array, and a field example states only a scalar",
+        ),
+    ] {
+        let graph = probe(
+            &[],
+            None,
+            Some(&object(&[example_fld(
+                "v",
+                &schema,
+                true,
+                &json!({}),
+                text,
+            )])),
+            &[],
+        );
+        let (_, problem) = invalid_example(sample_operation(&graph.operations[0], &graph));
+        assert_eq!(problem, format!("field `v` {reason}"), "{schema}");
+    }
+}
+
+#[test]
+fn a_field_example_makes_a_pattern_bound_input_sampleable() {
+    let graph = probe(
+        &[],
+        Some(&object(&[example_fld(
+            "sku",
+            &string(),
+            true,
+            &json!({"constraints": {"pattern": "^[A-Z]{3}-[0-9]{4}$"}}),
+            "ABC-1234",
+        )])),
+        None,
+        &[],
+    );
+    let Sampled::Sample(sample) = docs(&graph) else {
+        panic!("a declared value meets the pattern on the author's word");
+    };
+    assert_eq!(sample.bodies[0].value, json!({"sku": "ABC-1234"}));
+    assert!(
+        sample.bodies[0].unmet.is_empty(),
+        "{:?}",
+        sample.bodies[0].unmet
+    );
+}
+
+#[test]
+fn an_example_on_a_field_the_sample_leaves_out_is_still_checked() {
+    // An optional request field is not in the sample, but its example is still validated.
+    let graph = probe(
+        &[],
+        Some(&object(&[
+            fld("title", &string(), true),
+            example_fld(
+                "note",
+                &string(),
+                false,
+                &json!({"constraints": {"max_length": 2}}),
+                "long",
+            ),
+        ])),
+        None,
+        &[],
+    );
+    let (example, problem) = invalid_example(plan_contract_tests(&graph));
+    assert_eq!(
+        example,
+        "the example `long` of field `note` in schema `Req`"
+    );
+    assert_eq!(problem, "field `note` violates `maxLength`");
+}
+
+#[test]
+fn a_declared_request_example_is_the_body() {
+    let graph = documented(
+        probe(
+            &[],
+            Some(&object(&[
+                example_fld("title", &string(), true, &json!({}), "Neuromancer"),
+                fld("subtitle", &string(), false),
+            ])),
+            None,
+            &[],
+        ),
+        &json!({"request_examples": [
+            media_example(
+                "dune",
+                "application/json",
+                &json!({"title": "Dune", "subtitle": "A novel"}),
+            ),
+            media_example("later", "application/json", &json!({"title": "Later"})),
+            media_example("text", "text/plain", &json!("not json")),
+        ]}),
+    );
+    let sample = sample(&graph);
+    // The body declares an example, so the body is that example: no field is sampled for it.
+    assert_eq!(
+        sample.bodies[0].value,
+        json!({"title": "Dune", "subtitle": "A novel"})
+    );
+    assert_eq!(sample.bodies[0].example.as_deref(), Some("dune"));
+    let plan = plan_contract_tests(&graph).unwrap();
+    let bodies: Vec<&Value> = plan
+        .cases
+        .iter()
+        .filter_map(|case| case.expected_body.as_ref())
+        .collect();
+    assert!(!bodies.is_empty());
+    assert!(bodies
+        .iter()
+        .all(|body| **body == json!({"title": "Dune", "subtitle": "A novel"})));
+}
+
+#[test]
+fn a_declared_request_example_that_breaks_its_schema_is_an_error_naming_it() {
+    let body = object(&[
+        meta_fld(
+            "title",
+            &string(),
+            true,
+            &json!({"constraints": {"max_length": 3}}),
+        ),
+        fld("author", &named("t.Author"), false),
+    ]);
+    let author = schema("Author", &object(&[fld("name", &string(), true)]));
+    for (value, problem) in [
+        (
+            json!({"title": "Dune"}),
+            "field `title` violates `maxLength`",
+        ),
+        (json!({}), "the request body lacks required field `title`"),
+        (
+            json!({"title": "Du", "isbn": "1"}),
+            "the request body has field `isbn`, which its schema does not declare",
+        ),
+        (json!({"title": 7}), "field `title` is not a string"),
+        (
+            json!({"title": "Du", "author": {}}),
+            "field `author` lacks required field `name`",
+        ),
+        (
+            json!({"title": null}),
+            "field `title` is null, and the field is not nullable",
+        ),
+        (json!(["Du"]), "the request body is not an object"),
+    ] {
+        let graph = documented(
+            probe(&[], Some(&body), None, std::slice::from_ref(&author)),
+            &json!({"request_examples": [media_example("bad", "application/json", &value)]}),
+        );
+        let (example, actual) = invalid_example(sample_operation(&graph.operations[0], &graph));
+        assert_eq!(
+            example,
+            "request example `bad` (`application/json`) of operation `probe`"
+        );
+        assert_eq!(actual, problem, "{value}");
+    }
+}
+
+#[test]
+fn a_declared_response_example_is_the_reply() {
+    let graph = documented(
+        probe(
+            &[],
+            None,
+            Some(&object(&[
+                fld("id", &string(), true),
+                fld("rating", &int(), false),
+            ])),
+            &[],
+        ),
+        &json!({"responses": [{"status": 200, "examples": [
+            media_example("found", "application/json", &json!({"id": "b-1", "rating": 4}))
+        ]}]}),
+    );
+    match reply(&graph) {
+        SuccessOutcome::Sample(reply) => {
+            assert_eq!(
+                serde_json::from_str::<Value>(&reply.body).unwrap(),
+                json!({"id": "b-1", "rating": 4})
+            );
+            assert_eq!(reply.example.as_deref(), Some("found"));
+            assert_eq!(reply.field.unwrap().value, Some(json!("b-1")));
+        }
+        other => panic!("expected the declared reply, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_declared_json_example_is_checked_even_one_the_sample_does_not_use() {
+    let graph = documented(
+        probe(&[], None, Some(&object(&[fld("id", &string(), true)])), &[]),
+        &json!({"responses": [
+            {"status": 200, "examples": [
+                media_example("found", "application/json", &json!({"id": "b-1"})),
+                media_example("second", "application/json", &json!({"id": 2}))
+            ]},
+        ]}),
+    );
+    let (example, problem) = invalid_example(plan_contract_tests(&graph));
+    assert_eq!(
+        example,
+        "response 200 example `second` (`application/json`) of operation `probe`"
+    );
+    assert_eq!(problem, "field `id` is not a string");
+}
+
+#[test]
+fn a_declared_value_no_call_can_state_is_a_refusal_not_an_error() {
+    let body = object(&[fld("price", &float(), true)]);
+    let whole = documented(
+        probe(&[], Some(&body), None, &[]),
+        &json!({"request_examples": [
+            media_example("whole", "application/json", &json!({"price": 20}))
+        ]}),
+    );
+    assert_eq!(
+        refusal(&whole).to_string(),
+        "request body `application/json`: field `price` declares `20`, which Go, Python and \
+         TypeScript print differently"
+    );
+    let big = probe(
+        &[],
+        None,
+        Some(&object(&[example_fld(
+            "n",
+            &int(),
+            true,
+            &json!({}),
+            "9007199254740993",
+        )])),
+        &[],
+    );
+    assert!(matches!(
+        reply(&big),
+        SuccessOutcome::Refused(SampleRefusal::Declared { .. })
+    ));
+}

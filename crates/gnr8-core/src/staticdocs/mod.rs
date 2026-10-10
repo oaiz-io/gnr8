@@ -69,6 +69,8 @@ pub(crate) fn generate(
 
 /// Render every page, keyed by docs-relative path, and run rung 0 over the result.
 fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, String>, CoreError> {
+    // Declared examples are sampler inputs: every one is checked before any page samples.
+    crate::verify::check_declared_examples(graph)?;
     // Rung 0, no empty heading: the only headings whose text is not a fixed `const`, an id or a
     // schema name (each refused elsewhere when it cannot form a page name) are the API title and
     // the group names, so those are checked here. Verbatim prose is the user's and is never read
@@ -132,7 +134,8 @@ fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, Str
         let path = nav.operation_page(&op.id)?.to_string();
         let sampled = crate::verify::sample_operation(op, graph)?.for_docs();
         let example = example::render_example(graph, op, &sampled, sdks)?;
-        let text = page::render_operation(&site, op, &example, &mut links)?;
+        let shown = example::shown_examples(op, &sampled)?;
+        let text = page::render_operation(&site, op, &example, &shown, &mut links)?;
         operation_pages += 1;
         pages.insert(path, text);
     }

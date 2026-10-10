@@ -162,6 +162,21 @@ pub enum CoreError {
         message: String,
     },
 
+    /// A declared example is not a value of the input it is declared for.
+    ///
+    /// A field's `example` and an operation's request or response `MediaExample` are inputs to the
+    /// one sampler behind the `StaticDocs` pages and the contract tests. One that breaks its own
+    /// input — its type, a required field, a field the schema does not declare, or a declared
+    /// constraint — fails generation. It is never skipped, and never replaced by a sampled value.
+    #[error("invalid declared example: {example}: {problem}")]
+    InvalidExample {
+        /// Which example, named by where it is declared: the schema and field, or the operation,
+        /// the request or response status, the example's name and its media type.
+        example: String,
+        /// What is wrong, naming the value inside the example and the type or constraint it breaks.
+        problem: String,
+    },
+
     /// The `gofmt` subprocess ran but exited with a non-zero status (Phase 3 / SDK formatting).
     ///
     /// Mirrors the [`Self::HelperExit`] shape (exit `code` + captured `stderr`) and is kept distinct

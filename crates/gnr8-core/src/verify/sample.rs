@@ -18,9 +18,32 @@
 //! handed text, and the first variant is as valid a reply as any. A union in a request is refused
 //! ([`SampleRefusal::RequestUnion`]).
 //!
-//! The sampler reads type, constraints and a `format` the pipeline maps to a well-known scalar. It
-//! never reads a `default`, a field `example` or a declared media example: those restrict nothing,
-//! and letting one supply a value would be a second source for the same fact (AGENTS.md rule 3).
+//! The sampler reads type, constraints, a `format` the pipeline maps to a well-known scalar, and
+//! the examples the graph declares. It never reads a `default`: a default restricts nothing.
+//!
+//! # Declared examples
+//!
+//! Every input takes its value by one rule: **an input that declares an example takes that example;
+//! an input that declares none is built from its type.** Two kinds of input declare one:
+//!
+//! - a field, through its `example` (text, read as a value of the field's type the way an enum
+//!   member is: [`parse_member`]); and
+//! - a request body or a success reply, through the operation's first `MediaExample` for the JSON
+//!   media type the sample uses (`request_examples`, or the examples of the reply's status).
+//!
+//! A body or reply that declares an example is that example. It is not built from its fields, so
+//! no field example is consulted for it. A field example is consulted only where a body or reply
+//! is built. The two never meet in one value, so there is nothing to rank (AGENTS.md rule 3). Both
+//! stay published where they were declared.
+//!
+//! A declared value is checked against its input the way a built candidate is ([`satisfies`]), plus
+//! the type itself and, for a body, every required and every undeclared field. One that breaks its
+//! input is [`CoreError::InvalidExample`], never skipped and never replaced by a built value
+//! ([`check_declared_examples`] checks every declared example, used or not). The one constraint it
+//! is not checked against is `pattern`: gnr8 evaluates no `pattern`, and a declared value meets one
+//! on its author's word. That is the only way a pattern-bound input gets a met sample. A valid
+//! declared value that no call can state (a `null` in a request, a number the generated languages
+//! print differently) is a [`SampleRefusal::Declared`].
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -30,7 +53,9 @@ use serde_json::{json, Map, Number, Value};
 
 use crate::analyze::facts::Constraints;
 use crate::graph::direction::SchemaDirections;
-use crate::graph::{ApiGraph, Field, Operation, Param, Prim, Type, WellKnown};
+use crate::graph::{
+    ApiGraph, Field, MediaExample, Operation, Param, Prim, Schema, Type, WellKnown,
+};
 use crate::sdk::emit_common::{
     operation_auth_alternatives, request_body_models_of, success_responses_of, ApiKeyLocation,
     HttpAuthScheme, OperationAuthScheme, RequestBodyEncoding,
@@ -39,6 +64,15 @@ use crate::CoreError;
 
 use super::{
     DecodedField, SampleAuth, SampleBody, SampleCredential, SampleParam, MAX_SAMPLE_DEPTH,
+};
+
+mod declared;
+
+pub use declared::check_declared_examples;
+pub(crate) use declared::reply_media;
+use declared::{
+    declared_body, docs_policy, examples_for, field_example, reply_example, request_origin,
+    response_origin, schema_by_id,
 };
 
 /// The most elements or entries one sampled array or map carries.
@@ -65,6 +99,10 @@ fn sample_cap(subject: &str, constraint: &str, limit: u64) -> SampleRefusal {
 
 /// One operation's sample, or the reason it has none.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one value per operation, built once and matched by value by every consumer"
+)]
 pub enum Sampled {
     /// Every required input was sampled.
     Sample(OperationSample),
@@ -186,6 +224,9 @@ pub struct SuccessSample {
     pub field: Option<DecodedField>,
     /// The constraints the reply leaves unmet, in field order.
     pub unmet: Vec<UnmetConstraint>,
+    /// The name of the declared response example this reply is, when the operation declares one
+    /// for the status and media type of the reply.
+    pub example: Option<String>,
 }
 
 /// Why an input has no sample. `subject` is a dotted path from the input root — `query.limit`,
@@ -277,6 +318,15 @@ pub enum SampleRefusal {
         /// The `OpenAPI` keyword of the first constraint the last candidate violated.
         constraint: String,
     },
+    /// A declared example value that is valid for its input but that no sample can state.
+    Declared {
+        /// Where the value sits.
+        subject: String,
+        /// The value, as JSON text.
+        value: String,
+        /// What keeps a sample from stating it.
+        limit: DeclaredLimit,
+    },
     /// A required body that declares no JSON representation at all.
     NoJsonBody,
     /// A required body none of whose JSON representations can be sampled, with the first refused
@@ -342,6 +392,36 @@ impl fmt::Display for SampleRefusal {
                 subject,
                 constraint,
             } => write!(f, "{} cannot satisfy `{constraint}`", phrase(subject)),
+            Self::Declared {
+                subject,
+                value,
+                limit,
+            } => {
+                let subject = phrase(subject);
+                match limit {
+                    DeclaredLimit::Null => {
+                        write!(
+                            f,
+                            "{subject} declares `null`, which a sample call never sends"
+                        )
+                    }
+                    DeclaredLimit::FreeForm => write!(
+                        f,
+                        "{subject} declares a free-form value other than `{{}}`, which a sample \
+                         call cannot state"
+                    ),
+                    DeclaredLimit::Integer => write!(
+                        f,
+                        "{subject} declares `{value}`, beyond ±(2^53 − 1), the range TypeScript \
+                         carries exactly"
+                    ),
+                    DeclaredLimit::Float => write!(
+                        f,
+                        "{subject} declares `{value}`, which Go, Python and TypeScript print \
+                         differently"
+                    ),
+                }
+            }
             Self::NoJsonBody => f.write_str("the request body declares no JSON representation"),
             Self::BodyRefused {
                 content_type,
@@ -349,6 +429,19 @@ impl fmt::Display for SampleRefusal {
             } => write!(f, "request body `{content_type}`: {inner}"),
         }
     }
+}
+
+/// Why a valid declared value cannot be a sample ([`SampleRefusal::Declared`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredLimit {
+    /// A `null` in a request: no generated call spells one.
+    Null,
+    /// A free-form value in a request other than `{}`, the only one a generated call spells.
+    FreeForm,
+    /// An integer beyond `±(2^53 − 1)`, which a TypeScript `number` does not carry exactly.
+    Integer,
+    /// A float the generated languages print differently ([`prints_alike`]).
+    Float,
 }
 
 /// How a page names a refusal's subject: a parameter, a field, or a whole body.
@@ -517,27 +610,29 @@ pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, Cor
         }
     }
     let declared = request_body_models_of(op, graph)?;
+    let policy = docs_policy(op, graph);
     let mut bodies = Vec::new();
     let mut first_refusal: Option<(String, SampleRefusal)> = None;
     for (index, model) in declared.iter().enumerate() {
         if model.encoding != RequestBodyEncoding::Json {
             continue;
         }
-        let schema = graph
-            .schemas
-            .iter()
-            .find(|schema| schema.id == model.schema_id)
-            .ok_or_else(|| dangling(&model.schema_id))?;
-        let mut sampler = Sampler::new(graph, Side::Request);
-        match sampler.value(&schema.body, &Restriction::NONE, "body", 0)? {
-            Ok(value) => bodies.push(SampleBody {
+        let schema = schema_by_id(graph, &model.schema_id)?;
+        // The body is the first request example declared for its media type when there is one,
+        // and is built from its schema when there is none.
+        let example = policy
+            .and_then(|policy| examples_for(&policy.request_examples, &model.content_type).next());
+        let example_input = example.map(|example| (example, request_origin(op, example)));
+        match body_value(graph, Side::Request, schema, "body", example_input)? {
+            Ok((value, unmet)) => bodies.push(SampleBody {
                 content_type: model.content_type.clone(),
                 schema_id: model.schema_id.clone(),
                 model: model.model.clone(),
                 value,
                 selection: index,
                 representations: declared.len(),
-                unmet: sampler.unmet,
+                unmet,
+                example: example.map(|example| example.name.clone()),
             }),
             Err(refusal) => {
                 first_refusal.get_or_insert((model.content_type.clone(), refusal));
@@ -751,6 +846,7 @@ pub(crate) fn success_sample(
             body: String::new(),
             field: None,
             unmet: Vec::new(),
+            example: None,
         }));
     };
     let schema = graph
@@ -764,12 +860,14 @@ pub(crate) fn success_sample(
             ),
         })?;
     let subject = format!("response.{status}");
-    let mut sampler = Sampler::new(graph, Side::Response);
-    let value = match sampler.value(&schema.body, &Restriction::NONE, &subject, 0)? {
-        Ok(value) => value,
+    // The reply is the first response example declared for its status and media type when there
+    // is one, and is built from its schema when there is none.
+    let example = reply_example(op, graph, status);
+    let declared = example.map(|example| (example, response_origin(op, status, example)));
+    let (value, mut unmet) = match body_value(graph, Side::Response, schema, &subject, declared)? {
+        Ok(sampled) => sampled,
         Err(refusal) => return Ok(SuccessOutcome::Refused(refusal)),
     };
-    let mut unmet = sampler.unmet;
     let (value, field) = if omit_optional {
         let (Some(field), Some(object)) = (omitted_field(&schema.body), value.as_object()) else {
             return Ok(SuccessOutcome::NoReply);
@@ -789,6 +887,7 @@ pub(crate) fn success_sample(
         body: json_text(&value)?,
         field,
         unmet,
+        example: example.map(|example| example.name.clone()),
     }))
 }
 
@@ -825,17 +924,8 @@ pub(crate) fn error_payload(
     let value = match declared {
         None => envelope(),
         Some(body) => {
-            let schema = graph
-                .schemas
-                .iter()
-                .find(|schema| schema.id == body.ref_id)
-                .ok_or_else(|| dangling(&body.ref_id))?;
-            match Sampler::new(graph, Side::Response).value(
-                &schema.body,
-                &Restriction::NONE,
-                &format!("error.{status}"),
-                0,
-            )? {
+            let schema = schema_by_id(graph, &body.ref_id)?;
+            match Sampler::new(graph, Side::Response).root(schema, &format!("error.{status}"))? {
                 Ok(value) => value,
                 Err(
                     SampleRefusal::Recursive { .. }
@@ -850,6 +940,25 @@ pub(crate) fn error_payload(
     Ok(Ok(json_text(&value)?))
 }
 
+/// The value of a request body or a reply, and the constraints it leaves unmet: its declared
+/// example (with the text naming where it is declared) when it declares one, and a value built
+/// from its schema when it declares none — the one rule every input follows.
+fn body_value(
+    graph: &ApiGraph,
+    side: Side,
+    schema: &Schema,
+    subject: &str,
+    declared: Option<(&MediaExample, String)>,
+) -> Result<Result<(Value, Vec<UnmetConstraint>), SampleRefusal>, CoreError> {
+    if let Some((example, origin)) = declared {
+        let value = declared_body(graph, side, example, schema, subject, &origin)?;
+        return Ok(value.map(|value| (value, Vec::new())));
+    }
+    let mut sampler = Sampler::new(graph, side);
+    let value = sampler.root(schema, subject)?;
+    Ok(value.map(|value| (value, sampler.unmet)))
+}
+
 /// The first required scalar field of an object body, with the value the canned reply carries.
 fn checked_field(body: &Type, value: &Value) -> Option<DecodedField> {
     let Type::Object(fields) = body else {
@@ -861,7 +970,9 @@ fn checked_field(body: &Type, value: &Value) -> Option<DecodedField> {
         .find(|field| {
             SchemaDirections::input_field_is_required(field)
                 && is_checkable_scalar(&field.schema)
-                && object.contains_key(&field.json_name)
+                && object
+                    .get(&field.json_name)
+                    .is_some_and(|value| !value.is_null())
         })
         .map(|field| DecodedField {
             json_name: field.json_name.clone(),
@@ -976,6 +1087,9 @@ struct Sampler<'g> {
     visiting: BTreeSet<String>,
     /// The constraints the value sampled so far leaves unmet, in the order they were met.
     unmet: Vec<UnmetConstraint>,
+    /// The named schemas being sampled, innermost last, each with the subject its body sits at, so
+    /// a field example is named by its schema and its path inside it.
+    frames: Vec<(&'g str, String)>,
 }
 
 impl<'g> Sampler<'g> {
@@ -985,7 +1099,43 @@ impl<'g> Sampler<'g> {
             side,
             visiting: BTreeSet::new(),
             unmet: Vec::new(),
+            frames: Vec::new(),
         }
+    }
+
+    /// Build the value of one named schema's body: a request body, a reply or an error payload.
+    fn root(&mut self, schema: &'g Schema, subject: &str) -> Outcome {
+        self.frames.push((&schema.name, subject.to_string()));
+        let outcome = self.value(&schema.body, &Restriction::NONE, subject, 0);
+        self.frames.pop();
+        outcome
+    }
+
+    /// The value of one object field: its declared example when it declares one, a built value
+    /// otherwise; and the constraints that value leaves unmet.
+    fn field(
+        &mut self,
+        field: &Field,
+        restriction: &Restriction<'_>,
+        path: &str,
+        depth: usize,
+    ) -> Result<Result<(Value, Vec<UnmetConstraint>), SampleRefusal>, CoreError> {
+        let Some(text) = &field.example else {
+            return self.isolated(&field.schema, restriction, path, depth);
+        };
+        let Some((schema, root)) = self.frames.last() else {
+            return Err(CoreError::SdkGen {
+                message: format!("the sampler reached field '{path}' outside any named schema"),
+            });
+        };
+        let inside = path
+            .strip_prefix(root.as_str())
+            .and_then(|rest| rest.strip_prefix('.'))
+            .unwrap_or(path);
+        Ok(
+            field_example(self.graph, self.side, schema, inside, field, text, path)?
+                .map(|value| (value, Vec::new())),
+        )
     }
 
     /// Sample one value and hand back the constraints it alone leaves unmet, leaving the sampler's
@@ -1052,7 +1202,9 @@ impl<'g> Sampler<'g> {
                         schema: schema.name.clone(),
                     }));
                 }
+                self.frames.push((&schema.name, subject.to_string()));
                 let value = self.value(&schema.body, restriction, subject, depth + 1);
+                self.frames.pop();
                 self.visiting.remove(id);
                 value
             }
@@ -1150,7 +1302,7 @@ impl<'g> Sampler<'g> {
         subject: &str,
         depth: usize,
     ) -> Outcome {
-        let keys = match self.key_domain(key, subject)? {
+        let keys = match key_domain(self.graph, key, subject)? {
             Ok(keys) => keys,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -1192,48 +1344,6 @@ impl<'g> Sampler<'g> {
         Ok(checked(Value::Object(map), constraints, subject))
     }
 
-    /// The keys a map's key type admits, through named aliases.
-    fn key_domain(
-        &self,
-        key: &Type,
-        subject: &str,
-    ) -> Result<Result<KeyDomain, SampleRefusal>, CoreError> {
-        let mut ty = key;
-        let mut seen = BTreeSet::new();
-        loop {
-            match ty {
-                Type::Primitive(Prim::String) => return Ok(Ok(KeyDomain::Strings)),
-                // An enum key with no members has no key to sample: a map-key refusal, which (unlike
-                // an empty enum value) never sends an error model to the generic envelope.
-                Type::Enum(members) if members.is_empty() => {
-                    return Ok(Err(SampleRefusal::MapKey {
-                        subject: subject.to_string(),
-                    }));
-                }
-                Type::Enum(members) => return Ok(Ok(KeyDomain::Members(members.clone()))),
-                Type::Named(id) => {
-                    let schema = self
-                        .graph
-                        .schemas
-                        .iter()
-                        .find(|schema| &schema.id == id)
-                        .ok_or_else(|| dangling(id))?;
-                    if !seen.insert(id.as_str()) {
-                        return Ok(Err(SampleRefusal::MapKey {
-                            subject: subject.to_string(),
-                        }));
-                    }
-                    ty = &schema.body;
-                }
-                _ => {
-                    return Ok(Err(SampleRefusal::MapKey {
-                        subject: subject.to_string(),
-                    }));
-                }
-            }
-        }
-    }
-
     /// A request object carries its required fields, plus optional fields in field order until
     /// `minProperties` is met. A reply carries every field; a refused optional one is dropped, and
     /// optional fields are dropped from the end while `maxProperties` is exceeded.
@@ -1262,7 +1372,7 @@ impl<'g> Sampler<'g> {
                 format: field.meta.format.as_deref(),
             };
             let path = format!("{subject}.{}", field.json_name);
-            match self.isolated(&field.schema, &restriction, &path, depth + 1)? {
+            match self.field(field, &restriction, &path, depth + 1)? {
                 Ok((value, unmet)) => {
                     map.insert(field.json_name.clone(), value);
                     field_unmet.push((&field.json_name, unmet));
@@ -1298,6 +1408,43 @@ impl<'g> Sampler<'g> {
             }
         }
         Ok(checked(Value::Object(map), constraints, subject))
+    }
+}
+
+/// The keys a map's key type admits, through named aliases.
+fn key_domain(
+    graph: &ApiGraph,
+    key: &Type,
+    subject: &str,
+) -> Result<Result<KeyDomain, SampleRefusal>, CoreError> {
+    let mut ty = key;
+    let mut seen = BTreeSet::new();
+    loop {
+        match ty {
+            Type::Primitive(Prim::String) => return Ok(Ok(KeyDomain::Strings)),
+            // An enum key with no members has no key to sample: a map-key refusal, which (unlike
+            // an empty enum value) never sends an error model to the generic envelope.
+            Type::Enum(members) if members.is_empty() => {
+                return Ok(Err(SampleRefusal::MapKey {
+                    subject: subject.to_string(),
+                }));
+            }
+            Type::Enum(members) => return Ok(Ok(KeyDomain::Members(members.clone()))),
+            Type::Named(id) => {
+                let schema = schema_by_id(graph, id)?;
+                if !seen.insert(id.as_str()) {
+                    return Ok(Err(SampleRefusal::MapKey {
+                        subject: subject.to_string(),
+                    }));
+                }
+                ty = &schema.body;
+            }
+            _ => {
+                return Ok(Err(SampleRefusal::MapKey {
+                    subject: subject.to_string(),
+                }));
+            }
+        }
     }
 }
 
