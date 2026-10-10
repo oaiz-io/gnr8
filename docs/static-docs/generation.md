@@ -4,8 +4,9 @@
 
 `StaticDocs` writes a deterministic Markdown reference for the API: an index, one page per group,
 operation and schema, an error catalog, an authentication page, and an `llms.txt` index for agents.
-Every page is rendered from the same final graph as `openapi.yaml` and the SDKs, and every code
-sample on it is checked against the SDK it documents by `gnr8 verify`. The per-SDK `README.md` and
+Every page is rendered from the same final graph as `openapi.yaml` and the SDKs, and every SDK code
+sample on it is checked against the SDK it documents by `gnr8 verify`. A generated CLI's invocation
+and its declared command examples are printed verbatim and are not checked. The per-SDK `README.md` and
 `reference.md` are another view of the same docs model; see
 [The SDK's README and reference](#the-sdks-readme-and-reference).
 
@@ -30,8 +31,9 @@ it — docs are opt-in.
 
 ```text
 <dir>/
-  index.md                     title, description, version, servers, groups, operations, schemas,
-                               and the diagnostics that name no operation
+  index.md                     title, description, version, base path, servers, groups,
+                               operations, schemas, a `## Reference` list linking the errors and
+                               authentication pages, and the diagnostics that name no operation
   llms.txt                     the same pages, in the same order, as an index for agents
   errors.md                    when some operation declares an error response
   authentication.md            when the graph declares security
@@ -250,9 +252,9 @@ refused reply) is answered with an empty-bodied `400`, and the call must surface
 error carrying that status. The client is built the way the contract test builds it, so rung 3
 covers the call; the printed construction line is rung 2's.
 
-A sibling with no published import name, a missing toolchain (no `node`, or `node` without a
-`typescript` compiler), or a suite whose every operation's sample is refused (counted, not run) is
-reported `skipped` with the reason. A run in which every check was skipped is not verified. A
+A sibling with no published import name, a missing toolchain (no `go`, no `python3`, no `node`, or
+`node` without a `typescript` compiler), or a suite whose every operation's sample is refused
+(counted, not run) is reported `skipped` with the reason. A run in which every check was skipped is not verified. A
 Python unit that cannot import a module its SDK needs — `pydantic` for the default model style —
 names the `ModuleNotFoundError`.
 
@@ -319,6 +321,7 @@ escaped and summaries are folded to one line.
 ## Not included
 
 No HTML, JavaScript, search index, try-it console or hosted service; no site-generator files,
-sidebar manifests or front matter; no `curl`; no heading anchors; no error-code catalog; no
+sidebar manifests or front matter; no `curl`; no heading anchors; no catalog of application error
+codes (`errors.md` catalogs the HTTP statuses the API declares); no
 changelog page; no source-file links; no TypeScript CLI section; no samples for custom targets; no
 sample for a declared error status other than the lowest with a body.

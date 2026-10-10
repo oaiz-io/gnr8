@@ -132,7 +132,8 @@ gnr8 --json verify
 ```
 
 Runs the pipeline, then runs generated SDK contract tests, every selected Go/Python CLI command's
-`--help`, and — when the pipeline declares `StaticDocs` — every docs code sample:
+`--help`, and every SDK code sample a docs file prints — on `StaticDocs` pages, and in each SDK's own
+`README.md` and `reference.md`:
 
 ```text
 Go SDK              passed
@@ -192,16 +193,22 @@ executable. A nonzero probe, permission error, build/import failure, missing ent
 help is a failure. SDK toolchain failures retain their failure policy. A missing Go formatter can
 stop pipeline generation before the CLI probe, with exit 2.
 
-Docs suites check `StaticDocs` code samples, one suite per sibling SDK target (see
-[Static docs generation](../static-docs/generation.md#how-the-pages-are-verified)). Each first
-requires every page it checks among this run's fresh artifacts and the sample printed verbatim in
-it, after post-processors. Then it runs the language's tool over the samples (rung 2), and runs each
+Docs suites check the SDK code samples gnr8 prints (see
+[Static docs generation](../static-docs/generation.md#how-the-pages-are-verified)). A pipeline that
+declares `StaticDocs` gets one suite per sibling SDK target for each `StaticDocs` target; its pages
+live in the `StaticDocs` directory, and an SDK that writes its docs must print the same samples in
+its `README.md` and `reference.md`. A pipeline without `StaticDocs` gets one suite per SDK target
+that writes its `README.md` and `reference.md` (the default) and emits package metadata; its pages
+are those two files, in the SDK's own directory. An SDK target with no package metadata prints no
+sample, so without `StaticDocs` it has no docs suite at all. Each suite first requires every page it
+checks among this run's fresh artifacts and every block a sample relies on printed verbatim in it,
+after post-processors. Then it runs the language's tool over the samples (rung 2), and runs each
 sample's call against a recording transport that answers with the reply the page prints, comparing
 the request sent with the page's HTTP exchange and asserting the call's outcome (rung 3). A suite is
 skipped — with the reason — when its SDK target emits no package metadata (no published import
-name), when its toolchain is missing (no `go`, no `python3`, no `node`, or `node` without a
-`typescript` compiler), or when every operation's sample is refused (the count is reported; nothing
-runs).
+name; with `StaticDocs` only), when its toolchain is missing (no `go`, no `python3`, no `node`, or
+`node` without a `typescript` compiler), or when every operation's sample is refused (the count is
+reported; nothing runs).
 
 Exit 0 requires at least one passing suite and no failing suite; mixed passing/skipped results list
 the skips and pass. A run in which every suite was skipped reports `verified: false`, explains that
@@ -223,12 +230,15 @@ The tools it runs, and the toolchains they need:
 
 JSON retains SDK results in `suites` (each with its `cases` and `refused` counts) and adds `cli_suites` with language, program, output path,
 planned case count, tool, duration, status, typed reason and per-command results, and `docs_suites`
-with language, label, docs and SDK output paths, the checked and refused sample counts, tool,
+with language, label, docs and SDK output paths (`docs_dir` is the `StaticDocs` directory, or the
+SDK's own directory for a suite that checks its `README.md` and `reference.md`), the checked and
+refused sample counts, tool,
 duration, status and a typed reason (`no_consumer_identity`, `toolchain_absent`, `no_samples`,
 `missing_page`, `snippet_not_in_page`, `materialization`, `rejected`, `wire_mismatch`) naming the
 operation and page when one is at fault. Failure reasons carry the command arguments, exit code when
 available and captured output excerpt. Human reports label CLI and docs rows separately; repeated
-labels include the output path. `counts.passed`, `counts.failed` and `counts.skipped` count target
+labels include the output path, and a docs label still repeated (one SDK checked against two
+`StaticDocs` targets) also names the docs directory. `counts.passed`, `counts.failed` and `counts.skipped` count target
 suites across all three arrays. `timings_ms`, `diagnostics` and `worker`
 retain their existing meanings.
 

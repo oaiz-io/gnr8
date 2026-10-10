@@ -155,12 +155,20 @@ SDK (see [Static docs generation](../static-docs/generation.md#the-sdks-readme-a
   that emits no package metadata has no import to name, and its README says so in place of the
   import, the install line and the quick start.
 - `reference.md` is one file holding every docs page as a section, one heading level down: the
-  index, each operation with its parameters, bodies, responses and samples (the call, the typed
-  error, the pagination iterator) for this SDK, each schema, the error catalog and authentication.
+  index, each operation with its parameters, bodies, responses, samples (the call, the typed
+  error, the pagination iterator) for this SDK and, for a Go or Python SDK with a generated CLI,
+  the CLI invocation and its declared examples, each schema, the error catalog and authentication.
   It links only `README.md`; every other reference is a code span.
 
-`gnr8 verify` checks every sample the two files print — they compile and send the request they
-describe — whether or not the pipeline also declares `StaticDocs`.
+`gnr8 verify` checks every SDK sample the two files print — they compile and send the request they
+describe — whether or not the pipeline also declares `StaticDocs`. A CLI invocation and declared CLI
+examples are printed verbatim and are not checked.
+
+Writing the two files builds the same docs model `StaticDocs` renders from, so with docs on (the
+default) the SDK target fails generation on what `StaticDocs` fails on: an invalid declared example
+(`CoreError::InvalidExample`), a blank API title or group name, prose that breaks `reference.md`'s
+structure (an unclosed fence or HTML block in a doc comment), or an `OpenApiSchemaPatch` that
+changes a field fact `reference.md` prints. `.without_docs()` writes neither file.
 
 A diagnostic is printed where it belongs: under its operation, or under the index section when it
 names no operation. `reference.md` publishes a diagnostic only when its location is **inside the

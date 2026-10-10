@@ -73,6 +73,9 @@ fn main() -> std::process::ExitCode {
 - Go SDK: `GoSdk::new().module("example.com/yourservice/sdk").to("sdk")`.
 - Python SDK: `PySdk::new().module("example.com/yourservice/sdk").to("sdk")`.
 - TypeScript SDK: `TsSdk::new().module("example.com/yourservice/sdk").to("sdk")`.
+- Static Markdown docs: `StaticDocs::new().to("docs")`; an index, one page per group, operation and
+  schema, an error catalog, an authentication page and `llms.txt`, with a code sample per declared
+  SDK target that `gnr8 verify` checks.
 
 SDK outputs include `README.md` (import, install line, one verified quick-start call) and
 `reference.md` (every operation and schema with verified samples for that SDK) for later agents.
@@ -87,7 +90,10 @@ SDK outputs include `README.md` (import, install line, one verified quick-start 
 - `gnr8 generate`: writes outputs and updates ownership manifest.
 - `gnr8 check`: exits 1 if outputs are stale or user-edited.
 - `gnr8 verify`: runs each generated SDK's contract test with that language's own test tool
-  (`go test`, `unittest`, `tsc` + `node --test`) against a fake transport; exits 1 if any suite fails.
+  (`go test`, `unittest`, `tsc` + `node --test`) against a fake transport, every generated Go/Python
+  CLI command's `--help`, and every SDK code sample a `StaticDocs` page, SDK `README.md` or SDK
+  `reference.md` prints (compiled or run, and its request compared with the page's); exits 1 if any
+  suite fails.
 - `gnr8 changes --base <ref>`: compares the current projected graph with the committed
   `generated/gnr8.graph.json` at that revision; exits 1 only for checked breaking findings. Repeat
   `--exempt-tag <name>` to exempt exact standard operation tags on every extant side. `--markdown`
