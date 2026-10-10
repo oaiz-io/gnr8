@@ -138,6 +138,22 @@ impl<'g> NavModel<'g> {
             })
     }
 
+    /// The published name of a schema, by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::DocsGen`] for a dangling schema reference — never the raw id in place
+    /// of a name.
+    pub(crate) fn schema_name(&self, schema_id: &str) -> Result<&'g str, CoreError> {
+        self.schemas
+            .iter()
+            .find(|schema| schema.id == schema_id)
+            .map(|schema| schema.name.as_str())
+            .ok_or_else(|| CoreError::DocsGen {
+                message: format!("StaticDocs references dangling schema '{schema_id}'"),
+            })
+    }
+
     /// The group page an operation belongs to, if it is grouped.
     pub(crate) fn group_page(&self, op: &Operation) -> Option<&str> {
         let name = op.group.as_deref()?;
@@ -272,4 +288,44 @@ fn llms_line(label: &str, page: &str, summary: Option<&str>) -> String {
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::NavModel;
+    use crate::graph::{ApiGraph, Schema, SourceSpan, Type};
+    use crate::CoreError;
+
+    /// A schema the model does not carry is the same typed dangling-reference error whether a page
+    /// asks for its file or its name; neither answer is ever the raw id standing in for a name.
+    #[test]
+    fn a_dangling_schema_has_neither_a_page_nor_a_name() {
+        let mut graph = ApiGraph::default();
+        graph.schemas.push(Schema {
+            id: "internal/dto.Book".to_string(),
+            name: "Book".to_string(),
+            body: Type::Any {},
+            enum_source_order: Vec::new(),
+            provenance: SourceSpan {
+                file: "dto.go".to_string(),
+                start_line: 1,
+                end_line: 1,
+            },
+        });
+        let nav = NavModel::build(&graph, false).unwrap();
+        assert_eq!(nav.schema_name("internal/dto.Book").unwrap(), "Book");
+        for err in [
+            nav.schema_name("internal/dto.Missing").unwrap_err(),
+            nav.schema_page("internal/dto.Missing").unwrap_err(),
+        ] {
+            assert!(matches!(err, CoreError::DocsGen { .. }), "{err:?}");
+            assert!(
+                err.to_string()
+                    .contains("dangling schema 'internal/dto.Missing'"),
+                "{err}"
+            );
+        }
+    }
 }

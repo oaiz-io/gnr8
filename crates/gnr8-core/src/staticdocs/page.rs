@@ -180,8 +180,7 @@ pub(crate) fn render_operation(
     let mut out = format!("# {}\n\n", code_span(&op.id));
 
     let mut line = vec![code_span(&request_line(graph, op))];
-    if let Some(group_page) = site.nav.group_page(op) {
-        let name = op.group.as_deref().unwrap_or_default();
+    if let (Some(name), Some(group_page)) = (op.group.as_deref(), site.nav.group_page(op)) {
         line.push(format!(
             "Group: {}",
             links.link(&page, group_page, &link_label(name))
@@ -622,12 +621,7 @@ fn responses_section(
         let body = match &response.body {
             Some(body) => {
                 let schema_page = site.nav.schema_page(&body.ref_id)?;
-                let name = site
-                    .graph
-                    .schemas
-                    .iter()
-                    .find(|schema| schema.id == body.ref_id)
-                    .map_or(body.ref_id.as_str(), |schema| schema.name.as_str());
+                let name = site.nav.schema_name(&body.ref_id)?;
                 links.link(page, schema_page, &code_span(name))
             }
             None => match response.body_kind.as_str() {
@@ -910,7 +904,7 @@ pub(crate) fn type_label(
         )),
         Type::Named(id) => {
             let page = nav.schema_page(id)?;
-            beside(links.link(from, page, &code_span(nav_schema_name(nav, id))))
+            beside(links.link(from, page, &code_span(nav.schema_name(id)?)))
         }
         Type::Object(_) => with_format("object", None),
         Type::Enum(members) => beside(format!(
@@ -935,13 +929,6 @@ pub(crate) fn type_label(
             None => format!("{} (free-form)", code_span("object")),
         },
     })
-}
-
-fn nav_schema_name<'a>(nav: &'a NavModel<'_>, id: &'a str) -> &'a str {
-    nav.schemas
-        .iter()
-        .find(|schema| schema.id == id)
-        .map_or(id, |schema| schema.name.as_str())
 }
 
 /// Each declared constraint as a code span, keyed by its `OpenAPI` keyword.
