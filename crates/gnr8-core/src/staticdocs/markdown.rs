@@ -274,18 +274,11 @@ mod tests {
         assert_eq!(link_label("a]b [c]\nd"), "a\\]b \\[c\\] d");
     }
 
-    /// The words `scripts/check-invariants.sh` rejects in product surface. Committed docs under
-    /// `examples/` are inside the gate's scope, so a heading that used one would fail `make check`
-    /// in every project that commits its docs. (One is spelled in halves: the gate greps this file
-    /// too, and naming the word whole would trip it.)
-    const GATED: [&str; 6] = [
-        "compat",
-        "legacy",
-        concat!("brown", "field"),
-        "migration",
-        "baseline",
-        "profile",
-    ];
+    /// The AGENTS.md rule 0.3 words a doc section must not be named with. `make invariants` greps
+    /// these only as identifiers, so a heading in prose needs this test. The one 0.3 word the gate
+    /// rejects anywhere in its scope, in any case, is left out: the heading literals above sit in
+    /// this file, which is in the gate's scope, so the gate itself already fails on them.
+    const GATED: [&str; 5] = ["compat", "legacy", "migration", "baseline", "profile"];
 
     #[test]
     fn fixed_headings_are_invariant_gate_clean() {
