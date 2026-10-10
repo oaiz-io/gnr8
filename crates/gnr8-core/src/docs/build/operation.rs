@@ -30,13 +30,14 @@ const PARAMETER_LOCATIONS: [(&str, &str); 4] = [
     ("cookie", "Cookie"),
 ];
 
-const PARAMETER_COLUMNS: [&str; 6] = [
+const PARAMETER_COLUMNS: [&str; 7] = [
     "Name",
     "Type",
     "Required",
     "Default",
     "Constraints",
     "Description",
+    "Example",
 ];
 
 const RESPONSE_COLUMNS: [&str; 5] = ["Status", "Body", "Media types", "Headers", "Description"];
@@ -269,6 +270,11 @@ fn parameters(nav: &Nav<'_>, op: &Operation) -> Result<Vec<(&'static str, Table)
                 param.default.as_ref().map_or(Inline::text(""), literal),
                 Inline::join(constraints, ", "),
                 Inline::text(one_line(param.description.as_deref().unwrap_or_default())),
+                // Read as a value of the parameter's type, as a field's example is.
+                param
+                    .example
+                    .as_deref()
+                    .map_or(Inline::text(""), |example| Inline::code(one_line(example))),
             ]);
         }
         out.push((

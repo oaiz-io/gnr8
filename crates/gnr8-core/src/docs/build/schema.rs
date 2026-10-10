@@ -213,8 +213,13 @@ pub(super) fn constraint_spans(constraints: &Constraints, prefix: &str) -> Vec<I
     push("exclusiveMinimum", constraints.exclusive_minimum.clone());
     push("maximum", constraints.maximum.clone());
     push("exclusiveMaximum", constraints.exclusive_maximum.clone());
+    push("multipleOf", constraints.multiple_of.clone());
     push("minItems", constraints.min_items.map(|v| v.to_string()));
     push("maxItems", constraints.max_items.map(|v| v.to_string()));
+    push(
+        "uniqueItems",
+        constraints.unique_items.then(|| "true".to_string()),
+    );
     push(
         "minProperties",
         constraints.min_properties.map(|v| v.to_string()),

@@ -584,6 +584,32 @@ fn parameter_table_renders_parameter_prose() {
     );
 }
 
+/// A parameter's declared example is a published fact, printed in its row as a field's is, and the
+/// `multipleOf` and `uniqueItems` constraints are printed with the others.
+#[test]
+fn parameter_table_prints_the_declared_example_and_every_constraint() {
+    let mut value = bookstore_json();
+    let limit = &mut value["operations"][0]["params"][1];
+    limit["example"] = json!("40");
+    limit["constraints"]["multiple_of"] = json!("10");
+    value["schemas"][1]["body"]["of"][0]["meta"] = json!({"constraints": {"unique_items": true}});
+    let pages = render(&graph_of(value), &[]);
+    let parameters = section(page(&pages, "operations/list-books.md"), "Parameters");
+    assert!(
+        parameters
+            .contains("| Name | Type | Required | Default | Constraints | Description | Example |"),
+        "{parameters}"
+    );
+    assert!(
+        parameters.contains(
+            "| `limit` | `integer` | no | `20` | `minimum: 1`, `maximum: 100`, `multipleOf: 10` |  | `40` |"
+        ),
+        "{parameters}"
+    );
+    let fields = section(page(&pages, "schemas/book-list.md"), "Fields");
+    assert!(fields.contains("`uniqueItems: true`"), "{fields}");
+}
+
 /// A column with no cell in any row says nothing, so a table leaves it out; a column some row fills
 /// keeps an empty cell for every row that has nothing there.
 #[test]
