@@ -135,6 +135,11 @@ corrections that change this plan's design, each a [D] against the text below:
 - **Commit `268bf29` misdescribes one change** (review 27): the moved `CollectionRules.sizes` line is
   in the canned reply of the gin fixture's Go contract test, not a request value. History is left as
   is; this note is the correction.
+- **The TypeScript SDK with bearer or basic auth now compiles under `exactOptionalPropertyTypes`**
+  ([D]16, closing verification): the auth request fields are typed instead of optionally assigned.
+  SDKs without that auth are byte-identical.
+- **`schema_consumers` includes request-body variants and response headers** ([D]17): `gnr8 changes`
+  now sees schema use through them, so the docs "Used by" section and the change report agree.
 
 **README quick-start follow-up (D2), draft issue text — not filed.**
 
@@ -1434,7 +1439,7 @@ and `examples-check` proves it.
 | P4 | `taskflow` | `.gnr8/src/main.rs`; new `generated/docs/**` |
 | — | `flask-bookstore` | **none.** A second Python docs tree adds review volume and no coverage. |
 
-**SDK directories change in exactly two places,** both named above: the S1 contract-test re-baseline
+**SDK directories change in the plan's two places plus the two [D]16/[D]17 corrections above:** the S1 contract-test re-baseline
 (W1.4) and nestjs-bookstore's package-metadata opt-in (W2.5). Declaring `StaticDocs` itself changes
 none (D2).
 
