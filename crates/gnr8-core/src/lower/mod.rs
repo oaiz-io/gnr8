@@ -602,17 +602,25 @@ fn lower_parameter(
     if param.openapi_content.is_none() {
         if let Some((_, raw)) = openapi_fields.iter_mut().find(|(name, _)| name == "schema") {
             write_raw_constraints(raw, &param.constraints, &param.schema, schemas);
-            let items = match &param.schema {
-                Type::Array(items) => Some((items.as_ref(), "items")),
-                Type::Map { value, .. } => Some((value.as_ref(), "additionalProperties")),
+            let items = match collection_of(&param.schema, schemas) {
+                Some(Type::Array(items)) => Some((items.as_ref(), "items")),
+                Some(Type::Map { value, .. }) => Some((value.as_ref(), "additionalProperties")),
                 _ => None,
             };
-            if let Some((item_type, key)) = items {
-                if let Some(item_raw) = raw
-                    .as_object_mut()
-                    .and_then(|object| object.get_mut(key))
-                    .filter(|value| value.is_object())
+            if let (Some((item_type, key)), Some(object)) = (items, raw.as_object_mut()) {
+                // A schema that is a `$ref` to the collection states no items of its own; the
+                // referenced items' constraints are written beside the `$ref`, as the
+                // collection's own are.
+                if !object.contains_key(key)
+                    && object.contains_key("$ref")
+                    && !param.item_constraints.is_empty()
                 {
+                    object.insert(
+                        key.to_string(),
+                        serde_json::Value::Object(serde_json::Map::new()),
+                    );
+                }
+                if let Some(item_raw) = object.get_mut(key).filter(|value| value.is_object()) {
                     write_raw_constraints(item_raw, &param.item_constraints, item_type, schemas);
                 }
             }
@@ -718,6 +726,21 @@ fn example_literal(text: &str, kind: Option<&Prim>) -> LiteralValue {
         Some(Prim::Int { .. } | Prim::Float { .. }) => LiteralValue::Number(text.to_string()),
         Some(Prim::Bool) if text == "true" || text == "false" => LiteralValue::Bool(text == "true"),
         _ => LiteralValue::String(text.to_string()),
+    }
+}
+
+/// The array or map a parameter type is, through named aliases; `None` for anything else.
+fn collection_of<'a>(ty: &'a Type, schemas: &'a [crate::graph::Schema]) -> Option<&'a Type> {
+    let mut ty = ty;
+    let mut seen = BTreeSet::new();
+    loop {
+        match ty {
+            Type::Array(_) | Type::Map { .. } => return Some(ty),
+            Type::Named(id) if seen.insert(id.as_str()) => {
+                ty = &schemas.iter().find(|schema| &schema.id == id)?.body;
+            }
+            _ => return None,
+        }
     }
 }
 

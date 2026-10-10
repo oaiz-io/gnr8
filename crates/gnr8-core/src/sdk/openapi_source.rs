@@ -1129,9 +1129,31 @@ impl Importer {
         name: &str,
     ) -> (Constraints, Constraints) {
         let own = self.take_schema_constraints(raw, operation_id, name, "parameter");
-        let items = match parameter_items_mut(raw) {
-            Some(items) => self.take_schema_constraints(items, operation_id, name, "item"),
-            None => Constraints::default(),
+        let beside = parameter_items_mut(raw)
+            .map(|items| self.take_schema_constraints(items, operation_id, name, "item"));
+        // The items of the array a `$ref` names are the parameter's items too: followed exactly
+        // as the reference itself is.
+        let reference = raw.get("$ref").and_then(Value::as_str).map(str::to_string);
+        let referenced = reference.as_deref().and_then(|reference| {
+            let mut target = self.resolve_schema_chain(reference)?;
+            parameter_items_mut(&mut target)
+                .map(|items| self.take_schema_constraints(items, operation_id, name, "item"))
+        });
+        let items = match (beside, referenced, reference) {
+            (Some(beside), Some(referenced), Some(reference)) => {
+                let (combined, conflicts) = combined_constraints(beside, referenced);
+                for conflict in conflicts {
+                    self.warn_constraint_conflict(
+                        operation_id,
+                        name,
+                        "item",
+                        &reference,
+                        &conflict,
+                    );
+                }
+                combined
+            }
+            (beside, referenced, _) => beside.or(referenced).unwrap_or_default(),
         };
         (own, items)
     }
@@ -5438,6 +5460,51 @@ components:
         );
         super::upgrade_graph_from_artifact_v1(&mut version_1);
         assert_eq!(version_1, current);
+    }
+
+    /// A parameter whose schema is a `$ref` to an array keeps the referenced items' constraints,
+    /// and `openapi.yaml` publishes them beside the `$ref` as it publishes the array's own.
+    #[test]
+    fn a_referenced_array_parameter_keeps_its_item_constraints() {
+        let graph = import_yaml(
+            r##"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - { name: ids, in: query, schema: { $ref: "#/components/schemas/IdList" } }
+        - { name: codes, in: query, schema: { $ref: "#/components/schemas/Codes" } }
+      responses: { "204": { description: none } }
+components:
+  schemas:
+    IdList: { type: array, maxItems: 4, items: { type: integer, minimum: 0 } }
+    Codes: { type: array, items: { $ref: "#/components/schemas/Code" } }
+    Code: { type: string, maxLength: 3 }
+"##,
+        );
+        let param = |name: &str| {
+            graph.operations[0]
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+        };
+        assert_eq!(param("ids").constraints.max_items, Some(4));
+        assert_eq!(param("ids").item_constraints.minimum.as_deref(), Some("0"));
+        assert_eq!(param("codes").item_constraints.max_length, Some(3));
+        assert_eq!(
+            emitted_parameter_schema(&graph, "ids"),
+            serde_json::json!({
+                "$ref": "#/components/schemas/IdList", "maxItems": 4, "items": {"minimum": 0}
+            })
+        );
+        assert_eq!(
+            emitted_parameter_schema(&graph, "codes"),
+            serde_json::json!({"$ref": "#/components/schemas/Codes", "items": {"maxLength": 3}})
+        );
     }
 
     /// Rule 3: a fact stated both beside a `$ref` and in the schema it names is combined by one

@@ -252,7 +252,9 @@ must move the minor version.
   schema's enum, so `{$ref: Lvl, enum: [2, 3]}` with `Lvl: {enum: [1, 2]}` publishes `enum: [2]`
   instead of Lvl's wider `[1, 2]`. Two different patterns, or two enums with no member in common,
   are a `request.parameter.constraints.conflict` diagnostic, and the keyword stated beside the
-  `$ref` is the one carried.
+  `$ref` is the one carried. A parameter whose schema is a `$ref` to an array or map keeps the
+  referenced items' constraints too, and `openapi.yaml` publishes them beside the `$ref`
+  (`{$ref: IdList, maxItems: 4, items: {minimum: 0}}`).
 
 ## 0.18.0 — 2026-10-10
 
