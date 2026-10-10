@@ -338,9 +338,13 @@ in sorted order — with one classification shared by the SDKs, the contract tes
 
 | Media type | The body | Return type |
 | --- | --- | --- |
-| `application/json`, any `+json` | JSON, decoded into the model | the model |
-| any `text/*` | the text itself, decoded as UTF-8 | `string` (Go, TypeScript), `str` (Python) |
+| `application/json`, any `+json`, `*/*`, `application/*` | JSON, decoded into the model | the model |
+| any `text/*`, including the range `text/*` | the text itself, decoded as UTF-8 | `string` (Go, TypeScript), `str` (Python) |
 | anything else | the bytes, as an opaque success | `[]byte`, `bytes`, `Blob` |
+
+A media range is classified by the types it admits, because the declared schema describes the body
+whichever admitted type the server picks. A range that admits `application/json` (`*/*`,
+`application/*`) is JSON, `text/*` is text, and any other range (`image/*`) is bytes.
 
 Only when no JSON success model is declared does another success become the return type: a `text/*`
 reply first, then opaque bytes. A `text/*` reply is returned as a string whatever schema describes

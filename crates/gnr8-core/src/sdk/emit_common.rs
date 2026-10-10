@@ -2815,9 +2815,15 @@ fn reject_impossible_body(op: &Operation, resp: &crate::graph::Response) -> Resu
 /// One classification serves every consumer of a reply — the SDK emitters' decode and return type,
 /// the contract tests' canned replies, and the docs page's printed and replayed reply — so a media
 /// type cannot be JSON to one of them and text to another.
+///
+/// A media range (`*/*`, `application/*`, `text/*`) is classified by what it admits, because a
+/// schema declared under it describes the body whichever admitted type the server picks: a range
+/// that admits `application/json` (`*/*`, `application/*`) is JSON, `text/*` is text, and any other
+/// range is neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaFamily {
-    /// `application/json` and every `+json` structured-syntax type: the body is JSON.
+    /// `application/json`, every `+json` structured-syntax type, and a range that admits
+    /// `application/json`: the body is JSON.
     Json,
     /// Every `text/*` type: the body is the text itself, UTF-8.
     Text,
@@ -2833,7 +2839,11 @@ pub(crate) fn media_family(media_type: &str) -> MediaFamily {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    if essence == "application/json" || essence.ends_with("+json") {
+    if essence == "application/json"
+        || essence.ends_with("+json")
+        || essence == "*/*"
+        || essence == "application/*"
+    {
         MediaFamily::Json
     } else if essence.starts_with("text/") {
         MediaFamily::Text
@@ -3852,6 +3862,13 @@ mod tests {
             ("Text/CSV; charset=utf-8", MediaFamily::Text),
             ("application/octet-stream", MediaFamily::Other),
             ("application/xml", MediaFamily::Other),
+            // A range is classified by the media types it admits: one that admits
+            // `application/json` is JSON, `text/*` is text, and any other is neither.
+            ("*/*", MediaFamily::Json),
+            ("application/*", MediaFamily::Json),
+            ("Application/*; q=0.5", MediaFamily::Json),
+            ("text/*", MediaFamily::Text),
+            ("image/*", MediaFamily::Other),
         ] {
             assert_eq!(media_family(media), family, "{media}");
         }
@@ -3915,6 +3932,18 @@ mod tests {
         assert!(xml.body_model.is_none());
         assert_eq!(xml.binary_statuses, vec![200]);
         assert_eq!(xml.binary_content_type.as_deref(), Some("application/xml"));
+
+        // A schema-backed reply declared under a range that admits JSON returns the model.
+        let any = success_responses_of(
+            &op(serde_json::json!([
+                {"status": 200, "body": {"ref_id": "t.Widget"}, "content_type": "*/*", "content_types": ["*/*"]}
+            ])),
+            &graph,
+        )
+        .unwrap();
+        assert_eq!(any.body_model.as_deref(), Some("Widget"));
+        assert!(!any.text_body);
+        assert!(!any.has_binary_body());
 
         // A response declaring both a JSON and a text media type answers in the first, sorted.
         let both = success_responses_of(

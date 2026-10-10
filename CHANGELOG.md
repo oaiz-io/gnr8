@@ -148,9 +148,10 @@ must move the minor version.
   TypeScript) or `str` (Python), whatever schema describes the content; Python's `client.py` no
   longer imports that schema. A schema-backed reply in a media type that is neither JSON nor text
   (`application/xml`, say) was decoded as JSON too; it is now returned as bytes (`[]byte`, `bytes`,
-  `Blob`), as a download is. One classification of a media type — JSON for `application/json` and
-  `+json`, text for `text/*`, anything else neither — now serves the SDKs, the contract tests and
-  the docs page. A text reply is the return type only when the operation declares no JSON model;
+  `Blob`), as a download is. One classification of a media type — JSON for `application/json`,
+  `+json` and a range that admits JSON (`*/*`, `application/*`), text for `text/*`, anything else
+  neither — now serves the SDKs, the contract tests and the docs page. A schema-backed reply under
+  `*/*` or `application/*` still returns its model, as before. A text reply is the return type only when the operation declares no JSON model;
   beside one it is a status the method does not return, read from a response hook, and opaque bytes
   beside a text reply are too. Contract tests answer a text reply with the text under its declared
   media type (`content-type: text/plain`, body `gnr8`), and a text reply whose sample is not a string

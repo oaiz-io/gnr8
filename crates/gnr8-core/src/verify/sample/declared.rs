@@ -12,7 +12,9 @@ use crate::graph::direction::SchemaDirections;
 use crate::graph::{
     ApiGraph, Field, MediaExample, Operation, OperationDocsPolicy, Prim, Schema, Type, WellKnown,
 };
-use crate::sdk::emit_common::{request_body_models_of, RequestBodyEncoding};
+use crate::sdk::emit_common::{
+    media_family, request_body_models_of, MediaFamily, RequestBodyEncoding,
+};
 use crate::CoreError;
 
 use super::{
@@ -65,10 +67,10 @@ pub(crate) fn reply_media(op: &Operation, status: u16) -> Option<String> {
         .cloned()
 }
 
-/// Whether a media type carries its value as JSON, as the one media classifier says.
+/// Whether a media type carries its value as JSON, by the one classification every consumer of a
+/// reply shares ([`MediaFamily`]).
 fn is_json_media(content_type: &str) -> bool {
-    crate::sdk::emit_common::media_family(content_type)
-        == crate::sdk::emit_common::MediaFamily::Json
+    media_family(content_type) == MediaFamily::Json
 }
 
 /// The response example the reply of `status` is: the first one the operation declares for that
