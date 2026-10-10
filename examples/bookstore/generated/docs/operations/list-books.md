@@ -46,7 +46,7 @@ content-type: application/json
       "genre": "fiction",
       "id": "gnr8",
       "price": 1.5,
-      "publishedAt": "2024-01-02T03:04:05Z",
+      "publishedAt": "2024-01-02T03:04:05.123Z",
       "publisher": {
         "country": "gnr8",
         "name": "gnr8"

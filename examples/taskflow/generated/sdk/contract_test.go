@@ -123,7 +123,7 @@ func assertContractStatus(t *testing.T, err error, status int) {
 }
 
 func TestRequestShapeListTasks(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr[string]("gnr8")})
 	if err != nil {
@@ -135,7 +135,7 @@ func TestRequestShapeListTasks(t *testing.T) {
 }
 
 func TestRequestShapeCreateTask(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.CreateTask(context.Background(), CreateTaskRequest{Status: Status("done"), Title: "gnr8"})
 	if err != nil {
@@ -148,7 +148,7 @@ func TestRequestShapeCreateTask(t *testing.T) {
 }
 
 func TestRequestShapeDebugTasks(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.DebugTasks(context.Background())
 	if err != nil {
@@ -172,7 +172,7 @@ func TestRequestShapeDeleteTask(t *testing.T) {
 }
 
 func TestRequestShapeGetTask(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.GetTask(context.Background(), "gnr8")
 	if err != nil {
@@ -184,7 +184,7 @@ func TestRequestShapeGetTask(t *testing.T) {
 }
 
 func TestRequestShapeUpdateTask(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.UpdateTask(context.Background(), "gnr8", UpdateTaskRequest{})
 	if err != nil {
@@ -197,7 +197,7 @@ func TestRequestShapeUpdateTask(t *testing.T) {
 }
 
 func TestResponseDecodeListTasksPresent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr[string]("gnr8")})
 	if err != nil {
@@ -209,7 +209,7 @@ func TestResponseDecodeListTasksPresent(t *testing.T) {
 }
 
 func TestResponseDecodeCreateTaskPresent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.CreateTask(context.Background(), CreateTaskRequest{Status: Status("done"), Title: "gnr8"})
 	if err != nil {
@@ -222,7 +222,7 @@ func TestResponseDecodeCreateTaskPresent(t *testing.T) {
 }
 
 func TestResponseDecodeCreateTaskAbsent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.CreateTask(context.Background(), CreateTaskRequest{Status: Status("done"), Title: "gnr8"})
 	if err != nil {
@@ -250,7 +250,7 @@ func TestResponseDecodeDeleteTaskPresent(t *testing.T) {
 }
 
 func TestResponseDecodeGetTaskPresent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.GetTask(context.Background(), "gnr8")
 	if err != nil {
@@ -282,7 +282,7 @@ func TestTypedErrorGetTask404(t *testing.T) {
 }
 
 func TestAuthListTasks(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"tasks\":[{\"assignee\":{\"email\":\"gnr8\",\"id\":\"gnr8\",\"name\":\"gnr8\"},\"dueAt\":\"2024-01-02T03:04:05.123Z\",\"id\":\"gnr8\",\"labels\":[\"gnr8\"],\"notes\":\"gnr8\",\"priority\":7,\"status\":\"done\",\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.ListTasks(context.Background(), ListTasksParams{Status: Ptr[string]("gnr8")})
 	if err != nil {

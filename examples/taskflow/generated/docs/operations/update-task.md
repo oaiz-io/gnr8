@@ -57,7 +57,7 @@ content-type: application/json
     "id": "gnr8",
     "name": "gnr8"
   },
-  "dueAt": "2024-01-02T03:04:05Z",
+  "dueAt": "2024-01-02T03:04:05.123Z",
   "id": "gnr8",
   "labels": [
     "gnr8"

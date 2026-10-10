@@ -123,7 +123,7 @@ func assertContractStatus(t *testing.T, err error, status int) {
 }
 
 func TestRequestShapeListBooks(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr[string]("gnr8")})
 	if err != nil {
@@ -135,7 +135,7 @@ func TestRequestShapeListBooks(t *testing.T) {
 }
 
 func TestRequestShapeCreateBook(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.CreateBook(context.Background(), CreateBookRequest{Author: "gnr8", Genre: Genre("fiction"), Title: "gnr8"})
 	if err != nil {
@@ -160,7 +160,7 @@ func TestRequestShapeDeleteBook(t *testing.T) {
 }
 
 func TestRequestShapeGetBook(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.GetBook(context.Background(), "gnr8")
 	if err != nil {
@@ -172,7 +172,7 @@ func TestRequestShapeGetBook(t *testing.T) {
 }
 
 func TestRequestShapeUpdateBook(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.UpdateBook(context.Background(), "gnr8", UpdateBookRequest{})
 	if err != nil {
@@ -185,7 +185,7 @@ func TestRequestShapeUpdateBook(t *testing.T) {
 }
 
 func TestResponseDecodeListBooksPresent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr[string]("gnr8")})
 	if err != nil {
@@ -197,7 +197,7 @@ func TestResponseDecodeListBooksPresent(t *testing.T) {
 }
 
 func TestResponseDecodeCreateBookPresent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.CreateBook(context.Background(), CreateBookRequest{Author: "gnr8", Genre: Genre("fiction"), Title: "gnr8"})
 	if err != nil {
@@ -210,7 +210,7 @@ func TestResponseDecodeCreateBookPresent(t *testing.T) {
 }
 
 func TestResponseDecodeCreateBookAbsent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.CreateBook(context.Background(), CreateBookRequest{Author: "gnr8", Genre: Genre("fiction"), Title: "gnr8"})
 	if err != nil {
@@ -238,7 +238,7 @@ func TestResponseDecodeDeleteBookPresent(t *testing.T) {
 }
 
 func TestResponseDecodeGetBookPresent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.GetBook(context.Background(), "gnr8")
 	if err != nil {
@@ -270,7 +270,7 @@ func TestTypedErrorGetBook404(t *testing.T) {
 }
 
 func TestAuthListBooks(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"books\":[{\"author\":\"gnr8\",\"genre\":\"fiction\",\"id\":\"gnr8\",\"price\":1.5,\"publishedAt\":\"2024-01-02T03:04:05.123Z\",\"publisher\":{\"country\":\"gnr8\",\"name\":\"gnr8\"},\"subtitle\":\"gnr8\",\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]}")}}
 	client := contractClient(transport, WithAPIKeyHeader("ApiKeyAuth", "gnr8-contract-key"))
 	out, err := client.ListBooks(context.Background(), ListBooksParams{Genre: Ptr[string]("gnr8")})
 	if err != nil {

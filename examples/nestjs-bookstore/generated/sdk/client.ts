@@ -192,6 +192,23 @@ export class Client {
     }
   }
 
+  async _decodeText(response: Response): Promise<string> {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    try {
+      return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+        bytes,
+      );
+    } catch (cause) {
+      throw new ResponseDecodeError("invalid_text", response.status, {
+        headers: response.headers,
+        requestId: response.headers.get("x-request-id") ?? undefined,
+        expectedContentType: "text/*",
+        actualContentType: response.headers.get("content-type") ?? undefined,
+        cause,
+      });
+    }
+  }
+
   async _readErrorBody(
     response: Response,
   ): Promise<{ rawBody: string; jsonBody: unknown }> {

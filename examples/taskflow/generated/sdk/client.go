@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -493,4 +494,47 @@ func encodeWireQuery(values url.Values, allowReserved map[string]map[int]bool) s
 		}
 	}
 	return strings.Join(parts, "&")
+}
+
+// wireNumber writes a float parameter value as every generated SDK writes it: the shortest
+// decimal that reads back as the same value, laid out as JavaScript's Number#toString lays it out
+// (3, not 3.0; 10000000000000000, not 1e+16; 1e-7 below a millionth).
+func wireNumber(value float64, bits int) string {
+	if math.IsNaN(value) {
+		return "NaN"
+	}
+	if math.IsInf(value, 0) {
+		if value > 0 {
+			return "Infinity"
+		}
+		return "-Infinity"
+	}
+	if value == 0 {
+		return "0"
+	}
+	sign := ""
+	if value < 0 {
+		sign = "-"
+		value = -value
+	}
+	mantissa, exponent, _ := strings.Cut(strconv.FormatFloat(value, 'e', -1, bits), "e")
+	digits := strings.Replace(mantissa, ".", "", 1)
+	power, _ := strconv.Atoi(exponent)
+	point := power + 1
+	switch {
+	case len(digits) <= point && point <= 21:
+		return sign + digits + strings.Repeat("0", point-len(digits))
+	case 0 < point && point <= 21:
+		return sign + digits[:point] + "." + digits[point:]
+	case -6 < point && point <= 0:
+		return sign + "0." + strings.Repeat("0", -point) + digits
+	}
+	text := digits[:1]
+	if len(digits) > 1 {
+		text += "." + digits[1:]
+	}
+	if point > 0 {
+		return sign + text + "e+" + strconv.Itoa(point-1)
+	}
+	return sign + text + "e-" + strconv.Itoa(1-point)
 }
