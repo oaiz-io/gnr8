@@ -148,7 +148,8 @@ pub(crate) fn docs_edge(targets: impl FnOnce(Pipeline) -> Pipeline) -> DocsRun {
 /// The docs-wire fixture: an imported `OpenAPI` document whose sampled values every generated SDK
 /// has to put on the wire exactly as the page prints them — reserved characters in path and query
 /// values, enum, date-time, boolean and integer path parameters, keyword-named and unset optional
-/// body fields, a bare JSON string body, and optional non-object bodies. Needs no toolchain.
+/// body fields, a bare JSON string body, optional non-object bodies, and a `text/plain` reply every
+/// SDK has to return as the text the page prints. Needs no toolchain.
 pub(crate) fn docs_wire(targets: impl FnOnce(Pipeline) -> Pipeline) -> DocsRun {
     let pipeline = targets(Pipeline::new().source(OpenApi::new().input("openapi.yaml")))
         .target(StaticDocs::new().to(DOCS_DIR));

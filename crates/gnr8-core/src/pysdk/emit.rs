@@ -1703,7 +1703,8 @@ pub(crate) fn client_referenced_models(
         for body in request_body_models_of(op, graph)? {
             names.push(body.model);
         }
-        if let Some(model) = success_responses_of(op, graph)?.body_model {
+        let success = success_responses_of(op, graph)?;
+        if let (Some(model), false) = (success.body_model, success.text_body) {
             names.push(model);
         }
         if let Some(item_model) = pagination_item_model_name(graph, op) {
@@ -2912,6 +2913,13 @@ fn emit_operation(
         } else {
             "bytes".to_string()
         }
+    } else if success.text_body {
+        // A `text/*` reply is returned as the text itself.
+        if success.has_bodyless_alternative() {
+            "Optional[str]".to_string()
+        } else {
+            "str".to_string()
+        }
     } else {
         return_model.as_ref().map_or_else(
             || "Any".to_string(),
@@ -3230,17 +3238,21 @@ fn emit_operation(
             py_status_tuple(&success.body_statuses)
         )
         .map_err(sink)?;
-        writeln!(
-            out,
-            "            _data = json.loads(_raw) if _raw else {{}}"
-        )
-        .map_err(sink)?;
-        writeln!(
-            out,
-            "            return {}",
-            py_decode_expr(model, graph, model_style)
-        )
-        .map_err(sink)?;
+        if success.text_body {
+            writeln!(out, "            return _raw.decode(\"utf-8\")").map_err(sink)?;
+        } else {
+            writeln!(
+                out,
+                "            _data = json.loads(_raw) if _raw else {{}}"
+            )
+            .map_err(sink)?;
+            writeln!(
+                out,
+                "            return {}",
+                py_decode_expr(model, graph, model_style)
+            )
+            .map_err(sink)?;
+        }
         if success.has_bodyless_alternative() {
             writeln!(out, "        return None").map_err(sink)?;
         } else {
