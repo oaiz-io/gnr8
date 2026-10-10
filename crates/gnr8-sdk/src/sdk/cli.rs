@@ -100,7 +100,8 @@ impl OwnedCommand {
         self
     }
 
-    /// The Go function in `package cli` the dispatcher calls (`runLogin`).
+    /// The Go function in `package cli` the dispatcher calls (`runLogin`). It must be a Go
+    /// identifier that no other owned command calls and the generated CLI does not declare.
     #[must_use]
     pub fn function(mut self, function: impl Into<String>) -> Self {
         self.function = Some(function.into());
@@ -179,6 +180,10 @@ impl SdkCli {
     }
 
     /// A retired invocation that names its replacement and exits 2.
+    ///
+    /// The retired path is matched before dispatch, so it must be a path the CLI no longer runs:
+    /// not a live command or a prefix of one, and not an extension of a live command that takes
+    /// arguments.
     #[must_use]
     pub fn rename_error(mut self, error: crate::sdk::cli_spec::CliRenameError) -> Self {
         self.rename_errors.push(error);

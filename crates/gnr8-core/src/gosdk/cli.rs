@@ -211,6 +211,25 @@ fn check_owned_command_names(cli: &SdkCli, ops: &[&Operation]) -> Result<(), Cor
 /// two names for one command, and a derived name can meet another one silently: root `db-types`
 /// and topic `db` command `types` both derive `runDbTypes`.
 fn check_owned_command_functions(cli: &SdkCli) -> Result<(), CoreError> {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for (invocation, function) in owned_functions(cli) {
+        if let Some(first) = seen.get(&function) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned commands {first:?} and {invocation:?} both call Go function \
+                     {function:?}; give one of them its own OwnedCommand::function",
+                    cli.program
+                ),
+            });
+        }
+        seen.insert(function, invocation);
+    }
+    Ok(())
+}
+
+/// Every hand-owned command's invocation and the Go function its dispatch arm calls, root
+/// commands first, then each topic's in declaration order.
+fn owned_functions(cli: &SdkCli) -> Vec<(String, String)> {
     let root = cli
         .owned_commands
         .iter()
@@ -223,18 +242,29 @@ fn check_owned_command_functions(cli: &SdkCli) -> Result<(), CoreError> {
             )
         })
     });
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    for (invocation, function) in root.chain(topics) {
-        if let Some(first) = seen.get(&function) {
+    root.chain(topics).collect()
+}
+
+/// A hand-owned command's function is written by the user, so the generated package must not
+/// declare that name: `function("complete")` would call the completion handler, and a name the
+/// user does write would be declared twice.
+fn check_owned_functions_not_generated(cli: &SdkCli, files: &[SdkFile]) -> Result<(), CoreError> {
+    let main = main_file(&cli.program);
+    let declared: BTreeSet<String> = files
+        .iter()
+        .filter(|file| file.name != main)
+        .flat_map(|file| super::decls::package_names(&file.contents))
+        .collect();
+    for (invocation, function) in owned_functions(cli) {
+        if declared.contains(&function) {
             return Err(CoreError::SdkGen {
                 message: format!(
-                    "CLI {:?} owned commands {first:?} and {invocation:?} both call Go function \
-                     {function:?}; give one of them its own OwnedCommand::function",
+                    "CLI {:?} owned command {invocation:?} calls Go function {function:?}, which \
+                     the generated CLI already declares; give it another OwnedCommand::function",
                     cli.program
                 ),
             });
         }
-        seen.insert(function, invocation);
     }
     Ok(())
 }
@@ -384,6 +414,7 @@ pub(crate) fn emit_cli(
         })?);
     }
     files.sort_by(|left, right| left.name.cmp(&right.name));
+    check_owned_functions_not_generated(cli, &files)?;
     Ok(files)
 }
 

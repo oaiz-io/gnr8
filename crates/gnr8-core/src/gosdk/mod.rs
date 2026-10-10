@@ -14,6 +14,7 @@
 
 mod cli;
 mod contract;
+mod decls;
 mod emit;
 mod gofmt;
 

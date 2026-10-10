@@ -3942,3 +3942,116 @@ fn go_owned_command_function_must_be_a_go_identifier() {
         assert!(root.contains("Go identifier"), "{function}: {root}");
     }
 }
+
+#[test]
+fn go_owned_command_function_may_not_be_a_generated_name() {
+    if skip_go() {
+        return;
+    }
+    for function in ["complete", "Run", "active", "dispatchBooks", "cliGroups"] {
+        let topic = go_topic_owned_error(topic_owned_cli(
+            OwnedCommand::new("stats").function(function),
+        ));
+        assert!(
+            topic.contains(&format!(
+                "owned command \"books stats\" calls Go function {function:?}, which the generated CLI already declares"
+            )),
+            "{function}: {topic}"
+        );
+        let root = go_topic_owned_error(
+            spec_cli().owned_command(OwnedCommand::new("stats").function(function)),
+        );
+        assert!(root.contains("already declares"), "{function}: {root}");
+    }
+}
+
+/// `names` is only ever a local inside generated functions, so the user may declare it.
+#[test]
+fn go_owned_command_function_may_reuse_a_generated_local_name() {
+    if skip_go() {
+        return;
+    }
+    let go = generate_go_cli_with(
+        &grouped_graph(""),
+        topic_owned_cli(OwnedCommand::new("stats").function("names")),
+    );
+    assert!(go.contains("var names []string"), "{go}");
+    assert!(go.contains("return names(args[1:], active)"), "{go}");
+}
+
+fn rename_error_message(cli: SdkCli) -> String {
+    generate_cli_result(&grouped_graph(""), cli)
+        .expect_err("a rename error that reaches a live command is a configuration error")
+        .to_string()
+}
+
+#[test]
+fn rename_error_may_not_shadow_a_live_command() {
+    for retired in [vec!["books"], vec!["books", "list"], vec!["help"]] {
+        let message = rename_error_message(
+            spec_cli().rename_error(CliRenameError::new(retired.clone(), "books list")),
+        );
+        assert!(
+            message.contains(&format!(
+                "retired path {:?} matches live command",
+                retired.join(" ")
+            )),
+            "{retired:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn rename_error_may_not_capture_a_live_commands_arguments() {
+    let message = rename_error_message(
+        spec_cli().rename_error(CliRenameError::new(["books", "get", "old"], "books list")),
+    );
+    assert!(
+        message.contains("retired path \"books get old\" extends live command \"books get\""),
+        "{message}"
+    );
+    let message = rename_error_message(
+        spec_cli().rename_error(CliRenameError::new(["completion", "old"], "books list")),
+    );
+    assert!(
+        message.contains("extends live command \"completion\""),
+        "{message}"
+    );
+}
+
+/// `books list` takes no arguments, so `books list all` reaches nothing that runs today.
+#[test]
+fn rename_error_may_extend_a_command_without_arguments() {
+    let py = generate_cli_with(
+        &grouped_graph(""),
+        spec_cli().rename_error(CliRenameError::new(["books", "list", "all"], "books list")),
+    );
+    assert!(py.contains("\"all\""), "{py}");
+}
+
+#[test]
+fn rename_error_behind_an_earlier_one_is_refused() {
+    let message = rename_error_message(
+        spec_cli()
+            .rename_error(CliRenameError::new(["books", "old"], "books list"))
+            .rename_error(CliRenameError::new(["books", "old", "all"], "books list")),
+    );
+    assert!(
+        message.contains(
+            "retired path \"books old all\" is unreachable: the earlier retired path \"books old\" matches it first"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn go_rename_error_may_not_shadow_an_owned_command() {
+    let message = go_topic_owned_error(
+        topic_owned_cli("stats")
+            .rename_error(CliRenameError::new(["books", "stats"], "books list")),
+    );
+    assert!(
+        message.contains("retired path \"books stats\" matches live command \"books stats\""),
+        "{message}"
+    );
+}

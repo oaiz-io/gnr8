@@ -24,6 +24,13 @@ must move the minor version.
 - **`OwnedCommand::function` must be a Go identifier.** The dispatcher emits the function name as Go
   source, so generation now refuses a value that is not an ASCII Go identifier or is a keyword, at
   the root and under a topic. Such a value never produced a `cli.go` that compiles.
+- **`OwnedCommand::function` must not be a name the generated CLI declares.** A value such as
+  `complete` or `Run` called gnr8's own function instead of the hand-owned one, or declared it twice;
+  generation now refuses it.
+- **`rename_error` must not reach a live command.** A retired path is matched before dispatch, so a
+  path that was a live command or a prefix of one (`books`, `help`) made that command unreachable, and
+  one that extended a command taking arguments captured them. Generation now refuses both, and a
+  retired path that an earlier one already matches, in the Go and Python CLIs.
 
 ## 0.17.2 — 2026-10-10
 
