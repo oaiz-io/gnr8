@@ -1018,7 +1018,7 @@ fn pagination_section_only_with_a_policy() {
 fn check_wire_compares_json_numbers_by_value() {
     use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord};
     use gnr8_engine::verify::ContractTestLanguage;
-    let page = "## Example\n\n### HTTP\n\n```http\nPOST /m HTTP/1.1\ncontent-type: application/json\n\n{\n  \"ratio\": 1.0,\n  \"n\": [2, 0.5]\n}\n```\n";
+    let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nPOST /m HTTP/1.1\ncontent-type: application/json\n\n{\n  \"ratio\": 1.0,\n  \"n\": [2, 0.5]\n}\n```\n";
     let record = |body: &str| WireRecord {
         operation: "m".to_string(),
         method: "POST".to_string(),
@@ -1212,4 +1212,110 @@ fn operation_sample_reply_is_readable_from_an_integration_test() {
     let value: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(value["genre"], json!("fiction"));
     assert_eq!(field.map(|field| field.json_name), Some("id".to_string()));
+}
+
+/// A page name is the subject's kebab-case ASCII words. A name with none (an imported tag spelled
+/// `日本語`) or one Windows reserves (`con.md`) cannot be a file in every checkout, so it is a typed
+/// error naming the subject, never an empty or platform-broken file name.
+#[test]
+fn unwritable_page_names_are_typed_errors_naming_the_subject() {
+    for (group, reason) in [
+        ("日本語", "no letters or digits"),
+        ("Con", "reserved file name"),
+    ] {
+        let mut value = bookstore_json();
+        value["operations"][3]["group"] = json!(group);
+        let err = try_render(&graph_of(value), &[]).unwrap_err();
+        assert!(matches!(err, CoreError::DocsGen { .. }), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains(group) && text.contains(reason), "{text}");
+    }
+}
+
+/// `llms.txt` labels are escaped and its summaries are one line, so a name or a group description
+/// can never break the list it sits in.
+#[test]
+fn llms_txt_escapes_labels_and_folds_summaries() {
+    let mut value = bookstore_json();
+    value["group_docs"] = json!([{"name": "books", "summary": "Browse\nand manage"}]);
+    value["operations"][3]["id"] = json!("health[v2]");
+    let pages = render(&graph_of(value), &[]);
+    let llms = page(&pages, "llms.txt");
+    assert!(
+        llms.contains("- [books](groups/books.md): Browse and manage\n"),
+        "{llms}"
+    );
+    assert!(
+        llms.contains("- [health\\[v2\\]](operations/health-v2.md)"),
+        "{llms}"
+    );
+}
+
+/// "Used by" follows every root the graph's direction walk follows — request-body variants and
+/// response headers included — and a field shows the `format` `openapi.yaml` writes beside any
+/// type, and a free-form value is the `object` the document says it is.
+#[test]
+fn schema_pages_follow_every_root_and_print_every_published_format() {
+    let mut value = bookstore_json();
+    value["schemas"].as_array_mut().unwrap().extend([
+        schema(
+            "books.Draft",
+            "Draft",
+            &json!({"type": "object", "of": [field("title", &string(), true)]}),
+        ),
+        schema(
+            "books.Etag",
+            "Etag",
+            &json!({"type": "primitive", "of": {"prim": "string"}}),
+        ),
+    ]);
+    value["operations"][1]["request_body_content_type"] = json!("application/json");
+    value["operations"][1]["request_body_variants"] =
+        json!([{"body": {"ref_id": "books.Draft"}, "content_type": "application/vnd.draft+json"}]);
+    value["operations"][2]["responses"][0]["headers"] =
+        json!([{"name": "ETag", "schema": named("books.Etag")}]);
+    let book = value["schemas"][0]["body"]["of"].as_array_mut().unwrap();
+    let mut tags = field("tags", &json!({"type": "array", "of": string()}), false);
+    tags["meta"] = json!({"format": "csv"});
+    book.push(tags);
+    book.push(field("extra", &json!({"type": "any", "of": {}}), false));
+    let pages = render(&graph_of(value), &[]);
+    assert!(
+        section(page(&pages, "schemas/draft.md"), "Used by").contains("[`createBook`]"),
+        "{}",
+        page(&pages, "schemas/draft.md")
+    );
+    assert!(
+        section(page(&pages, "schemas/etag.md"), "Used by").contains("[`getBook`]"),
+        "{}",
+        page(&pages, "schemas/etag.md")
+    );
+    let fields = section(page(&pages, "schemas/book.md"), "Fields");
+    assert!(
+        fields.contains("| `tags` | array of `string` (`csv`) |"),
+        "{fields}"
+    );
+    assert!(
+        fields.contains("| `extra` | `object` (free-form) |"),
+        "{fields}"
+    );
+}
+
+/// Rung 3 reads the request from the page's Example section, never from a `### HTTP` heading a
+/// description happens to contain.
+#[test]
+fn check_wire_reads_the_example_section_only() {
+    use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord};
+    use gnr8_engine::verify::ContractTestLanguage;
+    let page = "# `m`\n\n### HTTP\n\n```http\nDELETE /decoy HTTP/1.1\n```\n\n## Example\n\n### HTTP\n\n```http\nGET /m HTTP/1.1\n```\n";
+    let record = WireRecord {
+        operation: "m".to_string(),
+        method: "GET".to_string(),
+        path: "/m".to_string(),
+        query: BTreeMap::new(),
+        headers: BTreeMap::new(),
+        body: None,
+        outcome: String::new(),
+    };
+    check_wire(page, &record, ContractTestLanguage::Go).expect("the Example section's request");
 }

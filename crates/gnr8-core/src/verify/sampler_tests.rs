@@ -1327,3 +1327,52 @@ fn request_bytes_are_a_typed_refusal() {
     };
     assert_eq!(inner.to_string(), "field `b` is a byte string");
 }
+
+/// A map keyed by an enum with no members has no key to sample: that is the map-key refusal, which
+/// skips an error model's typed-error case like every map-key refusal — it never reaches the generic
+/// error envelope, whose triggers stay exactly the pre-sampler ones.
+#[test]
+fn empty_enum_map_key_is_a_map_key_refusal() {
+    let empty = json!({"type": "enum", "of": []});
+    let graph = probe(
+        &[],
+        None,
+        Some(&object(&[fld("m", &map(&empty, &int()), true)])),
+        &[],
+    );
+    assert_eq!(reply_refusal(&graph), Some("MapKey"));
+    let errors = two_404s(&object(&[fld("m", &map(&empty, &int()), true)]));
+    assert_eq!(
+        typed_error_404(&errors).map(|(op, _)| op),
+        Some("second".to_string())
+    );
+}
+
+/// A date-time enum member is printed as a date-time literal by every SDK, so a member that is not
+/// an RFC 3339 instant cannot be the sample; the sampler takes the next member, or refuses.
+#[test]
+fn non_rfc3339_date_time_members_are_skipped() {
+    let date_time = json!({"type": "well_known", "of": "date_time"});
+    assert_eq!(
+        param_value(
+            &date_time,
+            &json!({"enum_values": ["yesterday", "2024-01-02T03:04:05Z"]})
+        ),
+        json!("2024-01-02T03:04:05Z")
+    );
+    let graph = probe(
+        &[query(
+            "at",
+            &date_time,
+            true,
+            &json!({"enum_values": ["yesterday"]}),
+        )],
+        None,
+        None,
+        &[],
+    );
+    assert!(matches!(
+        refusal(&graph),
+        SampleRefusal::Unsatisfiable { .. }
+    ));
+}

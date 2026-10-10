@@ -10,7 +10,7 @@ use crate::graph::{ApiGraph, Operation, Schema};
 use crate::sdk::emit_common::kebab;
 use crate::CoreError;
 
-use super::markdown::{AUTHENTICATION, ERRORS, OPERATIONS, REFERENCE, SCHEMAS};
+use super::markdown::{link_label, AUTHENTICATION, ERRORS, OPERATIONS, REFERENCE, SCHEMAS};
 
 /// The docs-relative path of the index page.
 pub(crate) const INDEX_PAGE: &str = "index.md";
@@ -153,6 +153,13 @@ impl<'g> NavModel<'g> {
     }
 }
 
+/// Windows reserves these device names whatever the extension, so `con.md` cannot be written there;
+/// a checked-in docs tree has to open on every system, so the name is refused everywhere.
+const WINDOWS_RESERVED: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
 /// `<dir>/<slug>.md`, refusing an empty slug or one an earlier subject already took.
 fn page_path<'a>(
     dir: &str,
@@ -169,6 +176,14 @@ fn page_path<'a>(
             ),
         });
     }
+    if WINDOWS_RESERVED.contains(&slug.as_str()) {
+        return Err(CoreError::DocsGen {
+            message: format!(
+                "StaticDocs cannot name a page for {kind} '{subject}': '{slug}.md' is a reserved \
+                 file name on Windows; rename the {kind}"
+            ),
+        });
+    }
     let page = format!("{dir}/{slug}.md");
     if let Some(previous) = taken.insert(page.clone(), subject) {
         return Err(CoreError::DocsGen {
@@ -182,9 +197,15 @@ fn page_path<'a>(
 }
 
 /// Render `llms.txt`: an index for agents, in exactly the order `index.md` lists its pages.
-pub(crate) fn render_llms_txt(nav: &NavModel<'_>, graph: &ApiGraph) -> String {
+///
+/// Every label is escaped so a name cannot close its link early, and every summary is one line.
+///
+/// # Errors
+///
+/// Returns [`CoreError::DocsGen`] for a page the model does not hold.
+pub(crate) fn render_llms_txt(nav: &NavModel<'_>, graph: &ApiGraph) -> Result<String, CoreError> {
     let mut out = String::new();
-    let _ = writeln!(out, "# {}", graph.title.trim());
+    let _ = writeln!(out, "# {}", one_line(&graph.title));
     if let Some(description) = graph
         .openapi_metadata
         .description
@@ -194,28 +215,32 @@ pub(crate) fn render_llms_txt(nav: &NavModel<'_>, graph: &ApiGraph) -> String {
     {
         out.push('\n');
         for line in description.lines() {
-            let _ = writeln!(out, "> {line}");
+            let _ = writeln!(out, "> {}", line.trim_end());
         }
     }
     for group in &nav.groups {
-        let _ = writeln!(out, "\n## {}\n", group.name);
-        let _ = writeln!(out, "{}", llms_line(group.name, &group.page, group.summary));
+        let _ = writeln!(out, "\n## {}\n", one_line(group.name));
+        let summary = group.summary.map(one_line);
+        let _ = writeln!(
+            out,
+            "{}",
+            llms_line(group.name, &group.page, summary.as_deref())
+        );
         for op in &group.operations {
-            out.push_str(&operation_line(nav, op));
+            out.push_str(&operation_line(nav, op)?);
         }
     }
     if !nav.ungrouped.is_empty() {
         let _ = writeln!(out, "\n## {OPERATIONS}\n");
         for op in &nav.ungrouped {
-            out.push_str(&operation_line(nav, op));
+            out.push_str(&operation_line(nav, op)?);
         }
     }
     if !nav.schemas.is_empty() {
         let _ = writeln!(out, "\n## {SCHEMAS}\n");
         for schema in &nav.schemas {
-            if let Ok(page) = nav.schema_page(&schema.id) {
-                let _ = writeln!(out, "{}", llms_line(&schema.name, page, None));
-            }
+            let page = nav.schema_page(&schema.id)?;
+            let _ = writeln!(out, "{}", llms_line(&schema.name, page, None));
         }
     }
     if !nav.reference.is_empty() {
@@ -224,24 +249,27 @@ pub(crate) fn render_llms_txt(nav: &NavModel<'_>, graph: &ApiGraph) -> String {
             let _ = writeln!(out, "{}", llms_line(label, page, None));
         }
     }
-    out
+    Ok(out)
 }
 
-fn operation_line(nav: &NavModel<'_>, op: &Operation) -> String {
+fn operation_line(nav: &NavModel<'_>, op: &Operation) -> Result<String, CoreError> {
     let summary = op
         .summary
         .as_deref()
-        .map(|summary| summary.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(one_line)
         .filter(|summary| !summary.is_empty());
-    nav.operation_page(&op.id).map_or_else(
-        |_| String::new(),
-        |page| format!("{}\n", llms_line(&op.id, page, summary.as_deref())),
-    )
+    let page = nav.operation_page(&op.id)?;
+    Ok(format!("{}\n", llms_line(&op.id, page, summary.as_deref())))
 }
 
 fn llms_line(label: &str, page: &str, summary: Option<&str>) -> String {
+    let label = link_label(label);
     match summary {
         Some(summary) => format!("- [{label}]({page}): {summary}"),
         None => format!("- [{label}]({page})"),
     }
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

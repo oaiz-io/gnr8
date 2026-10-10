@@ -18,7 +18,7 @@ use crate::verify::{
 };
 use crate::CoreError;
 
-use super::markdown::{code_block, code_span, HTTP};
+use super::markdown::{code_block, code_span, CLI, HTTP};
 use super::snippets::{sdk_label, snippet, NO_IDENTITY_NOTE};
 
 /// What every Example section says once, before the exchange.
@@ -129,7 +129,7 @@ fn cli_sections(
         }
         let _ = write!(
             out,
-            "\n### CLI — {}\n\n{}\n",
+            "\n### {CLI} — {}\n\n{}\n",
             code_span(&cli.program),
             code_span(&format!("{} {}", cli.program, command_invocation(cli, op)))
         );

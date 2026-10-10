@@ -206,7 +206,7 @@ impl fmt::Display for SampleRefusal {
             }
             Self::MapKey { subject } => write!(
                 f,
-                "{} is a map whose key is neither a string nor an enum",
+                "{} is a map whose key is neither a string nor an enum with members",
                 phrase(subject)
             ),
             Self::EmptyUnion { subject } => {
@@ -518,6 +518,9 @@ fn sample_param(
 }
 
 /// Refuse a parameter whose type, through any named aliases, is not a scalar.
+///
+/// That is also why `Param::item_constraints` is never read here: item constraints exist only on an
+/// array or map parameter, and such a parameter is refused before any value is sampled.
 fn scalar_parameter(
     param: &Param,
     graph: &ApiGraph,
@@ -671,7 +674,7 @@ pub(crate) fn success_sample(
     Ok(SuccessOutcome::Sample(SuccessSample {
         status,
         model: Some(model),
-        body: serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
+        body: json_text(&value)?,
         field,
     }))
 }
@@ -729,9 +732,7 @@ pub(crate) fn error_payload(
             }
         }
     };
-    Ok(Some(
-        serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
-    ))
+    Ok(Some(json_text(&value)?))
 }
 
 /// The first required scalar field of an object body, with the value the canned reply carries.
@@ -789,6 +790,14 @@ fn wire_scalar(value: &Value) -> Option<String> {
         Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
+}
+
+/// A sampled value as JSON text. A `Value` built by the sampler always serializes; the error path
+/// is typed rather than replaced by a stand-in body.
+fn json_text(value: &Value) -> Result<String, CoreError> {
+    serde_json::to_string(value).map_err(|error| CoreError::SdkGen {
+        message: format!("a sampled value is not serializable: {error}"),
+    })
 }
 
 fn dangling(id: &str) -> CoreError {
@@ -1039,8 +1048,10 @@ impl<'g> Sampler<'g> {
         loop {
             match ty {
                 Type::Primitive(Prim::String) => return Ok(Ok(KeyDomain::Strings)),
+                // An enum key with no members has no key to sample: a map-key refusal, which (unlike
+                // an empty enum value) never sends an error model to the generic envelope.
                 Type::Enum(members) if members.is_empty() => {
-                    return Ok(Err(SampleRefusal::EmptyEnum {
+                    return Ok(Err(SampleRefusal::MapKey {
                         subject: subject.to_string(),
                     }));
                 }
@@ -1204,6 +1215,11 @@ fn enum_candidate(
 /// A declared enum member as a value of the input's type, or `None` when it does not parse as one.
 fn parse_member(member: &str, ty: &Type) -> Option<Value> {
     match ty {
+        // Every SDK prints a date-time as a date-time literal, so a member must be an RFC 3339
+        // instant to be the sample.
+        Type::WellKnown(WellKnown::DateTime) => {
+            crate::gosdk::callsite::is_rfc3339(member).then(|| Value::String(member.to_string()))
+        }
         Type::Primitive(Prim::String) | Type::WellKnown(_) | Type::Enum(_) => {
             Some(Value::String(member.to_string()))
         }

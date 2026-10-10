@@ -483,7 +483,7 @@ Kind: object
 | `analyticsQuery` | [`GoalAnalyticsQueryOutput`](goal-analytics-query-output.md) | yes | no |  |  |  |  |
 | `createdAt` | `string` (`date-time`) | yes | no |  |  |  |  |
 | `description` | `string` | no | no |  |  |  |  |
-| `metadata` | `any` | no | no |  |  |  |  |
+| `metadata` | `object` (free-form) | no | no |  |  |  |  |
 | `name` | `string` | yes | no |  |  |  |  |
 | `targetDirection` | [`TargetDirection`](target-direction.md) | no | no |  |  |  |  |
 | `targetValue` | `number` | no | no |  |  |  |  |

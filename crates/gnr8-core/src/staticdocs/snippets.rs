@@ -16,6 +16,7 @@ use crate::verify::{
 };
 use crate::CoreError;
 
+use super::markdown::json_string;
 use super::nav::NavModel;
 
 /// One language's snippets for one sibling SDK, as gnr8 compiles and checks them.
@@ -187,13 +188,12 @@ fn go_qualifier(package: &str) -> String {
 
 /// The Go import entry for the SDK: its module path, aliased when the qualifier is not the package
 /// clause (an entry with a space prints as `alias "path"`).
-fn go_sdk_import(identity: &ConsumerIdentity) -> String {
-    let clause = sdk_package(&identity.import).unwrap_or_default();
-    if clause == identity.qualifier {
+fn go_sdk_import(identity: &ConsumerIdentity) -> Result<String, CoreError> {
+    Ok(if sdk_package(&identity.import)? == identity.qualifier {
         identity.import.clone()
     } else {
         format!("{} {}", identity.qualifier, identity.import)
-    }
+    })
 }
 
 /// The module or package a section is labelled with: what the declaration names.
@@ -303,7 +303,7 @@ pub(crate) fn snippet(
             let wire_client = format!(
                 "client := {qualifier}NewClient({base_url}, {qualifier}WithHTTPClient(&http.Client{{Transport: transport}}){options})"
             );
-            Ok(go_snippet(&site, identity, wire_client))
+            go_snippet(&site, identity, wire_client)
         }
         SiblingSdk::Python(t) => {
             let site =
@@ -363,13 +363,12 @@ fn ts_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String)
     }
 }
 
-/// A double-quoted string literal Go, Python and TypeScript all read the same way.
-fn json_string(text: &str) -> String {
-    serde_json::to_string(text).unwrap_or_else(|_| format!("\"{text}\""))
-}
-
 /// Go: construction, call, the error check and one use of the result, so it compiles as written.
-fn go_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String) -> Snippet {
+fn go_snippet(
+    site: &CallSite,
+    identity: &ConsumerIdentity,
+    wire_client: String,
+) -> Result<Snippet, CoreError> {
     let mut standard: Vec<String> = site
         .imports
         .iter()
@@ -380,8 +379,8 @@ fn go_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String)
     standard.sort();
     standard.dedup();
     standard.push(String::new());
-    standard.push(go_sdk_import(identity));
-    Snippet {
+    standard.push(go_sdk_import(identity)?);
+    Ok(Snippet {
         imports: standard,
         body: format!(
             "{}\n{}\nif err != nil {{\n\treturn err\n}}\nfmt.Printf(\"%+v\\n\", result)",
@@ -390,7 +389,7 @@ fn go_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String)
         call: site.call.clone(),
         wire_client,
         reply: CannedReply::default(),
-    }
+    })
 }
 
 /// A Go import block; an empty entry separates the standard library from the SDK.
@@ -451,7 +450,7 @@ pub fn compile_unit(
     let (file_name, text) = match sdk {
         SiblingSdk::Go(t) => (
             GO_UNIT_FILE,
-            go_unit_text(&sdk_package(&t.module)?, &identity, &snippets),
+            go_unit_text(&sdk_package(&t.module)?, &identity, &snippets)?,
         ),
         SiblingSdk::Python(_) => (PY_UNIT_FILE, py_unit_text(&identity, &snippets)),
         SiblingSdk::TypeScript(_) => (TS_UNIT_FILE, ts_unit_text(&identity, &snippets)),
@@ -774,9 +773,9 @@ fn go_unit_text(
     package: &str,
     identity: &ConsumerIdentity,
     snippets: &[(&Operation, Snippet)],
-) -> String {
+) -> Result<String, CoreError> {
     if snippets.is_empty() {
-        return format!("package {package}_test\n");
+        return Ok(format!("package {package}_test\n"));
     }
     let mut standard: Vec<String> = snippets
         .iter()
@@ -804,7 +803,7 @@ fn go_unit_text(
     standard.sort();
     standard.dedup();
     standard.push(String::new());
-    standard.push(go_sdk_import(identity));
+    standard.push(go_sdk_import(identity)?);
     let mut out = format!("package {package}_test\n\n{}\n", go_import_block(&standard));
     for (op, snippet) in snippets {
         out.push('\n');
@@ -844,7 +843,7 @@ fn go_unit_text(
         out,
         "\tpayload, err := json.Marshal(transport.records)\n\tif err != nil {{\n\t\tt.Fatal(err)\n\t}}\n\tif err := os.WriteFile(path, payload, 0o600); err != nil {{\n\t\tt.Fatal(err)\n\t}}\n}}\n"
     );
-    out
+    Ok(out)
 }
 
 /// The rung-3 recorder a Go unit carries, up to the first sample's call.
@@ -1086,9 +1085,11 @@ struct PageRequest {
     body: Option<String>,
 }
 
-/// The first fenced `http` block after the page's `### HTTP` heading, as a request.
+/// The first fenced `http` block after the `### HTTP` heading of the page's `## Example` section,
+/// as a request — never a heading a description happens to contain above it.
 fn page_request(page: &str) -> Option<PageRequest> {
-    let start = page.find("\n### HTTP\n")?;
+    let example = page.find("\n## Example\n")?;
+    let start = page[example..].find("\n### HTTP\n")? + example;
     let fence = page[start..].find("```http\n")? + start + "```http\n".len();
     let end = page[fence..].find("\n```")? + fence;
     let block = &page[fence..end];

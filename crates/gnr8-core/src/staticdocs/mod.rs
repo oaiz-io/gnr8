@@ -118,13 +118,13 @@ fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, Str
 
     pages.insert(
         INDEX_PAGE.to_string(),
-        page::render_index(&site, &mut links),
+        page::render_index(&site, &mut links)?,
     );
-    pages.insert(LLMS_TXT.to_string(), nav::render_llms_txt(&nav, graph));
+    pages.insert(LLMS_TXT.to_string(), nav::render_llms_txt(&nav, graph)?);
     for group in &nav.groups {
         pages.insert(
             group.page.clone(),
-            page::render_group(&site, group, &mut links),
+            page::render_group(&site, group, &mut links)?,
         );
     }
     let mut operation_pages = 0;

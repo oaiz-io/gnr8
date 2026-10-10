@@ -468,6 +468,11 @@ fn time_date_expression(text: &str) -> Result<String, CoreError> {
     ))
 }
 
+/// Whether `text` is an RFC 3339 instant every SDK can print as a date-time literal.
+pub(crate) fn is_rfc3339(text: &str) -> bool {
+    Rfc3339::parse(text).is_some_and(|instant| (1..=12).contains(&instant.month))
+}
+
 /// The fields of one RFC 3339 `date-time`.
 struct Rfc3339 {
     year: u16,

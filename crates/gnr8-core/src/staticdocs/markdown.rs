@@ -4,6 +4,8 @@
 //! anchors. Every fixed heading is a `const` here so one unit test can hold all of them against the
 //! invariant gate's vocabulary.
 
+use std::fmt::Write as _;
+
 /// `## Servers` on the index.
 pub(crate) const SERVERS: &str = "Servers";
 /// `## Groups` on the index.
@@ -40,6 +42,10 @@ pub(crate) const REFERENCE: &str = "Reference";
 pub(crate) const PAGINATION: &str = "Pagination";
 /// `## Diagnostics` on an operation page.
 pub(crate) const DIAGNOSTICS: &str = "Diagnostics";
+/// `### CLI — <program>` inside the example.
+pub(crate) const CLI: &str = "CLI";
+/// `### Declared examples for <status>` under the responses.
+pub(crate) const DECLARED_EXAMPLES_FOR: &str = "Declared examples for";
 /// `### Declared request examples` under the request body.
 pub(crate) const DECLARED_REQUEST_EXAMPLES: &str = "Declared request examples";
 
@@ -77,8 +83,45 @@ pub(crate) const FIXED_HEADINGS: &[&str] = &[
     "Query",
     "Header",
     "Cookie",
-    "Declared examples for",
+    CLI,
+    DECLARED_EXAMPLES_FOR,
+    "Go",
+    "Python",
+    "TypeScript",
 ];
+
+/// A double-quoted JSON string literal, which Go, Python and TypeScript all read the same way.
+///
+/// Written out rather than delegated to a serializer so it is a total function: every `&str` has
+/// exactly one literal, and there is no failure path to paper over.
+pub(crate) fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", control as u32);
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Text inside a Markdown link's `[label]`: brackets and backslashes escaped, whitespace collapsed,
+/// so a name can never close the label early.
+pub(crate) fn link_label(text: &str) -> String {
+    cell(text)
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+}
 
 /// Prose for one pipe-table cell: whitespace collapsed to single spaces, so a multi-line
 /// description stays inside its row. [`table`] escapes `|` in every cell.
@@ -216,7 +259,20 @@ pub(crate) fn finish(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cell, code_block, code_span, finish, table, FIXED_HEADINGS};
+    #![allow(clippy::unwrap_used)]
+
+    use super::{
+        cell, code_block, code_span, finish, json_string, link_label, table, FIXED_HEADINGS,
+    };
+
+    #[test]
+    fn json_strings_and_link_labels_escape_what_would_end_them() {
+        assert_eq!(json_string("a\"b\\c\nd\u{1}"), "\"a\\\"b\\\\c\\nd\\u0001\"");
+        for text in ["plain", "quote\"", "tab\tend", "é"] {
+            assert_eq!(json_string(text), serde_json::to_string(text).unwrap());
+        }
+        assert_eq!(link_label("a]b [c]\nd"), "a\\]b \\[c\\] d");
+    }
 
     /// The words `scripts/check-invariants.sh` rejects in product surface. Committed docs under
     /// `examples/` are inside the gate's scope, so a heading that used one would fail `make check`

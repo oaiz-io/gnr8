@@ -22,9 +22,10 @@ use gnr8::facts::{Constraints, LiteralValue};
 
 use super::links::LinkRegistry;
 use super::markdown::{
-    cell, code_block, code_span, table, AUTHENTICATION, DECLARED_REQUEST_EXAMPLES, DIAGNOSTICS,
-    ERRORS, EXAMPLE, FIELDS, GROUPS, MEMBERS, OPERATIONS, PAGINATION, PARAMETERS,
-    PARAMETER_LOCATIONS, REFERENCE, REQUEST_BODY, RESPONSES, SCHEMAS, SERVERS, TYPE, USED_BY,
+    cell, code_block, code_span, json_string, link_label, table, AUTHENTICATION,
+    DECLARED_EXAMPLES_FOR, DECLARED_REQUEST_EXAMPLES, DIAGNOSTICS, ERRORS, EXAMPLE, FIELDS, GROUPS,
+    MEMBERS, OPERATIONS, PAGINATION, PARAMETERS, PARAMETER_LOCATIONS, REFERENCE, REQUEST_BODY,
+    RESPONSES, SCHEMAS, SERVERS, TYPE, USED_BY,
 };
 use super::nav::{NavGroup, NavModel, AUTHENTICATION_PAGE, ERRORS_PAGE, INDEX_PAGE};
 
@@ -38,7 +39,7 @@ pub(crate) struct Site<'g> {
 }
 
 /// Render `index.md`.
-pub(crate) fn render_index(site: &Site<'_>, links: &mut LinkRegistry) -> String {
+pub(crate) fn render_index(site: &Site<'_>, links: &mut LinkRegistry) -> Result<String, CoreError> {
     let graph = site.graph;
     let mut out = format!("# {}\n\n", graph.title.trim());
     if let Some(description) = nonblank(graph.openapi_metadata.description.as_deref()) {
@@ -79,13 +80,13 @@ pub(crate) fn render_index(site: &Site<'_>, links: &mut LinkRegistry) -> String 
             let _ = write!(
                 out,
                 "### {}\n\n",
-                links.link(INDEX_PAGE, &group.page, group.name)
+                links.link(INDEX_PAGE, &group.page, &link_label(group.name))
             );
             if let Some(summary) = group.summary {
                 let _ = write!(out, "{}\n\n", one_line(summary));
             }
             for op in &group.operations {
-                out.push_str(&operation_entry(site, INDEX_PAGE, op, links));
+                out.push_str(&operation_entry(site, INDEX_PAGE, op, links)?);
             }
             out.push('\n');
         }
@@ -93,20 +94,19 @@ pub(crate) fn render_index(site: &Site<'_>, links: &mut LinkRegistry) -> String 
     if !site.nav.ungrouped.is_empty() {
         let _ = write!(out, "## {OPERATIONS}\n\n");
         for op in &site.nav.ungrouped {
-            out.push_str(&operation_entry(site, INDEX_PAGE, op, links));
+            out.push_str(&operation_entry(site, INDEX_PAGE, op, links)?);
         }
         out.push('\n');
     }
     if !site.nav.schemas.is_empty() {
         let _ = write!(out, "## {SCHEMAS}\n\n");
         for schema in &site.nav.schemas {
-            if let Ok(page) = site.nav.schema_page(&schema.id) {
-                let _ = writeln!(
-                    out,
-                    "- {}",
-                    links.link(INDEX_PAGE, page, &code_span(&schema.name))
-                );
-            }
+            let page = site.nav.schema_page(&schema.id)?;
+            let _ = writeln!(
+                out,
+                "- {}",
+                links.link(INDEX_PAGE, page, &code_span(&schema.name))
+            );
         }
         out.push('\n');
     }
@@ -116,7 +116,7 @@ pub(crate) fn render_index(site: &Site<'_>, links: &mut LinkRegistry) -> String 
             let _ = writeln!(out, "- {}", links.link(INDEX_PAGE, page, label));
         }
     }
-    out
+    Ok(out)
 }
 
 /// Render one group page.
@@ -124,16 +124,16 @@ pub(crate) fn render_group(
     site: &Site<'_>,
     group: &NavGroup<'_>,
     links: &mut LinkRegistry,
-) -> String {
+) -> Result<String, CoreError> {
     let mut out = format!("# {}\n\n", group.name);
     if let Some(summary) = group.summary {
         let _ = write!(out, "{}\n\n", one_line(summary));
     }
     let _ = write!(out, "## {OPERATIONS}\n\n");
     for op in &group.operations {
-        out.push_str(&operation_entry(site, &group.page, op, links));
+        out.push_str(&operation_entry(site, &group.page, op, links)?);
     }
-    out
+    Ok(out)
 }
 
 /// One list line naming an operation: its link, its request line and its summary.
@@ -142,10 +142,8 @@ fn operation_entry(
     from: &str,
     op: &Operation,
     links: &mut LinkRegistry,
-) -> String {
-    let Ok(page) = site.nav.operation_page(&op.id) else {
-        return String::new();
-    };
+) -> Result<String, CoreError> {
+    let page = site.nav.operation_page(&op.id)?;
     let mut line = format!(
         "- {} — {}",
         links.link(from, page, &code_span(&op.id)),
@@ -155,7 +153,7 @@ fn operation_entry(
         let _ = write!(line, " — {}", one_line(summary));
     }
     line.push('\n');
-    line
+    Ok(line)
 }
 
 fn request_line(graph: &ApiGraph, op: &Operation) -> String {
@@ -184,7 +182,10 @@ pub(crate) fn render_operation(
     let mut line = vec![code_span(&request_line(graph, op))];
     if let Some(group_page) = site.nav.group_page(op) {
         let name = op.group.as_deref().unwrap_or_default();
-        line.push(format!("Group: {}", links.link(&page, group_page, name)));
+        line.push(format!(
+            "Group: {}",
+            links.link(&page, group_page, &link_label(name))
+        ));
     }
     let tags = crate::graph::effective_operation_tags(graph, op);
     if !tags.is_empty() {
@@ -591,7 +592,7 @@ fn request_body_section(
     let examples = declared_examples(
         policy.map_or(&[][..], |policy| policy.request_examples.as_slice()),
         &content_types,
-    );
+    )?;
     if !examples.is_empty() {
         let _ = write!(out, "### {DECLARED_REQUEST_EXAMPLES}\n\n");
         out.push_str(&examples);
@@ -666,11 +667,11 @@ fn responses_section(
         let declared = declared_examples(
             docs.map_or(&[][..], |docs| docs.examples.as_slice()),
             &content_types.iter().map(String::as_str).collect::<Vec<_>>(),
-        );
+        )?;
         if !declared.is_empty() {
             let _ = write!(
                 examples,
-                "### Declared examples for {}\n\n{declared}",
+                "### {DECLARED_EXAMPLES_FOR} {}\n\n{declared}",
                 code_span(&response.status.to_string())
             );
         }
@@ -688,7 +689,10 @@ fn responses_section(
 
 /// The declared examples whose media type the operation declares, as the `OpenAPI` target keeps
 /// them: each labelled with its name and media type, its value printed as JSON.
-fn declared_examples(examples: &[MediaExample], content_types: &[&str]) -> String {
+fn declared_examples(
+    examples: &[MediaExample],
+    content_types: &[&str],
+) -> Result<String, CoreError> {
     let mut out = String::new();
     for example in examples.iter().filter(|example| {
         content_types
@@ -707,11 +711,14 @@ fn declared_examples(examples: &[MediaExample], content_types: &[&str]) -> Strin
         if let Some(description) = nonblank(example.description.as_deref()) {
             let _ = write!(out, "{}\n\n", description.trim_end());
         }
-        let value = serde_json::to_string_pretty(&example.value).unwrap_or_default();
+        let value =
+            serde_json::to_string_pretty(&example.value).map_err(|error| CoreError::DocsGen {
+                message: format!("declared example '{}' is not JSON: {error}", example.name),
+            })?;
         out.push_str(&code_block("json", &value));
         out.push('\n');
     }
-    out
+    Ok(out)
 }
 
 /// Render one schema page.
@@ -877,6 +884,12 @@ pub(crate) fn type_label(
             |f| format!("{} ({})", code_span(name), code_span(f)),
         )
     };
+    // A composite type spells its own label; the field's declared format, which `openapi.yaml`
+    // writes beside any shape, follows it.
+    let beside = |label: String| match format {
+        Some(format) => format!("{label} ({})", code_span(format)),
+        None => label,
+    };
     Ok(match ty {
         Type::Primitive(Prim::String) => with_format("string", None),
         Type::Primitive(Prim::Bytes) => with_format("string", Some("binary")),
@@ -886,34 +899,41 @@ pub(crate) fn type_label(
         Type::WellKnown(well_known) => {
             with_format("string", Some(crate::lower::openapi_format(well_known)))
         }
-        Type::Array(items) => format!("array of {}", type_label(items, None, from, nav, links)?),
-        Type::Map { key, value } => format!(
+        Type::Array(items) => beside(format!(
+            "array of {}",
+            type_label(items, None, from, nav, links)?
+        )),
+        Type::Map { key, value } => beside(format!(
             "map of {} to {}",
             type_label(key, None, from, nav, links)?,
             type_label(value, None, from, nav, links)?
-        ),
+        )),
         Type::Named(id) => {
             let page = nav.schema_page(id)?;
-            links.link(from, page, &code_span(nav_schema_name(nav, id)))
+            beside(links.link(from, page, &code_span(nav_schema_name(nav, id))))
         }
         Type::Object(_) => with_format("object", None),
-        Type::Enum(members) => format!(
+        Type::Enum(members) => beside(format!(
             "one of {}",
             members
                 .iter()
                 .map(|member| code_span(member))
                 .collect::<Vec<_>>()
                 .join(", ")
-        ),
-        Type::Union(variants) => format!(
+        )),
+        Type::Union(variants) => beside(format!(
             "one of {}",
             variants
                 .iter()
                 .map(|variant| type_label(variant, None, from, nav, links))
                 .collect::<Result<Vec<_>, CoreError>>()?
                 .join(", ")
-        ),
-        Type::Any {} => with_format("any", None),
+        )),
+        // `openapi.yaml` writes a free-form value as an object with any properties.
+        Type::Any {} => match format {
+            Some(_) => with_format("object", None),
+            None => format!("{} (free-form)", code_span("object")),
+        },
     })
 }
 
@@ -950,7 +970,12 @@ fn constraint_spans(constraints: &Constraints, prefix: &str) -> Vec<String> {
     );
     push("pattern", constraints.pattern.clone());
     if !constraints.enum_values.is_empty() {
-        push("enum", serde_json::to_string(&constraints.enum_values).ok());
+        let members: Vec<String> = constraints
+            .enum_values
+            .iter()
+            .map(|member| json_string(member))
+            .collect();
+        push("enum", Some(format!("[{}]", members.join(","))));
     }
     out
 }
@@ -958,7 +983,7 @@ fn constraint_spans(constraints: &Constraints, prefix: &str) -> Vec<String> {
 /// A literal as the JSON it stands for, in a code span.
 fn literal(value: &LiteralValue) -> String {
     code_span(&match value {
-        LiteralValue::String(text) => serde_json::to_string(text).unwrap_or_default(),
+        LiteralValue::String(text) => json_string(text),
         LiteralValue::Number(number) => number.clone(),
         LiteralValue::Bool(flag) => flag.to_string(),
         LiteralValue::Null => "null".to_string(),
