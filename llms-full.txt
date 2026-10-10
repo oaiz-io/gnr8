@@ -114,6 +114,7 @@ Prefer one focused Markdown page instead of loading every document:
 - Sources: `docs/extraction/sources.md`
 - OpenAPI generation: `docs/openapi/generation.md`
 - SDK generation: `docs/sdk/generation.md`
+- Static docs generation: `docs/static-docs/generation.md`
 - Diagnostics: `docs/diagnostics/reference.md`
 - Artifacts and CI: `docs/operations/artifacts-and-ci.md`
 - Public Rust API: `docs/reference/public-api.md`

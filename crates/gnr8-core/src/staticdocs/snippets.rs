@@ -1,7 +1,7 @@
 //! The one producer of code-sample text: for the pages, for gnr8's own compile tests, and for the
 //! `gnr8 verify` docs suite.
 //!
-//! A sample is assembled from the [`CallSite`] the language's call-site renderer returns — the same
+//! A sample is assembled from the `CallSite` the language's call-site renderer returns — the same
 //! renderer the contract tests use — so a page, a compile unit and a contract case can never spell a
 //! call three ways.
 
@@ -25,7 +25,7 @@ pub struct CompileUnit {
     pub file_name: String,
     /// The consumer import specifier the unit and every page print.
     pub identity: String,
-    /// The whole file text: imports, then one wrapper per entry.
+    /// The whole file text: imports, one wrapper per entry, then the rung-3 recording harness.
     pub text: String,
     /// One entry per sampled operation, in graph order.
     pub entries: Vec<CompileEntry>,
