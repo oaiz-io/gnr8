@@ -4514,6 +4514,59 @@ pub fn target_cli_help_suites(
     }])
 }
 
+/// The docs code-sample suites a declared built-in target contributes: one per sibling SDK when
+/// the target is `StaticDocs`, none otherwise.
+///
+/// # Errors
+///
+/// Returns the sampler's or a call-site renderer's graph error, or a sibling's configuration error.
+pub fn target_docs_suites(
+    spec: &BuiltinTarget,
+    ir: &ApiGraph,
+    plan: &PlanTargets<'_>,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    let BuiltinTarget::StaticDocs(docs) = spec else {
+        return Ok(Vec::new());
+    };
+    let projected = crate::graph::projection::for_generation(ir)?;
+    let graph = &*projected;
+    let mut cases = 0;
+    let mut refused = 0;
+    for op in &graph.operations {
+        match crate::verify::sample_operation(op, graph)? {
+            crate::verify::Sampled::Sample(_) => cases += 1,
+            crate::verify::Sampled::Refused(_) => refused += 1,
+        }
+    }
+    plan.sdks()
+        .map(|sdk| {
+            let (dir, module, go_verification) = match sdk {
+                SiblingSdk::Go(t) => (
+                    &t.dir,
+                    &t.module,
+                    Some(GoVerificationModule {
+                        module: t.module.clone(),
+                        go_version: t.go_version.clone(),
+                        package_metadata: t.package_metadata,
+                    }),
+                ),
+                SiblingSdk::Python(t) => (&t.dir, &t.module, None),
+                SiblingSdk::TypeScript(t) => (&t.dir, &t.module, None),
+            };
+            Ok(crate::verify::DocsSnippetSuite {
+                language: sdk.language(),
+                docs_dir: docs.dir.trim_end_matches('/').to_string(),
+                sdk_output_path: dir.trim_end_matches('/').to_string(),
+                package: sdk_package(module)?,
+                compile_unit: crate::staticdocs::snippets::compile_unit(graph, sdk)?,
+                cases,
+                refused,
+                go_verification,
+            })
+        })
+        .collect()
+}
+
 /// Execute a declared post-processor over `out`.
 ///
 /// # Errors

@@ -166,6 +166,35 @@ pub struct CliHelpSuite {
     pub plan: CliHelpPlan,
 }
 
+/// Docs code samples for one sibling SDK target, and what `gnr8 verify` needs to check them.
+///
+/// Declared by the `StaticDocs` target, one per sibling Go/Python/TypeScript SDK declaration of the
+/// same plan, in plan order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocsSnippetSuite {
+    /// Taken from `SiblingSdk::language()` — never stated separately.
+    pub language: ContractTestLanguage,
+    /// The docs target's project-relative output directory.
+    pub docs_dir: String,
+    /// The SDK target's project-relative output directory.
+    pub sdk_output_path: String,
+    /// The SDK's own package or module name (`sdk_package`), exactly as
+    /// [`ContractTestSuite::package`]. It is NOT the consumer import specifier, which is
+    /// `CompileUnit::identity` (Go: package `sdk`, identity `example.com/bookstore/sdk`).
+    pub package: String,
+    /// The compile unit from `staticdocs::snippets::compile_unit`, the same `render_call` output the
+    /// pages were assembled from. Its `entries` carry each page path and the snippet text that page
+    /// must contain verbatim. `None` is the one encoding of "no consumer identity": the suite is
+    /// reported skipped with that reason and never run.
+    pub compile_unit: Option<crate::staticdocs::snippets::CompileUnit>,
+    /// Operations with a sample.
+    pub cases: usize,
+    /// Operations whose sample is refused; counted, not run.
+    pub refused: usize,
+    /// Declared Go module facts; other languages carry none.
+    pub go_verification: Option<GoVerificationModule>,
+}
+
 /// Plan help checks using the same command facts as generation.
 ///
 /// # Errors

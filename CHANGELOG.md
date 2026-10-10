@@ -27,6 +27,9 @@ must move the minor version.
   Generation fails on a missing page or broken internal link.
 - Python and TypeScript calls on operation pages, for SDK targets that emit package metadata; CLI
   invocations for operations a generated CLI wraps.
+- `gnr8 verify` checks every docs code sample against the SDK it documents. Go and TypeScript
+  samples are compiled, and Python samples are executed against a stub transport. It also checks
+  that each sample appears unchanged in its page, and it reports skipped toolchains explicitly.
 
 ### Fixed
 

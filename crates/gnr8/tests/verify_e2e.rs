@@ -547,3 +547,70 @@ fn verify_checks_python_cli_help_without_installing_the_program() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Copy `src` into `dst`, leaving out build and cache directories a fresh checkout would not have.
+fn copy_project(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name == "target" || name == "cache" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            copy_project(&path, &dst.join(&name));
+        } else {
+            std::fs::copy(&path, dst.join(&name)).unwrap();
+        }
+    }
+}
+
+/// `gnr8 verify` over a copy of `examples/bookstore`, which declares `StaticDocs` beside its
+/// `GoSdk`: the Go docs suite runs `go vet` over the compile unit and passes, next to the contract
+/// and CLI help suites the same project already had.
+#[test]
+fn verify_runs_the_go_docs_suite_for_bookstore() {
+    if !toolchains_available() {
+        eprintln!("skipping verify_e2e: go/gofmt/cargo toolchain unavailable");
+        return;
+    }
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gnr8-docs-verify-{}-{nanos}", std::process::id()));
+    copy_project(&repo.join("examples/bookstore"), &root);
+    let sdk = std::fs::canonicalize(repo.join("crates/gnr8-sdk")).unwrap();
+    let manifest = root.join(".gnr8/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap().replace(
+        "path = \"../../../crates/gnr8-sdk\"",
+        &format!("path = {:?}", sdk.to_string_lossy()),
+    );
+    std::fs::write(&manifest, text).unwrap();
+
+    let (ok, out, err) = run_gnr8(&root, &["--json", "verify"]);
+    assert!(ok, "gnr8 verify must pass.\nstdout:\n{out}\nstderr:\n{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("verify --json is JSON");
+    assert_eq!(report["verified"], serde_json::json!(true), "{out}");
+    let docs = report["docs_suites"].as_array().expect("docs suites");
+    assert_eq!(docs.len(), 1, "{out}");
+    assert_eq!(docs[0]["language"], serde_json::json!("go"), "{out}");
+    assert_eq!(docs[0]["status"], serde_json::json!("passed"), "{out}");
+    assert_eq!(docs[0]["cases"], serde_json::json!(5), "{out}");
+    assert_eq!(
+        docs[0]["docs_dir"],
+        serde_json::json!("generated/docs"),
+        "{out}"
+    );
+
+    let (ok, out, _err) = run_gnr8(&root, &["verify"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("Go docs samples") && line.ends_with("passed")),
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

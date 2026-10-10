@@ -106,11 +106,11 @@ pub(crate) struct CliHelpReport {
     pub(crate) commands: Vec<CommandReport>,
 }
 
-trait ProcessRunner {
+pub(super) trait ProcessRunner {
     fn output(&mut self, command: &mut Command) -> io::Result<Output>;
 }
 
-struct NativeRunner;
+pub(super) struct NativeRunner;
 impl ProcessRunner for NativeRunner {
     fn output(&mut self, command: &mut Command) -> io::Result<Output> {
         command.output()

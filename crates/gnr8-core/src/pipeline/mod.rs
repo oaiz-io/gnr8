@@ -178,6 +178,8 @@ pub struct PipelineOutcome {
     pub contract_test_suites: Vec<ContractTestSuite>,
     /// Generated CLI help suites from built-in target declarations.
     pub cli_help_suites: Vec<crate::verify::CliHelpSuite>,
+    /// Docs code-sample suites a `StaticDocs` target declares, one per sibling SDK.
+    pub docs_suites: Vec<crate::verify::DocsSnippetSuite>,
     /// How many distinct source files contributed a fact to the graph.
     pub source_files: usize,
 }
@@ -244,6 +246,26 @@ pub fn cli_help_suites(
         if let PlanStage::Builtin(spec) = stage {
             suites.extend(builtins::target_cli_help_suites(spec, ir)?);
         }
+    }
+    Ok(suites)
+}
+
+/// Collect the docs code-sample suites a plan's `StaticDocs` targets declare.
+///
+/// They are built from the same sibling declarations the docs target read, so a suite exists for
+/// exactly the SDK sections the pages printed. Custom targets declare none.
+///
+/// # Errors
+/// Returns the sampler's or a call-site renderer's graph error.
+pub fn docs_suites(
+    plan: &StagePlan,
+    ir: &ApiGraph,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    let builtin_targets = emission::builtin_targets(&plan.targets);
+    let siblings = builtins::PlanTargets::new(&builtin_targets);
+    let mut suites = Vec::new();
+    for (_, spec) in &builtin_targets {
+        suites.extend(builtins::target_docs_suites(spec, ir, &siblings)?);
     }
     Ok(suites)
 }
@@ -406,6 +428,7 @@ pub fn run(
     // writers apply to user-configured target output; the versioned graph must remain exact JSON.
     let contract_test_suites = contract_test_suites(plan, &generation_ir)?;
     let cli_help_suites = cli_help_suites(plan, &generation_ir)?;
+    let docs_suites = docs_suites(plan, &generation_ir)?;
 
     artifacts.begin_stage("gnr8:GraphArtifact");
     artifacts.create(crate::graph_artifact::GRAPH_ARTIFACT_PATH, rendered_graph?)?;
@@ -419,6 +442,7 @@ pub fn run(
         readiness_targets: readiness_targets(plan),
         contract_test_suites,
         cli_help_suites,
+        docs_suites,
         source_files,
     })
 }
@@ -1573,5 +1597,96 @@ mod tests {
             matches!(err, CoreError::ArtifactOwnership { ref code, .. } if code == "artifact.path_collision"),
             "{err:?}"
         );
+    }
+
+    /// One graph with a sampled operation and one whose required parameter declares a `pattern`.
+    fn docs_graph() -> ApiGraph {
+        serde_json::from_value(serde_json::json!({
+            "module": "m", "base_path": "/", "title": "Docs", "diagnostics": [], "security": [],
+            "operations": [
+                {"id": "listItems", "method": "GET", "path": "/items", "handler": "listItems",
+                 "params": [], "request_body": null,
+                 "responses": [{"status": 204, "body": null, "body_kind": "empty"}],
+                 "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}},
+                {"id": "findItem", "method": "GET", "path": "/items/find", "handler": "findItem",
+                 "params": [{"name": "code", "location": "query", "required": true,
+                             "schema": {"type": "primitive", "of": {"prim": "string"}},
+                             "constraints": {"pattern": "^[a-z]+$"},
+                             "provenance": {"file": "a.go", "start_line": 2, "end_line": 2}}],
+                 "request_body": null,
+                 "responses": [{"status": 204, "body": null, "body_kind": "empty"}],
+                 "provenance": {"file": "a.go", "start_line": 2, "end_line": 2}}
+            ],
+            "schemas": []
+        }))
+        .expect("the docs graph deserializes")
+    }
+
+    #[test]
+    fn docs_suites_are_declared_per_sibling_sdk_in_plan_order() {
+        use crate::verify::ContractTestLanguage;
+        let plan = Pipeline::new()
+            .target(decl::TsSdk::new().module("items").to("gen/ts"))
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go"),
+            )
+            .target(decl::StaticDocs::new().to("gen/docs"))
+            .target(
+                decl::PySdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/py"),
+            )
+            .plan();
+        let suites = super::docs_suites(&plan, &docs_graph()).unwrap();
+        let shape: Vec<(ContractTestLanguage, &str, bool)> = suites
+            .iter()
+            .map(|suite| {
+                (
+                    suite.language,
+                    suite.sdk_output_path.as_str(),
+                    suite.compile_unit.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                // A TypeScript SDK emits no package.json by default, so it has no identity.
+                (ContractTestLanguage::TypeScript, "gen/ts", false),
+                (ContractTestLanguage::Go, "gen/go", true),
+                (ContractTestLanguage::Python, "gen/py", true),
+            ]
+        );
+        for suite in &suites {
+            assert_eq!(suite.docs_dir, "gen/docs");
+            assert_eq!(suite.cases, 1, "one operation samples");
+            assert_eq!(suite.refused, 1, "one operation is refused");
+        }
+        assert_eq!(suites[1].package, "sdk");
+        assert!(suites[1].go_verification.is_some());
+        let unit = suites[1].compile_unit.as_ref().unwrap();
+        assert_eq!(unit.identity, "example.com/items/sdk");
+        assert_eq!(unit.entries.len(), 1);
+        assert_eq!(unit.entries[0].page, "operations/list-items.md");
+    }
+
+    #[test]
+    fn no_static_docs_means_no_docs_suites() {
+        let plan = Pipeline::new()
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go"),
+            )
+            .plan();
+        assert!(super::docs_suites(&plan, &docs_graph()).unwrap().is_empty());
+        let docs_alone = Pipeline::new()
+            .target(decl::StaticDocs::new().to("gen/docs"))
+            .plan();
+        assert!(super::docs_suites(&docs_alone, &docs_graph())
+            .unwrap()
+            .is_empty());
     }
 }
