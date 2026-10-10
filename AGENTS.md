@@ -86,7 +86,7 @@ we support. We took none of their tags. If any of them changed tomorrow, nothing
 > licence to add more. Field prose should move to the field's own doc comment; until it does, do not
 > extend the tag grammar.
 >
-> **Resolved (0.18.0):** `goextract` used to read the `enums:"…"` / `enum:"…"` struct tags as an
+> **Resolved (after 0.18.0):** `goextract` used to read the `enums:"…"` / `enum:"…"` struct tags as an
 > enum, on bound parameters and schema fields alike. That spelling is a *foreign* generator's
 > convention, and no Go runtime consumes it. The reading was removed, with no detection or warning
 > left behind, because reporting the tag would still mean reading it. `binding:"oneof=…"` /
