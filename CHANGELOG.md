@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.18.0 — 2026-10-10
+
 ### Breaking
 
 - **`CliTopic` gains `owned_commands`.** Older serialized configs remain readable because the field
