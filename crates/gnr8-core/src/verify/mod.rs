@@ -323,6 +323,37 @@ pub struct SampleBody {
     pub unmet: Vec<UnmetConstraint>,
 }
 
+impl SampleBody {
+    /// The media type of the representation this sample selects, as the operation declares it.
+    ///
+    /// Every call-site renderer that spells a representation choice reads it here, so a selection
+    /// the operation does not declare is the same typed error in every language — never a silent
+    /// stand-in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::SdkGen`] when the selection is not among the operation's declared
+    /// representations, or the declarations themselves are rejected.
+    pub(crate) fn declared_content_type(
+        &self,
+        op: &Operation,
+        graph: &ApiGraph,
+    ) -> Result<String, CoreError> {
+        let declared = request_body_models_of(op, graph)?;
+        declared
+            .get(self.selection)
+            .map(|model| model.content_type.clone())
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!(
+                    "sampled call selects request representation {} of operation '{}', which has {}",
+                    self.selection,
+                    op.id,
+                    declared.len()
+                ),
+            })
+    }
+}
+
 /// One credential the client is configured with and the request must carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SampleAuth {

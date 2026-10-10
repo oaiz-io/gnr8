@@ -10,7 +10,7 @@
 use serde_json::Value;
 
 use crate::graph::{ApiGraph, Operation, Prim, Type};
-use crate::sdk::emit_common::{request_body_models_of, CallInputs, CallSite, Qualify};
+use crate::sdk::emit_common::{CallInputs, CallSite, Qualify};
 use crate::verify::{
     SampleAuth, SampleBody, SampleCredential, SampleParam, CONTRACT_TEST_BASIC_PASSWORD,
     CONTRACT_TEST_BASIC_USER, CONTRACT_TEST_BEARER, CONTRACT_TEST_CREDENTIAL,
@@ -238,11 +238,7 @@ fn body_expression(
 ) -> Result<String, CoreError> {
     let literal = ts_literal(&Type::Named(body.schema_id.clone()), &body.value, graph)?;
     if body.representations > 1 {
-        let declared = request_body_models_of(op, graph)?;
-        let content_type = declared.get(body.selection).map_or_else(
-            || body.content_type.clone(),
-            |model| model.content_type.clone(),
-        );
+        let content_type = body.declared_content_type(op, graph)?;
         return Ok(format!(
             "{{ contentType: {}, value: {literal} }}",
             ts_string_literal(&content_type)
@@ -350,5 +346,38 @@ fn ts_json_literal(value: &Value) -> String {
 fn unrenderable(ty: &Type) -> CoreError {
     CoreError::SdkGen {
         message: format!("cannot render a TypeScript literal for {ty:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::body_expression;
+    use crate::pysdk::callsite::tests::{selecting, two_representations};
+    use crate::CoreError;
+
+    #[test]
+    fn the_selected_representation_spells_its_declared_media_type() {
+        let graph = two_representations();
+        let literal = body_expression(&graph, &graph.operations[0], &selecting(1)).unwrap();
+        assert!(
+            literal.starts_with("{ contentType: \"application/vnd.note+json\", value: "),
+            "{literal}"
+        );
+    }
+
+    /// A selection the operation does not declare is a typed error, as it is for Go — never the
+    /// sample's own media type standing in for the declared one.
+    #[test]
+    fn an_undeclared_selection_is_a_typed_error() {
+        let graph = two_representations();
+        let err = body_expression(&graph, &graph.operations[0], &selecting(2)).unwrap_err();
+        assert!(matches!(err, CoreError::SdkGen { .. }), "{err:?}");
+        assert!(
+            err.to_string()
+                .contains("selects request representation 2 of operation 'putNote', which has 2"),
+            "{err}"
+        );
     }
 }

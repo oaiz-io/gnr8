@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use crate::graph::{ApiGraph, Operation, Prim, Type};
-use crate::sdk::emit_common::{request_body_models_of, CallInputs, CallSite, Qualify};
+use crate::sdk::emit_common::{CallInputs, CallSite, Qualify};
 use crate::sdk::model_style::PyModelStyle;
 use crate::verify::{
     SampleAuth, SampleBody, SampleCredential, CONTRACT_TEST_BASIC_PASSWORD,
@@ -148,11 +148,7 @@ fn body_literal(
         models,
     )?;
     if body.representations > 1 {
-        let declared = request_body_models_of(op, graph)?;
-        let content_type = declared.get(body.selection).map_or_else(
-            || body.content_type.clone(),
-            |model| model.content_type.clone(),
-        );
+        let content_type = body.declared_content_type(op, graph)?;
         return Ok(format!("({}, {literal})", py_string_literal(&content_type)));
     }
     Ok(literal)
@@ -304,5 +300,97 @@ pub(crate) fn py_scalar(value: &Value) -> Result<String, CoreError> {
 fn unrenderable(ty: &Type) -> CoreError {
     CoreError::SdkGen {
         message: format!("cannot render a Python literal for {ty:?}"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::collections::BTreeSet;
+
+    use serde_json::json;
+
+    use super::body_literal;
+    use crate::graph::ApiGraph;
+    use crate::sdk::model_style::PyModelStyle;
+    use crate::verify::SampleBody;
+    use crate::CoreError;
+
+    /// One operation that accepts `Note` as JSON or as `application/vnd.note+json`.
+    pub(crate) fn two_representations() -> ApiGraph {
+        serde_json::from_value(json!({
+            "module": "n", "base_path": "/", "title": "Notes", "diagnostics": [], "security": [],
+            "operations": [{
+                "id": "putNote", "method": "PUT", "path": "/note", "handler": "putNote",
+                "params": [],
+                "request_body": {"ref_id": "n.Note"},
+                "request_body_variants": [
+                    {"content_type": "application/vnd.note+json", "body": {"ref_id": "n.Note"}}
+                ],
+                "responses": [{"status": 204, "body": null, "body_kind": "empty"}],
+                "provenance": {"file": "n.go", "start_line": 1, "end_line": 1}
+            }],
+            "schemas": [{
+                "id": "n.Note", "name": "Note",
+                "body": {"type": "object", "of": []},
+                "provenance": {"file": "n.go", "start_line": 2, "end_line": 2}
+            }]
+        }))
+        .unwrap()
+    }
+
+    pub(crate) fn selecting(selection: usize) -> SampleBody {
+        SampleBody {
+            content_type: "application/json".to_string(),
+            schema_id: "n.Note".to_string(),
+            model: "Note".to_string(),
+            value: json!({}),
+            selection,
+            representations: 2,
+            unmet: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_selected_representation_spells_its_declared_media_type() {
+        let graph = two_representations();
+        let op = &graph.operations[0];
+        let mut models = BTreeSet::new();
+        let literal = body_literal(
+            &graph,
+            op,
+            &selecting(1),
+            PyModelStyle::Pydantic,
+            &mut models,
+        )
+        .unwrap();
+        assert!(
+            literal.starts_with("(\"application/vnd.note+json\", "),
+            "{literal}"
+        );
+    }
+
+    /// A selection the operation does not declare is a typed error, as it is for Go — never the
+    /// sample's own media type standing in for the declared one.
+    #[test]
+    fn an_undeclared_selection_is_a_typed_error() {
+        let graph = two_representations();
+        let op = &graph.operations[0];
+        let mut models = BTreeSet::new();
+        let err = body_literal(
+            &graph,
+            op,
+            &selecting(2),
+            PyModelStyle::Pydantic,
+            &mut models,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::SdkGen { .. }), "{err:?}");
+        assert!(
+            err.to_string()
+                .contains("selects request representation 2 of operation 'putNote', which has 2"),
+            "{err}"
+        );
     }
 }
