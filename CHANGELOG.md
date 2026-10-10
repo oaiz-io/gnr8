@@ -14,8 +14,10 @@ must move the minor version.
 - **Hand-owned commands inside generated topics.** `CliTopic::owned_command` names a Go command
   under a declared topic whose implementation is hand-owned. The topic's dispatcher calls
   `run<Topic><Name>` (or `OwnedCommand::function`), and its help page and typo hints list it first.
-  Generation refuses a topic that wraps no operation, a name equal to one of the topic's verbs or
-  sub-nouns, and topic owned commands on `PySdk`. Configs without the new field emit identical output.
+  Generation refuses a topic with no generated command, a name equal to one of the topic's verbs or
+  sub-nouns, two owned commands that call one Go function (such as root `db-types` and topic `db`
+  command `types`, which both derive `runDbTypes`), and topic owned commands on `PySdk`. Configs
+  without the new field emit identical output.
 
 ### Fixed
 

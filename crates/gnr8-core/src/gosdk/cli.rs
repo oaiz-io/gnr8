@@ -204,11 +204,43 @@ fn check_owned_command_names(cli: &SdkCli, ops: &[&Operation]) -> Result<(), Cor
     for topic in &cli.topics {
         check_topic_owned_command_names(cli, topic, &groups, ops)?;
     }
+    check_owned_command_functions(cli)
+}
+
+/// Each hand-owned command calls its own Go function. Two invocations that call one function are
+/// two names for one command, and a derived name can meet another one silently: root `db-types`
+/// and topic `db` command `types` both derive `runDbTypes`.
+fn check_owned_command_functions(cli: &SdkCli) -> Result<(), CoreError> {
+    let root = cli
+        .owned_commands
+        .iter()
+        .map(|command| (command.name.clone(), owned_function(command, None)));
+    let topics = cli.topics.iter().flat_map(|topic| {
+        topic.owned_commands.iter().map(|command| {
+            (
+                format!("{} {}", topic.name, command.name),
+                owned_function(command, Some(&topic.name)),
+            )
+        })
+    });
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for (invocation, function) in root.chain(topics) {
+        if let Some(first) = seen.get(&function) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} owned commands {first:?} and {invocation:?} both call Go function \
+                     {function:?}; give one of them its own OwnedCommand::function",
+                    cli.program
+                ),
+            });
+        }
+        seen.insert(function, invocation);
+    }
     Ok(())
 }
 
-/// A topic-owned command needs the topic's dispatcher, which exists only when the topic wraps an
-/// operation, and must not shadow a verb or sub-noun that dispatcher already routes.
+/// A topic-owned command needs the topic's dispatcher, which exists only when the topic has a
+/// generated command, and must not shadow a verb or sub-noun that dispatcher already routes.
 fn check_topic_owned_command_names(
     cli: &SdkCli,
     topic: &gnr8::sdk::CliTopic,
@@ -221,8 +253,8 @@ fn check_topic_owned_command_names(
     if !groups.contains(&topic.name) {
         return Err(CoreError::SdkGen {
             message: format!(
-                "CLI {:?} topic {:?} declares owned commands but wraps no operation; a topic \
-                 owned command needs the topic's generated dispatcher",
+                "CLI {:?} topic {:?} declares owned commands but has no generated command; a \
+                 topic owned command needs the topic's generated dispatcher",
                 cli.program, topic.name
             ),
         });

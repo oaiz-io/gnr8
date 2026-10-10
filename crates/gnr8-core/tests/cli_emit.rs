@@ -3854,11 +3854,50 @@ fn go_topic_owned_command_summary_and_function_are_single_line() {
 }
 
 #[test]
-fn go_topic_owned_command_needs_a_topic_that_wraps_an_operation() {
+fn go_topic_owned_command_needs_a_topic_with_a_generated_command() {
     let cli = spec_cli().topic(CliTopic::new("db").owned_command("types"));
     let message = go_topic_owned_error(cli);
     assert!(message.contains("topic \"db\""), "{message}");
-    assert!(message.contains("wraps no operation"), "{message}");
+    assert!(message.contains("has no generated command"), "{message}");
+}
+
+/// A topic that declares no command still has a dispatcher when operations sit in a group of the
+/// same name, so a hand-owned command can join it.
+#[test]
+fn go_topic_owned_command_joins_a_group_named_by_its_operations() {
+    if skip_go() {
+        return;
+    }
+    let cli = SdkCli::new("bookstore").topic(CliTopic::new("books").owned_command("stats"));
+    let go = generate_go_cli_with(&grouped_graph(""), cli);
+    let dispatch = go_func(&go, "dispatchBooks");
+    assert!(
+        dispatch.contains("case \"stats\":\n\t\treturn runBooksStats(args[1:], active)"),
+        "{dispatch}"
+    );
+}
+
+#[test]
+fn go_owned_commands_may_not_derive_one_function() {
+    let message = go_topic_owned_error(topic_owned_cli("stats").owned_command("books-stats"));
+    assert!(
+        message.contains(
+            "owned commands \"books-stats\" and \"books stats\" both call Go function \"runBooksStats\""
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn go_owned_commands_may_not_name_one_function() {
+    let message = go_topic_owned_error(
+        topic_owned_cli(OwnedCommand::new("stats").function("countBooks"))
+            .owned_command(OwnedCommand::new("count").function("countBooks")),
+    );
+    assert!(
+        message.contains("both call Go function \"countBooks\""),
+        "{message}"
+    );
 }
 
 #[test]
