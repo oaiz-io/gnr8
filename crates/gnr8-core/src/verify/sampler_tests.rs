@@ -2367,3 +2367,23 @@ fn an_unmodelled_parameter_keyword_is_recorded_unmet() {
         "the example meets what gnr8 does not evaluate"
     );
 }
+
+/// D-EX: a declared error response example is the typed-error case's body, as a declared success
+/// example is the success reply — the one rule every reply follows.
+#[test]
+fn a_declared_error_example_is_the_error_reply() {
+    let mut graph = two_404s(&object(&[fld("code", &string(), true)]));
+    graph.operation_docs = vec![serde_json::from_value(json!({
+        "operation_id": "first",
+        "responses": [{"status": 404, "examples": [
+            media_example("missing", "application/json", &json!({"code": "not_found"}))
+        ]}]
+    }))
+    .unwrap()];
+    let (operation, body) = typed_error_404(&graph).expect("a typed 404 case");
+    assert_eq!(operation, "first");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({"code": "not_found"})
+    );
+}

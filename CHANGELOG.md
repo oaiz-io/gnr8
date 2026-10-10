@@ -232,6 +232,10 @@ must move the minor version.
   in an imported parameter's schema is recorded as unmet too, so the page refuses instead of
   printing a value that may break it. That covers keywords gnr8 does not model (`const`, `not`, …)
   and keywords it could not type (an enum with no scalar `type`).
+- **A declared error response example is the typed-error case's body.** Contract tests built the
+  error reply from the model even when the operation declared an example for that status, though
+  the example was already checked against the model. An error reply now follows the rule every
+  reply follows, and generated `contract_test.*` files change for operations that declare one.
 - Integer samples stay within ±(2^53 − 1). Bounds such as `minimum: 9007199254740993` used to yield
   a sample the TypeScript SDK sent as `…992`; they are now a typed refusal naming the input.
 - An imported parameter's validation keywords (`minimum`, `maxLength`, `pattern`, a non-string

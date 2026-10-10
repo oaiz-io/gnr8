@@ -1052,7 +1052,9 @@ pub(crate) fn success_sample(
 /// skips the case (the planner counts it).
 ///
 /// The declared error model is used when the graph names one, so the body a target decodes matches
-/// the shape it declares. The generic message/slug envelope is sent only where it always was: a
+/// the shape it declares. Its body follows the rule every reply follows: the first response example
+/// declared for the status and its JSON media type when there is one, a value built from the model
+/// when there is none. The generic message/slug envelope is sent only where it always was: a
 /// status with no declared response or body, or a model refused as a whole as recursive, too deep,
 /// holding an empty enum or holding an empty union. A model refused by an unsatisfiable constraint,
 /// a sampler limit or a map key skips the case instead, so the envelope gains no trigger. A
@@ -1082,8 +1084,11 @@ pub(crate) fn error_payload(
         None => envelope(),
         Some(body) => {
             let schema = schema_by_id(graph, &body.ref_id)?;
-            match Sampler::new(graph, Side::Response).root(schema, &format!("error.{status}"))? {
-                Ok(value) => value,
+            let example = reply_example(op, graph, status);
+            let declared = example.map(|example| (example, response_origin(op, status, example)));
+            let subject = format!("error.{status}");
+            match body_value(graph, Side::Response, schema, &subject, declared)? {
+                Ok((value, _)) => value,
                 Err(
                     SampleRefusal::Recursive { .. }
                     | SampleRefusal::TooDeep { .. }
