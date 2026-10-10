@@ -92,6 +92,60 @@ a *Superseded (round 4, Nn)* note:
 - N4: the optional-body row states every trigger today's sampler already has, and Risk 1 names a
   fourth, narrow loss (§4.2, §10).
 
+**Revision — implementation review fix loop (`.briefs/12-run.json`; branch tip `65544a7`).** An
+independent review of the implementation found 3 blocking, 14 should-fix and 10 note findings. The
+corrections that change this plan's design, each a [D] against the text below:
+
+- **Rung 3 answers with the page's reply** (review 12; §4.2 "Rung 3", §5). The recording transport
+  answers each sample's call with the reply its page prints — status, the response's declared media
+  type, body — and the call must succeed on it; an operation whose outcome is `NoReply` or `Refused`
+  is answered with the empty-bodied `400` and must raise the SDK's typed error with that status. This
+  is what §4.2 asked for; the first implementation answered every call with the `400` and asserted
+  nothing about the outcome.
+- **A float sample prints alike in every language** (review 1; §4.2 candidate order). A float
+  candidate is used only when it is a decimal Go, Python, JavaScript and `serde_json` all print
+  identically: not a whole number, inside `[1e-4, 1e6)`, unchanged through `float32`. The candidate
+  list gains points inside the interval (bound ± 0.5, ± 0.25, midpoints); when none fits, the new
+  typed refusal `FloatWire`. Rung 3 compares JSON bodies with numbers by value.
+- **Imported parameter constraints are typed facts** (review 2). The OpenAPI importer reads a
+  parameter's `minimum`/`maxLength`/… (and its items') into `Param.constraints` /
+  `item_constraints`; OpenAPI 3.0 / Swagger 2 boolean `exclusiveMinimum`/`exclusiveMaximum` import as
+  the numeric exclusive bound (review 13). `openapi.yaml` output is unchanged.
+- **An unsampled optional body keeps its argument slot** (review 3): Go passes `nil`, TypeScript
+  `undefined` when a later slot is filled.
+- **A Go SDK whose package clause collides with a sample's own names is aliased** (review 4):
+  `clientsdk "example.com/x/client"`. `ConsumerIdentity.qualifier` is then the alias.
+- **Cookies are printed and compared** (review 7): a `cookie:` line on the page; rung 3 compares it
+  except for TypeScript, whose client leaves cookies to the `fetch` transport by design.
+- **`docs_suites` moved out of `pipeline::run`** (Risk 2, measured). On a synthetic 400-operation
+  OpenAPI project with Go, Python and TypeScript siblings, warm `gnr8 check` took a median 176 ms
+  with `StaticDocs` against 83 ms without (release CLI, 7 interleaved rounds, host load 4–10). The
+  memo already restores the 814 extra pages; the gap was the compile units re-sampling every
+  operation on every run. As Risk 2 provided, the suites are now built by `verify` alone
+  (`pipeline::docs_suites_of_run`, from the plan and the run's graph artifact), and
+  `PipelineOutcome` no longer carries them: the same `check` then took 93 ms against 85 ms. The
+  memo's premise is unchanged — `StaticDocs` keeps it; only a companion `StaticFiles` disables it, as
+  before.
+- **New typed outcomes**: `SampleRefusal::FloatWire` and `SampleRefusal::SampleCap` (the sampler's
+  64-entry / 1024-character limits are no longer reported as unsatisfiable bounds), the runner
+  reason `no_samples` (a suite whose every operation is refused is skipped, counted), Node without
+  `typescript` skipped as `toolchain_absent`, and `CoreError::DocsGen` for every docs-target failure.
+- **Rung 0's empty-heading check** covers only headings the renderer emits (a blank title or group
+  name is a typed error); verbatim prose is never read as a heading.
+- **Commit `268bf29` misdescribes one change** (review 27): the moved `CollectionRules.sizes` line is
+  in the canned reply of the gin fixture's Go contract test, not a request value. History is left as
+  is; this note is the correction.
+
+**README quick-start follow-up (D2), draft issue text — not filed.**
+
+> *Generated SDK READMEs: replace the placeholder quick start with a real, verified call.* The
+> `SdkDocs` README quick start (`crates/gnr8-core/src/sdk/docs.rs`) is a hard-coded placeholder with no
+> method call, and the Python one imports `from sdk import Client` whatever the package is called.
+> `StaticDocs` now renders a real, compiled and wire-checked sample per operation for every SDK target
+> that emits package metadata (`staticdocs::snippets`). Proposal: render the README quick start from
+> the same `snippet` producer for one operation, and let `gnr8 verify`'s docs suite cover it. This
+> moves SDK-directory bytes, so it ships as its own release note, after 0.18.0.
+
 Two rules govern the plan, carried from the research and CLI documents:
 
 > Do not weaken or reinterpret the AGENTS.md invariants. If a proposed mechanism brushes an
@@ -1499,8 +1553,9 @@ none (D2).
    generated clients do not offer.
 6. **SDK targets without package metadata get no snippets.** TypeScript's default is off
    (`crates/gnr8-sdk/src/sdk/builtins.rs:2706-2710`), so a default `TsSdk` gets the typed
-   no-identity note. Mitigation: the note names the cause and the one-line fix (`.package(…)`), and
-   the P5 page says so. *Superseded:* this risk was "TypeScript import specifier without package
+   no-identity note. Mitigation: the note names the cause, and the P5 page names the one-line fix
+   (`.package(…)`). *Superseded (implementation review, 27):* this said the note itself names the
+   fix; §4.1's exact note text, which is what shipped, names only the cause. *Superseded:* this risk was "TypeScript import specifier without package
    metadata", mitigated by a docs-relative specifier — the rule-3 fallback withdrawn under
    finding 14.
 
@@ -1553,6 +1608,17 @@ none (D2).
 ---
 
 ## 11. Owner-informable decisions, and what overriding each would cost
+
+*Added in the implementation review fix loop (review 18 and 20), each with the shipped default:*
+
+- **Dataclass-style `PySdk` and rung 3.** A dataclass SDK serializes with `dataclasses.asdict`, so
+  every unset optional field goes out as `null`, and its docs suite fails rung 3 on any request body
+  with an optional field. Default: disclosed in the CHANGELOG and the guide, SDK unchanged. Fixing it
+  changes generated SDK bytes (omit unset optionals, as the pydantic style does).
+- **`index.md` version.** The index omits the version when none is declared, while `openapi.yaml`
+  and the CLI print the `0.1.0` default (`lower/mod.rs`). Default: omit (a page renders declared
+  facts). Printing the default instead is a one-line change.
+
 
 | Decision | If overridden |
 |---|---|

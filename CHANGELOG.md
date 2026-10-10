@@ -32,7 +32,11 @@ must move the minor version.
   that each sample appears unchanged in its page, and it reports skipped toolchains explicitly.
 - `errors.md`, `authentication.md`, per-page diagnostics and pagination sections. `gnr8 verify` runs
   each sample's call against a fake transport and asserts it sends the request printed on the page,
-  with credentials and base URL substituted.
+  with credentials and base URL substituted. The transport answers with the reply the page prints,
+  and the call must succeed on it; an operation whose page prints no reply is answered with an empty
+  `400`, and the call must raise the SDK's typed error with that status. A Python SDK in the
+  dataclass model style sends unset optional fields as explicit `null`, so its docs samples fail
+  this check on any request body with an optional field; the default pydantic style passes.
 
 ### Fixed
 
@@ -45,7 +49,17 @@ must move the minor version.
   reply field is left out of the canned reply instead, so only a refused required field costs a
   case. Enum-keyed map samples use an enum member as the key. Generated `contract_test.*` files
   change for operations whose inputs or responses declare constraints, and suites over patterned
-  models can lose cases.
+  models can lose cases. A float sample is always a decimal every generated language prints alike
+  (never a whole number), so a contract test no longer compares `1.0` with the `1` a Go or
+  TypeScript client sends.
+- Parameters imported from an OpenAPI document keep their `minimum`, `maxLength` and other
+  constraints as typed facts (`openapi.yaml` output is unchanged), and OpenAPI 3.0 / Swagger 2
+  `exclusiveMinimum: true` / `exclusiveMaximum: true` import as the exclusive bound instead of the
+  string `"true"`.
+- A generated TypeScript SDK with bearer or basic authentication compiles under
+  `exactOptionalPropertyTypes`.
+- The operations a schema reaches now include those that reach it through an alternative request
+  body or a response header, as the schema's own direction analysis already did.
 
 ## 0.17.1 — 2026-10-07
 

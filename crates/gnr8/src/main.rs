@@ -697,6 +697,8 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
     output.verbose("verify: running pipeline");
     let pipeline_start = Instant::now();
     let run = gnr8_engine::worker::run_pipeline(&root, policy, cache_store().as_ref())?;
+    // Docs suites are built here, their only consumer, not on every pipeline run.
+    let docs = gnr8_engine::pipeline::docs_suites_of_run(&run.plan, &run.outcome.artifacts)?;
     let pipeline_elapsed = pipeline_start.elapsed();
 
     let diagnostics = run.outcome.diagnostics;
@@ -704,7 +706,7 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
 
     if run.outcome.contract_test_suites.is_empty()
         && run.outcome.cli_help_suites.is_empty()
-        && run.outcome.docs_suites.is_empty()
+        && docs.is_empty()
     {
         bail!(
             "no SDK contract tests or generated CLI help checks to run, and no docs samples — add an SDK, CLI or StaticDocs target to .gnr8/src/main.rs"
@@ -720,8 +722,7 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
     );
     let cli_suites =
         verify::run_cli_help_suites(&root, &run.outcome.cli_help_suites, &run.outcome.artifacts);
-    let docs_suites =
-        verify::run_docs_suites(&root, &run.outcome.docs_suites, &run.outcome.artifacts);
+    let docs_suites = verify::run_docs_suites(&root, &docs, &run.outcome.artifacts);
     let run_elapsed = run_start.elapsed();
 
     let report = verify::VerifyReport::new(

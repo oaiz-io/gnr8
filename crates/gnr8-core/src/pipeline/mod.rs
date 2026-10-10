@@ -178,8 +178,6 @@ pub struct PipelineOutcome {
     pub contract_test_suites: Vec<ContractTestSuite>,
     /// Generated CLI help suites from built-in target declarations.
     pub cli_help_suites: Vec<crate::verify::CliHelpSuite>,
-    /// Docs code-sample suites a `StaticDocs` target declares, one per sibling SDK.
-    pub docs_suites: Vec<crate::verify::DocsSnippetSuite>,
     /// How many distinct source files contributed a fact to the graph.
     pub source_files: usize,
 }
@@ -268,6 +266,46 @@ pub fn docs_suites(
         suites.extend(builtins::target_docs_suites(spec, ir, &siblings)?);
     }
     Ok(suites)
+}
+
+/// The docs suites of one finished run, from its plan and the graph artifact it wrote.
+///
+/// Building a suite renders every compile unit — every operation sampled, for every sibling SDK —
+/// so it is done only where it is checked, by `gnr8 verify`, rather than on every `generate`,
+/// `check` and `watch` (measured: about 90 ms of a 170 ms warm `check` on a 400-operation API with
+/// three SDK siblings). The graph is the artifact the run wrote: the projected graph every target,
+/// the docs target included, consumed.
+///
+/// # Errors
+/// Returns a graph-artifact error when the run wrote none or it does not parse, and the sampler's
+/// or a call-site renderer's graph error.
+pub fn docs_suites_of_run(
+    plan: &StagePlan,
+    artifacts: &[Artifact],
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    let declares_docs = plan.targets.iter().any(|stage| {
+        matches!(
+            stage,
+            PlanStage::Builtin(gnr8::sdk::BuiltinTarget::StaticDocs(_))
+        )
+    });
+    if !declares_docs {
+        return Ok(Vec::new());
+    }
+    let text = artifacts
+        .iter()
+        .find(|artifact| artifact.path == crate::graph_artifact::GRAPH_ARTIFACT_PATH)
+        .map(|artifact| artifact.text.as_str())
+        .ok_or_else(|| CoreError::DocsGen {
+            message: "the run wrote no graph artifact to check the docs samples against"
+                .to_string(),
+        })?;
+    let graph = serde_json::from_str::<crate::graph_artifact::GraphArtifact>(text)
+        .map_err(|error| CoreError::DocsGen {
+            message: format!("the run's graph artifact does not parse: {error}"),
+        })?
+        .graph;
+    docs_suites(plan, &graph)
 }
 
 /// Project-relative input roots the plan's built-in source declares.
@@ -428,7 +466,6 @@ pub fn run(
     // writers apply to user-configured target output; the versioned graph must remain exact JSON.
     let contract_test_suites = contract_test_suites(plan, &generation_ir)?;
     let cli_help_suites = cli_help_suites(plan, &generation_ir)?;
-    let docs_suites = docs_suites(plan, &generation_ir)?;
 
     artifacts.begin_stage("gnr8:GraphArtifact");
     artifacts.create(crate::graph_artifact::GRAPH_ARTIFACT_PATH, rendered_graph?)?;
@@ -442,7 +479,6 @@ pub fn run(
         readiness_targets: readiness_targets(plan),
         contract_test_suites,
         cli_help_suites,
-        docs_suites,
         source_files,
     })
 }

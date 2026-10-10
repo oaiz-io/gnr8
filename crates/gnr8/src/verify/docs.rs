@@ -1065,7 +1065,10 @@ mod tests {
                 .output()
                 .is_ok_and(|output| output.status.success())
         };
-        for suite in &outcome.docs_suites {
+        let docs = gnr8_engine::pipeline::docs_suites_of_run(&pipeline.plan(), &outcome.artifacts)
+            .unwrap();
+        assert_eq!(docs.len(), 2);
+        for suite in &docs {
             let available = match suite.language {
                 ContractTestLanguage::Python => has("python3", &["-c", "import pydantic"]),
                 ContractTestLanguage::TypeScript => {
@@ -1102,5 +1105,59 @@ mod tests {
         assert_eq!(excerpt, "ModuleNotFoundError: No module named 'pydantic'");
         let (message, _) = super::rejection(&output(1, "vet: x.go:3:1: undefined: Foo"));
         assert_eq!(message, "the tool rejected a sample");
+    }
+
+    /// Rung 3 has teeth against the real Go tools: the docs-edge suite passes, and after one page is
+    /// rewritten to print another request than its sample sends (as a post-processor could), the
+    /// suite fails naming the operation and the differing field.
+    #[test]
+    fn host_runner_go_suite_fails_on_a_page_that_prints_another_request() {
+        use gnr8_engine::sdk::prelude::*;
+        let has_go = Command::new("go")
+            .arg("version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !has_go {
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/docs-edge/openapi.yaml");
+        let root = crate::verify::tests::temp_root("docs-e2e-go");
+        std::fs::copy(&fixture, root.join("openapi.yaml")).unwrap();
+        let pipeline = Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(
+                GoSdk::new()
+                    .module("example.com/edge/sdk")
+                    .to("generated/sdk"),
+            )
+            .target(StaticDocs::new().to("generated/docs"));
+        let outcome =
+            gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), None).unwrap();
+        let docs = gnr8_engine::pipeline::docs_suites_of_run(&pipeline.plan(), &outcome.artifacts)
+            .unwrap();
+        let suite = &docs[0];
+        let report = super::run(&root, suite, &outcome.artifacts, "docs".into());
+        assert_eq!(
+            report.status,
+            DocsStatus::Passed,
+            "{:?}",
+            report.reason.map(|reason| reason.explain())
+        );
+        let mut planted = outcome.artifacts.clone();
+        let page = planted
+            .iter_mut()
+            .find(|artifact| artifact.path == "generated/docs/operations/create-measure.md")
+            .unwrap();
+        page.text = page
+            .text
+            .replace("POST /measures HTTP/1.1", "POST /measurez HTTP/1.1");
+        let report = super::run(&root, suite, &planted, "docs".into());
+        assert_eq!(report.status, DocsStatus::Failed);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::WireMismatch);
+        assert_eq!(reason.operation.as_deref(), Some("createMeasure"));
+        assert!(reason.message.contains("path"), "{}", reason.message);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

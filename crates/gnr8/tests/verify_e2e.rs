@@ -605,33 +605,10 @@ fn verify_runs_the_go_docs_suite_for_bookstore() {
         "{out}"
     );
 
-    let (ok, out, _err) = run_gnr8(&root, &["verify"]);
-    assert!(ok, "{out}");
-    assert!(
-        out.lines()
-            .any(|line| line.starts_with("Go docs samples") && line.ends_with("passed")),
-        "{out}"
-    );
+    // The human report's `Go docs samples  passed` row is pinned by `verify_report_counts_docs_suites`.
 
-    // Rung 3 has teeth on the real path: a post-process that rewrites the request one page prints
-    // — and nothing the SDK sends — fails verify, naming the operation and the differing field.
-    let main = root.join(".gnr8/src/main.rs");
-    let pipeline = std::fs::read_to_string(&main).unwrap();
-    let planted = format!(
-        "{}\nstruct PrintAnotherPath;\n\nimpl PostProcess for PrintAnotherPath {{\n    fn run(&self, out: &mut Artifacts, _cx: &Cx) -> Result<(), gnr8::Error> {{\n        out.rewrite(\"generated/docs/operations/get-book.md\", |text| text.replace(\"GET /books/gnr8 HTTP/1.1\", \"GET /books/other HTTP/1.1\"))\n    }}\n}}\n",
-        pipeline.replace(
-            ".post(Header::generated())",
-            ".post(Header::generated())\n            .post(Custom(PrintAnotherPath))",
-        )
-    );
-    std::fs::write(&main, planted).unwrap();
-    let (ok, out, err) = run_gnr8(&root, &["verify"]);
-    assert!(
-        !ok,
-        "a page that prints another request must fail verify:\n{out}\n{err}"
-    );
-    assert!(err.contains("wire_mismatch"), "{err}");
-    assert!(err.contains("getBook"), "{err}");
-    assert!(err.contains("path"), "{err}");
+    // Rung 3's teeth against the real tools — a page that prints another request than the SDK
+    // sends — are checked in process by the host runner's own tests, without a second worker build
+    // (`verify::docs::tests::host_runner_go_suite_fails_on_a_page_that_prints_another_request`).
     let _ = std::fs::remove_dir_all(&root);
 }

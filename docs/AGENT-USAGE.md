@@ -201,7 +201,7 @@ The SDK output is generated. Do not patch generated client files by hand; update
 | Missing source toolchain | Install `go`, `python3`, or `node` plus project `typescript`. |
 | Generated file skipped as user-edited | Inspect the edit; run `gnr8 generate --force` only if overwrite is intended. |
 | `gnr8 check` exits 1 | Run `gnr8 generate`; commit updated generated artifacts. |
-| `gnr8 verify` exits 1 | Read the failed SDK contract or CLI help check's command and reason; an all-skipped run means no checks executed. |
+| `gnr8 verify` exits 1 | Read the failed SDK contract, CLI help or docs sample check's command and reason (a docs reason names the operation and page); an all-skipped run means no checks executed. |
 | Diagnostics in `doctor` | Prefer typed source/config changes over guessing undocumented behavior. |
 
 ## CI

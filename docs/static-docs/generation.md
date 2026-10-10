@@ -72,7 +72,13 @@ target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` w
   once — enum, length, range, item count, property count — and a string whose format gnr8 maps to a
   well-known scalar (`uuid`, `date-time`, `date`, `duration`, `decimal`, `email`, `uri`) takes that
   scalar's literal. Other formats are annotations and are not honoured. An enum member is printed as
-  declared.
+  declared. A parameter imported from an OpenAPI document carries its `minimum`, `maxLength` and
+  other bounds as typed facts, so its sample honours them too.
+- **A number prints the same everywhere.** A float sample is a decimal that Go, Python, TypeScript
+  and the page all print identically: never a whole number (Go and TypeScript print `2`, Python
+  `2.0`), never one needing an exponent, and unchanged through a `float32` field. Bounds that only
+  admit such numbers print `No sample call: … admits no decimal that Go, Python and TypeScript print
+  alike`.
 - **What has no sample says why.** A required input carrying a `pattern` (never synthesized), or
   bounds no value can meet, prints `No sample call: …` in place of the exchange and every call. A
   canned reply that cannot be sampled prints `No sample response body: …`. A file download, no success
@@ -80,6 +86,8 @@ target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` w
 - **Credentials and the base URL are placeholders.** The HTTP exchange prints `{apiKey}`, `{token}`
   and `{base64(username:password)}`; the code takes them and the base URL as variables. No server is
   chosen for you. Paths start at the server root; a server URL with a path prefix prepends it.
+- **The exchange is the whole request.** Cookie parameters print as a `cookie:` line, and the reply
+  carries the media type the response declares (`application/hal+json`, not a stand-in).
 - **Declared examples are shown where they are declared.** A `MediaExample` appears under the
   request body or the response status it belongs to. The sampled call never substitutes for it, and
   it never substitutes for the sampled call.
@@ -99,6 +107,10 @@ A target without one prints *"No sample call: this SDK target emits no package m
 no published import name."* For a `TsSdk`, turn it on with
 `.package(SdkPackageMetadata::new().registry_name("@acme/sdk"))`.
 
+A Go package whose name is one the sample itself uses (`client`, `fmt`, `err`, `http`, a predeclared
+identifier, …) is imported under an alias, `clientsdk "example.com/acme/client"`, so the sample
+compiles as printed.
+
 ## How the pages are verified
 
 | Rung | Checks | Where |
@@ -116,12 +128,19 @@ model constructor and required model field; an optional Python model keyword is 
 
 Rung 3 runs each sample's call statement against a recording transport, with the contract test's
 credentials and the base URL `http://gnr8.test` in place of the page's placeholders and variables,
-and compares the request it sent with the page's HTTP exchange field by field. The client is built
-the way the contract test builds it, so rung 3 covers the call; the printed construction line is
-rung 2's.
+and compares the request it sent with the page's HTTP exchange field by field — the body as JSON,
+numbers by value, and the `cookie:` line except for TypeScript, whose client leaves cookies to the
+`fetch` transport (a browser owns them). The transport answers each call with the reply its page
+prints, and the call must succeed on it; an operation whose page prints no reply (a download, or a
+refused reply) is answered with an empty-bodied `400`, and the call must surface the SDK's typed
+error carrying that status. The client is built the way the contract test builds it, so rung 3
+covers the call; the printed construction line is rung 2's.
 
-A sibling with no published import name, or a missing toolchain, is reported `skipped` with the
-reason. A run in which every check was skipped is not verified.
+A sibling with no published import name, a missing toolchain (no `node`, or `node` without a
+`typescript` compiler), or a suite whose every operation's sample is refused (counted, not run) is
+reported `skipped` with the reason. A run in which every check was skipped is not verified. A
+Python unit that cannot import a module its SDK needs — `pydantic` for the default model style —
+names the `ModuleNotFoundError`.
 
 ## `llms.txt`
 
@@ -130,7 +149,9 @@ is written for agents to read, and its layout may change in any release, as gene
 may. Tools that need API facts read the versioned graph artifact, `generated/gnr8.graph.json`.
 
 Group names are printed verbatim, so a group literally named `Optional` becomes an `## Optional`
-section, which the `llms.txt` proposal treats as skippable.
+section, which the `llms.txt` proposal treats as skippable, and a group named `Operations`,
+`Schemas` or `Reference` shares its heading with the fixed section of that name. Link labels are
+escaped and summaries are folded to one line.
 
 ## Known limitations
 
@@ -142,6 +163,17 @@ section, which the `llms.txt` proposal treats as skippable.
   Pydantic style omits them.
 - An error status with no declared response body keeps the contract test's generic error envelope;
   error bodies are never printed on a page.
+- A printed sample holds at most 64 array or map entries and 1024 string characters; a lower bound
+  above that prints `No sample call: … above the 64 a printed sample holds`, a limit of the page
+  rather than of the API.
+- A page name is the kebab-case of the subject's ASCII letters and digits. A name with none (a tag
+  spelled `日本語`), or one Windows reserves as a device name (`con`, `nul`, `com1`, …), stops
+  generation with an error naming it.
+- The index omits the version when none is declared; `openapi.yaml` prints its `0.1.0` default.
+- Two Go SDK defects predate the docs target and surface through it: a path parameter whose sample
+  contains `@` or `:` is escaped differently by the Go client than the page (and the Go contract
+  test) expects, and a `date-time` path parameter fails to build the Go SDK. Both are SDK fixes, not
+  docs fixes.
 
 ## Not included
 
