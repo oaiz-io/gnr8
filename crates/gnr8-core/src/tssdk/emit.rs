@@ -1232,9 +1232,9 @@ fn ts_operation_runtime<'a>(graph: &'a ApiGraph, op: &Operation) -> TsOperationR
 /// `ops` are all of the graph's operations, in graph order. Each method:
 /// - takes path params as positional args, then a typed `body` arg for body-bearing ops, then required
 ///   query params (positional), then optional query params (each defaulting to `undefined`);
-/// - interpolates each path param through `encodeURIComponent(String(value))` (V5 path-injection
-///   mitigation — twin of Go `url.PathEscape` / Python `urllib.quote(safe='')`); builds the query with a
-///   `URLSearchParams`; joins `base_path` + `op.path`;
+/// - interpolates each path param through `wireEscape(String(value))` (V5 path-injection mitigation —
+///   twin of Go `wireEscape` / Python `_path_segment`); builds the query with a `URLSearchParams`
+///   written by `wireQueryString`; joins `base_path` + `op.path`;
 /// - dispatches through `this._request`, throws `ApiError` for rejected responses, and returns decoded
 ///   JSON only for accepted statuses that declare a body model.
 ///
@@ -1266,9 +1266,7 @@ pub(crate) fn emit_operations(
     out.push_str("}\n");
     emit_group_facades(&mut out, ops)?;
     emit_operation_params_types(&mut out, graph, ops)?;
-    if ts_operations_need_wire_helpers(ops) {
-        emit_ts_wire_helpers(&mut out, ts_operations_need_query_string_helper(ops));
-    }
+    emit_ts_wire_helpers(&mut out, ts_wire_helpers_of(ops, graph)?);
     Ok(out)
 }
 
@@ -1306,9 +1304,7 @@ pub(crate) fn emit_operation_module(
         )?;
         emit_pagination_helpers(&mut body, op, graph, OperationEmitStyle::PrototypeFunction)?;
     }
-    if ts_operations_need_wire_helpers(ops) {
-        emit_ts_wire_helpers(&mut body, ts_operations_need_query_string_helper(ops));
-    }
+    emit_ts_wire_helpers(&mut body, ts_wire_helpers_of(ops, graph)?);
     let model_import = if body.contains("models.") {
         format!("import * as models from \"{models_module}\";\n")
     } else {
@@ -2687,14 +2683,37 @@ fn ts_operations_need_wire_helpers(ops: &[&Operation]) -> bool {
     })
 }
 
-/// Whether any operation in this file builds its query string with `wireQueryString`.
-///
-/// Only `allowReserved` parameters need it — everything else uses `URLSearchParams.toString()`.
-/// Emitting it unconditionally would leave an unused function in most generated SDKs, which trips
-/// consumers compiling with `noUnusedLocals` or linting the generated output.
-fn ts_operations_need_query_string_helper(ops: &[&Operation]) -> bool {
-    ops.iter()
-        .any(|op| op.params.iter().any(|param| param.allow_reserved))
+/// The module-level wire helpers one file's operations call. Each is emitted exactly when called:
+/// an unused function trips consumers compiling with `noUnusedLocals` or linting the output.
+#[derive(Clone, Copy)]
+struct TsWireHelpers {
+    /// `wireParameterPairs`: a query parameter, an `allowReserved` one, or a header that pairs.
+    pairs: bool,
+    /// `wireQueryString`: a query string is built — a query parameter or a query API key.
+    query_string: bool,
+    /// `wireEscape`: a path segment or a query string is encoded.
+    escape: bool,
+}
+
+fn ts_wire_helpers_of(ops: &[&Operation], graph: &ApiGraph) -> Result<TsWireHelpers, CoreError> {
+    let mut query_string = false;
+    for op in ops {
+        query_string |= op.params.iter().any(|param| param.location == "query");
+        query_string |= flattened_auth_schemes(&operation_auth_alternatives(graph, op)?)
+            .iter()
+            .any(|scheme| {
+                matches!(scheme, OperationAuthScheme::ApiKey(scheme)
+                    if scheme.location == ApiKeyLocation::Query)
+            });
+    }
+    let path = ops
+        .iter()
+        .any(|op| op.params.iter().any(|param| param.location == "path"));
+    Ok(TsWireHelpers {
+        pairs: ts_operations_need_wire_helpers(ops),
+        query_string,
+        escape: query_string || path,
+    })
 }
 
 fn emit_ts_header_parameters(out: &mut String, args: &ResolvedArgs) -> Result<(), CoreError> {
@@ -2750,11 +2769,33 @@ fn emit_ts_header_parameter(
 }
 
 /// Emit only the wire helpers this file's operations actually call.
-fn emit_ts_wire_helpers(out: &mut String, needs_query_string: bool) {
-    emit_ts_wire_parameter_pairs(out);
-    if needs_query_string {
+fn emit_ts_wire_helpers(out: &mut String, helpers: TsWireHelpers) {
+    if helpers.pairs {
+        emit_ts_wire_parameter_pairs(out);
+    }
+    if helpers.query_string {
         emit_ts_wire_query_string(out);
     }
+    if helpers.escape {
+        emit_ts_wire_escape(out);
+    }
+}
+
+/// `wireEscape`: the one rule every path segment, query name and query value is encoded with. Each
+/// byte but an RFC 3986 unreserved one (`A-Z a-z 0-9 - . _ ~`) becomes `%XX` — the rule the page and
+/// the contract test spell a path and a query with (`verify::percent_encode`).
+/// `encodeURIComponent` alone leaves `! ' ( ) *`.
+fn emit_ts_wire_escape(out: &mut String) {
+    out.push_str(
+        r#"
+function wireEscape(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (char) => "%" + char.charCodeAt(0).toString(16).toUpperCase(),
+  );
+}
+"#,
+    );
 }
 
 fn emit_ts_wire_parameter_pairs(out: &mut String) {
@@ -2803,7 +2844,7 @@ fn emit_ts_wire_query_string(out: &mut String) {
         r#"
 function wireQueryString(
   values: URLSearchParams,
-  allowReserved: Set<number>,
+  allowReserved: Set<number> = new Set<number>(),
 ): string {
   const restoreReserved = (value: string): string =>
     value.replace(
@@ -2813,9 +2854,9 @@ function wireQueryString(
   const parts: string[] = [];
   let index = 0;
   values.forEach((value, key) => {
-    const encoded = encodeURIComponent(value);
+    const encoded = wireEscape(value);
     parts.push(
-      encodeURIComponent(key) +
+      wireEscape(key) +
         "=" +
         (allowReserved.has(index) ? restoreReserved(encoded) : encoded),
     );
@@ -2890,7 +2931,7 @@ fn emit_op_path(
             .find(|(pp, _)| &pp.name == token)
             .map_or_else(|| camel(token), |(_, id)| id.clone());
         let placeholder = format!("{{{token}}}");
-        let interp = format!("${{encodeURIComponent(String({ident}))}}");
+        let interp = format!("${{wireEscape(String({ident}))}}");
         tmpl = tmpl.replace(&placeholder, &interp);
     }
     writeln!(out, "    let path = `{tmpl}`;").map_err(sink)?;
@@ -2962,6 +3003,8 @@ fn emit_op_query(
         writeln!(out, "      }}").map_err(sink)?;
         writeln!(out, "    }}").map_err(sink)?;
     }
+    // One encoder for every query string: `URLSearchParams.toString()` writes a space as `+` and
+    // leaves `*` bare, unlike the page and the contract test.
     if has_allow_reserved {
         writeln!(
             out,
@@ -2969,7 +3012,7 @@ fn emit_op_query(
         )
         .map_err(sink)?;
     } else {
-        writeln!(out, "    const qs = searchParams.toString();").map_err(sink)?;
+        writeln!(out, "    const qs = wireQueryString(searchParams);").map_err(sink)?;
     }
     writeln!(out, "    if (qs) {{").map_err(sink)?;
     writeln!(out, "      path = path + \"?\" + qs;").map_err(sink)?;
@@ -4641,12 +4684,8 @@ mod tests {
             );
         }
 
-        /// Every helper the emitter writes must be called by the file that carries it.
-        ///
-        /// `wireQueryString` is only reachable from an `allowReserved` parameter, but query
-        /// parameters in general now route through `wireParameterPairs` — emitting both together
-        /// would leave a dead function in most generated SDKs, breaking consumers that compile the
-        /// output with `noUnusedLocals` or lint it.
+        /// Every helper the emitter writes must be called by the file that carries it: a dead
+        /// function breaks consumers that compile the output with `noUnusedLocals` or lint it.
         fn assert_no_unreferenced_helpers(out: &str) {
             for line in out.lines() {
                 let Some(name) = line
@@ -4664,7 +4703,7 @@ mod tests {
         }
 
         #[test]
-        fn plain_query_params_do_not_emit_an_unused_query_string_helper() {
+        fn plain_query_params_are_written_by_the_one_wire_encoder() {
             let g = ops_graph();
             let out = emit_operations(&g, "bookstore", "/", &ops_for(&g, "listBooks")).unwrap();
 
@@ -4673,8 +4712,10 @@ mod tests {
                 "query params serialize through wireParameterPairs:\n{out}"
             );
             assert!(
-                !out.contains("wireQueryString"),
-                "wireQueryString must not be emitted when no parameter sets allowReserved:\n{out}"
+                out.contains("const qs = wireQueryString(searchParams);")
+                    && out.contains("function wireEscape(")
+                    && !out.contains("searchParams.toString()"),
+                "URLSearchParams.toString() writes a space as `+`, unlike the page:\n{out}"
             );
             assert_no_unreferenced_helpers(&out);
         }
@@ -4755,7 +4796,7 @@ mod tests {
             let g = ops_graph();
             let out = emit_operations(&g, "bookstore", "/", &ops_for(&g, "getBook")).unwrap();
             assert!(
-                out.contains("let path = `/books/${encodeURIComponent(String(bookId))}`;"),
+                out.contains("let path = `/books/${wireEscape(String(bookId))}`;"),
                 "path param must be percent-escaped (V5) via a backslash-free template literal:\n{out}"
             );
             assert!(
