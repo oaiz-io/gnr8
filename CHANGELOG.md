@@ -90,6 +90,11 @@ must move the minor version.
   `exclusiveMinimum: true` / `exclusiveMaximum: true` is published in the 3.1 spelling
   (`exclusiveMinimum: 5`), and members of a parameter enum that can never validate (another kind than
   the declared `type`, or `null`) are left out.
+- A docs page prints a reply in its declared media type's wire form, and the `gnr8 verify` docs check
+  answers the call with exactly that: a `text/plain` reply is the text itself (`gnr8`, not the JSON
+  string `"gnr8"`), and a reply in a media type that is neither JSON nor text prints no body, as a
+  file download already did. The docs check therefore now reports that the generated SDKs decode a
+  `text/*` success reply as JSON.
 - An imported document's base path is no longer stated twice. The first server's path (or Swagger
   2's `basePath`) becomes the graph's base path, which every generated path, the SDKs and the docs
   request line already carry; the imported servers now drop it (`https://api.example.com/v1` is

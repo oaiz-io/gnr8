@@ -241,10 +241,11 @@ pub(crate) struct Snippet {
 
 /// The reply a rung-3 harness answers one sample's call with.
 ///
-/// It is the reply the page prints — its status, its declared media type and its body — and the
-/// call must succeed on it. An operation whose page prints no reply (a file download, no success
-/// status, a first success status outside 2xx, or a refused reply) is answered with an empty-bodied
-/// `400`, and the call must surface the SDK's typed error carrying that status.
+/// It is the reply the page prints — its status, its declared media type and its body in that
+/// media type's wire form ([`super::example::wire_reply`]) — and the call must succeed on it. An
+/// operation whose page prints no reply (a file download, a reply in a media type with no printable
+/// form, no success status, a first success status outside 2xx, or a refused reply) is answered
+/// with an empty-bodied `400`, and the call must surface the SDK's typed error carrying that status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CannedReply {
     pub(crate) status: u16,
@@ -258,25 +259,23 @@ pub(crate) struct CannedReply {
 const NO_REPLY_STATUS: u16 = 400;
 
 fn canned_reply(op: &Operation, sample: &OperationSample) -> Result<CannedReply, CoreError> {
-    Ok(match &sample.reply {
-        crate::verify::SuccessOutcome::Sample(reply) => CannedReply {
-            status: reply.status,
-            content_type: if reply.body.is_empty() {
-                String::new()
-            } else {
-                super::example::reply_media_type(op, reply.status)?
-            },
-            body: reply.body.clone(),
+    let printed = match &sample.reply {
+        crate::verify::SuccessOutcome::Sample(reply) => super::example::wire_reply(op, reply)?,
+        crate::verify::SuccessOutcome::NoReply | crate::verify::SuccessOutcome::Refused(_) => None,
+    };
+    Ok(match printed {
+        Some(wire) => CannedReply {
+            status: wire.status,
+            content_type: wire.content_type,
+            body: wire.body,
             success: true,
         },
-        crate::verify::SuccessOutcome::NoReply | crate::verify::SuccessOutcome::Refused(_) => {
-            CannedReply {
-                status: NO_REPLY_STATUS,
-                content_type: String::new(),
-                body: String::new(),
-                success: false,
-            }
-        }
+        None => CannedReply {
+            status: NO_REPLY_STATUS,
+            content_type: String::new(),
+            body: String::new(),
+            success: false,
+        },
     })
 }
 

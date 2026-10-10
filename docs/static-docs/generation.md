@@ -98,7 +98,10 @@ target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` w
   and `{base64(username:password)}`; the code takes them and the base URL as variables. No server is
   chosen for you. Paths start at the server root; a server URL with a path prefix prepends it.
 - **The exchange is the whole request.** Cookie parameters print as a `cookie:` line, and the reply
-  carries the media type the response declares (`application/hal+json`, not a stand-in).
+  carries the media type the response declares (`application/hal+json`, not a stand-in) in that
+  media type's wire form: JSON for a JSON type, the text itself (never quoted) for a `text/*` type.
+  A reply in any other media type has no printable body and, like a file download, is not printed.
+  `gnr8 verify` answers each call with exactly that reply.
 - **Declared examples are shown where they are declared.** A `MediaExample` appears under the
   request body or the response status it belongs to. The sampled call never substitutes for it, and
   it never substitutes for the sampled call.

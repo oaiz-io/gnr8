@@ -67,11 +67,10 @@ pub(crate) fn render_example(
     out.push_str(&code_block("http", &http_request(graph, op, sample)?));
     match &sample.reply {
         SuccessOutcome::Sample(reply) => {
-            out.push('\n');
-            out.push_str(&code_block(
-                "http",
-                &http_response(op, reply.status, &reply.body)?,
-            ));
+            if let Some(wire) = wire_reply(op, reply)? {
+                out.push('\n');
+                out.push_str(&code_block("http", &http_response(&wire)));
+            }
         }
         SuccessOutcome::Refused(refusal) => {
             let _ = write!(out, "\nNo sample response body: {refusal}.\n");
@@ -256,25 +255,147 @@ pub(crate) fn reply_media_type(op: &Operation, status: u16) -> Result<String, Co
         })
 }
 
-/// The response message: status line, then the canned body as pretty JSON, with the media type the
-/// operation declares for it.
-fn http_response(op: &Operation, status: u16, body: &str) -> Result<String, CoreError> {
-    if body.is_empty() {
-        return Ok(format!("HTTP/1.1 {status}"));
+/// One success reply in the wire form of the media type the operation declares for it: the reply a
+/// page prints, and the reply a rung-3 harness answers the call with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WireReply {
+    pub(crate) status: u16,
+    /// The declared media type; empty when the status carries no body.
+    pub(crate) content_type: String,
+    /// The body exactly as it travels: compact JSON for a JSON media type, the text itself for a
+    /// `text/*` one.
+    pub(crate) body: String,
+    /// The body as the page prints it: pretty JSON, or the text itself.
+    pub(crate) printed: String,
+}
+
+/// The sampled reply in its declared media type's wire form.
+///
+/// A JSON media type (`application/json`, `…+json`) carries the sample as JSON; a `text/*` media
+/// type carries a string sample as the text itself, never quoted. Any other media type — or a
+/// `text/*` one whose value is not a string — has no wire form a sample can state, so, like a file
+/// download, the page prints no reply (`None`) and rung 3 answers as it does for one.
+///
+/// # Errors
+///
+/// Returns [`CoreError::DocsGen`] for a status with a body but no media type, or a sampled reply
+/// that is not JSON.
+pub(crate) fn wire_reply(
+    op: &Operation,
+    reply: &crate::verify::SuccessSample,
+) -> Result<Option<WireReply>, CoreError> {
+    if reply.body.is_empty() {
+        return Ok(Some(WireReply {
+            status: reply.status,
+            content_type: String::new(),
+            body: String::new(),
+            printed: String::new(),
+        }));
     }
+    let content_type = reply_media_type(op, reply.status)?;
     let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|error| CoreError::DocsGen {
+        serde_json::from_str(&reply.body).map_err(|error| CoreError::DocsGen {
             message: format!("the sampled reply is not JSON: {error}"),
         })?;
-    Ok(format!(
-        "HTTP/1.1 {status}\ncontent-type: {}\n\n{}",
-        reply_media_type(op, status)?,
-        pretty(&value)?
-    ))
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let (body, printed) = if essence == "application/json" || essence.ends_with("+json") {
+        (reply.body.clone(), pretty(&value)?)
+    } else if essence.starts_with("text/") {
+        let serde_json::Value::String(text) = value else {
+            return Ok(None);
+        };
+        (text.clone(), text)
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(WireReply {
+        status: reply.status,
+        content_type,
+        body,
+        printed,
+    }))
+}
+
+/// The response message: status line, then the media type and the body as the page prints it.
+fn http_response(reply: &WireReply) -> String {
+    if reply.body.is_empty() {
+        return format!("HTTP/1.1 {}", reply.status);
+    }
+    format!(
+        "HTTP/1.1 {}\ncontent-type: {}\n\n{}",
+        reply.status, reply.content_type, reply.printed
+    )
 }
 
 fn pretty(value: &serde_json::Value) -> Result<String, CoreError> {
     serde_json::to_string_pretty(value).map_err(|error| CoreError::DocsGen {
         message: format!("a sampled value is not serializable: {error}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use serde_json::json;
+
+    use super::{http_response, wire_reply};
+    use crate::graph::Operation;
+    use crate::verify::SuccessSample;
+
+    /// An operation whose 200 reply declares `media`.
+    fn replying(media: &str) -> Operation {
+        serde_json::from_value(json!({
+            "id": "probe", "method": "GET", "path": "/probe", "handler": "probe",
+            "params": [], "request_body": null,
+            "responses": [{"status": 200, "body": {"ref_id": "t.Res"}, "content_types": [media]}],
+            "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}
+        }))
+        .unwrap()
+    }
+
+    fn sample(body: &str) -> SuccessSample {
+        SuccessSample {
+            status: 200,
+            model: Some("Res".to_string()),
+            body: body.to_string(),
+            field: None,
+            unmet: Vec::new(),
+        }
+    }
+
+    /// A reply is printed, and answered on rung 3, in the wire form of its declared media type: JSON
+    /// for a JSON type, the text itself — never quoted — for a `text/*` type, and nothing for a
+    /// type a sample cannot state, as for a file download.
+    #[test]
+    fn a_reply_takes_its_declared_media_types_wire_form() {
+        let text = wire_reply(&replying("text/plain"), &sample("\"gnr8\""))
+            .unwrap()
+            .expect("a text reply has a wire form");
+        assert_eq!(text.body, "gnr8");
+        assert_eq!(
+            http_response(&text),
+            "HTTP/1.1 200\ncontent-type: text/plain\n\ngnr8"
+        );
+
+        let json_reply = wire_reply(&replying("application/hal+json"), &sample("{\"a\":1}"))
+            .unwrap()
+            .expect("a JSON reply has a wire form");
+        assert_eq!(json_reply.body, "{\"a\":1}");
+        assert_eq!(json_reply.printed, "{\n  \"a\": 1\n}");
+
+        assert_eq!(
+            wire_reply(&replying("application/octet-stream"), &sample("\"gnr8\"")).unwrap(),
+            None
+        );
+        assert_eq!(
+            wire_reply(&replying("text/csv"), &sample("{\"a\":1}")).unwrap(),
+            None
+        );
+    }
 }
