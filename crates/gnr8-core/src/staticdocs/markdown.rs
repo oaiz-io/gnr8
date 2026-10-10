@@ -147,19 +147,47 @@ fn row(cells: &[String]) -> String {
     out
 }
 
-/// The first heading line outside a fenced code block whose text is empty, if any.
-pub(crate) fn empty_heading(text: &str) -> Option<&str> {
-    let mut in_fence = false;
-    for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if !in_fence && line.starts_with('#') && line.trim_start_matches('#').trim().is_empty() {
-            return Some(line);
+/// A fenced-code-block marker: the fence character and its run length, when `line` opens or
+/// closes one (`` ``` `` or `~~~`, three or more, indented at most three spaces).
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    let fence = trimmed
+        .chars()
+        .next()
+        .filter(|ch| *ch == '`' || *ch == '~')?;
+    let run = trimmed.chars().take_while(|ch| *ch == fence).count();
+    (run >= 3).then_some((fence, run))
+}
+
+/// Tracks which lines of a page sit inside a fenced code block, for both fence kinds: a fence is
+/// closed only by the same character, at least as long, with nothing after it.
+#[derive(Default)]
+struct Fences {
+    open: Option<(char, usize)>,
+}
+
+impl Fences {
+    /// Feed one line; returns whether it is inside a fence (fence lines themselves included).
+    fn inside(&mut self, line: &str) -> bool {
+        match (self.open, fence_marker(line)) {
+            (None, Some(marker)) => {
+                self.open = Some(marker);
+                true
+            }
+            (Some((fence, run)), Some((closing, length)))
+                if closing == fence
+                    && length >= run
+                    && line.trim().chars().all(|ch| ch == fence) =>
+            {
+                self.open = None;
+                true
+            }
+            (open, _) => open.is_some(),
         }
     }
-    None
 }
 
 /// Normalize a rendered page: `\n` line endings, no trailing whitespace on any line, no run of more
@@ -167,12 +195,10 @@ pub(crate) fn empty_heading(text: &str) -> Option<&str> {
 pub(crate) fn finish(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut blank_run = 0;
-    let mut in_fence = false;
+    let mut fences = Fences::default();
     for line in text.replace("\r\n", "\n").lines() {
         let line = line.trim_end();
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-        }
+        let in_fence = fences.inside(line);
         if line.is_empty() && !in_fence {
             blank_run += 1;
             if blank_run > 1 {
@@ -242,5 +268,8 @@ mod tests {
     fn finished_pages_have_one_trailing_newline_and_no_trailing_space() {
         assert_eq!(finish("# a  \n\n\n\nb\n\n\n"), "# a\n\nb\n");
         assert_eq!(finish("```\n\n\n```\n"), "```\n\n\n```\n");
+        assert_eq!(finish("~~~\n\n\n~~~\n\n\nx\n"), "~~~\n\n\n~~~\n\nx\n");
+        // A shorter or different fence does not close a block.
+        assert_eq!(finish("````\n```\n\n\n````\n"), "````\n```\n\n\n````\n");
     }
 }

@@ -33,7 +33,7 @@ impl LinkRegistry {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::SdkGen`] naming every dangling link and the page that emitted it. A
+    /// Returns [`CoreError::DocsGen`] naming every dangling link and the page that emitted it. A
     /// dangling link is a renderer defect, so generation fails closed rather than writing it.
     pub(crate) fn check(&self, emitted: &BTreeSet<String>) -> Result<(), CoreError> {
         let dangling: Vec<String> = self
@@ -49,7 +49,7 @@ impl LinkRegistry {
         if dangling.is_empty() {
             Ok(())
         } else {
-            Err(CoreError::SdkGen {
+            Err(CoreError::DocsGen {
                 message: format!(
                     "StaticDocs rendered a link to a page it does not emit: {}",
                     dangling.join(", ")

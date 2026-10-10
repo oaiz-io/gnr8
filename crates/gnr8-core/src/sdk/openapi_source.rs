@@ -1053,6 +1053,7 @@ impl Importer {
             None => None,
         };
         let default = schema.get("default").and_then(literal_value);
+        let (constraints, item_constraints) = self.parameter_constraints(schema);
         let imported = self.type_from_schema(schema);
         let (style, explode) =
             self.import_parameter_serialization(parameter, &location, &imported.ty, operation_id);
@@ -1061,8 +1062,8 @@ impl Importer {
             location,
             required,
             schema: imported.ty,
-            constraints: Constraints::default(),
-            item_constraints: Constraints::default(),
+            constraints,
+            item_constraints,
             default,
             style,
             explode,
@@ -1075,6 +1076,36 @@ impl Importer {
             openapi_fields,
             provenance: self.span(),
         })
+    }
+
+    /// A parameter's own constraints and, for an array or map, its items' — read from the schema
+    /// the parameter's type is read from, so the sampler and the docs see the bounds the imported
+    /// document states (a local `$ref` is followed to the schema it names).
+    fn parameter_constraints(&mut self, schema: &Value) -> (Constraints, Constraints) {
+        let resolved = schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .and_then(|reference| self.resolve_ref_value(&reference));
+        let schema = resolved.as_ref().unwrap_or(schema);
+        let items = schema.get("items").or_else(|| {
+            schema
+                .get("additionalProperties")
+                .filter(|value| value.is_object())
+        });
+        let items = items
+            .and_then(|items| {
+                items
+                    .get("$ref")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+                    .and_then(|reference| self.resolve_ref_value(&reference))
+                    .or_else(|| Some(items.clone()))
+            })
+            .map_or_else(Constraints::default, |items| {
+                constraints_from_schema(&items)
+            });
+        (constraints_from_schema(schema), items)
     }
 
     fn parameter_openapi_fields(&self, parameter: &Value) -> Vec<(String, Value)> {
@@ -2513,29 +2544,55 @@ fn required_set(schema: &Value) -> BTreeSet<String> {
 
 fn field_meta_from_schema(schema: &Value) -> FieldMeta {
     FieldMeta {
-        constraints: Constraints {
-            min_length: schema.get("minLength").and_then(Value::as_u64),
-            max_length: schema.get("maxLength").and_then(Value::as_u64),
-            min_items: schema.get("minItems").and_then(Value::as_u64),
-            max_items: schema.get("maxItems").and_then(Value::as_u64),
-            min_properties: schema.get("minProperties").and_then(Value::as_u64),
-            max_properties: schema.get("maxProperties").and_then(Value::as_u64),
-            minimum: schema.get("minimum").map(json_number_or_string),
-            maximum: schema.get("maximum").map(json_number_or_string),
-            exclusive_minimum: schema.get("exclusiveMinimum").map(json_number_or_string),
-            exclusive_maximum: schema.get("exclusiveMaximum").map(json_number_or_string),
-            pattern: schema
-                .get("pattern")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            enum_values: string_enum_values(schema).map_or_else(Vec::new, |values| values.values),
-        },
+        constraints: constraints_from_schema(schema),
         default: schema.get("default").and_then(literal_value),
         format: schema
             .get("format")
             .and_then(Value::as_str)
             .map(ToString::to_string),
         extensions: Vec::new(),
+    }
+}
+
+/// The validation keywords of one schema object, as the graph's typed constraints.
+///
+/// A numeric bound is read in either spelling: OpenAPI 3.1's `exclusiveMinimum: 5`, or OpenAPI 3.0
+/// and Swagger 2's `minimum: 5` with `exclusiveMinimum: true`. Both are the one fact "greater than
+/// 5"; a `false` flag is the plain inclusive bound.
+fn constraints_from_schema(schema: &Value) -> Constraints {
+    let (minimum, exclusive_minimum) = numeric_bound(schema, "minimum", "exclusiveMinimum");
+    let (maximum, exclusive_maximum) = numeric_bound(schema, "maximum", "exclusiveMaximum");
+    Constraints {
+        min_length: schema.get("minLength").and_then(Value::as_u64),
+        max_length: schema.get("maxLength").and_then(Value::as_u64),
+        min_items: schema.get("minItems").and_then(Value::as_u64),
+        max_items: schema.get("maxItems").and_then(Value::as_u64),
+        min_properties: schema.get("minProperties").and_then(Value::as_u64),
+        max_properties: schema.get("maxProperties").and_then(Value::as_u64),
+        minimum,
+        maximum,
+        exclusive_minimum,
+        exclusive_maximum,
+        pattern: schema
+            .get("pattern")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        enum_values: string_enum_values(schema).map_or_else(Vec::new, |values| values.values),
+    }
+}
+
+/// One side's `(inclusive, exclusive)` bound, from either the 3.1 numeric exclusive keyword or the
+/// 3.0 boolean flag beside the inclusive one.
+fn numeric_bound(
+    schema: &Value,
+    inclusive: &str,
+    exclusive: &str,
+) -> (Option<String>, Option<String>) {
+    let bound = schema.get(inclusive).map(json_number_or_string);
+    match schema.get(exclusive) {
+        Some(Value::Bool(true)) => (None, bound),
+        Some(Value::Bool(false)) | None => (bound, None),
+        Some(other) => (bound, Some(json_number_or_string(other))),
     }
 }
 
@@ -4701,5 +4758,60 @@ components:
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// OpenAPI 3.0 and Swagger 2 spell an exclusive bound as `minimum: 5` plus
+    /// `exclusiveMinimum: true`; 3.1 spells it `exclusiveMinimum: 5`. Both import as the one typed
+    /// fact, `exclusive_minimum = "5"`, and a `false` flag leaves the inclusive bound alone.
+    #[test]
+    fn boolean_exclusive_bounds_import_as_numeric_exclusive_bounds() {
+        let boolean = super::field_meta_from_schema(&serde_json::json!({
+            "type": "integer", "minimum": 5, "exclusiveMinimum": true,
+            "maximum": 9, "exclusiveMaximum": false
+        }))
+        .constraints;
+        assert_eq!(boolean.exclusive_minimum.as_deref(), Some("5"));
+        assert_eq!(boolean.minimum, None);
+        assert_eq!(boolean.maximum.as_deref(), Some("9"));
+        assert_eq!(boolean.exclusive_maximum, None);
+        let numeric = super::field_meta_from_schema(&serde_json::json!({
+            "type": "number", "exclusiveMinimum": 0.5, "maximum": 2
+        }))
+        .constraints;
+        assert_eq!(numeric.exclusive_minimum.as_deref(), Some("0.5"));
+        assert_eq!(numeric.maximum.as_deref(), Some("2"));
+    }
+
+    /// An imported parameter's bounds are typed facts, as an imported field's are: the sampler
+    /// reads them, and the docs Constraints column shows them.
+    #[test]
+    fn imported_parameter_constraints_are_typed_facts() {
+        let doc = serde_json::json!({
+            "openapi": "3.0.3",
+            "info": {"title": "P", "version": "1"},
+            "paths": {"/items": {"get": {
+                "operationId": "listItems",
+                "parameters": [
+                    {"name": "limit", "in": "query", "schema": {
+                        "type": "integer", "minimum": 1, "maximum": 5, "exclusiveMaximum": true}},
+                    {"name": "ids", "in": "query", "schema": {
+                        "type": "array", "maxItems": 3, "items": {"type": "integer", "minimum": 0}}}
+                ],
+                "responses": {"204": {"description": "none"}}
+            }}}
+        });
+        let graph = import_openapi_document(
+            std::path::Path::new("."),
+            std::path::PathBuf::from("openapi.json"),
+            &doc.to_string(),
+        )
+        .expect("imports");
+        let params = &graph.operations[0].params;
+        let limit = params.iter().find(|p| p.name == "limit").unwrap();
+        assert_eq!(limit.constraints.minimum.as_deref(), Some("1"));
+        assert_eq!(limit.constraints.exclusive_maximum.as_deref(), Some("5"));
+        let ids = params.iter().find(|p| p.name == "ids").unwrap();
+        assert_eq!(ids.constraints.max_items, Some(3));
+        assert_eq!(ids.item_constraints.minimum.as_deref(), Some("0"));
     }
 }

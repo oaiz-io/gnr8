@@ -70,7 +70,7 @@ pub(crate) fn render_example(
             out.push('\n');
             out.push_str(&code_block(
                 "http",
-                &http_response(reply.status, &reply.body)?,
+                &http_response(op, reply.status, &reply.body)?,
             ));
         }
         SuccessOutcome::Refused(refusal) => {
@@ -188,7 +188,12 @@ fn http_request(
         "{} {target} HTTP/1.1",
         op.method.to_ascii_uppercase()
     )];
-    for (name, value) in request_headers(&sample.params, body, &sample.auth, &credentials) {
+    let mut headers = request_headers(&sample.params, body, &sample.auth, &credentials);
+    if let Some(cookie) = cookie_header(&sample.params) {
+        headers.push(("cookie".to_string(), cookie));
+        headers.sort();
+    }
+    for (name, value) in headers {
         lines.push(format!("{name}: {value}"));
     }
     if let Some(body) = body {
@@ -203,23 +208,73 @@ fn credentials_placeholder() -> String {
     placeholders().api_key
 }
 
-/// The response message: status line, then the canned body as pretty JSON when there is one.
-fn http_response(status: u16, body: &str) -> Result<String, CoreError> {
+/// The `Cookie` header the sampled cookie parameters make, in graph order: each name and value
+/// percent-encoded as the generated clients encode them, joined by `; `.
+pub(crate) fn cookie_header(params: &[crate::verify::SampleParam]) -> Option<String> {
+    let pairs: Vec<String> = params
+        .iter()
+        .filter(|param| param.location == "cookie")
+        .map(|param| {
+            format!(
+                "{}={}",
+                percent_encode(&param.name),
+                percent_encode(&param.wire)
+            )
+        })
+        .collect();
+    (!pairs.is_empty()).then(|| pairs.join("; "))
+}
+
+/// The media type the operation declares for a success status's body: the first of its declared
+/// media types, the one the `OpenAPI` lowering lists first.
+///
+/// # Errors
+///
+/// Returns [`CoreError::DocsGen`] for a status that carries a body but declares no media type,
+/// which the lowering refuses as well.
+pub(crate) fn reply_media_type(op: &Operation, status: u16) -> Result<String, CoreError> {
+    let mut declared: Vec<&String> = op
+        .responses
+        .iter()
+        .filter(|response| response.status == status)
+        .flat_map(|response| {
+            response
+                .content_types
+                .iter()
+                .chain(response.content_type.iter())
+        })
+        .collect();
+    declared.sort();
+    declared
+        .first()
+        .map(|media| (*media).clone())
+        .ok_or_else(|| CoreError::DocsGen {
+            message: format!(
+                "operation '{}' response {status} carries a body but declares no media type",
+                op.id
+            ),
+        })
+}
+
+/// The response message: status line, then the canned body as pretty JSON, with the media type the
+/// operation declares for it.
+fn http_response(op: &Operation, status: u16, body: &str) -> Result<String, CoreError> {
     if body.is_empty() {
         return Ok(format!("HTTP/1.1 {status}"));
     }
     let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|error| CoreError::SdkGen {
+        serde_json::from_str(body).map_err(|error| CoreError::DocsGen {
             message: format!("the sampled reply is not JSON: {error}"),
         })?;
     Ok(format!(
-        "HTTP/1.1 {status}\ncontent-type: application/json\n\n{}",
+        "HTTP/1.1 {status}\ncontent-type: {}\n\n{}",
+        reply_media_type(op, status)?,
         pretty(&value)?
     ))
 }
 
 fn pretty(value: &serde_json::Value) -> Result<String, CoreError> {
-    serde_json::to_string_pretty(value).map_err(|error| CoreError::SdkGen {
+    serde_json::to_string_pretty(value).map_err(|error| CoreError::DocsGen {
         message: format!("a sampled value is not serializable: {error}"),
     })
 }

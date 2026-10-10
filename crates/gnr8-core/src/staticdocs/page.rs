@@ -367,7 +367,7 @@ pub(crate) fn render_errors(
                     .schemas
                     .iter()
                     .find(|schema| schema.name == name)
-                    .ok_or_else(|| CoreError::SdkGen {
+                    .ok_or_else(|| CoreError::DocsGen {
                         message: format!("StaticDocs error catalog names unknown schema '{name}'"),
                     })?;
                 let target = site.nav.schema_page(&schema.id)?;
@@ -529,7 +529,7 @@ fn parameters_section(
         })
         .collect();
     if !others.is_empty() {
-        return Err(CoreError::SdkGen {
+        return Err(CoreError::DocsGen {
             message: format!(
                 "StaticDocs cannot place parameter '{}' of operation '{}': location '{}' is not a \
                  parameter location",

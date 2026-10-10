@@ -183,8 +183,15 @@ impl<'a> Speller<'a> {
         if !request_params.is_empty() {
             args.push(self.params_literal(op, &request_params, inputs.params)?);
         }
-        if let Some(body) = inputs.body {
-            args.push(self.body_literal(op, body)?);
+        match inputs.body {
+            Some(body) => args.push(self.body_literal(op, body)?),
+            // The method declares the body parameter whenever the operation declares a body, even
+            // an optional one the sampler leaves out (a multipart upload, or a refused value): the
+            // call passes `nil`, which is what a caller who sends no body writes.
+            None if !request_body_models_of(op, self.graph)?.is_empty() => {
+                args.push("nil".to_string());
+            }
+            None => {}
         }
         Ok(args)
     }

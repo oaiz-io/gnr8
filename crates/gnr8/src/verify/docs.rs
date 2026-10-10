@@ -490,7 +490,7 @@ fn compare_wire(
             .find(|record| record.operation == entry.operation_id)
             .map_or_else(
                 || Err("the sample's call sent no request".to_string()),
-                |record| check_wire(page, record),
+                |record| check_wire(page, record, suite.language),
             );
         if let Err(field) = outcome {
             let mut reason = DocsReason::new(

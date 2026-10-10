@@ -16,6 +16,7 @@ use gnr8_engine::sdk::prelude::*;
 
 pub(crate) const GOALSERVICE: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/goalservice");
+pub(crate) const DOCS_EDGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/docs-edge");
 pub(crate) const GIN_REGRESSION: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../fixtures/gin-contract-regression"
@@ -135,11 +136,23 @@ pub(crate) fn gin_regression() -> Option<DocsRun> {
     )
 }
 
+/// The docs-edge fixture: an imported `OpenAPI` document with the shapes the docs target has to get
+/// right end to end, the SDK targets `targets` adds, then the docs target. Needs no toolchain.
+pub(crate) fn docs_edge(targets: impl FnOnce(Pipeline) -> Pipeline) -> DocsRun {
+    let pipeline = targets(Pipeline::new().source(OpenApi::new().input("openapi.yaml")))
+        .target(StaticDocs::new().to(DOCS_DIR));
+    generate(DOCS_EDGE, &pipeline)
+}
+
 fn run(fixture: &str, pipeline: &Pipeline) -> Option<DocsRun> {
     if !go_available() {
         eprintln!("skipping: go toolchain unavailable");
         return None;
     }
+    Some(generate(fixture, pipeline))
+}
+
+fn generate(fixture: &str, pipeline: &Pipeline) -> DocsRun {
     let root = temp_dir("fixture");
     copy_dir(Path::new(fixture), &root);
     let outcome = gnr8_engine::pipeline::run_in_process(pipeline, &Cx::new(&root), None)
@@ -157,5 +170,5 @@ fn run(fixture: &str, pipeline: &Pipeline) -> Option<DocsRun> {
     )
     .expect("the graph artifact deserializes")
     .graph;
-    Some(DocsRun { artifacts, graph })
+    DocsRun { artifacts, graph }
 }

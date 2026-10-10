@@ -52,7 +52,7 @@ impl<'g> NavModel<'g> {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::SdkGen`] naming both subjects when two operations, two schemas or two
+    /// Returns [`CoreError::DocsGen`] naming both subjects when two operations, two schemas or two
     /// groups slug to one file, and naming the subject when one slugs to nothing.
     pub(crate) fn build(graph: &'g ApiGraph, errors: bool) -> Result<Self, CoreError> {
         let mut operation_pages = BTreeMap::new();
@@ -114,12 +114,12 @@ impl<'g> NavModel<'g> {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::SdkGen`] for an id the graph does not carry.
+    /// Returns [`CoreError::DocsGen`] for an id the graph does not carry.
     pub(crate) fn operation_page(&self, operation_id: &str) -> Result<&str, CoreError> {
         self.operation_pages
             .get(operation_id)
             .map(String::as_str)
-            .ok_or_else(|| CoreError::SdkGen {
+            .ok_or_else(|| CoreError::DocsGen {
                 message: format!("StaticDocs has no page for operation '{operation_id}'"),
             })
     }
@@ -128,12 +128,12 @@ impl<'g> NavModel<'g> {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::SdkGen`] for a dangling schema reference.
+    /// Returns [`CoreError::DocsGen`] for a dangling schema reference.
     pub(crate) fn schema_page(&self, schema_id: &str) -> Result<&str, CoreError> {
         self.schema_pages
             .get(schema_id)
             .map(String::as_str)
-            .ok_or_else(|| CoreError::SdkGen {
+            .ok_or_else(|| CoreError::DocsGen {
                 message: format!("StaticDocs references dangling schema '{schema_id}'"),
             })
     }
@@ -162,7 +162,7 @@ fn page_path<'a>(
 ) -> Result<String, CoreError> {
     let slug = kebab(subject);
     if slug.is_empty() {
-        return Err(CoreError::SdkGen {
+        return Err(CoreError::DocsGen {
             message: format!(
                 "StaticDocs cannot name a page for {kind} '{subject}': it has no letters or digits \
                  to form a file name"
@@ -171,7 +171,7 @@ fn page_path<'a>(
     }
     let page = format!("{dir}/{slug}.md");
     if let Some(previous) = taken.insert(page.clone(), subject) {
-        return Err(CoreError::SdkGen {
+        return Err(CoreError::DocsGen {
             message: format!(
                 "StaticDocs {kind}s '{previous}' and '{subject}' both map to the page '{page}'; \
                  rename one so each gets its own page"

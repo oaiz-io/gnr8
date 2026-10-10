@@ -11,6 +11,7 @@
 //! never reads a `default`, a field `example` or a declared media example: those restrict nothing,
 //! and letting one supply a value would be a second source for the same fact (AGENTS.md rule 3).
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -143,6 +144,13 @@ pub enum SampleRefusal {
         /// The patterned input.
         subject: String,
     },
+    /// A float whose bounds admit only numbers the generated languages print differently — a whole
+    /// number (`2` in Go and TypeScript, `2.0` in Python), or one that needs an exponent or loses
+    /// digits through a `float32` field.
+    FloatWire {
+        /// The input.
+        subject: String,
+    },
     /// No candidate satisfies every constraint at once.
     Unsatisfiable {
         /// The input.
@@ -191,6 +199,11 @@ impl fmt::Display for SampleRefusal {
                 phrase(subject)
             ),
             Self::Pattern { subject } => write!(f, "{} declares `pattern`", phrase(subject)),
+            Self::FloatWire { subject } => write!(
+                f,
+                "{} admits no decimal that Go, Python and TypeScript print alike",
+                phrase(subject)
+            ),
             Self::Unsatisfiable {
                 subject,
                 constraint,
@@ -280,17 +293,37 @@ pub fn satisfies(value: &Value, constraints: &Constraints) -> Result<(), Violati
             (
                 "minimum",
                 &constraints.minimum,
-                f64::ge as fn(&f64, &f64) -> bool,
+                (|order| order != Ordering::Less) as fn(Ordering) -> bool,
             ),
-            ("exclusiveMinimum", &constraints.exclusive_minimum, f64::gt),
-            ("maximum", &constraints.maximum, f64::le),
-            ("exclusiveMaximum", &constraints.exclusive_maximum, f64::lt),
+            (
+                "exclusiveMinimum",
+                &constraints.exclusive_minimum,
+                |order| order == Ordering::Greater,
+            ),
+            ("maximum", &constraints.maximum, |order| {
+                order != Ordering::Greater
+            }),
+            (
+                "exclusiveMaximum",
+                &constraints.exclusive_maximum,
+                |order| order == Ordering::Less,
+            ),
         ] {
-            if let Some(bound) = bound {
-                match bound.trim().parse::<f64>() {
-                    Ok(bound) if admits(&number, &bound) => {}
-                    _ => return violated(keyword),
-                }
+            let Some(bound) = bound else {
+                continue;
+            };
+            // An integer against an integer bound compares exactly; anything else through f64.
+            let order = match (value.as_i64(), bound.trim().parse::<i128>()) {
+                (Some(integer), Ok(bound)) => Some(i128::from(integer).cmp(&bound)),
+                _ => bound
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|bound| bound.is_finite())
+                    .and_then(|bound| number.partial_cmp(&bound)),
+            };
+            if !order.is_some_and(admits) {
+                return violated(keyword);
             }
         }
     }
@@ -841,14 +874,8 @@ impl<'g> Sampler<'g> {
                 Ok(checked(Value::String(candidate), constraints, subject))
             }
             Type::Primitive(Prim::Bool) => Ok(checked(Value::Bool(true), constraints, subject)),
-            Type::Primitive(Prim::Int { .. }) => Ok(match integer_candidate(constraints) {
-                Some(value) => checked(json!(value), constraints, subject),
-                None => unsatisfiable(subject, first_numeric_bound(constraints)),
-            }),
-            Type::Primitive(Prim::Float { .. }) => Ok(match float_candidate(constraints) {
-                Some(value) => checked(Value::Number(value), constraints, subject),
-                None => unsatisfiable(subject, first_numeric_bound(constraints)),
-            }),
+            Type::Primitive(Prim::Int { .. }) => Ok(integer_candidate(constraints, subject)),
+            Type::Primitive(Prim::Float { .. }) => Ok(float_candidate(constraints, subject)),
             // A byte string has a different literal in every target and a base64 wire form on
             // top; a request stays out of that, and a reply carries one as the wire does.
             Type::Primitive(Prim::Bytes) => Ok(match self.side {
@@ -1108,14 +1135,27 @@ fn enum_candidate(
             .collect()
     };
     let mut last = None;
+    let mut unprintable = false;
     for member in members {
         let Some(candidate) = parse_member(member, ty) else {
             continue;
         };
+        // A float member is printed by every writer too, so it takes the float rule.
+        if matches!(ty, Type::Primitive(Prim::Float { .. }))
+            && !candidate.as_f64().is_some_and(prints_alike)
+        {
+            unprintable = true;
+            continue;
+        }
         match satisfies(&candidate, constraints) {
             Ok(()) => return Ok(candidate),
             Err(violation) => last = Some(violation.constraint),
         }
+    }
+    if unprintable && last.is_none() {
+        return Err(SampleRefusal::FloatWire {
+            subject: subject.to_string(),
+        });
     }
     unsatisfiable(subject, last.unwrap_or("enum"))
 }
@@ -1218,16 +1258,12 @@ struct Bound {
     exclusive: bool,
 }
 
-/// A declared bound that is not a finite number; no candidate can satisfy it.
-struct Unparseable;
-
-/// The tighter of an inclusive and an exclusive bound on one side.
-fn bound(
-    inclusive: Option<&String>,
-    exclusive: Option<&String>,
-    lower: bool,
-) -> Result<Option<Bound>, Unparseable> {
-    let parse = |text: Option<&String>, exclusive: bool| -> Result<Option<Bound>, Unparseable> {
+/// The effective numeric interval: the tighter inclusive or exclusive bound on each side, or the
+/// keyword of a declared bound that is not a finite number (which no candidate can satisfy).
+fn numeric_interval(
+    constraints: &Constraints,
+) -> Result<(Option<Bound>, Option<Bound>), &'static str> {
+    let parse = |text: Option<&String>, exclusive: bool, keyword: &'static str| {
         let Some(text) = text else {
             return Ok(None);
         };
@@ -1236,11 +1272,9 @@ fn bound(
             .ok()
             .filter(|value| value.is_finite())
             .map(|value| Some(Bound { value, exclusive }))
-            .ok_or(Unparseable)
+            .ok_or(keyword)
     };
-    let inclusive = parse(inclusive, false)?;
-    let exclusive = parse(exclusive, true)?;
-    Ok(match (inclusive, exclusive) {
+    let tighter = |a: Option<Bound>, b: Option<Bound>, lower: bool| match (a, b) {
         (None, other) | (other, None) => other,
         (Some(a), Some(b)) => {
             let a_tighter = if lower {
@@ -1248,80 +1282,126 @@ fn bound(
             } else {
                 a.value < b.value
             };
-            if a_tighter {
-                Some(a)
-            } else {
-                Some(b)
-            }
+            Some(if a_tighter { a } else { b })
         }
-    })
+    };
+    let low = tighter(
+        parse(constraints.minimum.as_ref(), false, "minimum")?,
+        parse(
+            constraints.exclusive_minimum.as_ref(),
+            true,
+            "exclusiveMinimum",
+        )?,
+        true,
+    );
+    let high = tighter(
+        parse(constraints.maximum.as_ref(), false, "maximum")?,
+        parse(
+            constraints.exclusive_maximum.as_ref(),
+            true,
+            "exclusiveMaximum",
+        )?,
+        false,
+    );
+    Ok((low, high))
 }
 
 /// The base `7` when it lies inside the effective interval; otherwise the nearest admissible
-/// integer.
-fn integer_candidate(constraints: &Constraints) -> Option<i64> {
-    const BASE: i64 = 7;
-    let low = bound(
-        constraints.minimum.as_ref(),
-        constraints.exclusive_minimum.as_ref(),
-        true,
-    )
-    .ok()?;
-    let high = bound(
-        constraints.maximum.as_ref(),
-        constraints.exclusive_maximum.as_ref(),
-        false,
-    )
-    .ok()?;
-    let lowest = low.map(|bound| {
-        if bound.exclusive {
-            bound.value.floor() + 1.0
-        } else {
-            bound.value.ceil()
-        }
-    });
-    let highest = high.map(|bound| {
-        if bound.exclusive {
-            bound.value.ceil() - 1.0
-        } else {
-            bound.value.floor()
-        }
-    });
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "the base is a small constant, exactly representable"
-    )]
-    let base = BASE as f64;
+/// integer. Integer bounds are taken exactly — as integers when they are written as integers — so a
+/// bound beyond 2^53 is never rounded through `f64`.
+fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, SampleRefusal> {
+    const BASE: i128 = 7;
+    if let Err(keyword) = numeric_interval(constraints) {
+        return unsatisfiable(subject, keyword);
+    }
+    let lowest = [
+        constraints
+            .minimum
+            .as_deref()
+            .and_then(|text| integer_bound(text, true)),
+        constraints
+            .exclusive_minimum
+            .as_deref()
+            .and_then(|text| integer_bound(text, false))
+            .map(|bound| bound + 1),
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+    let highest = [
+        constraints
+            .maximum
+            .as_deref()
+            .and_then(|text| integer_bound(text, false)),
+        constraints
+            .exclusive_maximum
+            .as_deref()
+            .and_then(|text| integer_bound(text, true))
+            .map(|bound| bound - 1),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
     let chosen = match (lowest, highest) {
-        (Some(lowest), _) if base < lowest => lowest,
-        (_, Some(highest)) if base > highest => highest,
-        _ => base,
+        (Some(lowest), _) if BASE < lowest => lowest,
+        (_, Some(highest)) if BASE > highest => highest,
+        _ => BASE,
     };
-    // A bound outside i64 saturates; `satisfies` then rejects the candidate.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "chosen is integral after floor/ceil, and a bound beyond i64 saturates by design"
-    )]
-    Some(chosen as i64)
+    match i64::try_from(chosen) {
+        Ok(chosen) => checked(json!(chosen), constraints, subject),
+        Err(_) => unsatisfiable(subject, first_numeric_bound(constraints)),
+    }
 }
 
-/// The base `1.5` when it lies inside the effective interval; otherwise the nearest inclusive
-/// bound, or for an exclusive bound the midpoint of the interval (an unbounded side taken as the
-/// bound ± 1).
-fn float_candidate(constraints: &Constraints) -> Option<Number> {
+/// A numeric bound as the integer nearest it on the admissible side: `ceil` for a lower bound,
+/// `floor` for an upper one. An integer-valued bound is parsed exactly.
+fn integer_bound(text: &str, lower: bool) -> Option<i128> {
+    let text = text.trim();
+    if let Ok(exact) = text.parse::<i128>() {
+        return Some(exact);
+    }
+    let value = text.parse::<f64>().ok().filter(|value| value.is_finite())?;
+    let rounded = if lower { value.ceil() } else { value.floor() };
+    // Beyond i128 a bound is unmeetable by any i64 anyway; saturating keeps it on the right side.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rounded is integral, and a bound beyond i128 saturates on its own side"
+    )]
+    Some(rounded as i128)
+}
+
+/// Whether every writer of a sample prints `value` as the same text: the page (`serde_json`), Go
+/// (`strconv.FormatFloat(v, 'g', -1, 64)` in a query, `encoding/json` in a body), Python (`repr`)
+/// and JavaScript (`Number#toString`).
+///
+/// They agree on a finite decimal that is not a whole number (Go and JavaScript print `2`, Python
+/// and `serde_json` print `2.0`), lies in `[1e-4, 1e6)` (Go's shortest `'g'` form switches to an
+/// exponent at `1e6`, and below `1e-4`), and survives a `float32` field unchanged.
+fn prints_alike(value: f64) -> bool {
+    let magnitude = value.abs();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "narrowing to f32 is the point: a float32 field must print the same decimal"
+    )]
+    let narrowed = value as f32;
+    value.is_finite()
+        && value.fract() != 0.0
+        && (1e-4..1e6).contains(&magnitude)
+        && format!("{narrowed}") == format!("{value}")
+}
+
+/// The float sample: the first candidate that lies inside the effective interval and prints alike
+/// everywhere ([`prints_alike`]).
+///
+/// The candidates, in order: the base `1.5`; the nearest inclusive bound, or for an exclusive bound
+/// the midpoint of the interval (an unbounded side taken as the bound ± 1); then points inside the
+/// interval half and a quarter away from each bound, and its midpoint.
+fn float_candidate(constraints: &Constraints, subject: &str) -> Result<Value, SampleRefusal> {
     const BASE: f64 = 1.5;
-    let low = bound(
-        constraints.minimum.as_ref(),
-        constraints.exclusive_minimum.as_ref(),
-        true,
-    )
-    .ok()?;
-    let high = bound(
-        constraints.maximum.as_ref(),
-        constraints.exclusive_maximum.as_ref(),
-        false,
-    )
-    .ok()?;
+    let (low, high) = match numeric_interval(constraints) {
+        Ok(interval) => interval,
+        Err(keyword) => return unsatisfiable(subject, keyword),
+    };
     let above_low = |x: f64| {
         low.is_none_or(|b| {
             if b.exclusive {
@@ -1340,24 +1420,55 @@ fn float_candidate(constraints: &Constraints) -> Option<Number> {
             }
         })
     };
-    let chosen = if above_low(BASE) && below_high(BASE) {
-        BASE
+    let nearest = if above_low(BASE) && below_high(BASE) {
+        Some(BASE)
     } else if !above_low(BASE) {
-        let low = low?;
-        if low.exclusive {
-            let top = high.map_or(low.value + 1.0, |high| high.value);
-            f64::midpoint(low.value, top)
-        } else {
-            low.value
-        }
+        low.map(|low| {
+            if low.exclusive {
+                let top = high.map_or(low.value + 1.0, |high| high.value);
+                f64::midpoint(low.value, top)
+            } else {
+                low.value
+            }
+        })
     } else {
-        let high = high?;
-        if high.exclusive {
-            let bottom = low.map_or(high.value - 1.0, |low| low.value);
-            f64::midpoint(bottom, high.value)
-        } else {
-            high.value
-        }
+        high.map(|high| {
+            if high.exclusive {
+                let bottom = low.map_or(high.value - 1.0, |low| low.value);
+                f64::midpoint(bottom, high.value)
+            } else {
+                high.value
+            }
+        })
     };
-    Number::from_f64(chosen)
+    let mut candidates = vec![BASE];
+    candidates.extend(nearest);
+    if let Some(low) = low {
+        candidates.extend([low.value + 0.5, low.value + 0.25]);
+    }
+    if let Some(high) = high {
+        candidates.extend([high.value - 0.5, high.value - 0.25]);
+    }
+    if let (Some(low), Some(high)) = (low, high) {
+        let middle = f64::midpoint(low.value, high.value);
+        candidates.extend([
+            middle,
+            f64::midpoint(low.value, middle),
+            f64::midpoint(middle, high.value),
+        ]);
+    }
+    let admissible: Vec<f64> = candidates
+        .into_iter()
+        .filter(|x| above_low(*x) && below_high(*x))
+        .collect();
+    match admissible.iter().find(|x| prints_alike(**x)) {
+        Some(&chosen) => match Number::from_f64(chosen) {
+            Some(number) => checked(Value::Number(number), constraints, subject),
+            None => unsatisfiable(subject, first_numeric_bound(constraints)),
+        },
+        None if admissible.is_empty() => unsatisfiable(subject, first_numeric_bound(constraints)),
+        None => Err(SampleRefusal::FloatWire {
+            subject: subject.to_string(),
+        }),
+    }
 }

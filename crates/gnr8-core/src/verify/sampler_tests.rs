@@ -204,7 +204,9 @@ fn sample_respects_inclusive_numeric_bounds() {
         param_value(&float(), &json!({"minimum": "0.25", "maximum": "0.75"})),
         json!(0.75)
     );
-    assert_eq!(param_value(&float(), &json!({"minimum": "2"})), json!(2.0));
+    // The bound itself is a whole number, which Go and TypeScript print as `2` and Python as
+    // `2.0`; the sampler moves inside the interval to a decimal all three print alike.
+    assert_eq!(param_value(&float(), &json!({"minimum": "2"})), json!(2.5));
     assert_eq!(
         param_value(&int(), &json!({"minimum": "1", "maximum": "100"})),
         json!(7)
@@ -1172,4 +1174,76 @@ fn assert_refusal(refusal: &SampleRefusal, set: &Value) {
         SampleRefusal::Unsatisfiable { .. } => {}
         other => panic!("unexpected refusal {other:?} for {set}"),
     }
+}
+
+/// A float sample is printed by four writers — the page (`serde_json`), Go (`strconv`, shortest),
+/// Python (`repr`) and JavaScript (`Number#toString`) — and every one of them must print the same
+/// text, or rung 3 and the generated contract tests compare `1.0` with `1`. So a float sample is
+/// never a whole number, never needs an exponent in any of them, and survives a `float32` field.
+#[test]
+fn float_samples_print_alike_in_go_python_and_typescript() {
+    for (bounds, expected) in [
+        (json!({"minimum": "0", "maximum": "1"}), json!(0.5)),
+        (json!({"exclusive_maximum": "1"}), json!(0.5)),
+        (json!({"minimum": "1", "maximum": "3"}), json!(1.5)),
+        (json!({"minimum": "10"}), json!(10.5)),
+        (json!({"maximum": "-4"}), json!(-4.5)),
+        (json!({"minimum": "0.25", "maximum": "0.75"}), json!(0.75)),
+    ] {
+        let value = param_value(&float(), &bounds);
+        assert_eq!(value, expected, "{bounds}");
+        let wire = sample(&probe(
+            &[query("q", &float(), true, &bounds)],
+            None,
+            None,
+            &[],
+        ))
+        .params[0]
+            .wire
+            .clone();
+        assert_eq!(wire, expected.to_string(), "{bounds}");
+        let number = value.as_f64().unwrap();
+        assert!(
+            number.fract() != 0.0,
+            "{bounds}: {number} is a whole number"
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        let narrowed = number as f32;
+        assert_eq!(format!("{narrowed}"), format!("{number}"), "{bounds}");
+    }
+    // A request body field takes the same rule.
+    assert_eq!(
+        body_value(
+            &float(),
+            &json!({"constraints": {"minimum": "0", "maximum": "1"}}),
+            &[]
+        ),
+        json!(0.5)
+    );
+    // Only a whole number fits, so no float prints alike everywhere: a typed refusal, not `2.0`.
+    let graph = probe(
+        &[query(
+            "q",
+            &float(),
+            true,
+            &json!({"minimum": "2", "maximum": "2"}),
+        )],
+        None,
+        None,
+        &[],
+    );
+    let refused = refusal(&graph);
+    assert!(
+        matches!(&refused, SampleRefusal::FloatWire { subject } if subject == "query.q"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        refused.to_string(),
+        "parameter `q` admits no decimal that Go, Python and TypeScript print alike"
+    );
+    // A whole-number enum member is skipped for the same reason.
+    assert_eq!(
+        param_value(&float(), &json!({"enum_values": ["2", "2.5"]})),
+        json!(2.5)
+    );
 }

@@ -629,8 +629,19 @@ pub(crate) fn emit_client_with_models(
     } else {
         ""
     };
-    let bearer_field = "  private readonly bearerToken?: string;\n";
-    let basic_field = "  private readonly basicAuth?: { username: string; password: string };\n";
+    // A declared scheme assigns the field from an optional option, so under
+    // `exactOptionalPropertyTypes` the field must admit `undefined` explicitly; an undeclared one
+    // is never assigned and keeps the plain optional field.
+    let bearer_field = if has_bearer_auth {
+        "  private readonly bearerToken?: string | undefined;\n"
+    } else {
+        "  private readonly bearerToken?: string;\n"
+    };
+    let basic_field = if has_basic_auth {
+        "  private readonly basicAuth?: { username: string; password: string } | undefined;\n"
+    } else {
+        "  private readonly basicAuth?: { username: string; password: string };\n"
+    };
     let bearer_init = if has_bearer_auth {
         "    this.bearerToken = opts.bearerToken;\n"
     } else {

@@ -407,7 +407,7 @@ fn operation_slug_collision_is_an_error_naming_both() {
     value["operations"].as_array_mut().unwrap().insert(2, clash);
     let err = try_render(&graph_of(value), &[]).unwrap_err();
     let text = err.to_string();
-    assert!(matches!(err, CoreError::SdkGen { .. }), "{err:?}");
+    assert!(matches!(err, CoreError::DocsGen { .. }), "{err:?}");
     assert!(text.contains("listBooks"), "{text}");
     assert!(text.contains("list_books"), "{text}");
     assert!(text.contains("list-books.md"), "{text}");
@@ -423,7 +423,7 @@ fn schema_slug_collision_is_an_error_naming_both() {
     ));
     let err = try_render(&graph_of(value), &[]).unwrap_err();
     let text = err.to_string();
-    assert!(matches!(err, CoreError::SdkGen { .. }), "{err:?}");
+    assert!(matches!(err, CoreError::DocsGen { .. }), "{err:?}");
     assert!(text.contains("BookList"), "{text}");
     assert!(text.contains("Book_List"), "{text}");
 }
@@ -989,4 +989,110 @@ fn pagination_section_only_with_a_policy() {
             assert!(!text.contains("## Pagination"), "{path}");
         }
     }
+}
+
+/// Rung 3 compares bodies the way the contract assertions do: as JSON, numbers by value, so a
+/// page's `0.5` and a client's `0.50` (or `1.0` and `1`) are the same number.
+#[test]
+fn check_wire_compares_json_numbers_by_value() {
+    use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord};
+    use gnr8_engine::verify::ContractTestLanguage;
+    let page = "## Example\n\n### HTTP\n\n```http\nPOST /m HTTP/1.1\ncontent-type: application/json\n\n{\n  \"ratio\": 1.0,\n  \"n\": [2, 0.5]\n}\n```\n";
+    let record = |body: &str| WireRecord {
+        operation: "m".to_string(),
+        method: "POST".to_string(),
+        path: "/m".to_string(),
+        query: BTreeMap::new(),
+        headers: [("content-type".to_string(), "application/json".to_string())]
+            .into_iter()
+            .collect(),
+        body: Some(body.to_string()),
+        outcome: String::new(),
+    };
+    check_wire(
+        page,
+        &record("{\"n\":[2.0,0.50],\"ratio\":1}"),
+        ContractTestLanguage::Go,
+    )
+    .expect("equal numbers");
+    let err = check_wire(
+        page,
+        &record("{\"n\":[2,0.5],\"ratio\":0.9}"),
+        ContractTestLanguage::Go,
+    )
+    .unwrap_err();
+    assert!(err.starts_with("body:"), "{err}");
+}
+
+#[path = "support/docs_pipeline.rs"]
+mod docs_pipeline;
+
+/// The docs-edge pages, with no SDK sibling.
+fn edge_pages() -> BTreeMap<String, String> {
+    let pages = docs_pipeline::docs_edge(|pipeline| pipeline).pages();
+    if let Ok(dir) = std::env::var("GNR8_DOCS_DUMP") {
+        for (path, text) in &pages {
+            let target = std::path::Path::new(&dir).join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, text).unwrap();
+        }
+    }
+    pages
+}
+
+/// Imported parameter bounds are typed facts the sampler reads, so the page's claim that every
+/// value satisfies its declared constraints holds for an imported spec too — and the Constraints
+/// column shows them.
+#[test]
+fn imported_parameter_constraints_steer_the_sample_and_show_on_the_page() {
+    let pages = edge_pages();
+    let text = page(&pages, "operations/list-measures.md");
+    let parameters = section(text, "Parameters");
+    assert!(
+        parameters.contains("| `limit` | `integer` | yes |  | `minimum: 1`, `maximum: 5` |"),
+        "{parameters}"
+    );
+    assert!(
+        parameters.contains("| `tag` | `string` | yes |  | `minLength: 6` |"),
+        "{parameters}"
+    );
+    let example = section(text, "Example");
+    assert!(
+        example.contains("GET /measures?limit=5&maxShare=0.5&tag=gnr8gn HTTP/1.1\n"),
+        "{example}"
+    );
+    let refused = section(page(&pages, "operations/get-code.md"), "Example");
+    assert!(
+        refused.contains("No sample call: parameter `code` declares `pattern`."),
+        "{refused}"
+    );
+}
+
+/// Prose is printed verbatim and is the user's, so nothing in it can stop generation: a line made
+/// only of `#` is a sentence of theirs, not a heading the renderer emitted. A `~~~` fence in it
+/// keeps its inner blank lines as a backtick fence does.
+#[test]
+fn verbatim_prose_never_trips_the_heading_check_or_loses_fenced_blank_lines() {
+    let mut value = bookstore_json();
+    value["operations"][0]["description"] =
+        json!("First paragraph.\n#\n\n~~~text\na\n\n\nb\n~~~\nLast.");
+    let pages = render(&graph_of(value), &[]);
+    let text = page(&pages, "operations/list-books.md");
+    assert!(text.contains("\n#\n"), "{text}");
+    assert!(text.contains("~~~text\na\n\n\nb\n~~~\n"), "{text}");
+}
+
+/// A heading the renderer itself emits is never empty: an API title or a group name that is blank
+/// is a typed error naming it, before any page is written.
+#[test]
+fn blank_title_or_group_name_is_a_typed_error() {
+    let mut value = bookstore_json();
+    value["title"] = json!("  ");
+    let err = try_render(&graph_of(value), &[]).unwrap_err();
+    assert!(matches!(err, CoreError::DocsGen { .. }), "{err:?}");
+    assert!(err.to_string().contains("title"), "{err}");
+    let mut value = bookstore_json();
+    value["operations"][3]["group"] = json!(" ");
+    let err = try_render(&graph_of(value), &[]).unwrap_err();
+    assert!(err.to_string().contains("group"), "{err}");
 }

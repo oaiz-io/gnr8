@@ -67,7 +67,7 @@ pub(crate) fn consumer_identity(
             }
             Ok(Some(ConsumerIdentity {
                 import: t.module.clone(),
-                qualifier: sdk_package(&t.module)?,
+                qualifier: go_qualifier(&sdk_package(&t.module)?),
             }))
         }
         SiblingSdk::Python(t) => {
@@ -93,6 +93,109 @@ pub(crate) fn consumer_identity(
     }
 }
 
+/// Every name a Go sample, its wrapper or the compile unit's harness binds or imports, plus Go's
+/// predeclared identifiers. An SDK package clause spelled like one of them would be shadowed by it
+/// (`client := client.NewClient(…)`), so the sample imports the SDK under an alias instead.
+const GO_TAKEN_NAMES: &[&str] = &[
+    // The sample's locals and imports, and the wrapper's parameters.
+    "client",
+    "result",
+    "err",
+    "ctx",
+    "fmt",
+    "time",
+    "baseURL",
+    "apiKey",
+    "token",
+    "username",
+    "password",
+    // The compile unit's harness.
+    "bytes",
+    "context",
+    "json",
+    "io",
+    "http",
+    "os",
+    "strings",
+    "testing",
+    "transport",
+    "t",
+    "path",
+    "payload",
+    "record",
+    "request",
+    "index",
+    "name",
+    "text",
+    "operation",
+    // Predeclared identifiers.
+    "any",
+    "append",
+    "bool",
+    "byte",
+    "cap",
+    "clear",
+    "close",
+    "comparable",
+    "complex",
+    "complex128",
+    "complex64",
+    "copy",
+    "delete",
+    "error",
+    "false",
+    "float32",
+    "float64",
+    "imag",
+    "int",
+    "int16",
+    "int32",
+    "int64",
+    "int8",
+    "iota",
+    "len",
+    "make",
+    "max",
+    "min",
+    "new",
+    "nil",
+    "panic",
+    "print",
+    "println",
+    "real",
+    "recover",
+    "rune",
+    "string",
+    "true",
+    "uint",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uint8",
+    "uintptr",
+];
+
+/// The name a Go sample spells the SDK's symbols with: its package clause, or `<package>sdk` when
+/// the clause is a name the sample already uses.
+fn go_qualifier(package: &str) -> String {
+    if GO_TAKEN_NAMES.contains(&package) {
+        format!("{package}sdk")
+    } else {
+        package.to_string()
+    }
+}
+
+/// The Go import entry for the SDK: its module path, aliased when the qualifier is not the package
+/// clause (an entry with a space prints as `alias "path"`).
+fn go_sdk_import(identity: &ConsumerIdentity) -> String {
+    let clause = sdk_package(&identity.import).unwrap_or_default();
+    if clause == identity.qualifier {
+        identity.import.clone()
+    } else {
+        format!("{} {}", identity.qualifier, identity.import)
+    }
+}
+
 /// The module or package a section is labelled with: what the declaration names.
 pub(crate) fn sdk_label(sdk: SiblingSdk<'_>) -> &str {
     match sdk {
@@ -113,6 +216,49 @@ pub(crate) struct Snippet {
     /// The client a rung-3 harness builds instead: the contract base URL and credentials, on the
     /// recording transport, the way the contract harness builds its client.
     pub(crate) wire_client: String,
+    /// What a rung-3 harness answers the call with, and what the call must make of it.
+    pub(crate) reply: CannedReply,
+}
+
+/// The reply a rung-3 harness answers one sample's call with.
+///
+/// It is the reply the page prints — its status, its declared media type and its body — and the
+/// call must succeed on it. An operation whose page prints no reply (a file download, no success
+/// status, a first success status outside 2xx, or a refused reply) is answered with an empty-bodied
+/// `400`, and the call must surface the SDK's typed error carrying that status.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CannedReply {
+    pub(crate) status: u16,
+    pub(crate) content_type: String,
+    pub(crate) body: String,
+    /// `true`: the call must succeed; `false`: it must raise the typed error with `status`.
+    pub(crate) success: bool,
+}
+
+/// The status a rung-3 harness answers an operation with when its page prints no reply.
+const NO_REPLY_STATUS: u16 = 400;
+
+fn canned_reply(op: &Operation, sample: &OperationSample) -> Result<CannedReply, CoreError> {
+    Ok(match &sample.reply {
+        crate::verify::SuccessOutcome::Sample(reply) => CannedReply {
+            status: reply.status,
+            content_type: if reply.body.is_empty() {
+                String::new()
+            } else {
+                super::example::reply_media_type(op, reply.status)?
+            },
+            body: reply.body.clone(),
+            success: true,
+        },
+        crate::verify::SuccessOutcome::NoReply | crate::verify::SuccessOutcome::Refused(_) => {
+            CannedReply {
+                status: NO_REPLY_STATUS,
+                content_type: String::new(),
+                body: String::new(),
+                success: false,
+            }
+        }
+    })
 }
 
 impl Snippet {
@@ -195,6 +341,7 @@ fn py_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String)
         body: format!("{}\nresult = {}\nprint(result)", site.construct, site.call),
         call: format!("result = {}", site.call),
         wire_client,
+        reply: CannedReply::default(),
     }
 }
 
@@ -212,6 +359,7 @@ fn ts_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String)
         ),
         call: format!("const result = await {};", site.call),
         wire_client,
+        reply: CannedReply::default(),
     }
 }
 
@@ -232,7 +380,7 @@ fn go_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String)
     standard.sort();
     standard.dedup();
     standard.push(String::new());
-    standard.push(identity.import.clone());
+    standard.push(go_sdk_import(identity));
     Snippet {
         imports: standard,
         body: format!(
@@ -241,6 +389,7 @@ fn go_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String)
         ),
         call: site.call.clone(),
         wire_client,
+        reply: CannedReply::default(),
     }
 }
 
@@ -248,12 +397,10 @@ fn go_snippet(site: &CallSite, identity: &ConsumerIdentity, wire_client: String)
 fn go_import_block(imports: &[String]) -> String {
     let lines = imports
         .iter()
-        .map(|import| {
-            if import.is_empty() {
-                String::new()
-            } else {
-                format!("\t\"{import}\"")
-            }
+        .map(|import| match import.split_once(' ') {
+            _ if import.is_empty() => String::new(),
+            Some((alias, path)) => format!("\t{alias} \"{path}\""),
+            None => format!("\t\"{import}\""),
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -292,7 +439,8 @@ pub fn compile_unit(
         let Sampled::Sample(sample) = sample_operation(op, graph)? else {
             continue;
         };
-        let snippet = snippet(graph, op, &sample, sdk, &identity)?;
+        let mut snippet = snippet(graph, op, &sample, sdk, &identity)?;
+        snippet.reply = canned_reply(op, &sample)?;
         entries.push(CompileEntry {
             operation_id: op.id.clone(),
             page: nav.operation_page(&op.id)?.to_string(),
@@ -401,13 +549,30 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         "\n@unittest.skipUnless(os.environ.get(\"{WIRE_ENV}\"), \"rung 3 runs only when {WIRE_ENV} names a file\")\nclass DocsWire(unittest.TestCase):\n    def test_record(self) -> None:\n        wire = _Wire()\n"
     );
     for (op, snippet) in snippets {
-        let _ = write!(
+        let reply = &snippet.reply;
+        let _ = writeln!(
             out,
-            "        try:\n            {}\n            {}\n            del result\n        except ApiError:\n            pass\n        wire.mark({})\n",
-            snippet.wire_client,
-            snippet.call,
-            json_string(&op.id)
+            "        wire.respond({}, {}, {})",
+            reply.status,
+            json_string(&reply.content_type),
+            json_string(&reply.body)
         );
+        if reply.success {
+            let _ = write!(
+                out,
+                "        outcome = \"\"\n        try:\n            {}\n            {}\n            del result\n        except Exception as error:  # noqa: BLE001 - any failure is the finding\n            outcome = \"the call failed on the page's reply: \" + repr(error)\n",
+                snippet.wire_client, snippet.call
+            );
+        } else {
+            let _ = write!(
+                out,
+                "        outcome = \"expected the SDK's typed ApiError with status {status}, but the call returned\"\n        try:\n            {}\n            {}\n            del result\n        except ApiError as error:\n            outcome = \"\" if error.status_code == {status} else \"expected status {status}, got \" + str(error.status_code)\n        except Exception as error:  # noqa: BLE001 - any other failure is the finding\n            outcome = \"expected the SDK's typed ApiError with status {status}, got \" + repr(error)\n",
+                snippet.wire_client,
+                snippet.call,
+                status = reply.status
+            );
+        }
+        let _ = writeln!(out, "        wire.mark({}, outcome)", json_string(&op.id));
     }
     let _ = write!(
         out,
@@ -432,12 +597,16 @@ class _Refuse(urllib.request.HTTPHandler):
     https_open = http_open
 
 
-class _Wire(_Refuse):
-    """Records each request a sample's call sends, then refuses it like _Refuse."""
+class _Wire(urllib.request.HTTPHandler):
+    """Records each request a sample's call sends, and answers it with the reply set last."""
 
     def __init__(self):
         super().__init__()
         self.records = []
+        self.reply = (400, "", "")
+
+    def respond(self, status, content_type, body):
+        self.reply = (status, content_type, body)
 
     def http_open(self, req):
         url = urllib.parse.urlsplit(req.full_url)
@@ -450,16 +619,26 @@ class _Wire(_Refuse):
                 "query": urllib.parse.parse_qs(url.query, keep_blank_values=True),
                 "headers": {name.lower(): value for name, value in req.header_items()},
                 "body": None if data is None else data.decode("utf-8"),
+                "outcome": "",
             }
         )
-        return super().http_open(req)
+        status, content_type, body = self.reply
+        message = email.message.Message()
+        if content_type:
+            message["Content-Type"] = content_type
+        response = urllib.response.addinfourl(
+            io.BytesIO(body.encode("utf-8")), message, req.full_url, status
+        )
+        response.msg = "Docs"
+        return response
 
     https_open = http_open
 
-    def mark(self, operation):
+    def mark(self, operation, outcome):
         for record in self.records:
             if not record["operation"]:
                 record["operation"] = operation
+                record["outcome"] = outcome
 
 
 def Client(*args, **kwargs):  # noqa: N802 - stands in for the SDK's Client
@@ -470,8 +649,13 @@ fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
     if snippets.is_empty() {
         return "export {};\n".to_string();
     }
+    let names = if snippets.iter().any(|(_, snippet)| !snippet.reply.success) {
+        "ApiError, Client"
+    } else {
+        "Client"
+    };
     let mut out = format!(
-        "import {{ Client }} from {};\n",
+        "import {{ {names} }} from {};\n",
         json_string(&identity.import)
     );
     for (op, snippet) in snippets {
@@ -484,13 +668,32 @@ fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
     }
     out.push_str(TS_WIRE_HEAD);
     for (op, snippet) in snippets {
-        let _ = write!(
+        let reply = &snippet.reply;
+        let _ = writeln!(
             out,
-            "  try {{\n    {}\n    {}\n    void result;\n  }} catch {{\n    // The typed error the recording transport's 400 raises.\n  }}\n  mark({});\n",
-            snippet.wire_client,
-            snippet.call,
-            json_string(&op.id)
+            "  respond({}, {}, {});",
+            reply.status,
+            json_string(&reply.content_type),
+            json_string(&reply.body)
         );
+        if reply.success {
+            let _ = write!(
+                out,
+                "  {{\n    let outcome = \"\";\n    try {{\n      {}\n      {}\n      void result;\n    }} catch (error) {{\n      outcome = `the call failed on the page's reply: ${{String(error)}}`;\n    }}\n    mark({}, outcome);\n  }}\n",
+                snippet.wire_client,
+                snippet.call,
+                json_string(&op.id)
+            );
+        } else {
+            let _ = write!(
+                out,
+                "  {{\n    let outcome = \"expected the SDK's typed ApiError with status {status}, but the call returned\";\n    try {{\n      {}\n      {}\n      void result;\n    }} catch (error) {{\n      outcome =\n        error instanceof ApiError && error.status === {status}\n          ? \"\"\n          : `expected the SDK's typed ApiError with status {status}, got ${{String(error)}}`;\n    }}\n    mark({}, outcome);\n  }}\n",
+                snippet.wire_client,
+                snippet.call,
+                json_string(&op.id),
+                status = reply.status
+            );
+        }
     }
     out.push_str("  return records;\n}\n");
     out
@@ -507,11 +710,16 @@ export interface DocsWireRecord {
   query: Record<string, string[]>;
   headers: Record<string, string>;
   body: string | null;
+  outcome: string;
 }
 
 /** Run every sample's call against a recording transport and return what each one sent. */
 export async function docsWire(): Promise<DocsWireRecord[]> {
   const records: DocsWireRecord[] = [];
+  let reply = { status: 400, contentType: "", body: "" };
+  const respond = (status: number, contentType: string, body: string): void => {
+    reply = { status, contentType, body };
+  };
   const fetchStub: typeof fetch = async (input, init) => {
     const url = new URL(
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
@@ -531,13 +739,22 @@ export async function docsWire(): Promise<DocsWireRecord[]> {
       query,
       headers,
       body: typeof init?.body === "string" ? init.body : null,
+      outcome: "",
     });
-    return new Response(null, { status: 400 });
+    const replyHeaders: Record<string, string> = {};
+    if (reply.contentType !== "") {
+      replyHeaders["content-type"] = reply.contentType;
+    }
+    return new Response(reply.body === "" ? null : reply.body, {
+      status: reply.status,
+      headers: replyHeaders,
+    });
   };
-  const mark = (operation: string): void => {
+  const mark = (operation: string, outcome: string): void => {
     for (const record of records) {
       if (record.operation === "") {
         record.operation = operation;
+        record.outcome = outcome;
       }
     }
   };
@@ -564,7 +781,7 @@ fn go_unit_text(
     let mut standard: Vec<String> = snippets
         .iter()
         .flat_map(|(_, snippet)| snippet.imports.iter())
-        .filter(|import| !import.is_empty() && **import != identity.import)
+        .filter(|import| !import.is_empty() && !import.ends_with(&identity.import))
         .cloned()
         .collect();
     standard.extend(
@@ -572,6 +789,7 @@ fn go_unit_text(
             "bytes",
             "context",
             "encoding/json",
+            "fmt",
             "io",
             "net/http",
             "os",
@@ -580,10 +798,13 @@ fn go_unit_text(
         ]
         .map(str::to_string),
     );
+    if snippets.iter().any(|(_, snippet)| !snippet.reply.success) {
+        standard.push("errors".to_string());
+    }
     standard.sort();
     standard.dedup();
     standard.push(String::new());
-    standard.push(identity.import.clone());
+    standard.push(go_sdk_import(identity));
     let mut out = format!("package {package}_test\n\n{}\n", go_import_block(&standard));
     for (op, snippet) in snippets {
         out.push('\n');
@@ -591,11 +812,31 @@ fn go_unit_text(
     }
     out.push_str(GO_WIRE_HEAD);
     for (op, snippet) in snippets {
+        let reply = &snippet.reply;
         let _ = write!(
             out,
-            "\t{{\n\t\t{}\n\t\t{}\n\t\t_, _ = result, err\n\t\ttransport.mark({})\n\t}}\n",
+            "\t{{\n\t\ttransport.respond({}, {}, {})\n\t\t{}\n\t\t{}\n\t\t_ = result\n",
+            reply.status,
+            json_string(&reply.content_type),
+            json_string(&reply.body),
             snippet.wire_client,
-            snippet.call,
+            snippet.call
+        );
+        if reply.success {
+            out.push_str(
+                "\t\toutcome := \"\"\n\t\tif err != nil {\n\t\t\toutcome = \"the call failed on the page's reply: \" + err.Error()\n\t\t}\n",
+            );
+        } else {
+            let _ = write!(
+                out,
+                "\t\toutcome := \"\"\n\t\tvar apiErr *{}.APIError\n\t\tif !errors.As(err, &apiErr) || apiErr.StatusCode != {status} {{\n\t\t\toutcome = fmt.Sprintf(\"expected the SDK's typed *APIError with status {status}, got %v\", err)\n\t\t}}\n",
+                identity.qualifier,
+                status = reply.status
+            );
+        }
+        let _ = write!(
+            out,
+            "\t\ttransport.mark({}, outcome)\n\t}}\n",
             json_string(&op.id)
         );
     }
@@ -616,11 +857,21 @@ type docsWireRecord struct {
 	Query     map[string][]string `json:"query"`
 	Headers   map[string]string   `json:"headers"`
 	Body      *string             `json:"body"`
+	Outcome   string              `json:"outcome"`
 }
 
-// docsWireTransport records each request and answers an empty-bodied 400.
+// docsWireTransport records each request and answers it with the reply set last.
 type docsWireTransport struct {
-	records []docsWireRecord
+	records     []docsWireRecord
+	status      int
+	contentType string
+	body        string
+}
+
+func (transport *docsWireTransport) respond(status int, contentType string, body string) {
+	transport.status = status
+	transport.contentType = contentType
+	transport.body = body
 }
 
 func (transport *docsWireTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -644,18 +895,23 @@ func (transport *docsWireTransport) RoundTrip(request *http.Request) (*http.Resp
 		}
 	}
 	transport.records = append(transport.records, record)
+	header := http.Header{}
+	if transport.contentType != "" {
+		header.Set("Content-Type", transport.contentType)
+	}
 	return &http.Response{
-		StatusCode: 400,
-		Header:     http.Header{},
-		Body:       io.NopCloser(bytes.NewReader(nil)),
+		StatusCode: transport.status,
+		Header:     header,
+		Body:       io.NopCloser(bytes.NewReader([]byte(transport.body))),
 		Request:    request,
 	}, nil
 }
 
-func (transport *docsWireTransport) mark(operation string) {
+func (transport *docsWireTransport) mark(operation string, outcome string) {
 	for index := range transport.records {
 		if transport.records[index].Operation == "" {
 			transport.records[index].Operation = operation
+			transport.records[index].Outcome = outcome
 		}
 	}
 }
@@ -684,6 +940,10 @@ pub struct WireRecord {
     pub headers: BTreeMap<String, String>,
     /// The request body text, when one was sent.
     pub body: Option<String>,
+    /// What the call made of the canned reply, when that is not what the page says it should be;
+    /// empty when the call ended as the page's exchange says it does.
+    #[serde(default)]
+    pub outcome: String,
 }
 
 /// Rung 3: the request a sample sent equals the HTTP exchange its page prints, after the page's
@@ -691,12 +951,23 @@ pub struct WireRecord {
 /// URL carries no path, so a printed path compares as is.
 ///
 /// Compares the method, the path, every query parameter, every header the page prints (the client
-/// may send more, such as a user agent), and the body as JSON.
+/// may send more, such as a user agent), the body as JSON with numbers compared by value, and what
+/// the call made of the canned reply ([`WireRecord::outcome`]).
+///
+/// The page's `cookie` line is compared too, except for TypeScript: its generated client leaves
+/// cookies to the `fetch` transport by design (a browser owns them), so the harness never sees one.
 ///
 /// # Errors
 ///
 /// Returns the first field that differs, as `field: page …, sent …`.
-pub fn check_wire(page: &str, record: &WireRecord) -> Result<(), String> {
+pub fn check_wire(
+    page: &str,
+    record: &WireRecord,
+    language: ContractTestLanguage,
+) -> Result<(), String> {
+    if !record.outcome.is_empty() {
+        return Err(format!("call: {}", record.outcome));
+    }
     let exchange =
         page_request(page).ok_or_else(|| "the page prints no HTTP request".to_string())?;
     let substitute = |text: &str| {
@@ -741,6 +1012,9 @@ pub fn check_wire(page: &str, record: &WireRecord) -> Result<(), String> {
         }
     }
     for (name, value) in &exchange.headers {
+        if language == ContractTestLanguage::TypeScript && name.eq_ignore_ascii_case("cookie") {
+            continue;
+        }
         let want = substitute(value);
         match record.headers.get(&name.to_ascii_lowercase()) {
             Some(got) if *got == want => {}
@@ -761,10 +1035,33 @@ pub fn check_wire(page: &str, record: &WireRecord) -> Result<(), String> {
             let want_value: serde_json::Value = serde_json::from_str(want)
                 .map_err(|error| format!("body: the page prints no JSON body: {error}"))?;
             match serde_json::from_str::<serde_json::Value>(sent_body) {
-                Ok(got) if got == want_value => Ok(()),
+                Ok(got) if json_equivalent(&got, &want_value) => Ok(()),
                 _ => differ("body", want, sent_body),
             }
         }
+    }
+}
+
+/// JSON equality with numbers compared by value, as the contract assertions compare them: a page's
+/// `1.0` and a client's `1` are one number.
+fn json_equivalent(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) => match (a.as_i64(), b.as_i64()) {
+            (Some(a), Some(b)) => a == b,
+            _ => a.as_f64().is_some() && a.as_f64() == b.as_f64(),
+        },
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| json_equivalent(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(key, value)| {
+                    b.get(key)
+                        .is_some_and(|other| json_equivalent(value, other))
+                })
+        }
+        _ => left == right,
     }
 }
 

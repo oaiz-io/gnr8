@@ -38,7 +38,7 @@ use page::Site;
 /// # Errors
 ///
 /// Returns [`CoreError::Config`] for an empty output directory, or one that equals, contains or
-/// lies inside a sibling SDK target's directory; [`CoreError::SdkGen`] for a slug collision or a
+/// lies inside a sibling SDK target's directory; [`CoreError::DocsGen`] for a slug collision or a
 /// rung-0 failure; and the graph's own error for a fact the shared SDK helpers reject.
 pub(crate) fn generate(
     decl: &StaticDocs,
@@ -69,6 +69,29 @@ pub(crate) fn generate(
 
 /// Render every page, keyed by docs-relative path, and run rung 0 over the result.
 fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, String>, CoreError> {
+    // Rung 0, no empty heading: the only headings whose text is not a fixed `const`, an id or a
+    // schema name (each refused elsewhere when it cannot form a page name) are the API title and
+    // the group names, so those are checked here. Verbatim prose is the user's and is never read
+    // as a heading.
+    if graph.title.trim().is_empty() {
+        return Err(CoreError::DocsGen {
+            message: "StaticDocs cannot print an empty heading: the API title is blank — set one \
+                      with SetTitle"
+                .to_string(),
+        });
+    }
+    if let Some(op) = graph.operations.iter().find(|op| {
+        op.group
+            .as_deref()
+            .is_some_and(|group| group.trim().is_empty())
+    }) {
+        return Err(CoreError::DocsGen {
+            message: format!(
+                "StaticDocs cannot print an empty heading: operation '{}' has a blank group name",
+                op.id
+            ),
+        });
+    }
     // The error catalog is the SDK model's own error plan, so the page lists exactly the error
     // responses every generated client models. The package name plays no part in that plan.
     let errors = crate::sdk::model::SdkModel::build(
@@ -134,7 +157,7 @@ fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, Str
     if operation_pages != graph.operations.len()
         || nav.operation_page_count() != graph.operations.len()
     {
-        return Err(CoreError::SdkGen {
+        return Err(CoreError::DocsGen {
             message: format!(
                 "StaticDocs rendered {operation_pages} operation pages for {} operations",
                 graph.operations.len()
@@ -143,13 +166,8 @@ fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, Str
     }
     let emitted: BTreeSet<String> = pages.keys().cloned().collect();
     links.check(&emitted)?;
-    for (path, text) in &mut pages {
+    for text in pages.values_mut() {
         *text = markdown::finish(text);
-        if let Some(line) = markdown::empty_heading(text) {
-            return Err(CoreError::SdkGen {
-                message: format!("StaticDocs rendered an empty heading {line:?} in {path}"),
-            });
-        }
     }
     Ok(pages)
 }

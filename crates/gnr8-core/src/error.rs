@@ -154,6 +154,14 @@ pub enum CoreError {
         message: String,
     },
 
+    /// The `StaticDocs` target could not render its reference from the graph: a page name it cannot
+    /// form, two subjects with one page, a fact a page cannot state, or a rung-0 failure.
+    #[error("docs generation failed: {message}")]
+    DocsGen {
+        /// Human-readable failure detail.
+        message: String,
+    },
+
     /// The `gofmt` subprocess ran but exited with a non-zero status (Phase 3 / SDK formatting).
     ///
     /// Mirrors the [`Self::HelperExit`] shape (exit `code` + captured `stderr`) and is kept distinct

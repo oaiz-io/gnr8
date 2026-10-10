@@ -182,12 +182,14 @@ fn call_arguments(
             continue;
         }
         if slot == BODY_SLOT {
-            let Some(body) = &body_literal else {
-                // An optional body the sampler chose not to send: leave the slot out entirely, which
-                // is exactly what a caller who omits it does.
-                continue;
-            };
-            args.push(body.clone());
+            // An optional body the sampler chose not to send: `undefined` holds its slot, so a later
+            // argument (the optional params object) stays in its own; trailing ones are dropped
+            // below, which is exactly what a caller who omits the body writes.
+            args.push(
+                body_literal
+                    .clone()
+                    .unwrap_or_else(|| OMITTED_BODY.to_string()),
+            );
             continue;
         }
         let value = path_values
@@ -202,9 +204,14 @@ fn call_arguments(
             })?;
         args.push(value);
     }
-
+    while args.last().is_some_and(|arg| arg == OMITTED_BODY) {
+        args.pop();
+    }
     Ok(args)
 }
+
+/// The argument an omitted optional body passes when a later slot is filled.
+const OMITTED_BODY: &str = "undefined";
 
 fn params_object(shape: &TsOperationShape<'_>, samples: &[SampleParam]) -> String {
     let entries = shape

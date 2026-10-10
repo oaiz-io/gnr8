@@ -319,9 +319,15 @@ fn typescript_unresolvable_import_fails_rung_two() {
 }
 
 use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord, WIRE_ENV};
+use gnr8_engine::verify::ContractTestLanguage;
 
 /// Assert every entry's recorded request equals the HTTP exchange its page prints.
-fn assert_wire_matches_pages(run: &DocsRun, unit_entries: usize, wire: &std::path::Path) {
+fn assert_wire_matches_pages(
+    run: &DocsRun,
+    unit_entries: usize,
+    wire: &std::path::Path,
+    language: ContractTestLanguage,
+) {
     let text = std::fs::read_to_string(wire).expect("the harness wrote its records");
     let records: Vec<WireRecord> = serde_json::from_str(&text).expect("records are JSON");
     assert_eq!(
@@ -332,7 +338,8 @@ fn assert_wire_matches_pages(run: &DocsRun, unit_entries: usize, wire: &std::pat
     let pages = run.pages();
     for record in &records {
         let page = page_of(&pages, &record.operation);
-        check_wire(page, record).unwrap_or_else(|field| panic!("{}: {field}", record.operation));
+        check_wire(page, record, language)
+            .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
     }
 }
 
@@ -363,7 +370,7 @@ fn go_snippet_call_sends_the_page_request() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_wire_matches_pages(&run, unit.entries.len(), &wire);
+    assert_wire_matches_pages(&run, unit.entries.len(), &wire, ContractTestLanguage::Go);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -427,8 +434,12 @@ fn python_snippet_call_sends_the_page_request() {
         assert_eq!(records.len(), entries);
         let pages = run.pages();
         for record in &records {
-            check_wire(page_of(&pages, &record.operation), record)
-                .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
+            check_wire(
+                page_of(&pages, &record.operation),
+                record,
+                ContractTestLanguage::Python,
+            )
+            .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
         }
         return;
     }
@@ -445,7 +456,7 @@ fn python_snippet_call_sends_the_page_request() {
     let mut bodies_with_nulls = 0;
     for record in &records {
         let page = page_of(&pages, &record.operation);
-        match check_wire(page, record) {
+        match check_wire(page, record, ContractTestLanguage::Python) {
             Ok(()) => {}
             Err(field) => {
                 assert!(field.starts_with("body:"), "{}: {field}", record.operation);
@@ -454,9 +465,9 @@ fn python_snippet_call_sends_the_page_request() {
                 strip_nulls(&mut sent);
                 let mut without_nulls = record.clone();
                 without_nulls.body = Some(sent.to_string());
-                check_wire(page, &without_nulls).unwrap_or_else(|field| {
-                    panic!("{}: beyond the nulls: {field}", record.operation)
-                });
+                check_wire(page, &without_nulls, ContractTestLanguage::Python).unwrap_or_else(
+                    |field| panic!("{}: beyond the nulls: {field}", record.operation),
+                );
                 bodies_with_nulls += 1;
             }
         }
@@ -479,11 +490,17 @@ fn typescript_snippet_call_sends_the_page_request() {
     let Some((run, ts)) = typescript_run() else {
         return;
     };
-    let unit = compile_unit(&run.graph, SiblingSdk::TypeScript(&ts))
+    typescript_rung_three(&run, &ts);
+}
+
+/// Rung 3 for one TypeScript SDK of `run`: compile the unit and the SDK to `CommonJS`, run every
+/// sample's call against the recording `fetch`, and compare each request with its page.
+fn typescript_rung_three(run: &DocsRun, ts: &TsSdk) {
+    let unit = compile_unit(&run.graph, SiblingSdk::TypeScript(ts))
         .unwrap()
         .unwrap();
     let dir = temp_dir("typescript-wire");
-    run.write_dir("generated/ts", &dir.join("sdk"));
+    run.write_dir(&ts.dir, &dir.join("sdk"));
     std::fs::write(dir.join("snippets.ts"), &unit.text).unwrap();
     // Compile to CommonJS, then resolve the published name to the compiled SDK at run time.
     std::fs::write(
@@ -535,6 +552,146 @@ fn typescript_snippet_call_sends_the_page_request() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_wire_matches_pages(&run, unit.entries.len(), &wire);
+    assert_wire_matches_pages(
+        run,
+        unit.entries.len(),
+        &wire,
+        ContractTestLanguage::TypeScript,
+    );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Rung 2 (`go vet`) then rung 3 (the recording harness) for one Go SDK of `run`.
+fn go_rungs_two_and_three(run: &DocsRun, go: &GoSdk, label: &str) {
+    let unit = compile_unit(&run.graph, SiblingSdk::Go(go))
+        .unwrap()
+        .expect("a Go SDK with package metadata has a consumer identity");
+    go_unit_rungs(run, go, label, &unit.text, unit.entries.len());
+}
+
+/// Run one (possibly planted) Go unit's rungs 2 and 3 and compare every record with its page.
+fn go_unit_rungs(run: &DocsRun, go: &GoSdk, label: &str, text: &str, entries: usize) {
+    let unit = gnr8_engine::staticdocs::snippets::CompileUnit {
+        file_name: "docs_snippets_test.go".to_string(),
+        identity: go.module.clone(),
+        text: text.to_string(),
+        entries: Vec::new(),
+    };
+    let dir = temp_dir(label);
+    run.write_dir(&go.dir, &dir);
+    std::fs::write(dir.join(&unit.file_name), &unit.text).unwrap();
+    let go_command = |args: &[&str]| {
+        let mut command = Command::new("go");
+        command
+            .args(args)
+            .current_dir(&dir)
+            .env("GOFLAGS", "-mod=mod")
+            .env("GOWORK", "off");
+        command
+    };
+    let vet = go_command(&["vet", "./..."]).output().unwrap();
+    assert!(
+        vet.status.success(),
+        "{label}: go vet failed:\n{}\n--- {} ---\n{}",
+        String::from_utf8_lossy(&vet.stderr),
+        unit.file_name,
+        unit.text
+    );
+    let wire = dir.join("wire.json");
+    let recorded = go_command(&["test", "-count=1", "-run", "^TestDocsWire$", "./..."])
+        .env(WIRE_ENV, &wire)
+        .output()
+        .unwrap();
+    assert!(
+        recorded.status.success(),
+        "{label}: {}\n{}",
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert_wire_matches_pages(run, entries, &wire, ContractTestLanguage::Go);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The docs-edge fixture through Go: a 0–1 float parameter and body field (a whole-number sample
+/// would print `1.0` on the page and `1` on the wire), imported parameter bounds, an optional
+/// multipart body the sampler leaves out (the call still passes `nil` for it), a required cookie,
+/// a `hal+json` reply, and a module whose package is named `client` — the snippet's own local name.
+#[test]
+fn docs_edge_samples_vet_and_send_the_page_request_in_go() {
+    if !docs_pipeline::go_available() {
+        return;
+    }
+    let go = GoSdk::new().module("example.com/edge/client").to(SDK_DIR);
+    let run = docs_pipeline::docs_edge(|pipeline| pipeline.target(go.clone()));
+    go_rungs_two_and_three(&run, &go, "edge-go");
+}
+
+/// The docs-edge fixture through TypeScript: the optional multipart body precedes the optional
+/// params object, so leaving the body out must still keep the params in their own slot.
+#[test]
+fn docs_edge_samples_typecheck_and_send_the_page_request_in_typescript() {
+    if !typescript_available() {
+        return;
+    }
+    let ts = TsSdk::new()
+        .module("edge")
+        .package(SdkPackageMetadata::new().registry_name("@example/edge-sdk"))
+        .to("generated/ts");
+    let run = docs_pipeline::docs_edge(|pipeline| pipeline.target(ts.clone()));
+    let unit = compile_unit(&run.graph, SiblingSdk::TypeScript(&ts))
+        .unwrap()
+        .unwrap();
+    let output = run_tsc(&run, &unit.text, &unit.identity);
+    assert!(
+        output.status.success(),
+        "{}\n--- snippets.ts ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        unit.text
+    );
+    typescript_rung_three(&run, &ts);
+}
+
+/// Rung 3 asserts what each call makes of its reply: a call answered with the reply its page prints
+/// must succeed, and one answered with the empty `400` (here the PDF download, whose page prints no
+/// reply) must surface the SDK's typed error. Planting the wrong reply in either fails the check.
+#[test]
+fn rung_three_asserts_success_on_the_page_reply_and_the_typed_error_otherwise() {
+    if !docs_pipeline::go_available() {
+        return;
+    }
+    let go = GoSdk::new().module("example.com/edge/sdk").to(SDK_DIR);
+    let run = docs_pipeline::docs_edge(|pipeline| pipeline.target(go.clone()));
+    let unit = compile_unit(&run.graph, SiblingSdk::Go(&go))
+        .unwrap()
+        .unwrap();
+    assert!(
+        unit.text.contains("transport.respond(400, \"\", \"\")"),
+        "the download is answered with the empty 400:\n{}",
+        unit.text
+    );
+    for (from, to, finding) in [
+        (
+            "transport.respond(400, \"\", \"\")",
+            "transport.respond(200, \"\", \"\")",
+            "typed *APIError",
+        ),
+        (
+            "transport.respond(201, ",
+            "transport.respond(500, ",
+            "failed on the page's reply",
+        ),
+    ] {
+        let planted = unit.text.replacen(from, to, 1);
+        let outcome = std::panic::catch_unwind(|| {
+            go_unit_rungs(&run, &go, "edge-planted", &planted, unit.entries.len());
+        });
+        let message = outcome
+            .err()
+            .and_then(|panic| panic.downcast::<String>().ok())
+            .map_or_else(
+                || panic!("planting {to} must fail rung 3"),
+                |message| *message,
+            );
+        assert!(message.contains(finding), "{message}");
+    }
 }
