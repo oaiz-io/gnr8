@@ -29,6 +29,10 @@ use crate::sdk::emit_common::{
 use crate::sdk::layout::{OperationFileSplit, SdkFileLayout};
 use std::collections::BTreeMap;
 
+/// The TypeScript SDK's typed error for a rejected HTTP response: the one spelling every emitted
+/// file, the contract tests, and every docs page name it by.
+pub(crate) const ERROR_TYPE: &str = "ApiError";
+
 /// Generate the TypeScript SDK as a deterministic, dependency-free multi-file bundle String (D-06,
 /// TSSDK-01).
 ///

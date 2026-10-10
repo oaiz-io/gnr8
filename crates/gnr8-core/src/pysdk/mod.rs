@@ -32,6 +32,10 @@ use crate::sdk::emit_common::{
 use crate::sdk::layout::{OperationFileSplit, SdkFileLayout};
 use crate::sdk::model_style::PyModelStyle;
 
+/// The Python SDK's typed error for a rejected HTTP response: the one spelling every emitted file,
+/// the generated CLI and contract tests, and every docs page name it by.
+pub(crate) const ERROR_TYPE: &str = "ApiError";
+
 /// Generate the Python SDK as a deterministic multi-file bundle String (D-06, PYSDK-01).
 ///
 /// Emits `__init__.py` (re-exports), `client.py` (the `urllib`-backed `Client` + one method per

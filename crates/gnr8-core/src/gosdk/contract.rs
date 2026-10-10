@@ -22,6 +22,7 @@ use super::callsite::{go_scalar, render_call, TIME_IMPORT};
 use super::emit::{
     exported, go_field_emissions, go_pointer_depth, go_struct_field_type, operation_method_name,
 };
+use super::ERROR_TYPE;
 
 /// The file name the Go SDK's contract test is emitted at.
 pub(crate) const CONTRACT_TEST_FILE: &str = "contract_test.go";
@@ -206,9 +207,9 @@ func assertContractBody(t *testing.T, request contractRequest, expected string) 
 
 func assertContractStatus(t *testing.T, err error, status int) {{
 	t.Helper()
-	var apiErr *APIError
+	var apiErr *{ERROR_TYPE}
 	if !errors.As(err, &apiErr) {{
-		t.Fatalf("expected *APIError, got %v", err)
+		t.Fatalf("expected *{ERROR_TYPE}, got %v", err)
 	}}
 	if apiErr.StatusCode != status {{
 		t.Fatalf("status: got %d, want %d", apiErr.StatusCode, status)

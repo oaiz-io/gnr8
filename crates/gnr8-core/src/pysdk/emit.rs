@@ -26,11 +26,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use super::ERROR_TYPE;
+
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{
     ApiGraph, Field, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Param,
     Prim, RuntimePolicy, Type,
 };
+use crate::sdk::emit_common::PaginationNames;
 use crate::sdk::emit_common::{
     binary_value_shape, error_response_bodies_of, is_json_object_key, join_path,
     operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
@@ -1492,13 +1495,14 @@ fn emit_dataclass_to_dict(
 /// `package` is unused in the body (no package clause in Python) but kept for call-site symmetry with
 /// the Go twin's `emit_errors`. The `from __future__ import annotations` header keeps annotations lazy.
 pub(crate) fn emit_errors(_package: &str) -> String {
-    "\
+    format!(
+        "\
 from __future__ import annotations
 
 from typing import Any, Optional
 
 
-class ApiError(Exception):
+class {ERROR_TYPE}(Exception):
     \"\"\"Raised by operation methods on a non-success response.
 
     Carries status, response metadata, raw body, parsed JSON, and decoded error body.
@@ -1517,9 +1521,9 @@ class ApiError(Exception):
         json_body: Any = None,
         body: Any = None,
     ) -> None:
-        super().__init__(f\"{status_code} {message} ({slug})\")
+        super().__init__(f\"{{status_code}} {{message}} ({{slug}})\")
         self.status_code = status_code
-        self.headers = headers or {}
+        self.headers = headers or {{}}
         self.request_id = request_id
         self.raw_body = raw_body
         self.json_body = json_body
@@ -1540,11 +1544,11 @@ class AuthConfigurationError(Exception):
         operation_id: str,
         alternatives: list[list[str]],
     ) -> None:
-        super().__init__(f\"No configured credentials satisfy operation {operation_id}\")
+        super().__init__(f\"No configured credentials satisfy operation {{operation_id}}\")
         self.operation_id = operation_id
         self.alternatives = alternatives
 "
-    .to_string()
+    )
 }
 
 /// Emit the public value object used for one named multipart file part.
@@ -1913,9 +1917,9 @@ pub(crate) fn emit_client_with_models(
     // not emit — importing it there would be an unused import (ruff F401).
     let mut first_party: Vec<String> =
         vec![if has_api_key_auth || has_bearer_auth || has_basic_auth {
-            "from .errors import ApiError, AuthConfigurationError".to_string()
+            format!("from .errors import {ERROR_TYPE}, AuthConfigurationError")
         } else {
-            "from .errors import ApiError".to_string()
+            format!("from .errors import {ERROR_TYPE}")
         }];
     if !model_refs.is_empty() {
         // A parenthesized, one-name-per-line import with a trailing comma: the "magic trailing comma"
@@ -2435,7 +2439,7 @@ class Client:
                 if (status < 200 or status >= 300) and status not in success_statuses:
                     self._call_error_hooks(
                         context,
-                        ApiError(
+                        {ERROR_TYPE}(
                             status,
                             \"\",
                             \"\",
@@ -2497,7 +2501,7 @@ class Client:
         headers: dict[str, str],
         raw: bytes,
         error_model: Optional[type] = None,
-    ) -> ApiError:
+    ) -> {ERROR_TYPE}:
         try:
             json_body = json.loads(raw) if raw else None
         except ValueError:
@@ -2510,7 +2514,7 @@ class Client:
                 body = json_body
         decoded = json_body if isinstance(json_body, dict) else {{}}
         request_id = _header_value(headers, \"X-Request-ID\")
-        return ApiError(
+        return {ERROR_TYPE}(
             status,
             decoded.get(\"message\", \"\"),
             decoded.get(\"slug\", \"\"),
@@ -2570,8 +2574,17 @@ pub(crate) fn pagination_method_names(graph: &ApiGraph, op: &Operation) -> Vec<S
     if pagination_policy_for(graph, op).is_none() {
         return Vec::new();
     }
-    let method = operation_method_name(op);
-    vec![format!("{method}_pages"), format!("iter_{method}")]
+    let PaginationNames { pages, iterate } = pagination_names(&operation_method_name(op));
+    vec![pages, iterate]
+}
+
+/// The two helpers a paginated operation's method `method` gains: the page collector and the item
+/// iterator — the one spelling the emitter and the docs use.
+pub(crate) fn pagination_names(method: &str) -> PaginationNames {
+    PaginationNames {
+        pages: format!("{method}_pages"),
+        iterate: format!("iter_{method}"),
+    }
 }
 
 /// The keyword/digit-safe, collision-checked Python identifiers for one operation's arguments.
@@ -3431,8 +3444,10 @@ fn emit_pagination_helpers(
         return Ok(());
     };
     let method_name = operation_method_name(op);
-    let pages_name = format!("{method_name}_pages");
-    let items_name = format!("iter_{method_name}");
+    let PaginationNames {
+        pages: pages_name,
+        iterate: items_name,
+    } = pagination_names(&method_name);
     let info = py_pagination_info(graph, op, policy, model_style)?;
     let (args, call_args) = py_pagination_args(op, graph)?;
 
@@ -3784,7 +3799,10 @@ pub(crate) fn emit_init_with_models(
     out.push_str("from __future__ import annotations\n\n");
     out.push_str("from .client import Client, ClientHooks, HookContext, RequestOptions\n");
     // Both error types are raised by generated operations, so both belong in the package barrel.
-    out.push_str("from .errors import ApiError, AuthConfigurationError\n");
+    let _ = writeln!(
+        out,
+        "from .errors import {ERROR_TYPE}, AuthConfigurationError"
+    );
 
     // Every named schema becomes a top-level symbol in models.py (class or alias) — re-export them all.
     let names: Vec<&str> = graph.schemas.iter().map(|s| s.name.as_str()).collect();
@@ -3802,7 +3820,7 @@ pub(crate) fn emit_init_with_models(
     out.push_str("    \"ClientHooks\",\n");
     out.push_str("    \"HookContext\",\n");
     out.push_str("    \"RequestOptions\",\n");
-    out.push_str("    \"ApiError\",\n");
+    let _ = writeln!(out, "    \"{ERROR_TYPE}\",");
     out.push_str("    \"AuthConfigurationError\",\n");
     out.push_str("    \"MultipartFile\",\n");
     for name in &names {

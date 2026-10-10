@@ -17,6 +17,8 @@ use std::fmt::Write as _;
 use crate::graph::{ApiGraph, Operation, Type};
 use crate::sdk::emit_common::{CallInputs, Qualify};
 use crate::sdk::model_style::PyModelStyle;
+
+use super::ERROR_TYPE;
 use crate::verify::{CaseOutcome, ContractCase, ContractTestPlan, DecodedField};
 use crate::CoreError;
 
@@ -88,9 +90,9 @@ fn header(model_module: &str, models: &BTreeSet<String>) -> String {
          import urllib.request\n\
          import urllib.response\n\
          \n\
-         from .client import Client\n\
-         from .errors import ApiError\n",
+         from .client import Client\n",
     );
+    let _ = writeln!(out, "from .errors import {ERROR_TYPE}");
     if !models.is_empty() {
         let _ = writeln!(out, "from .{model_module} import (");
         for model in models {
@@ -224,7 +226,11 @@ fn emit_case(
             }
         }
         CaseOutcome::TypedError { status } | CaseOutcome::Redirect { status } => {
-            writeln!(out, "        with self.assertRaises(ApiError) as caught:").map_err(sink)?;
+            writeln!(
+                out,
+                "        with self.assertRaises({ERROR_TYPE}) as caught:"
+            )
+            .map_err(sink)?;
             writeln!(out, "            {call}").map_err(sink)?;
             writeln!(
                 out,

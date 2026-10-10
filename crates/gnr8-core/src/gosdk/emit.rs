@@ -24,6 +24,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use super::ERROR_TYPE;
+
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{
     ApiGraph, Field, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Prim,
@@ -33,7 +35,7 @@ use crate::sdk::emit_common::{
     binary_value_shape, error_response_bodies_of, join_path, operation_auth_alternatives,
     operation_prose, path_tokens, path_tokens_match, quoted_string_literal, request_body_models_of,
     schema_is_multipart_request, split_words, success_responses_of, ApiKeyLocation,
-    BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme, OperationAuthScheme,
+    BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme, OperationAuthScheme, PaginationNames,
     RequestBodyEncoding, RequestBodyModel, SuccessResponses, UniqueSchemaNames,
 };
 use crate::CoreError;
@@ -940,7 +942,7 @@ return nil, err
 continue
 }}
 if (resp.StatusCode < 200 || resp.StatusCode >= 300) && !runtime.SuccessStatuses[resp.StatusCode] {{
-c.callErrorHooks(attemptReq.Context(), ctx, &APIError{{StatusCode: resp.StatusCode, Headers: resp.Header.Clone(), RequestID: resp.Header.Get(\"X-Request-ID\")}})
+c.callErrorHooks(attemptReq.Context(), ctx, &{ERROR_TYPE}{{StatusCode: resp.StatusCode, Headers: resp.Header.Clone(), RequestID: resp.Header.Get(\"X-Request-ID\")}})
 }}
 if cancel != nil {{
 resp.Body = &cancelOnCloseReadCloser{{ReadCloser: resp.Body, cancel: cancel}}
@@ -1141,9 +1143,9 @@ fn go_retry_status_map(runtime: &RuntimePolicy) -> String {
 pub(crate) fn emit_errors(package: &str) -> String {
     let body = format!(
         "\
-// APIError is returned by operation methods on rejected HTTP responses. It exposes the
+// {ERROR_TYPE} is returned by operation methods on rejected HTTP responses. It exposes the
 // HTTP status, response metadata, raw body, parsed JSON body, and decoded error body.
-type APIError struct {{
+type {ERROR_TYPE} struct {{
 StatusCode int
 Headers http.Header
 RequestID string
@@ -1156,29 +1158,29 @@ Hints []string
 }}
 
 // Error implements the error interface.
-func (e *APIError) Error() string {{
+func (e *{ERROR_TYPE}) Error() string {{
 return fmt.Sprintf(\"{package}: %d %s (%s)\", e.StatusCode, e.Message, e.Slug)
 }}
 
 // IsNotFound reports whether the error is a 404.
-func (e *APIError) IsNotFound() bool {{
+func (e *{ERROR_TYPE}) IsNotFound() bool {{
 return e.StatusCode == 404
 }}
 
-// ErrorStatusCode returns the HTTP status carried by an APIError, or zero for
+// ErrorStatusCode returns the HTTP status carried by an {ERROR_TYPE}, or zero for
 // non-HTTP errors.
 func ErrorStatusCode(err error) int {{
-var apiError *APIError
+var apiError *{ERROR_TYPE}
 if errors.As(err, &apiError) {{
 return apiError.StatusCode
 }}
 return 0
 }}
 
-// ErrorRawBody returns the response body carried by an APIError, or nil for
+// ErrorRawBody returns the response body carried by an {ERROR_TYPE}, or nil for
 // non-HTTP errors. The returned bytes are a copy and may be modified by the caller.
 func ErrorRawBody(err error) []byte {{
-var apiError *APIError
+var apiError *{ERROR_TYPE}
 if !errors.As(err, &apiError) {{
 return nil
 }}
@@ -1861,6 +1863,15 @@ fn emit_go_pagination_items(
     Ok(GO_PAGE_ITEMS_LOCAL.to_string())
 }
 
+/// The two helpers a paginated operation's method `method` gains: the page collector and the item
+/// iterator — the one spelling the emitter and the docs use.
+pub(crate) fn pagination_names(method: &str) -> PaginationNames {
+    PaginationNames {
+        pages: format!("{method}Pages"),
+        iterate: format!("Iterate{method}"),
+    }
+}
+
 fn emit_pagination_helpers(
     body: &mut String,
     op: &Operation,
@@ -1870,8 +1881,10 @@ fn emit_pagination_helpers(
         return Ok(());
     };
     let method_name = operation_method_name(op);
-    let pages_name = format!("{method_name}Pages");
-    let items_name = format!("Iterate{method_name}");
+    let PaginationNames {
+        pages: pages_name,
+        iterate: items_name,
+    } = pagination_names(&method_name);
     let info = go_pagination_info(graph, op, policy)?;
     let PaginationArgs { args, call_args } = go_pagination_args(op, graph)?;
 
@@ -2750,7 +2763,11 @@ fn emit_request_dispatch(
         writeln!(body, "return data, nil").map_err(sink)?;
         writeln!(body, "}}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
-            writeln!(body, "return out, &APIError{{StatusCode: resp.StatusCode}}").map_err(sink)?;
+            writeln!(
+                body,
+                "return out, &{ERROR_TYPE}{{StatusCode: resp.StatusCode}}"
+            )
+            .map_err(sink)?;
         }
     } else if has_decode {
         writeln!(
@@ -2777,7 +2794,11 @@ fn emit_request_dispatch(
         }
         writeln!(body, "}}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
-            writeln!(body, "return out, &APIError{{StatusCode: resp.StatusCode}}").map_err(sink)?;
+            writeln!(
+                body,
+                "return out, &{ERROR_TYPE}{{StatusCode: resp.StatusCode}}"
+            )
+            .map_err(sink)?;
         }
     }
     Ok(())
@@ -2914,7 +2935,7 @@ fn emit_error_decode(body: &mut String, op: &Operation, graph: &ApiGraph) -> Res
     writeln!(body, "if typedBody == nil {{").map_err(sink)?;
     writeln!(body, "typedBody = jsonBody").map_err(sink)?;
     writeln!(body, "}}").map_err(sink)?;
-    writeln!(body, "return out, &APIError{{").map_err(sink)?;
+    writeln!(body, "return out, &{ERROR_TYPE}{{").map_err(sink)?;
     writeln!(body, "StatusCode: resp.StatusCode,").map_err(sink)?;
     writeln!(body, "Headers: resp.Header.Clone(),").map_err(sink)?;
     writeln!(body, "RequestID: resp.Header.Get(\"X-Request-ID\"),").map_err(sink)?;

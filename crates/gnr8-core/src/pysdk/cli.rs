@@ -35,6 +35,7 @@ use crate::CoreError;
 
 use super::emit::{operation_method_name, py_string_literal, resolve_op_args_for, safe_ident};
 use super::model_module_for;
+use super::ERROR_TYPE;
 
 /// The file name the Python SDK's generated CLI is written at.
 pub(crate) const CLI_DIR: &str = "cli";
@@ -3221,7 +3222,9 @@ fn emit_main_module(
         ", PROGRAM"
     };
     if has_security(graph) {
-        imports.push("from ..errors import ApiError, AuthConfigurationError".to_string());
+        imports.push(format!(
+            "from ..errors import {ERROR_TYPE}, AuthConfigurationError"
+        ));
         imports.push("from .credentials import HelperError".to_string());
         // The "no credentials configured" diagnostic names the command and every variable that
         // would satisfy it, so the tables are read here rather than in credentials.py.
@@ -3229,7 +3232,7 @@ fn emit_main_module(
             "from .config import COMMAND_BY_ID, CREDENTIAL_ENV, HELP_SPEC, HELPER_ENV{program}"
         ));
     } else {
-        imports.push("from ..errors import ApiError".to_string());
+        imports.push(format!("from ..errors import {ERROR_TYPE}"));
         imports.push(format!("from .config import HELP_SPEC{program}"));
     }
     if has_request_body(ops, graph)? {
@@ -3447,7 +3450,7 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     .map_err(sink)?;
     writeln!(out, "    try:").map_err(sink)?;
     writeln!(out, "        result = handler(args)").map_err(sink)?;
-    writeln!(out, "    except ApiError as exc:").map_err(sink)?;
+    writeln!(out, "    except {ERROR_TYPE} as exc:").map_err(sink)?;
     writeln!(
         out,
         "        code = output.exit_code_for_status(exc.status_code)"

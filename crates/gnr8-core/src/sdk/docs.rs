@@ -56,11 +56,12 @@ fn sdk_readme(language: &str, package: &str, ir: &ApiGraph) -> String {
     );
     text.push_str("## Agent workflow\n\n");
     text.push_str("1. Read `reference.md` in this directory for operation and schema names.\n");
-    // The error type is named per language; a combined "APIError/ApiError" would send half of
-    // readers looking for a symbol their SDK does not export.
+    // The error type is named per language, as that language's emitter spells it; one combined
+    // spelling would send half of readers looking for a symbol their SDK does not export.
     let error_type = match language {
-        "Go" => "`*APIError`",
-        _ => "`ApiError`",
+        "Go" => format!("`*{}`", crate::gosdk::ERROR_TYPE),
+        "Python" => format!("`{}`", crate::pysdk::ERROR_TYPE),
+        _ => format!("`{}`", crate::tssdk::ERROR_TYPE),
     };
     let construct = match language {
         "TypeScript" => "2. Construct the generated `Client` with `{ baseUrl }`.\n",

@@ -29,11 +29,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use super::ERROR_TYPE;
+
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{
     ApiGraph, Field, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Param,
     Prim, RuntimePolicy, Type,
 };
+use crate::sdk::emit_common::PaginationNames;
 use crate::sdk::emit_common::{
     binary_value_shape, error_response_bodies_of, is_json_object_key, join_path,
     operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
@@ -504,16 +507,17 @@ fn ts_field_type(
 
 /// Emit `errors.ts`: the typed `ApiError extends Error` carrying status, response metadata, and body.
 pub(crate) fn emit_errors(_package: &str) -> String {
-    "\
-export interface ApiErrorInit {
+    format!(
+        "\
+export interface {ERROR_TYPE}Init {{
   headers?: Headers | undefined;
   requestId?: string | undefined;
   rawBody?: string | undefined;
   jsonBody?: unknown;
   body?: unknown;
-}
+}}
 
-export class ApiError extends Error {
+export class {ERROR_TYPE} extends Error {{
   public readonly headers: Headers;
   public readonly requestId?: string | undefined;
   public readonly rawBody: string;
@@ -522,45 +526,45 @@ export class ApiError extends Error {
 
   constructor(
     public readonly status: number,
-    init: ApiErrorInit = {},
-  ) {
-    super(`HTTP ${status}`);
-    this.name = \"ApiError\";
+    init: {ERROR_TYPE}Init = {{}},
+  ) {{
+    super(`HTTP ${{status}}`);
+    this.name = \"{ERROR_TYPE}\";
     this.headers = init.headers ?? new Headers();
     this.requestId = init.requestId;
     this.rawBody = init.rawBody ?? \"\";
     this.jsonBody = init.jsonBody ?? null;
     this.body = init.body ?? this.jsonBody;
-  }
+  }}
 
-  isNotFound(): boolean {
+  isNotFound(): boolean {{
     return this.status === 404;
-  }
-}
+  }}
+}}
 
-export class AuthConfigurationError extends Error {
+export class AuthConfigurationError extends Error {{
   constructor(
     public readonly operationId: string,
     public readonly alternatives: readonly (readonly string[])[],
-  ) {
-    super(`No configured credentials satisfy operation ${operationId}`);
+  ) {{
+    super(`No configured credentials satisfy operation ${{operationId}}`);
     this.name = \"AuthConfigurationError\";
-  }
-}
+  }}
+}}
 
 export type ResponseDecodeFailure =
   \"empty_body\" | \"unexpected_content_type\" | \"invalid_json\";
 
-export interface ResponseDecodeErrorInit {
+export interface ResponseDecodeErrorInit {{
   headers?: Headers | undefined;
   requestId?: string | undefined;
   rawBody?: string | undefined;
   expectedContentType?: string | undefined;
   actualContentType?: string | undefined;
   cause?: unknown;
-}
+}}
 
-export class ResponseDecodeError extends Error {
+export class ResponseDecodeError extends Error {{
   public readonly headers: Headers;
   public readonly requestId?: string | undefined;
   public readonly rawBody: string;
@@ -571,9 +575,9 @@ export class ResponseDecodeError extends Error {
   constructor(
     public readonly failure: ResponseDecodeFailure,
     public readonly status: number,
-    init: ResponseDecodeErrorInit = {},
-  ) {
-    super(`HTTP ${status}: response decode failed (${failure})`);
+    init: ResponseDecodeErrorInit = {{}},
+  ) {{
+    super(`HTTP ${{status}}: response decode failed (${{failure}})`);
     this.name = \"ResponseDecodeError\";
     this.headers = init.headers ?? new Headers();
     this.requestId = init.requestId;
@@ -581,10 +585,10 @@ export class ResponseDecodeError extends Error {
     this.expectedContentType = init.expectedContentType ?? \"application/json\";
     this.actualContentType = init.actualContentType;
     this.cause = init.cause;
-  }
-}
+  }}
+}}
 "
-    .to_string()
+    )
 }
 
 /// Emit `client.ts`'s header + the dependency-free `Client` backed by the platform `fetch` global.
@@ -669,7 +673,7 @@ pub(crate) fn emit_client_with_models(
     format!(
         "\
 import {{
-  ApiError,
+  {ERROR_TYPE},
   AuthConfigurationError,
   ResponseDecodeError,
 }} from \"./errors\";
@@ -1098,7 +1102,7 @@ export class Client {{
         !(context.successStatuses ?? []).includes(response.status) &&
         !opaqueRedirect
       ) {{
-        const error = new ApiError(response.status, {{
+        const error = new {ERROR_TYPE}(response.status, {{
           headers: response.headers,
           requestId: response.headers.get(\"x-request-id\") ?? undefined,
         }});
@@ -1324,7 +1328,7 @@ pub(crate) fn emit_operation_module(
         }
     }
     let out = format!(
-        "{}import {{ ApiError }} from \"{errors_module}\";\n{model_import}\n{body}",
+        "{}import {{ {ERROR_TYPE} }} from \"{errors_module}\";\n{model_import}\n{body}",
         ts_module_specifier_list("import type", &client_types, client_module)
     );
     Ok(out)
@@ -1355,11 +1359,17 @@ pub(crate) fn pagination_method_names(graph: &ApiGraph, op: &Operation) -> Vec<S
     if pagination_policy_for(graph, op).is_none() {
         return Vec::new();
     }
-    let method = operation_method_name(op);
-    vec![
-        format!("{method}Pages"),
-        format!("iterate{}", upper_camel_first(&method)),
-    ]
+    let PaginationNames { pages, iterate } = pagination_names(&operation_method_name(op));
+    vec![pages, iterate]
+}
+
+/// The two helpers a paginated operation's method `method` gains: the page collector and the item
+/// iterator — the one spelling the emitter and the docs use.
+pub(crate) fn pagination_names(method: &str) -> PaginationNames {
+    PaginationNames {
+        pages: format!("{method}Pages"),
+        iterate: format!("iterate{}", upper_camel_first(method)),
+    }
 }
 
 fn grouped_ops<'op>(ops: &[&'op Operation]) -> BTreeMap<String, Vec<&'op Operation>> {
@@ -2288,8 +2298,10 @@ fn emit_pagination_helpers(
         return Ok(());
     };
     let method_name = operation_method_name(op);
-    let pages_name = format!("{method_name}Pages");
-    let items_name = format!("iterate{}", upper_camel_first(&method_name));
+    let PaginationNames {
+        pages: pages_name,
+        iterate: items_name,
+    } = pagination_names(&method_name);
     let info = ts_pagination_info(graph, op, policy)?;
     let TsPaginationArgs {
         args,
@@ -3346,7 +3358,7 @@ fn emit_error_throw_branch(
         .map_err(sink)?;
         writeln!(out, "      }}").map_err(sink)?;
     }
-    writeln!(out, "      throw new ApiError(res.status, {{").map_err(sink)?;
+    writeln!(out, "      throw new {ERROR_TYPE}(res.status, {{").map_err(sink)?;
     writeln!(out, "        headers: res.headers,").map_err(sink)?;
     writeln!(
         out,
@@ -3615,7 +3627,7 @@ fn emit_op_dispatch(
         writeln!(out, "      return await res.blob();").map_err(sink)?;
         writeln!(out, "    }}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
-            writeln!(out, "    throw new ApiError(res.status);").map_err(sink)?;
+            writeln!(out, "    throw new {ERROR_TYPE}(res.status);").map_err(sink)?;
         }
     } else if let Some(model) = success.body_model.as_deref() {
         writeln!(
@@ -3636,7 +3648,7 @@ fn emit_op_dispatch(
         }
         writeln!(out, "    }}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
-            writeln!(out, "    throw new ApiError(res.status);").map_err(sink)?;
+            writeln!(out, "    throw new {ERROR_TYPE}(res.status);").map_err(sink)?;
         }
     }
     Ok(())
@@ -3727,16 +3739,16 @@ pub(crate) fn emit_index_with_models(
     }
     out.push_str(&ts_module_specifier_list(
         "export",
-        &fixed_exports(&["ApiError", "AuthConfigurationError", "ResponseDecodeError"]),
+        &fixed_exports(&[ERROR_TYPE, "AuthConfigurationError", "ResponseDecodeError"]),
         "./errors",
     ));
     out.push_str(&ts_module_specifier_list(
         "export type",
-        &fixed_exports(&[
-            "ApiErrorInit",
-            "ResponseDecodeErrorInit",
-            "ResponseDecodeFailure",
-        ]),
+        &[
+            format!("{ERROR_TYPE}Init"),
+            "ResponseDecodeErrorInit".to_string(),
+            "ResponseDecodeFailure".to_string(),
+        ],
         "./errors",
     ));
 

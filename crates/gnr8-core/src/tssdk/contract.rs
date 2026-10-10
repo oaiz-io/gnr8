@@ -22,6 +22,7 @@ use crate::CoreError;
 
 use super::callsite::{render_call, ts_key, ts_object};
 use super::emit::{is_ident, ts_string_literal};
+use super::ERROR_TYPE;
 
 /// The file name the TypeScript SDK's contract test is emitted at.
 pub(crate) const CONTRACT_TEST_FILE: &str = "contract.test.ts";
@@ -50,7 +51,10 @@ pub(crate) fn emit_contract_test(
         cases.push_str(&emit_case(graph, op, case)?);
     }
     let mut out = String::new();
-    out.push_str(HEADER);
+    let _ = write!(
+        out,
+        "import {{ Client }} from \"./client\";\nimport {{ {ERROR_TYPE} }} from \"./errors\";\n"
+    );
     out.push_str(&harness(&plan.base_url));
     writeln!(
         out,
@@ -72,9 +76,6 @@ fn operation<'graph>(
             message: format!("contract test plan names unknown operation '{operation_id}'"),
         })
 }
-
-const HEADER: &str =
-    "import { Client } from \"./client\";\nimport { ApiError } from \"./errors\";\n";
 
 /// The recording transport, the assertions, and the exported case shape.
 #[expect(
@@ -200,8 +201,8 @@ function assertBody(request: ContractRequest, expected: string): void {{
 }}
 
 function assertApiError(caught: unknown, status: number): void {{
-  if (!(caught instanceof ApiError)) {{
-    throw new Error(`expected an ApiError, got ${{String(caught)}}`);
+  if (!(caught instanceof {ERROR_TYPE})) {{
+    throw new Error(`expected an {ERROR_TYPE}, got ${{String(caught)}}`);
   }}
   assertEqual(caught.status, status, "status");
 }}

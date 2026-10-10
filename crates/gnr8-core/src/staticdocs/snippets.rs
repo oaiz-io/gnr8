@@ -8,9 +8,12 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use crate::gosdk::ERROR_TYPE as GO_ERROR_TYPE;
 use crate::graph::{ApiGraph, Operation};
+use crate::pysdk::ERROR_TYPE as PY_ERROR_TYPE;
 use crate::sdk::builtins::{sdk_package, SiblingSdk};
 use crate::sdk::emit_common::{CallInputs, CallSite, ConsumerIdentity, Qualify};
+use crate::tssdk::ERROR_TYPE as TS_ERROR_TYPE;
 use crate::verify::{
     sample_operation, ContractTestLanguage, OperationSample, Sampled, CONTRACT_TEST_BASE_URL,
 };
@@ -543,7 +546,7 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
     let mut out = String::from(
         "from __future__ import annotations\n\nimport email.message\nimport io\nimport json\nimport os\nimport unittest\nimport urllib.parse\nimport urllib.request\nimport urllib.response\n\n",
     );
-    let _ = writeln!(out, "from {package} import ApiError");
+    let _ = writeln!(out, "from {package} import {PY_ERROR_TYPE}");
     let _ = writeln!(out, "from {package} import Client as _DocsClient");
     out.push_str(PY_STUB);
     for (op, snippet) in snippets {
@@ -566,7 +569,7 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         let name = py_wrapper_name(&op.id);
         let _ = write!(
             out,
-            "    def test_{name}(self) -> None:\n        with self.assertRaises(ApiError):\n            {name}(\"http://gnr8.test\", \"key\", \"token\", \"user\", \"secret\")\n\n"
+            "    def test_{name}(self) -> None:\n        with self.assertRaises({PY_ERROR_TYPE}):\n            {name}(\"http://gnr8.test\", \"key\", \"token\", \"user\", \"secret\")\n\n"
         );
     }
     let _ = write!(
@@ -595,7 +598,7 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         } else {
             let _ = write!(
                 out,
-                "        outcome = \"expected the SDK's typed ApiError with status {status}, but the call returned\"\n        try:\n            {}\n            {}\n            del result\n        except ApiError as error:\n            outcome = \"\" if error.status_code == {status} else \"expected status {status}, got \" + str(error.status_code)\n        except Exception as error:  # noqa: BLE001 - any other failure is the finding\n            outcome = \"expected the SDK's typed ApiError with status {status}, got \" + repr(error)\n",
+                "        outcome = \"expected the SDK's typed {PY_ERROR_TYPE} with status {status}, but the call returned\"\n        try:\n            {}\n            {}\n            del result\n        except {PY_ERROR_TYPE} as error:\n            outcome = \"\" if error.status_code == {status} else \"expected status {status}, got \" + str(error.status_code)\n        except Exception as error:  # noqa: BLE001 - any other failure is the finding\n            outcome = \"expected the SDK's typed {PY_ERROR_TYPE} with status {status}, got \" + repr(error)\n",
                 snippet.wire_client,
                 call,
                 status = reply.status
@@ -679,9 +682,9 @@ fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         return "export {};\n".to_string();
     }
     let names = if snippets.iter().any(|(_, snippet)| !snippet.reply.success) {
-        "ApiError, Client"
+        format!("{TS_ERROR_TYPE}, Client")
     } else {
-        "Client"
+        "Client".to_string()
     };
     let mut out = format!(
         "import {{ {names} }} from {};\n",
@@ -716,7 +719,7 @@ fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&Operation, Snippet)])
         } else {
             let _ = write!(
                 out,
-                "  {{\n    let outcome = \"expected the SDK's typed ApiError with status {status}, but the call returned\";\n    try {{\n      {}\n      {}\n      void result;\n    }} catch (error) {{\n      outcome =\n        error instanceof ApiError && error.status === {status}\n          ? \"\"\n          : `expected the SDK's typed ApiError with status {status}, got ${{String(error)}}`;\n    }}\n    mark({}, outcome);\n  }}\n",
+                "  {{\n    let outcome = \"expected the SDK's typed {TS_ERROR_TYPE} with status {status}, but the call returned\";\n    try {{\n      {}\n      {}\n      void result;\n    }} catch (error) {{\n      outcome =\n        error instanceof {TS_ERROR_TYPE} && error.status === {status}\n          ? \"\"\n          : `expected the SDK's typed {TS_ERROR_TYPE} with status {status}, got ${{String(error)}}`;\n    }}\n    mark({}, outcome);\n  }}\n",
                 snippet.wire_client,
                 snippet.call,
                 json_string(&op.id),
@@ -854,7 +857,7 @@ fn go_unit_text(
         } else {
             let _ = write!(
                 out,
-                "\t\toutcome := \"\"\n\t\tvar apiErr *{}.APIError\n\t\tif !errors.As(err, &apiErr) || apiErr.StatusCode != {status} {{\n\t\t\toutcome = fmt.Sprintf(\"expected the SDK's typed *APIError with status {status}, got %v\", err)\n\t\t}}\n",
+                "\t\toutcome := \"\"\n\t\tvar apiErr *{}.{GO_ERROR_TYPE}\n\t\tif !errors.As(err, &apiErr) || apiErr.StatusCode != {status} {{\n\t\t\toutcome = fmt.Sprintf(\"expected the SDK's typed *{GO_ERROR_TYPE} with status {status}, got %v\", err)\n\t\t}}\n",
                 identity.qualifier,
                 status = reply.status
             );

@@ -34,6 +34,11 @@ use crate::sdk::emit_common::{
 };
 use crate::sdk::layout::{OperationFileSplit, SdkFileLayout};
 
+/// The Go SDK's typed error for a rejected HTTP response: the one spelling every emitted file, the
+/// generated CLI and contract tests, and every docs page name it by. A consumer meets it as
+/// `*<package>.APIError`.
+pub(crate) const ERROR_TYPE: &str = "APIError";
+
 /// Generate the Go SDK as a deterministic, `gofmt`-clean multi-file bundle String (D-06, SDK-01..04).
 ///
 /// Emits `client.go` (functional-options `Client`), `errors.go` (typed `APIError`), one generic

@@ -3154,6 +3154,15 @@ pub(crate) enum Qualify<'a> {
     },
 }
 
+/// The two helpers a paginated operation gains in one SDK, as that SDK's emitter spells them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaginationNames {
+    /// The helper that collects every page.
+    pub(crate) pages: String,
+    /// The helper that iterates every item across pages.
+    pub(crate) iterate: String,
+}
+
 /// What a consumer imports. Exists only when the SDK target emits a package manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConsumerIdentity {
