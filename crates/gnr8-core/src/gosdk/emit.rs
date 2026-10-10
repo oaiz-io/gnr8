@@ -2980,7 +2980,7 @@ fn query_string_expr(
         "float32" => Ok(format!("strconv.FormatFloat(float64({accessor}), 'g', -1, 32)")),
         "float64" => Ok(format!("strconv.FormatFloat({accessor}, 'g', -1, 64)")),
         "bool" => Ok(format!("strconv.FormatBool({accessor})")),
-        "time.Time" => Ok(format!("({accessor}).Format(time.RFC3339)")),
+        "time.Time" => Ok(format!("({accessor}).Format(time.RFC3339Nano)")),
         other => Err(CoreError::SdkGen {
             message: format!(
                 "unsupported query-param Go type '{other}': only string/int64/float32/float64/bool/time.Time \
@@ -3229,7 +3229,7 @@ return []wireParameterPair{{Name: name, Value: wireParameterScalar(input)}}
 
 func wireParameterScalar(value any) string {
 if instant, ok := value.(time.Time); ok {
-return instant.Format(time.RFC3339)
+return instant.Format(time.RFC3339Nano)
 }
 return fmt.Sprint(value)
 }
@@ -3591,7 +3591,7 @@ fn path_segment_expr(op: &Operation, token: &str, graph: &ApiGraph) -> Result<St
         })?;
     let ident = lower_camel(token);
     let text = if resolves_to_date_time(&param.schema, graph)? {
-        format!("{ident}.Format(time.RFC3339)")
+        format!("{ident}.Format(time.RFC3339Nano)")
     } else {
         format!("fmt.Sprint({ident})")
     };
@@ -4592,7 +4592,7 @@ mod tests {
                 "a date-time path parameter is a time.Time:\n{out}"
             );
             assert!(
-                out.contains("wireEscape(uuid.Format(time.RFC3339))"),
+                out.contains("wireEscape(uuid.Format(time.RFC3339Nano))"),
                 "a date-time path segment is RFC 3339:\n{out}"
             );
             assert!(

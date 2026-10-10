@@ -272,7 +272,7 @@ content-type: application/json
         "metric": "gnr8",
         "windowDays": 7
       },
-      "createdAt": "2024-01-02T03:04:05Z",
+      "createdAt": "2024-01-02T03:04:05.123Z",
       "description": "gnr8",
       "metadata": {},
       "name": "gnr8",

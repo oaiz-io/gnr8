@@ -439,6 +439,12 @@ fn fit(
         (Type::Any {}, _) if side == Side::Request && value != &json!({}) => {
             Ok(declared(DeclaredLimit::FreeForm))
         }
+        // Go sends a `time.Time` in its own spelling; Python and TypeScript send the string.
+        (Type::WellKnown(WellKnown::DateTime), Value::String(text))
+            if side == Side::Request && !crate::gosdk::callsite::is_canonical_rfc3339(text) =>
+        {
+            Ok(declared(DeclaredLimit::DateTime))
+        }
         _ => fit_parts(graph, side, ty, value, constraints, subject),
     }
 }

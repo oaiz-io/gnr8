@@ -800,7 +800,7 @@ fn a_dropped_field_takes_its_unmet_constraints_with_it() {
 fn string_with_a_mapped_format_selects_its_literal() {
     for (format, literal) in [
         ("uuid", "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234"),
-        ("date-time", "2024-01-02T03:04:05Z"),
+        ("date-time", "2024-01-02T03:04:05.123Z"),
         ("date", "2024-01-02"),
         ("duration", "PT1H"),
         ("decimal", "1.50"),
@@ -2122,4 +2122,40 @@ fn a_declared_value_no_call_can_state_is_a_refusal_not_an_error() {
         reply(&big),
         SuccessOutcome::Refused(SampleRefusal::Declared { .. })
     ));
+}
+
+/// A declared request date-time has to be spelled the way Go sends one, or Go's bytes differ from
+/// the string Python and TypeScript send as written. A canonical one is the sample as declared.
+#[test]
+fn a_declared_request_date_time_must_be_spelled_the_way_go_sends_it() {
+    let body = object(&[fld(
+        "at",
+        &json!({"type": "well_known", "of": "date_time"}),
+        true,
+    )]);
+    let trailing_zero = documented(
+        probe(&[], Some(&body), None, &[]),
+        &json!({"request_examples": [
+            media_example("zero", "application/json", &json!({"at": "2024-01-02T03:04:05.120Z"}))
+        ]}),
+    );
+    assert_eq!(
+        refusal(&trailing_zero).to_string(),
+        "request body `application/json`: field `at` declares `\"2024-01-02T03:04:05.120Z\"`, a \
+         date-time Go sends in a different spelling than Python and TypeScript"
+    );
+    let canonical = documented(
+        probe(&[], Some(&body), None, &[]),
+        &json!({"request_examples": [
+            media_example("ms", "application/json", &json!({"at": "2024-01-02T03:04:05.12+02:00"}))
+        ]}),
+    );
+    let plan = plan_contract_tests(&canonical).unwrap();
+    assert!(
+        plan.cases.iter().any(|case| case
+            .expected_body
+            .as_ref()
+            .is_some_and(|body| body == &json!({"at": "2024-01-02T03:04:05.12+02:00"}))),
+        "{plan:?}"
+    );
 }

@@ -296,6 +296,13 @@ selection:
 - TypeScript emits a discriminated `{Operation}Body` union keyed by `contentType`.
 - Python accepts a union of `(Literal[content_type], Model)` tuples.
 
+A `date-time` value goes on the wire as RFC 3339 with its fractional seconds. Go takes a `time.Time`
+and writes `Format(time.RFC3339Nano)`: the fraction's trailing zeros dropped, and `Z` for a zero
+offset. Python and TypeScript take the string and send it as written. A caller who passes that
+canonical spelling therefore sends the same bytes from every SDK. Docs samples and contract tests
+send `2024-01-02T03:04:05.123Z`, and a declared request date-time in another spelling is refused
+as a sample.
+
 JSON, `application/*+json`, form, multipart, text, and binary choices use the same shared encoding
 classification in every target. Multipart array fields become repeated parts; absent or null fields
 are omitted.

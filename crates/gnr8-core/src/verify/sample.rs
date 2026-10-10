@@ -420,6 +420,11 @@ impl fmt::Display for SampleRefusal {
                         "{subject} declares `{value}`, which Go, Python and TypeScript print \
                          differently"
                     ),
+                    DeclaredLimit::DateTime => write!(
+                        f,
+                        "{subject} declares `{value}`, a date-time Go sends in a different \
+                         spelling than Python and TypeScript"
+                    ),
                 }
             }
             Self::NoJsonBody => f.write_str("the request body declares no JSON representation"),
@@ -442,6 +447,10 @@ pub enum DeclaredLimit {
     Integer,
     /// A float the generated languages print differently ([`prints_alike`]).
     Float,
+    /// A date-time in a request not spelled the way Go sends it (`time.RFC3339Nano`: upper-case
+    /// `T`, no trailing zeros in the fraction, `Z` for a zero offset), so Go would send different
+    /// bytes than Python and TypeScript, which send the string as written.
+    DateTime,
 }
 
 /// How a page names a refusal's subject: a parameter, a field, or a whole body.
@@ -1585,7 +1594,7 @@ fn mapped_format_literal(format: &str) -> Option<String> {
 fn well_known_sample(well_known: &WellKnown) -> &'static str {
     match well_known {
         WellKnown::Uuid => "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234",
-        WellKnown::DateTime => "2024-01-02T03:04:05Z",
+        WellKnown::DateTime => "2024-01-02T03:04:05.123Z",
         WellKnown::Date => "2024-01-02",
         WellKnown::Duration => "PT1H",
         WellKnown::Decimal => "1.50",

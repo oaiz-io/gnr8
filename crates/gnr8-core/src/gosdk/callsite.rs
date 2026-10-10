@@ -516,6 +516,39 @@ pub(crate) fn is_rfc3339(text: &str) -> bool {
     Rfc3339::parse(text).is_some_and(|instant| (1..=12).contains(&instant.month))
 }
 
+/// Whether `text` is the one spelling every SDK sends for its instant.
+///
+/// Python and TypeScript take a date-time as a string and send it as written; Go takes a
+/// `time.Time` and sends `Format(time.RFC3339Nano)`: an upper-case `T`, the fraction with its
+/// trailing zeros dropped (no `.` at all when it is zero), at most nine digits, and `Z` for a zero
+/// offset. Only a value already in that spelling goes out byte-identical from all three.
+pub(crate) fn is_canonical_rfc3339(text: &str) -> bool {
+    let Some(instant) = Rfc3339::parse(text).filter(|instant| (1..=12).contains(&instant.month))
+    else {
+        return false;
+    };
+    let mut canonical = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        instant.year, instant.month, instant.day, instant.hour, instant.minute, instant.second
+    );
+    if instant.nanos != 0 {
+        let fraction = format!("{:09}", instant.nanos);
+        canonical.push('.');
+        canonical.push_str(fraction.trim_end_matches('0'));
+    }
+    if instant.offset_minutes == 0 {
+        canonical.push('Z');
+    } else {
+        let sign = if instant.offset_minutes < 0 { '-' } else { '+' };
+        let minutes = instant.offset_minutes.unsigned_abs();
+        let _ = std::fmt::Write::write_fmt(
+            &mut canonical,
+            format_args!("{sign}{:02}:{:02}", minutes / 60, minutes % 60),
+        );
+    }
+    canonical == text
+}
+
 /// The fields of one RFC 3339 `date-time`.
 struct Rfc3339 {
     year: u16,
@@ -936,5 +969,28 @@ mod tests {
         );
         assert!(time_date_expression("2024-01-02").is_err());
         assert!(time_date_expression("2024-13-02T03:04:05Z").is_err());
+    }
+
+    /// The canonical spelling is what Go's `Format(time.RFC3339Nano)` writes for the instant.
+    #[test]
+    fn a_canonical_date_time_is_the_spelling_go_sends() {
+        for canonical in [
+            "2024-01-02T03:04:05Z",
+            "2024-01-02T03:04:05.123Z",
+            "2024-01-02T03:04:05.5+02:00",
+            "2024-01-02T03:04:05.123456789-05:30",
+        ] {
+            assert!(super::is_canonical_rfc3339(canonical), "{canonical}");
+        }
+        for other in [
+            "2024-01-02T03:04:05.120Z",
+            "2024-01-02T03:04:05.0Z",
+            "2024-01-02T03:04:05+00:00",
+            "2024-01-02t03:04:05z",
+            "2024-01-02T03:04:05.1234567891Z",
+            "2024-01-02",
+        ] {
+            assert!(!super::is_canonical_rfc3339(other), "{other}");
+        }
     }
 }

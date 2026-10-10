@@ -199,13 +199,13 @@ func TestRequestShapeDynamicHeaderFile(t *testing.T) {
 func TestRequestShapeAttendance(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"cursor\":\"gnr8\",\"days\":7,\"limit\":7,\"offset\":7,\"page\":7,\"q\":\"gnr8\",\"sort\":\"gnr8\",\"token\":\"gnr8\"}")}}
 	client := contractClient(transport)
-	out, err := client.Attendance(context.Background(), AttendanceParams{Days: Ptr[int64](7), StartDate: contractTime("2024-01-02T03:04:05Z")})
+	out, err := client.Attendance(context.Background(), AttendanceParams{Days: Ptr[int64](7), StartDate: contractTime("2024-01-02T03:04:05.123Z")})
 	if err != nil {
 		t.Fatalf("Attendance: %v", err)
 	}
 	_ = out
 	request := contractSingleRequest(t, transport)
-	assertContractWire(t, request, "GET", "/v1/items/attendance", url.Values{"days": {"7"}, "startDate": {"2024-01-02T03:04:05Z"}}, map[string]string{})
+	assertContractWire(t, request, "GET", "/v1/items/attendance", url.Values{"days": {"7"}, "startDate": {"2024-01-02T03:04:05.123Z"}}, map[string]string{})
 }
 
 func TestRequestShapeCookieAccepted(t *testing.T) {
@@ -248,13 +248,13 @@ func TestResponseDecodeLoginPresent(t *testing.T) {
 func TestResponseDecodeAttendancePresent(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"cursor\":\"gnr8\",\"days\":7,\"limit\":7,\"offset\":7,\"page\":7,\"q\":\"gnr8\",\"sort\":\"gnr8\",\"token\":\"gnr8\"}")}}
 	client := contractClient(transport)
-	out, err := client.Attendance(context.Background(), AttendanceParams{Days: Ptr[int64](7), StartDate: contractTime("2024-01-02T03:04:05Z")})
+	out, err := client.Attendance(context.Background(), AttendanceParams{Days: Ptr[int64](7), StartDate: contractTime("2024-01-02T03:04:05.123Z")})
 	if err != nil {
 		t.Fatalf("Attendance: %v", err)
 	}
 	_ = out
 	request := contractSingleRequest(t, transport)
-	assertContractWire(t, request, "GET", "/v1/items/attendance", url.Values{"days": {"7"}, "startDate": {"2024-01-02T03:04:05Z"}}, map[string]string{})
+	assertContractWire(t, request, "GET", "/v1/items/attendance", url.Values{"days": {"7"}, "startDate": {"2024-01-02T03:04:05.123Z"}}, map[string]string{})
 }
 
 func TestResponseDecodeCollectionCardinalityPresent(t *testing.T) {

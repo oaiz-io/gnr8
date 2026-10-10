@@ -151,7 +151,7 @@ func TestRequestShapeUpdateAuthor(t *testing.T) {
 }
 
 func TestRequestShapeListBooks(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "[{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "[{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]")}}
 	client := contractClient(transport, WithBearerToken("gnr8-contract-token"))
 	out, err := client.ListBooks(context.Background(), ListBooksParams{XTrace: "gnr8", Genre: Ptr[Genre](Genre("fiction")), Limit: Ptr[int64](7)})
 	if err != nil {
@@ -163,45 +163,45 @@ func TestRequestShapeListBooks(t *testing.T) {
 }
 
 func TestRequestShapeCreateBook(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithBasicAuth("gnr8", "contract"))
-	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
+	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05.123Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
 	if err != nil {
 		t.Fatalf("CreateBook: %v", err)
 	}
 	_ = out
 	request := contractSingleRequest(t, transport)
 	assertContractWire(t, request, "POST", "/books", url.Values{}, map[string]string{"authorization": "Basic Z25yODpjb250cmFjdA==", "content-type": "application/json"})
-	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
+	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
 	if got := out.Title; got != "gnr8" {
 		t.Fatalf("Title: got %v, want %v", got, "gnr8")
 	}
 }
 
 func TestBodySelectionCreateBookApplicationJSON(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithBasicAuth("gnr8", "contract"))
-	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
+	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05.123Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
 	if err != nil {
 		t.Fatalf("CreateBook: %v", err)
 	}
 	_ = out
 	request := contractSingleRequest(t, transport)
 	assertContractWire(t, request, "POST", "/books", url.Values{}, map[string]string{"authorization": "Basic Z25yODpjb250cmFjdA==", "content-type": "application/json"})
-	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
+	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
 }
 
 func TestBodySelectionCreateBookApplicationVndShapesJSON(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithBasicAuth("gnr8", "contract"))
-	out, err := client.CreateBook(context.Background(), CreateBookApplicationVndShapesJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
+	out, err := client.CreateBook(context.Background(), CreateBookApplicationVndShapesJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05.123Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
 	if err != nil {
 		t.Fatalf("CreateBook: %v", err)
 	}
 	_ = out
 	request := contractSingleRequest(t, transport)
 	assertContractWire(t, request, "POST", "/books", url.Values{}, map[string]string{"authorization": "Basic Z25yODpjb250cmFjdA==", "content-type": "application/vnd.shapes+json"})
-	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
+	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
 }
 
 func TestResponseDecodeUpdateAuthorPresent(t *testing.T) {
@@ -237,7 +237,7 @@ func TestResponseDecodeUpdateAuthorAbsent(t *testing.T) {
 }
 
 func TestResponseDecodeListBooksPresent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "[{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "[{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]")}}
 	client := contractClient(transport, WithBearerToken("gnr8-contract-token"))
 	out, err := client.ListBooks(context.Background(), ListBooksParams{XTrace: "gnr8", Genre: Ptr[Genre](Genre("fiction")), Limit: Ptr[int64](7)})
 	if err != nil {
@@ -249,32 +249,32 @@ func TestResponseDecodeListBooksPresent(t *testing.T) {
 }
 
 func TestResponseDecodeCreateBookPresent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithBasicAuth("gnr8", "contract"))
-	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
+	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05.123Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
 	if err != nil {
 		t.Fatalf("CreateBook: %v", err)
 	}
 	_ = out
 	request := contractSingleRequest(t, transport)
 	assertContractWire(t, request, "POST", "/books", url.Values{}, map[string]string{"authorization": "Basic Z25yODpjb250cmFjdA==", "content-type": "application/json"})
-	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
+	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
 	if got := out.Title; got != "gnr8" {
 		t.Fatalf("Title: got %v, want %v", got, "gnr8")
 	}
 }
 
 func TestResponseDecodeCreateBookAbsent(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithBasicAuth("gnr8", "contract"))
-	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
+	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05.123Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
 	if err != nil {
 		t.Fatalf("CreateBook: %v", err)
 	}
 	_ = out
 	request := contractSingleRequest(t, transport)
 	assertContractWire(t, request, "POST", "/books", url.Values{}, map[string]string{"authorization": "Basic Z25yODpjb250cmFjdA==", "content-type": "application/json"})
-	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
+	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
 	if out.Note != nil {
 		t.Fatalf("Note: expected an absent field, got %v", out.Note)
 	}
@@ -292,7 +292,7 @@ func TestTypedErrorUpdateAuthor400(t *testing.T) {
 }
 
 func TestAuthListBooks(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "[{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "[{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}]")}}
 	client := contractClient(transport, WithBearerToken("gnr8-contract-token"))
 	out, err := client.ListBooks(context.Background(), ListBooksParams{XTrace: "gnr8", Genre: Ptr[Genre](Genre("fiction")), Limit: Ptr[int64](7)})
 	if err != nil {
@@ -304,16 +304,16 @@ func TestAuthListBooks(t *testing.T) {
 }
 
 func TestAuthCreateBook(t *testing.T) {
-	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
+	transport := &contractTransport{responses: []*http.Response{contractResponse(201, map[string]string{"content-type": "application/json"}, "{\"author\":{\"name\":\"gnr8\",\"nickname\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\",\"nickname\":\"gnr8\"}],\"genre\":\"fiction\",\"note\":\"gnr8\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")}}
 	client := contractClient(transport, WithBasicAuth("gnr8", "contract"))
-	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
+	out, err := client.CreateBook(context.Background(), CreateBookApplicationJSONBody{Value: Book{Author: Author{Name: "gnr8"}, Coauthors: []Author{Author{Name: "gnr8"}}, Genre: Genre("fiction"), Published: contractTime("2024-01-02T03:04:05.123Z"), Ratings: map[string]int64{"key": 7}, Tags: []string{"gnr8"}, Title: "gnr8"}})
 	if err != nil {
 		t.Fatalf("CreateBook: %v", err)
 	}
 	_ = out
 	request := contractSingleRequest(t, transport)
 	assertContractWire(t, request, "POST", "/books", url.Values{}, map[string]string{"authorization": "Basic Z25yODpjb250cmFjdA==", "content-type": "application/json"})
-	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
+	assertContractBody(t, request, "{\"author\":{\"name\":\"gnr8\"},\"coauthors\":[{\"name\":\"gnr8\"}],\"genre\":\"fiction\",\"published\":\"2024-01-02T03:04:05.123Z\",\"ratings\":{\"key\":7},\"tags\":[\"gnr8\"],\"title\":\"gnr8\"}")
 }
 
 func TestRedirectPolicyUpdateAuthor(t *testing.T) {

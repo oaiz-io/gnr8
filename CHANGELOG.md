@@ -43,8 +43,9 @@ must move the minor version.
   `StaticDocs`, or an SDK target with contract tests, which are on by default. gnr8 does not check
   a declared value against `pattern`; the author's example is taken as matching it, and it is now
   the only way a pattern-bound input gets a sample on a page. A valid example that no call can
-  state, such as a `null` in a request or a whole number in a float field, prints `No sample call:
-  …` and names the value. An operation page prints a declared example's value once, in the Example
+  state, such as a `null` in a request, a whole number in a float field, or a request date-time not
+  spelled the way Go sends it (`…05.120Z`, `+00:00`), prints `No sample call: …` and names the
+  value. An operation page prints a declared example's value once, in the Example
   section. Where the example is declared, the page keeps its name and prose. `SampleBody` and
   `SuccessSample` gain `example`, `SampleRefusal` gains `Declared`, and `CoreError` gains
   `InvalidExample`.
@@ -97,7 +98,8 @@ must move the minor version.
   key. Generated `contract_test.*` files change for operations whose inputs or responses declare
   constraints. A float sample is always a decimal every generated language prints alike (never a
   whole number), so a contract test no longer compares `1.0` with the `1` a Go or TypeScript client
-  sends.
+  sends. A date-time sample carries a fraction (`2024-01-02T03:04:05.123Z`), so every contract test
+  and docs page checks that sub-second precision survives the trip.
 - Parameters imported from an OpenAPI document keep their `minimum`, `maxLength` and other
   constraints as typed facts, and OpenAPI 3.0 / Swagger 2
   `exclusiveMinimum: true` / `exclusiveMaximum: true` import as the exclusive bound instead of the
@@ -118,6 +120,11 @@ must move the minor version.
   with a path or query parameter.
 - **A Go SDK with a `date-time` path parameter builds**: the segment is sent as RFC 3339, as a
   `date-time` query or header value already was, and the file imports `time`.
+- **Go keeps sub-second precision in a `date-time` path, query or header value.** It formatted
+  them with `time.RFC3339`, which drops the fraction, so `…05.123+02:00` went out as `…05+02:00`
+  while Python and TypeScript sent the string as written. Every Go date-time wire value now uses
+  `time.RFC3339Nano`, as its JSON bodies already did. Generated Go operation files change for every
+  operation with a date-time parameter.
 - **The Go contract test records the path as sent** (`URL.EscapedPath()`), which is what its expected
   path spells; a path value that needs escaping no longer fails it.
 - **Go samples and contract tests compile for an optional enum, date-time or scalar body**: the call
