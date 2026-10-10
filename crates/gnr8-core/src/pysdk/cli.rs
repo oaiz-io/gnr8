@@ -17,17 +17,17 @@ use crate::graph::{
 use crate::lower::DEFAULT_API_VERSION;
 use crate::sdk::bundle::SdkFile;
 use crate::sdk::emit_common::{
-    body_field_flags, check_cli_names, cli_next_cursor_field, cli_operations, cli_result_shape,
-    command_docs_url, command_examples, command_invocation, command_output_note, command_see_also,
-    command_sub_noun, command_topic, command_verb, command_view, credential_env_var, debug_env_var,
-    file_stem, flag_name, format_env_var, help_spec_json, helper_env_var, http_auth_features_for,
-    is_positional_param, no_input_env_var, operation_auth_alternatives, operation_prose,
-    output_dir_env_var, pager_env_var, parameter_flag_help, positional_names,
-    reject_duplicate_command_files, reject_sse_operations, request_body_models_of,
-    response_field_names, CliResultShape, OperationAuthScheme, RequestBodyModel, ALL_HELP,
-    BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP, COLOR_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP,
-    FORMAT_HELP, JSON_HELP, LIMIT_HELP, NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP, QUIET_HELP,
-    YES_HELP,
+    body_field_flags, check_cli_names, cli_bound_flags, cli_next_cursor_field, cli_operations,
+    cli_result_shape, command_docs_url, command_examples, command_invocation, command_output_note,
+    command_see_also, command_sub_noun, command_topic, command_verb, command_view,
+    credential_env_var, debug_env_var, file_stem, flag_name, format_env_var, help_spec_json,
+    helper_env_var, http_auth_features_for, is_positional_param, no_input_env_var,
+    operation_auth_alternatives, operation_prose, output_dir_env_var, pager_env_var,
+    parameter_flag_help, positional_names, reject_duplicate_command_files, reject_sse_operations,
+    request_body_models_of, response_field_names, retired_parts, CliResultShape,
+    OperationAuthScheme, RequestBodyModel, ALL_HELP, BASE_URL_HELP, BODY_FILE_HELP, BODY_HELP,
+    COLOR_HELP, CURSOR_HELP, DEBUG_HELP, FIELDS_HELP, FORMAT_HELP, JSON_HELP, LIMIT_HELP,
+    NO_INPUT_HELP, NO_PAGER_HELP, OUTPUT_HELP, QUIET_HELP, YES_HELP,
 };
 use crate::sdk::layout::SdkFileLayout;
 use crate::sdk::model_style::PyModelStyle;
@@ -218,6 +218,7 @@ pub(crate) fn emit_cli(
 ) -> Result<Vec<SdkFile>, CoreError> {
     let ops = cli_operations(graph, cli)?;
     check_cli_names(&ops, graph, cli)?;
+    check_retired_flag_abbreviations(&ops, graph, cli)?;
     reject_sse_operations(&ops, &cli.program)?;
     http_auth_features_for(&ops, graph)?;
     let modules = command_modules(&ops, cli)?;
@@ -2151,12 +2152,22 @@ fn emit_parser_module(modules: &[CommandModule<'_>], cli: &SdkCli) -> Result<Str
     }
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
-    writeln!(out, "class OutputParser(argparse.ArgumentParser):").map_err(sink)?;
-    writeln!(out, "    def error(self, message: str) -> None:").map_err(sink)?;
-    writeln!(out, "        from . import output").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
-    writeln!(out, "        output.print_error(message, code=2)").map_err(sink)?;
-    writeln!(out, "        raise SystemExit(2)").map_err(sink)?;
+    // A usage error reaches `main` unprinted, so `main` resolves a retired invocation on argparse's
+    // error path, and only there.
+    out.push_str(
+        r#"class UsageError(SystemExit):
+    """Arguments argparse rejected; main names a retired invocation or prints this."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(2)
+        self.message = message
+
+
+class OutputParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise UsageError(message)
+"#,
+    );
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
     writeln!(out, "def build_parser() -> argparse.ArgumentParser:").map_err(sink)?;
@@ -3211,10 +3222,10 @@ fn emit_main_module(
     let mut imports = vec![
         "from . import output".to_string(),
         "from .complete import complete, print_completion".to_string(),
-        "from .parser import build_parser".to_string(),
+        "from .parser import UsageError, build_parser".to_string(),
     ];
-    // `PROGRAM` is only read by the rename checker's error line, so it is imported only when there
-    // is a retired position to name.
+    // `PROGRAM` is only read by the retired-invocation checker's error line, so it is imported only
+    // when there is a retired invocation to name.
     let program = if cli.rename_errors.is_empty() {
         ""
     } else {
@@ -3238,48 +3249,111 @@ fn emit_main_module(
     emit_relative_imports(&mut out, &mut imports)?;
     writeln!(out).map_err(sink)?;
     writeln!(out).map_err(sink)?;
-    emit_rename_checker(&mut out, cli)?;
+    emit_retired_checker(&mut out, cli)?;
     emit_main(&mut out, ops, graph)?;
     Ok(finish(out))
 }
 
-fn emit_rename_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> {
-    writeln!(out, "def _check_rename(argv: list[str]) -> int:").map_err(sink)?;
+/// argparse expands an unambiguous prefix of a long flag, so a retired flag that begins a flag its
+/// command binds would stand where argparse reads that flag.
+fn check_retired_flag_abbreviations(
+    ops: &[&Operation],
+    graph: &ApiGraph,
+    cli: &SdkCli,
+) -> Result<(), CoreError> {
+    for error in &cli.rename_errors {
+        let (path, Some(flag)) = retired_parts(error) else {
+            continue;
+        };
+        let joined = path.join(" ");
+        let Some(op) = ops
+            .iter()
+            .copied()
+            .find(|op| command_invocation(cli, op) == joined)
+        else {
+            continue;
+        };
+        if let Some(bound) = cli_bound_flags(cli, graph, op)?
+            .into_iter()
+            .find(|bound| bound.starts_with(flag) && bound != flag)
+        {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {:?} retired flag {:?} abbreviates \"--{bound}\", which Python's argparse \
+                     reads it as; retire a flag that begins no flag {joined:?} binds",
+                    cli.program,
+                    error.from.join(" ")
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `_check_retired` runs only after argparse rejects the arguments: an unknown command under a
+/// topic, or an argument or flag a command does not take. argparse prints help before it reports
+/// an unknown flag, so help on a command still wins, as it does in the Go CLI.
+fn emit_retired_checker(out: &mut String, cli: &SdkCli) -> Result<(), CoreError> {
+    writeln!(out, "def _check_retired(argv: list[str]) -> int:").map_err(sink)?;
     if cli.rename_errors.is_empty() {
         writeln!(out, "    return 0").map_err(sink)?;
         writeln!(out).map_err(sink)?;
         writeln!(out).map_err(sink)?;
         return Ok(());
     }
-    writeln!(out, "    tokens = argv").map_err(sink)?;
-    writeln!(out, "    renames = [").map_err(sink)?;
+    writeln!(out, "    retired = [").map_err(sink)?;
     for error in &cli.rename_errors {
-        let from = error
-            .from
+        let (path, flag) = retired_parts(error);
+        let source = path
             .iter()
             .map(|token| py_string_literal(token))
             .collect::<Vec<_>>()
             .join(", ");
+        let source = if path.len() == 1 {
+            format!("({source},)")
+        } else {
+            format!("({source})")
+        };
         writeln!(
             out,
-            "        (({from},), {}),",
+            "        ({source}, {}, {}),",
+            py_string_literal(flag.unwrap_or_default()),
             py_string_literal(&error.to)
         )
         .map_err(sink)?;
     }
     writeln!(out, "    ]").map_err(sink)?;
-    writeln!(out, "    for retired, replacement in renames:").map_err(sink)?;
-    writeln!(out, "        if tokens[: len(retired)] == list(retired):").map_err(sink)?;
-    writeln!(out, "            return output.print_error(").map_err(sink)?;
-    writeln!(
-        out,
-        "                f\"{{' '.join(retired)}} is now {{PROGRAM}} {{replacement}}\", code=2"
-    )
-    .map_err(sink)?;
-    writeln!(out, "            )").map_err(sink)?;
-    writeln!(out, "    return 0").map_err(sink)?;
-    writeln!(out).map_err(sink)?;
-    writeln!(out).map_err(sink)?;
+    // The most specific entry wins: the longest command path, then a retired flag over the path,
+    // then the retired flag typed first.
+    out.push_str(
+        r#"    best = None
+    for source, flag, replacement in retired:
+        if tuple(argv[: len(source)]) != source:
+            continue
+        at = len(argv)
+        if flag:
+            at = -1
+            for index in range(len(source), len(argv)):
+                arg = argv[index]
+                if arg == "--":
+                    break
+                name = (arg[2:] if arg.startswith("--") else arg[1:]).split("=", 1)[0]
+                if arg.startswith("-") and name == flag:
+                    at = index
+                    break
+            if at < 0:
+                continue
+        if best is None or (len(source), -at) > (len(best[0]), -best[3]):
+            best = (source, flag, replacement, at)
+    if best is None:
+        return 0
+    source, flag, replacement, _ = best
+    invocation = " ".join((*source, f"--{flag}") if flag else source)
+    return output.print_error(f"{invocation} is now {PROGRAM} {replacement}", code=2)
+
+
+"#,
+    );
     Ok(())
 }
 
@@ -3305,6 +3379,12 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "        return 0").map_err(sink)?;
     writeln!(out, "    try:").map_err(sink)?;
     writeln!(out, "        parser.parse_args([*rest, \"--help\"])").map_err(sink)?;
+    writeln!(out, "    except UsageError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "        return output.print_error(exc.message, code=2)"
+    )
+    .map_err(sink)?;
     writeln!(out, "    except SystemExit as exc:").map_err(sink)?;
     writeln!(out, "        if exc.code in (0, None):").map_err(sink)?;
     writeln!(out, "            return 0").map_err(sink)?;
@@ -3406,9 +3486,6 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     argv = [*argv[start:], *prefix]
 "#,
     );
-    writeln!(out, "    code = _check_rename(argv)").map_err(sink)?;
-    writeln!(out, "    if code:").map_err(sink)?;
-    writeln!(out, "        return code").map_err(sink)?;
     writeln!(out, "    if argv and argv[0] == \"help\":").map_err(sink)?;
     writeln!(out, "        return _print_help(argv[1:])").map_err(sink)?;
     writeln!(out, "    if argv and argv[0] == \"completion\":").map_err(sink)?;
@@ -3416,7 +3493,14 @@ fn emit_main(out: &mut String, ops: &[&Operation], graph: &ApiGraph) -> Result<(
     writeln!(out, "    if argv and argv[0] == \"__complete\":").map_err(sink)?;
     writeln!(out, "        return complete(argv[1:])").map_err(sink)?;
     writeln!(out, "    parser = build_parser()").map_err(sink)?;
-    writeln!(out, "    args = parser.parse_args(argv)").map_err(sink)?;
+    writeln!(out, "    try:").map_err(sink)?;
+    writeln!(out, "        args = parser.parse_args(argv)").map_err(sink)?;
+    writeln!(out, "    except UsageError as exc:").map_err(sink)?;
+    writeln!(
+        out,
+        "        return _check_retired(argv) or output.print_error(exc.message, code=2)"
+    )
+    .map_err(sink)?;
     writeln!(out, "    output.apply_globals(args)").map_err(sink)?;
     writeln!(out, "    if getattr(args, \"fields\", None) == \"help\":").map_err(sink)?;
     writeln!(

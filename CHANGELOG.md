@@ -9,6 +9,37 @@ must move the minor version.
 
 ## Unreleased
 
+### Added
+
+- **Retired flags.** A `CliRenameError` may end in one long flag the command no longer takes:
+  `CliRenameError::new(["books", "get", "--book-id"], "books get <id>")`. `books get --book-id 1`
+  prints `books get --book-id is now bookstore books get <id>`, exits 2 and sends no request, in
+  the Go and Python CLIs. Generation refuses a retired flag that the command binds, one after a
+  topic or with no command, one after a path that extends a generated command, `--help`, `-h` and
+  `--version`, and (Python) one that begins a bound flag, because argparse reads `--deb` as
+  `--debug`.
+- **`checkRetired` for hand-owned Go commands.** Generated `package cli` always declares
+  `checkRetired(path, args []string) int`. A hand-owned dispatcher calls it before it reports an
+  unknown command, so the declared table also covers retired paths under hand-owned commands.
+  Only a retired invocation beyond `path` matches. `parseFlags` calls it with the flag tokens when
+  a parse fails, and reads the command path from the `flag.FlagSet` name, so it resolves only
+  retired flags of that path. Generation now accepts retired invocations under root and topic
+  owned commands.
+
+### Changed
+
+- **Retired invocations resolve on the error path.** The generated CLIs no longer match retired
+  paths before dispatch. The Go CLI looks up the table only for an unknown command under the root,
+  a topic or a sub-noun, an unexpected argument after a generated command that takes none, and a
+  failed flag parse; the Python CLI only when argparse rejects the arguments. A retired invocation
+  therefore never shadows a live command. When several match, the longest command path wins, then
+  a retired flag over the path it follows, then the retired flag typed first. Order no longer
+  matters, so generation accepts a retired path under a shorter one and refuses only a
+  duplicate. A retired path that extends a generated command without arguments now yields to that
+  command's `--help`. The message, exit code and output channel do not change. Generated Go names
+  each command's `flag.FlagSet` after its full invocation (`books get`), and `checkRetired`
+  replaces the undocumented `checkRename`.
+
 ## 0.18.0 — 2026-10-10
 
 ### Breaking

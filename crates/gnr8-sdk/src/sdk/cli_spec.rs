@@ -280,14 +280,16 @@ impl CliSelector {
 /// A retired invocation that names its replacement and exits 2 without sending a request.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CliRenameError {
-    /// Old tokens, including the topic (`books list-books`).
+    /// Old tokens, including the topic: a retired path (`books list-books`), or a command path
+    /// ending in the one long flag it no longer takes (`books get --book-id`).
     pub from: Vec<String>,
     /// Exact replacement the user should type (`books list`).
     pub to: String,
 }
 
 impl CliRenameError {
-    /// `from` is the retired path; `to` is the exact replacement.
+    /// `from` is the retired path, optionally ending in a retired `--flag`; `to` is the exact
+    /// replacement.
     #[must_use]
     pub fn new(from: impl IntoIterator<Item = impl Into<String>>, to: impl Into<String>) -> Self {
         Self {

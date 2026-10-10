@@ -182,9 +182,12 @@ impl SdkCli {
 
     /// A retired invocation that names its replacement and exits 2.
     ///
-    /// The retired path is matched before dispatch, so it must be a path the CLI no longer runs:
-    /// no flag tokens, not a live command or a prefix of one, and not an extension of a live
-    /// command that takes arguments.
+    /// It is resolved only where the invocation already fails: an unknown command, or an unknown
+    /// flag or argument of a command. A retired path therefore never shadows a live command, and
+    /// must not be one or extend a generated command that takes arguments. A retired flag ends the
+    /// path of the command it belonged to (`["books", "get", "--book-id"]`) and must not be a flag
+    /// that command binds. Under a hand-owned command, its code resolves both through the
+    /// generated `checkRetired`.
     #[must_use]
     pub fn rename_error(mut self, error: crate::sdk::cli_spec::CliRenameError) -> Self {
         self.rename_errors.push(error);

@@ -1959,7 +1959,7 @@ fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<
             }
         }
     }
-    check_cli_rename_errors(ops, cli)?;
+    check_cli_rename_errors(ops, graph, cli)?;
     for view in &cli.views {
         let known = graph
             .schemas
@@ -1977,106 +1977,262 @@ fn check_cli_spec(ops: &[&Operation], graph: &ApiGraph, cli: &SdkCli) -> Result<
     Ok(())
 }
 
-/// One invocation the generated CLI runs, and whether it takes arguments after its path.
-struct LiveCommand {
-    path: Vec<String>,
-    takes_arguments: bool,
+/// What the generated CLI runs at one live command path.
+enum LiveNode<'a> {
+    /// The root, a topic, or a sub-noun: it dispatches the next token, and an unknown one is an
+    /// error.
+    Dispatcher,
+    /// A generated operation command. Its flags and positionals are parsed by generated code.
+    Generated(&'a Operation),
+    /// `help`, `completion` or `__complete`: generated, and every argument after it is its own.
+    Reserved,
+    /// A hand-owned command. Its own code reports unknown commands and flags under it.
+    Owned,
 }
 
-/// Every invocation the generated CLI runs: operation commands, hand-owned commands, and the
-/// reserved `help`, `completion` and `__complete`.
-fn live_commands(ops: &[&Operation], cli: &SdkCli) -> Vec<LiveCommand> {
-    let reserved = ["help", "completion", "__complete"].map(|name| LiveCommand {
-        path: vec![name.to_string()],
-        takes_arguments: true,
-    });
-    let operations = ops.iter().copied().map(|op| LiveCommand {
-        path: command_invocation(cli, op)
+/// Every live command path of the generated CLI and what runs there.
+fn live_nodes<'a>(ops: &[&'a Operation], cli: &SdkCli) -> BTreeMap<Vec<String>, LiveNode<'a>> {
+    let mut nodes = BTreeMap::new();
+    nodes.insert(Vec::new(), LiveNode::Dispatcher);
+    for op in ops.iter().copied() {
+        let path: Vec<String> = command_invocation(cli, op)
             .split_whitespace()
             .map(str::to_string)
-            .collect(),
-        takes_arguments: !positional_names(cli, op).is_empty(),
-    });
-    let root_owned = cli.owned_commands.iter().map(|command| LiveCommand {
-        path: vec![command.name.clone()],
-        takes_arguments: true,
-    });
-    let topic_owned = cli.topics.iter().flat_map(|topic| {
-        topic.owned_commands.iter().map(|command| LiveCommand {
-            path: vec![topic.name.clone(), command.name.clone()],
-            takes_arguments: true,
-        })
-    });
-    reserved
-        .into_iter()
-        .chain(operations)
-        .chain(root_owned)
-        .chain(topic_owned)
-        .collect()
+            .collect();
+        for end in 1..path.len() {
+            nodes.insert(path[..end].to_vec(), LiveNode::Dispatcher);
+        }
+        nodes.insert(path, LiveNode::Generated(op));
+    }
+    for name in ["help", "completion", "__complete"] {
+        nodes.insert(vec![name.to_string()], LiveNode::Reserved);
+    }
+    for command in &cli.owned_commands {
+        nodes.insert(vec![command.name.clone()], LiveNode::Owned);
+    }
+    for topic in &cli.topics {
+        for command in &topic.owned_commands {
+            nodes.insert(vec![topic.name.clone()], LiveNode::Dispatcher);
+            nodes.insert(
+                vec![topic.name.clone(), command.name.clone()],
+                LiveNode::Owned,
+            );
+        }
+    }
+    nodes
 }
 
-/// A retired path is matched as a prefix of the arguments before anything is dispatched, so it
-/// must not reach a live command: not through a flag token (`--help` is handled after the check),
-/// not as a prefix of a command (that command could never run), not as an extension of one that
-/// takes arguments (that command could not take those arguments), and not behind an earlier
-/// retired path that already matches it.
-fn check_cli_rename_errors(ops: &[&Operation], cli: &SdkCli) -> Result<(), CoreError> {
+/// The command path a retired invocation names and the long flag it retires, without its `--`.
+pub(crate) fn retired_parts(error: &gnr8::sdk::CliRenameError) -> (&[String], Option<&str>) {
+    match error.from.split_last() {
+        Some((last, path)) if last.starts_with('-') => (path, Some(last.trim_start_matches('-'))),
+        _ => (error.from.as_slice(), None),
+    }
+}
+
+/// Every flag name a generated command binds: its parameters and their boolean negations, its
+/// switch flag, its body-field flags, and the reserved flags it shares with every command.
+pub(crate) fn cli_bound_flags(
+    cli: &SdkCli,
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Result<BTreeSet<String>, CoreError> {
+    let mut bound = reserved_flags_for(op, graph)?;
+    let paging = paging_param_names(graph, op);
+    for param in &op.params {
+        if paging.contains(&param.name) || is_positional_param(cli, op, &param.name) {
+            continue;
+        }
+        let flag = flag_name(param);
+        if matches!(param.schema, Type::Primitive(Prim::Bool)) {
+            bound.insert(format!("no-{flag}"));
+        }
+        bound.insert(flag);
+    }
+    if let Some(switch) = cli
+        .spec_command(&op.id)
+        .and_then(|command| command.switch_flag.as_ref())
+    {
+        bound.insert(switch.flag.clone());
+    }
+    for field in body_field_flags(cli, op, graph)? {
+        bound.insert(field.flag);
+    }
+    Ok(bound)
+}
+
+/// A retired invocation is resolved only where the CLI would otherwise fail: an unknown command
+/// under a dispatcher, an unexpected argument after a generated command that takes none, an
+/// unknown flag on a generated command, and whatever a hand-owned command reports through
+/// `checkRetired`. One that no such error reaches could never print anything, so it is refused:
+/// a live command path, an extension of a command whose arguments are its own, a flag the command
+/// binds, a flag that follows no command, and a flag after a path that extends a generated command,
+/// whose flag parse fails first. `--help`, `-h` and `--version` stay live.
+fn check_cli_rename_errors(
+    ops: &[&Operation],
+    graph: &ApiGraph,
+    cli: &SdkCli,
+) -> Result<(), CoreError> {
     let program = cli.program.as_str();
-    let live = live_commands(ops, cli);
+    let live = live_nodes(ops, cli);
     for (index, error) in cli.rename_errors.iter().enumerate() {
-        let retired = error.from.as_slice();
-        if retired.is_empty() {
-            return Err(CoreError::SdkGen {
-                message: format!("CLI {program:?} rename error has an empty retired path"),
-            });
-        }
-        if let Some(token) = retired
+        let full = error.from.join(" ");
+        let (path, flag) = check_retired_shape(program, error)?;
+        let kind = if flag.is_some() { "flag" } else { "path" };
+        if cli.rename_errors[..index]
             .iter()
-            .find(|token| token.is_empty() || token.starts_with('-'))
+            .any(|earlier| earlier.from == error.from)
         {
             return Err(CoreError::SdkGen {
-                message: format!(
-                    "CLI {program:?} retired path {:?} has token {token:?}; a retired path names \
-                     commands, and `--help`, `--version` and other flags stay live",
-                    retired.join(" ")
-                ),
+                message: format!("CLI {program:?} retired invocation {full:?} is declared twice"),
             });
         }
-        for command in &live {
-            if command.path.starts_with(retired) {
+        let joined = path.join(" ");
+        match (live.get(path), flag) {
+            (Some(LiveNode::Dispatcher), Some(_)) => {
                 return Err(CoreError::SdkGen {
                     message: format!(
-                        "CLI {program:?} retired path {:?} matches live command {:?}, which could \
-                         never run; retire a path the CLI no longer uses",
-                        retired.join(" "),
-                        command.path.join(" ")
+                        "CLI {program:?} retired flag {full:?} names no command: {joined:?} is a \
+                         topic, not a command"
                     ),
                 });
             }
-            if command.takes_arguments && retired.starts_with(&command.path) {
+            (Some(_), None) => {
                 return Err(CoreError::SdkGen {
                     message: format!(
-                        "CLI {program:?} retired path {:?} extends live command {:?}, which takes \
-                         arguments, so it would capture them; retire a path the CLI no longer uses",
-                        retired.join(" "),
-                        command.path.join(" ")
+                        "CLI {program:?} retired path {full:?} is a live command path, so it is \
+                         never an unknown command; retire a path the CLI no longer runs"
                     ),
                 });
             }
+            (Some(LiveNode::Generated(op)), Some(flag)) => {
+                if cli_bound_flags(cli, graph, op)?.contains(flag) {
+                    return Err(CoreError::SdkGen {
+                        message: format!(
+                            "CLI {program:?} retired flag {full:?} is a flag {joined:?} binds, so \
+                             it is never unknown; retire a flag the command no longer takes"
+                        ),
+                    });
+                }
+                continue;
+            }
+            (Some(LiveNode::Reserved), Some(_)) => {
+                return Err(CoreError::SdkGen {
+                    message: format!(
+                        "CLI {program:?} retired flag {full:?} follows live command {joined:?}, \
+                         which takes arguments, so they are never unknown"
+                    ),
+                });
+            }
+            (Some(LiveNode::Owned), Some(_)) => continue,
+            (None, _) => {}
         }
-        if let Some(earlier) = cli.rename_errors[..index]
-            .iter()
-            .find(|earlier| retired.starts_with(&earlier.from))
-        {
+        let Some((prefix, node)) = (0..path.len())
+            .rev()
+            .find_map(|end| live.get(&path[..end]).map(|node| (&path[..end], node)))
+        else {
+            continue;
+        };
+        if let (Some(_), LiveNode::Generated(_)) = (flag, node) {
             return Err(CoreError::SdkGen {
                 message: format!(
-                    "CLI {program:?} retired path {:?} is unreachable: the earlier retired path \
-                     {:?} matches it first",
-                    retired.join(" "),
-                    earlier.from.join(" ")
+                    "CLI {program:?} retired flag {full:?} follows a path that extends generated \
+                     command {:?}, whose flag parse fails on it first; retire the flag on that \
+                     command",
+                    prefix.join(" ")
                 ),
             });
         }
+        let takes_arguments = match node {
+            LiveNode::Generated(op) => !positional_names(cli, op).is_empty(),
+            LiveNode::Reserved => true,
+            LiveNode::Dispatcher | LiveNode::Owned => false,
+        };
+        if takes_arguments {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} retired {kind} {full:?} extends live command {:?}, which \
+                     takes arguments, so they are never an unknown command; retire a path the CLI \
+                     no longer runs",
+                    prefix.join(" ")
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A retired invocation is a non-empty command path, optionally followed by one retired long flag.
+fn check_retired_shape<'a>(
+    program: &str,
+    error: &'a gnr8::sdk::CliRenameError,
+) -> Result<(&'a [String], Option<&'a str>), CoreError> {
+    let retired = error.from.as_slice();
+    let full = retired.join(" ");
+    let Some((last, before)) = retired.split_last() else {
+        return Err(CoreError::SdkGen {
+            message: format!("CLI {program:?} rename error has an empty retired path"),
+        });
+    };
+    if retired.iter().any(String::is_empty) {
+        return Err(CoreError::SdkGen {
+            message: format!("CLI {program:?} retired invocation {full:?} has an empty token"),
+        });
+    }
+    if before.iter().any(|token| token.starts_with('-')) {
+        return Err(CoreError::SdkGen {
+            message: format!(
+                "CLI {program:?} retired invocation {full:?} has a flag before its last token; \
+                 only the last token may be a flag"
+            ),
+        });
+    }
+    let (path, flag) = retired_parts(error);
+    if let Some(flag) = flag {
+        if path.is_empty() {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "CLI {program:?} retired flag {full:?} names no command; a retired flag \
+                     follows the command it belonged to"
+                ),
+            });
+        }
+        check_retired_flag_token(program, &full, last, flag)?;
+    }
+    Ok((path, flag))
+}
+
+/// A retired flag is spelled `--name` in the lowercase ASCII every generated flag uses, and is
+/// never one of the flags that print help or the version.
+fn check_retired_flag_token(
+    program: &str,
+    full: &str,
+    token: &str,
+    name: &str,
+) -> Result<(), CoreError> {
+    let spelled = token.strip_prefix("--") == Some(name)
+        && name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
+    if !spelled {
+        return Err(CoreError::SdkGen {
+            message: format!(
+                "CLI {program:?} retired invocation {full:?} ends in {token:?}; spell a retired \
+                 flag --name in lowercase ASCII letters, digits and hyphens"
+            ),
+        });
+    }
+    if ["help", "h", "version"].contains(&name) {
+        return Err(CoreError::SdkGen {
+            message: format!(
+                "CLI {program:?} retired invocation {full:?} retires {token:?}; --help, -h and \
+                 --version stay live"
+            ),
+        });
     }
     Ok(())
 }
