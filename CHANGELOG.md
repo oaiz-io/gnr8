@@ -36,6 +36,13 @@ must move the minor version.
   base states is not reported: the referenced schema may have tightened it (`maximum: 500` beside a
   `$ref` whose schema says `maximum: 100`, or an enum beside it that the schema's enum narrows). A
   keyword loosened or removed beside the `$ref` is still reported.
+- On a version 1 base, a schema field is read the way the importer reads it now, so the first
+  comparison reports no field change the API did not make. A field bound kept as the OpenAPI 3.0
+  flag (`minimum: 0` with `exclusiveMinimum: "true"`) reads as the exclusive bound. A field fact a
+  version 1 artifact could not hold is unknown, not added: `multipleOf` and `uniqueItems`; an enum
+  or an example where the base states none (0.18.0 dropped an enum with a member of another kind,
+  and a number or boolean example); and a plain string that is now a string enum, with the `null`
+  its members admit. Every fact the base states is compared.
 - **Each SDK's `README.md` and `reference.md` are rewritten from the docs model** that `StaticDocs`
   renders its pages from, built for that one SDK. `README.md` replaces the `Package/module` line
   with `Import` (the Go module path, the Python import package, the `package.json` name) and

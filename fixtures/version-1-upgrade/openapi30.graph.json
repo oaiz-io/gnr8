@@ -1,0 +1,524 @@
+{
+  "schema_version": 1,
+  "graph": {
+    "module": "up",
+    "operations": [
+      {
+        "id": "listItems",
+        "method": "GET",
+        "path": "/items",
+        "handler": "listItems",
+        "params": [
+          {
+            "name": "level",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "named",
+              "of": "Lvl"
+            },
+            "openapi_fields": [
+              [
+                "schema",
+                {
+                  "$ref": "#/components/schemas/Lvl",
+                  "enum": [
+                    1,
+                    2,
+                    3,
+                    4
+                  ]
+                }
+              ]
+            ],
+            "provenance": {
+              "file": "openapi.yaml",
+              "start_line": 1,
+              "end_line": 1
+            }
+          },
+          {
+            "name": "limit",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "named",
+              "of": "Limit"
+            },
+            "openapi_fields": [
+              [
+                "schema",
+                {
+                  "$ref": "#/components/schemas/Limit",
+                  "maximum": 500
+                }
+              ]
+            ],
+            "provenance": {
+              "file": "openapi.yaml",
+              "start_line": 1,
+              "end_line": 1
+            }
+          },
+          {
+            "name": "mode",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "openapi_fields": [
+              [
+                "schema",
+                {
+                  "enum": [
+                    "x",
+                    2,
+                    "y"
+                  ],
+                  "type": "string"
+                }
+              ]
+            ],
+            "provenance": {
+              "file": "openapi.yaml",
+              "start_line": 1,
+              "end_line": 1
+            }
+          },
+          {
+            "name": "n",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "int",
+                "bits": 64,
+                "signed": true
+              }
+            },
+            "openapi_fields": [
+              [
+                "example",
+                3
+              ],
+              [
+                "schema",
+                {
+                  "type": "integer"
+                }
+              ]
+            ],
+            "provenance": {
+              "file": "openapi.yaml",
+              "start_line": 1,
+              "end_line": 1
+            }
+          },
+          {
+            "name": "page",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "int",
+                "bits": 64,
+                "signed": true
+              }
+            },
+            "openapi_fields": [
+              [
+                "schema",
+                {
+                  "exclusiveMinimum": true,
+                  "minimum": 0,
+                  "multipleOf": 2,
+                  "type": "integer"
+                }
+              ]
+            ],
+            "provenance": {
+              "file": "openapi.yaml",
+              "start_line": 1,
+              "end_line": 1
+            }
+          },
+          {
+            "name": "size",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "named",
+              "of": "Limit"
+            },
+            "openapi_fields": [
+              [
+                "schema",
+                {
+                  "$ref": "#/components/schemas/Limit",
+                  "maximum": 50,
+                  "minimum": 5
+                }
+              ]
+            ],
+            "provenance": {
+              "file": "openapi.yaml",
+              "start_line": 1,
+              "end_line": 1
+            }
+          }
+        ],
+        "request_body": null,
+        "request_body_required": false,
+        "responses": [
+          {
+            "status": 200,
+            "body": {
+              "ref_id": "Item"
+            },
+            "content_types": [
+              "application/json"
+            ]
+          }
+        ],
+        "provenance": {
+          "file": "openapi.yaml",
+          "start_line": 1,
+          "end_line": 1
+        }
+      }
+    ],
+    "schemas": [
+      {
+        "id": "Item",
+        "name": "Item",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "count",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 64,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "flag",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "bool"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "kind",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "kind2",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "label",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 64,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": "8"
+            },
+            {
+              "json_name": "mode",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "named",
+                "of": "Mode"
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "nested",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "object",
+                  "of": [
+                    {
+                      "json_name": "deep",
+                      "serializer_may_omit": true,
+                      "deserializer_accepts_absent": true,
+                      "deserializer_accepts_null": false,
+                      "serializer_may_emit_null": false,
+                      "validator_requires_presence": false,
+                      "validator_rejects_null": false,
+                      "schema": {
+                        "type": "primitive",
+                        "of": {
+                          "prim": "int",
+                          "bits": 64,
+                          "signed": true
+                        }
+                      },
+                      "description": null,
+                      "example": null,
+                      "meta": {
+                        "constraints": {
+                          "minimum": "1",
+                          "exclusive_minimum": "true"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "price",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": false,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "float",
+                  "bits": 64
+                }
+              },
+              "description": null,
+              "example": null,
+              "meta": {
+                "constraints": {
+                  "minimum": "0",
+                  "exclusive_minimum": "true"
+                }
+              }
+            },
+            {
+              "json_name": "ratio",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "float",
+                  "bits": 64
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "score",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 64,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": null,
+              "meta": {
+                "constraints": {
+                  "maximum": "10",
+                  "exclusive_maximum": "false"
+                }
+              }
+            },
+            {
+              "json_name": "tags",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "primitive",
+                  "of": {
+                    "prim": "string"
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "openapi.yaml",
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      {
+        "id": "Limit",
+        "name": "Limit",
+        "body": {
+          "type": "primitive",
+          "of": {
+            "prim": "int",
+            "bits": 64,
+            "signed": true
+          }
+        },
+        "provenance": {
+          "file": "openapi.yaml",
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      {
+        "id": "Lvl",
+        "name": "Lvl",
+        "body": {
+          "type": "primitive",
+          "of": {
+            "prim": "int",
+            "bits": 64,
+            "signed": true
+          }
+        },
+        "provenance": {
+          "file": "openapi.yaml",
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      {
+        "id": "Mode",
+        "name": "Mode",
+        "body": {
+          "type": "primitive",
+          "of": {
+            "prim": "string"
+          }
+        },
+        "provenance": {
+          "file": "openapi.yaml",
+          "start_line": 1,
+          "end_line": 1
+        }
+      }
+    ],
+    "diagnostics": [],
+    "base_path": "/v1",
+    "title": "Up",
+    "openapi_metadata": {
+      "version": "1",
+      "servers": [
+        {
+          "url": "https://api.example.com/v1"
+        },
+        {
+          "url": "https://staging.example.com/v1",
+          "description": "staging"
+        }
+      ]
+    },
+    "security": [],
+    "operation_docs": [
+      {
+        "operation_id": "listItems",
+        "responses": [
+          {
+            "status": 200,
+            "description": "ok"
+          }
+        ]
+      }
+    ]
+  }
+}

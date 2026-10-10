@@ -3285,6 +3285,11 @@ fn parameter_items_mut(raw: &mut Value) -> Option<&mut Value> {
 /// server whose path is the base path loses it. A keyword beside a
 /// `$ref` moves; the bounds of the schema a `$ref` names were never in a version 1 graph and stay
 /// unknown.
+///
+/// Version 1 also kept a field's OpenAPI 3.0 / Swagger 2 boolean `exclusiveMinimum: true` as the
+/// bound text `"true"` beside the inclusive `minimum`; [`boolean_exclusive_bounds`] reads it as the
+/// importer's [`numeric_bound`] does. A field fact version 1 could not hold at all is compared as
+/// unknown on such a base ([`crate::changes::diff_base_graph`]).
 pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
     let ApiGraph {
         operations,
@@ -3325,6 +3330,9 @@ pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
             combined_constraints(items, std::mem::take(&mut param.item_constraints)).0;
     }
     take_parameter_examples(graph);
+    for_each_field(graph, &mut |field| {
+        boolean_exclusive_bounds(&mut field.meta.constraints);
+    });
     // Only the importer kept the base path on a server; a server set in configuration was the
     // user's own URL in version 1 and still is.
     let base_path = normalize_path(&graph.base_path);
@@ -3333,6 +3341,68 @@ pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
             if server_url_path(&server.url) == base_path {
                 server.url = server_url_without_path(&server.url);
             }
+        }
+    }
+}
+
+/// Read a version 1 bound pair that holds the OpenAPI 3.0 boolean flag as its exclusive bound
+/// (`minimum: "5"`, `exclusive_minimum: "true"`) as [`numeric_bound`] reads the flag: `true` makes
+/// the inclusive bound exclusive, `false` leaves it inclusive. No other producer ever wrote a
+/// non-numeric bound.
+fn boolean_exclusive_bounds(constraints: &mut Constraints) {
+    for (inclusive, exclusive) in [
+        (&mut constraints.minimum, &mut constraints.exclusive_minimum),
+        (&mut constraints.maximum, &mut constraints.exclusive_maximum),
+    ] {
+        match exclusive.as_deref().map(str::trim) {
+            Some("true") => *exclusive = inclusive.take(),
+            Some("false") => *exclusive = None,
+            _ => {}
+        }
+    }
+}
+
+/// Visit every field of every type a graph holds: schema bodies, parameter types and response
+/// header types, nested objects included.
+fn for_each_field(graph: &mut ApiGraph, visit: &mut dyn FnMut(&mut crate::graph::Field)) {
+    fn walk(ty: &mut Type, visit: &mut dyn FnMut(&mut crate::graph::Field)) {
+        match ty {
+            Type::Object(fields) => {
+                for field in fields {
+                    visit(field);
+                    walk(&mut field.schema, visit);
+                }
+            }
+            Type::Array(item) => walk(item, visit),
+            Type::Map { key, value } => {
+                walk(key, visit);
+                walk(value, visit);
+            }
+            Type::Union(variants) => {
+                for variant in variants {
+                    walk(variant, visit);
+                }
+            }
+            Type::Primitive(_)
+            | Type::WellKnown(_)
+            | Type::Named(_)
+            | Type::Enum(_)
+            | Type::Any {} => {}
+        }
+    }
+    for schema in &mut graph.schemas {
+        walk(&mut schema.body, visit);
+    }
+    for op in &mut graph.operations {
+        for param in &mut op.params {
+            walk(&mut param.schema, visit);
+        }
+        for header in op
+            .responses
+            .iter_mut()
+            .flat_map(|response| response.headers.iter_mut())
+        {
+            walk(&mut header.schema, visit);
         }
     }
 }
@@ -5906,6 +5976,96 @@ components:
         let before = configured.clone();
         super::upgrade_graph_from_artifact_v1(&mut configured);
         assert_eq!(configured, before, "a configured server keeps its path");
+    }
+
+    /// The graph artifacts gnr8 0.18.0 wrote (schema version 1) for two imported documents compare
+    /// with this importer's graph of the same document without a change: every fact a version 1
+    /// artifact held is read by the importer's rules, and a fact it could not hold — a field's
+    /// `multipleOf` or `uniqueItems`, an enum or example 0.18.0 dropped, the referenced bounds of
+    /// a `$ref` parameter — is unknown on that base, not added.
+    #[test]
+    fn a_version_1_artifact_compares_with_this_importer_without_change() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/version-1-upgrade");
+        for name in ["openapi30", "swagger20"] {
+            let artifact = std::fs::read_to_string(root.join(format!("{name}.graph.json")))
+                .expect("fixture artifact");
+            let mut artifact: crate::graph_artifact::GraphArtifact =
+                serde_json::from_str(&artifact).expect("artifact parses");
+            assert_eq!(artifact.schema_version, 1, "{name} is a 0.18.0 artifact");
+            super::upgrade_graph_from_artifact_v1(&mut artifact.graph);
+            let document =
+                std::fs::read_to_string(root.join(format!("{name}.yaml"))).expect("fixture");
+            let current = import_openapi_document(
+                std::path::Path::new("."),
+                std::path::PathBuf::from("openapi.yaml"),
+                &document,
+            )
+            .expect("imports");
+            let current = crate::graph::projection::for_generation(&current)
+                .expect("projects")
+                .into_owned();
+            let base = crate::changes::BaseGraph {
+                reference: "v0.18.0".to_string(),
+                commit: "0".repeat(40),
+                graph: artifact.graph,
+                upgraded_from_version_1: true,
+            };
+            let report = crate::changes::diff_base_graph(
+                &base,
+                &current,
+                &std::collections::BTreeSet::new(),
+                &[],
+            )
+            .expect("diff");
+            let changes: Vec<&str> = report
+                .changes
+                .iter()
+                .map(|change| change.message.as_str())
+                .collect();
+            assert!(changes.is_empty(), "{name}: {changes:#?}");
+            if name != "openapi30" {
+                continue;
+            }
+            // A fact the version 1 base states is still compared.
+            let edited = document
+                .replace("maximum: 10, exclusiveMaximum: false", "maximum: 5")
+                .replace(
+                    "minimum: 0, exclusiveMinimum: true}",
+                    "minimum: 1, exclusiveMinimum: true}",
+                )
+                .replace("example: \"8\"", "example: \"9\"");
+            let edited = import_openapi_document(
+                std::path::Path::new("."),
+                std::path::PathBuf::from("openapi.yaml"),
+                &edited,
+            )
+            .expect("imports");
+            let edited = crate::graph::projection::for_generation(&edited)
+                .expect("projects")
+                .into_owned();
+            let report = crate::changes::diff_base_graph(
+                &base,
+                &edited,
+                &std::collections::BTreeSet::new(),
+                &[],
+            )
+            .expect("diff");
+            let mut changes: Vec<&str> = report
+                .changes
+                .iter()
+                .map(|change| change.message.as_str())
+                .collect();
+            changes.sort_unstable();
+            assert_eq!(
+                changes,
+                vec![
+                    "field `label` documentation changed",
+                    "response field `price` constraints changed",
+                    "response field `score` constraints changed",
+                ]
+            );
+        }
     }
 
     fn import_yaml(text: &str) -> crate::graph::ApiGraph {

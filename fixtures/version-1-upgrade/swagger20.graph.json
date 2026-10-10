@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "graph": {
+    "module": "sw",
+    "operations": [
+      {
+        "id": "listItems",
+        "method": "GET",
+        "path": "/items",
+        "handler": "listItems",
+        "params": [
+          {
+            "name": "page",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "int",
+                "bits": 64,
+                "signed": true
+              }
+            },
+            "openapi_fields": [
+              [
+                "schema",
+                {
+                  "exclusiveMinimum": true,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              ]
+            ],
+            "provenance": {
+              "file": "openapi.yaml",
+              "start_line": 1,
+              "end_line": 1
+            }
+          }
+        ],
+        "request_body": null,
+        "request_body_required": false,
+        "responses": [
+          {
+            "status": 200,
+            "body": {
+              "ref_id": "Item"
+            },
+            "content_types": [
+              "application/json"
+            ]
+          }
+        ],
+        "provenance": {
+          "file": "openapi.yaml",
+          "start_line": 1,
+          "end_line": 1
+        }
+      }
+    ],
+    "schemas": [
+      {
+        "id": "Item",
+        "name": "Item",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "count",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 64,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "price",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "float",
+                  "bits": 64
+                }
+              },
+              "description": null,
+              "example": null,
+              "meta": {
+                "constraints": {
+                  "minimum": "0",
+                  "exclusive_minimum": "true"
+                }
+              }
+            }
+          ]
+        },
+        "provenance": {
+          "file": "openapi.yaml",
+          "start_line": 1,
+          "end_line": 1
+        }
+      }
+    ],
+    "diagnostics": [],
+    "base_path": "/v1",
+    "title": "Sw",
+    "openapi_metadata": {
+      "version": "1",
+      "servers": [
+        {
+          "url": "https://api.example.com/v1"
+        },
+        {
+          "url": "http://api.example.com/v1"
+        }
+      ]
+    },
+    "security": [],
+    "operation_docs": [
+      {
+        "operation_id": "listItems",
+        "responses": [
+          {
+            "status": 200,
+            "description": "ok"
+          }
+        ]
+      }
+    ]
+  }
+}

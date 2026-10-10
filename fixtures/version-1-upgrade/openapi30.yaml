@@ -1,0 +1,46 @@
+openapi: 3.0.3
+info: {title: Up, version: "1"}
+servers:
+  - url: https://api.example.com/v1
+  - url: https://staging.example.com/v1
+    description: staging
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - {name: limit, in: query, schema: {$ref: "#/components/schemas/Limit", maximum: 500}}
+        - {name: size, in: query, schema: {$ref: "#/components/schemas/Limit", minimum: 5, maximum: 50}}
+        - {name: level, in: query, schema: {$ref: "#/components/schemas/Lvl", enum: [1, 2, 3, 4]}}
+        - {name: page, in: query, schema: {type: integer, minimum: 0, exclusiveMinimum: true, multipleOf: 2}}
+        - {name: mode, in: query, schema: {type: string, enum: [x, 2, y]}}
+        - {name: n, in: query, example: 3, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}
+components:
+  schemas:
+    Limit: {type: integer, minimum: 1, maximum: 100}
+    Lvl: {type: integer, enum: [1, 2]}
+    Mode: {type: string, enum: [p, 3, q]}
+    Item:
+      type: object
+      required: [price]
+      properties:
+        price: {type: number, multipleOf: 0.25, minimum: 0, exclusiveMinimum: true}
+        score: {type: integer, maximum: 10, exclusiveMaximum: false}
+        tags: {type: array, uniqueItems: true, items: {type: string}}
+        kind: {type: string, enum: [a, 1, b]}
+        kind2: {type: string, enum: [c, null, 1]}
+        mode: {$ref: "#/components/schemas/Mode"}
+        count: {type: integer, example: 7}
+        label: {type: integer, example: "8"}
+        ratio: {type: number, example: 0.5}
+        flag: {type: boolean, example: true}
+        nested:
+          type: array
+          items:
+            type: object
+            properties:
+              deep: {type: integer, minimum: 1, exclusiveMinimum: true, multipleOf: 3}

@@ -6,8 +6,8 @@ use crate::graph::direction::{
     directions_of, schema_consumers, schema_directions, SchemaConsumers, SchemaDirections,
 };
 use crate::graph::{
-    ApiGraph, Field, OpenApiMetadataPolicy, Operation, Param, Response, Schema, SecurityScheme,
-    SourceSpan, Type,
+    ApiGraph, Field, OpenApiMetadataPolicy, Operation, Param, Prim, Response, Schema,
+    SecurityScheme, SourceSpan, Type, WellKnown,
 };
 use crate::CoreError;
 
@@ -1921,6 +1921,7 @@ fn compare_type(
             );
         }
         _ if base == current => {}
+        _ if enum_unknown_on_version_1(base, current, out.base_from_version_1) => {}
         _ => {
             let prefix = directions.prefix(true);
             out.push(
@@ -2018,7 +2019,9 @@ fn compare_existing_field(
         scope,
         out,
     );
-    if base.description != current.description || base.example != current.example {
+    // A version 1 base read for what it could hold ([`version_1_field_facts`]).
+    let (example, constraints) = version_1_field_facts(base, current, out.base_from_version_1);
+    if base.description != current.description || base.example != *example {
         out.push(
             scope,
             ChangeKind::DocOnly,
@@ -2036,16 +2039,13 @@ fn compare_existing_field(
     if !constraints_mirror_type {
         compare_enum(
             &base.meta.constraints.enum_values,
-            &current.meta.constraints.enum_values,
+            &constraints.enum_values,
             subject,
             directions,
             scope,
             out,
         );
-        if enum_source_order_changed(
-            &base.meta.constraints.enum_values,
-            &current.meta.constraints.enum_values,
-        ) {
+        if enum_source_order_changed(&base.meta.constraints.enum_values, &constraints.enum_values) {
             out.push(
                 scope,
                 ChangeKind::DocOnly,
@@ -2057,6 +2057,7 @@ fn compare_existing_field(
     }
     let mut base_meta = base.meta.clone();
     let mut current_meta = current.meta.clone();
+    current_meta.constraints = constraints;
     base_meta.constraints.enum_values.clear();
     current_meta.constraints.enum_values.clear();
     if base_meta != current_meta {
@@ -2069,6 +2070,66 @@ fn compare_existing_field(
             format!("{prefix} field `{name}` constraints changed"),
         );
     }
+}
+
+/// The current field's example and constraints as a base can be compared with them.
+///
+/// Comparing two version 2 graphs, they are the field's own. A version 1 artifact (gnr8 0.18.0 and
+/// earlier) could not hold every field fact this graph holds, so on a base read from one a fact it
+/// could not hold is unknown, not added:
+///
+/// - `multipleOf` and `uniqueItems`, which no version 1 field carried;
+/// - an enum the base states none of: 0.18.0 dropped a field enum with a member of another kind than
+///   its `type` (`type: string, enum: [a, 1]`), so a base without one cannot say it had none; and
+/// - an example the base states none of: 0.18.0 dropped a number or boolean field example.
+///
+/// Every fact the base does state is compared.
+fn version_1_field_facts<'f>(
+    base: &Field,
+    current: &'f Field,
+    base_from_version_1: bool,
+) -> (&'f Option<String>, crate::analyze::facts::Constraints) {
+    const UNSTATED: &Option<String> = &None;
+    let mut constraints = current.meta.constraints.clone();
+    if !base_from_version_1 {
+        return (&current.example, constraints);
+    }
+    let base_constraints = &base.meta.constraints;
+    constraints
+        .multiple_of
+        .clone_from(&base_constraints.multiple_of);
+    constraints.unique_items = base_constraints.unique_items;
+    if base_constraints.enum_values.is_empty() {
+        constraints.enum_values.clear();
+    }
+    let example = if base.example.is_none() {
+        UNSTATED
+    } else {
+        &current.example
+    };
+    (example, constraints)
+}
+
+/// Whether `current` is a string enum where a version 1 base holds a plain string.
+///
+/// gnr8 0.18.0 imported `type: string, enum: [a, 1]` — an enum with a member of another kind — as a
+/// plain string, dropping the enum and any `null` member with it. This graph imports it as the enum
+/// of its string members. A version 1 base cannot say which it held, so the enum, and the null its
+/// members admit, are unknown on it rather than a changed type.
+fn enum_unknown_on_version_1(base: &Type, current: &Type, base_from_version_1: bool) -> bool {
+    base_from_version_1
+        && matches!(
+            base,
+            Type::Primitive(Prim::String)
+                | Type::WellKnown(
+                    WellKnown::Uuid
+                        | WellKnown::DateTime
+                        | WellKnown::Date
+                        | WellKnown::Email
+                        | WellKnown::Uri
+                )
+        )
+        && matches!(current, Type::Enum(_))
 }
 
 fn enum_constraints_mirror_type(field: &Field) -> bool {
@@ -2134,7 +2195,10 @@ fn compare_field_axes(
     }
     let base_nullable = nullable_on(base, directions.base);
     let current_nullable = nullable_on(current, directions.current);
-    if base_nullable != current_nullable {
+    // The `null` member of an enum a version 1 base dropped is as unknown as the enum.
+    let null_unknown = !base_nullable
+        && enum_unknown_on_version_1(&base.schema, &current.schema, out.base_from_version_1);
+    if base_nullable != current_nullable && !null_unknown {
         let added = current_nullable;
         let breaking = directions.unconsumed()
             || if added {
