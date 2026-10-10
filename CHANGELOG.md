@@ -22,8 +22,11 @@ must move the minor version.
 - **`generated/gnr8.graph.json` is schema version 2.** An imported parameter's validation keywords
   now live in its typed constraints instead of the raw schema the graph keeps, and an imported
   server no longer repeats the base path. Tools that read the artifact must accept version 2.
-  `gnr8 changes --base <ref>` still reads a version 1 base: it applies the importer's two rules to
-  it, so the first comparison after upgrading reports no change the API did not make. The one
+  `gnr8 changes --base <ref>` still reads a version 1 base: it applies the importer's rules to it,
+  so the first comparison after upgrading reports no change the API did not make. The base path is
+  taken off a version 1 server only when the importer wrote the graph (its operations carry the
+  imported document's provenance), so a server set with `OpenApiMetadata::server` beside
+  `SetBasePath` keeps its URL and reports no change. The one
   exception is the bounds of a schema an imported parameter names with `$ref`, which a version 1
   artifact never held; they show as added constraints once.
 - `gnr8_engine::verify`: `ContractTestSuite` gains `refused` and `ContractTestPlan` gains `refused`

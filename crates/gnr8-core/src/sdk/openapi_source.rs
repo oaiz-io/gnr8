@@ -2349,11 +2349,7 @@ impl Importer {
     }
 
     fn span(&self) -> SourceSpan {
-        SourceSpan {
-            file: self.display_file(),
-            start_line: 1,
-            end_line: 1,
-        }
+        document_span(self.display_file())
     }
 
     fn warn(&mut self, message: String) {
@@ -3078,14 +3074,37 @@ pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
         }
     }
     take_parameter_examples(graph);
+    // Only the importer kept the base path on a server; a server set in configuration was the
+    // user's own URL in version 1 and still is.
     let base_path = normalize_path(&graph.base_path);
-    if base_path != "/" {
+    if base_path != "/" && imported_from_openapi(graph) {
         for server in &mut graph.openapi_metadata.servers {
             if server_url_path(&server.url) == base_path {
                 server.url = server_url_without_path(&server.url);
             }
         }
     }
+}
+
+/// The provenance the importer gives every fact it imports: the document itself, as a whole
+/// (line 1 to line 1). No extractor writes it — an extracted operation names the line of its
+/// route registration, which a source file never has on its first line.
+fn document_span(file: String) -> SourceSpan {
+    SourceSpan {
+        file,
+        start_line: 1,
+        end_line: 1,
+    }
+}
+
+/// Whether a graph's operations are the importer's: it has some, and every one carries the
+/// importer's span of one document ([`document_span`]).
+fn imported_from_openapi(graph: &ApiGraph) -> bool {
+    let Some(first) = graph.operations.first() else {
+        return false;
+    };
+    let document = document_span(first.provenance.file.clone());
+    graph.operations.iter().all(|op| op.provenance == document)
 }
 
 /// A server URL with its path taken off: the scheme and host of an absolute URL, `/` for a
@@ -5270,6 +5289,30 @@ components:
         );
         super::upgrade_graph_from_artifact_v1(&mut version_1);
         assert_eq!(version_1, current);
+    }
+
+    /// The version 1 importer kept the base path on the servers it imported; a server set in
+    /// configuration was never touched, by either version. So the upgrade strips the base path only
+    /// from a graph the importer wrote — never from a `SetBasePath` + `OpenApiMetadata::server`
+    /// pair, which would report a server change the API never made.
+    #[test]
+    fn the_version_1_upgrade_leaves_a_configured_server_alone() {
+        let mut configured: crate::graph::ApiGraph = serde_json::from_value(serde_json::json!({
+            "module": "example.com/svc", "base_path": "/v1", "title": "Svc", "diagnostics": [],
+            "security": [],
+            "openapi_metadata": {"servers": [{"url": "https://api.example.com/v1"}]},
+            "operations": [{
+                "id": "listItems", "method": "GET", "path": "/items", "handler": "listItems",
+                "params": [], "request_body": null,
+                "responses": [{"status": 204, "body": null, "body_kind": "empty"}],
+                "provenance": {"file": "handlers.go", "start_line": 12, "end_line": 14}
+            }],
+            "schemas": []
+        }))
+        .expect("graph");
+        let before = configured.clone();
+        super::upgrade_graph_from_artifact_v1(&mut configured);
+        assert_eq!(configured, before, "a configured server keeps its path");
     }
 
     fn import_yaml(text: &str) -> crate::graph::ApiGraph {
