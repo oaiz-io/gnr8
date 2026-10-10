@@ -8,7 +8,7 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `country` | `string` | no | yes |  |  |  |  |
-| `name` | `string` | no | yes |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `country` | `string` | no | yes |
+| `name` | `string` | no | yes |

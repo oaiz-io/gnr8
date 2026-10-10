@@ -12,8 +12,8 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `email` | `string` | yes | no |  |  |  |  |
-| `id` | `string` | yes | no |  |  |  |  |
-| `name` | `string` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `email` | `string` | yes | no |
+| `id` | `string` | yes | no |
+| `name` | `string` | yes | no |

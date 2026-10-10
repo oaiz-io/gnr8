@@ -10,9 +10,9 @@ Filters left unset in the payload keep their current values.
 
 ### Path
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `book_id` | `integer` | yes |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `book_id` | `integer` | yes |
 
 ## Request body
 
@@ -24,9 +24,9 @@ Required: yes
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`CreatedMessage`](../schemas/created-message.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`CreatedMessage`](../schemas/created-message.md) | `application/json` |
 
 ## Example
 

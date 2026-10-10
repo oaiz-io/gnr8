@@ -8,10 +8,10 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `labels` | array of `string` | no | yes |  |  |  |  |
-| `notes` | `string` | no | yes |  |  |  |  |
-| `priority` | `integer` | no | yes |  |  |  |  |
-| `status` | [`Status`](status.md) | no | yes |  |  |  |  |
-| `title` | `string` | no | yes |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `labels` | array of `string` | no | yes |
+| `notes` | `string` | no | yes |
+| `priority` | `integer` | no | yes |
+| `status` | [`Status`](status.md) | no | yes |
+| `title` | `string` | no | yes |

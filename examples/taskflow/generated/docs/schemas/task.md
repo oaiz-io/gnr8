@@ -12,13 +12,13 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `assignee` | [`AssigneeOutput`](assignee-output.md) | yes | no |  |  |  |  |
-| `dueAt` | `string` (`date-time`) | yes | no |  |  |  |  |
-| `id` | `string` | yes | no |  |  |  |  |
-| `labels` | array of `string` | yes | yes |  |  |  |  |
-| `notes` | `string` | no | no |  |  |  |  |
-| `priority` | `integer` | yes | no |  |  |  |  |
-| `status` | [`Status`](status.md) | yes | no |  |  |  |  |
-| `title` | `string` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `assignee` | [`AssigneeOutput`](assignee-output.md) | yes | no |
+| `dueAt` | `string` (`date-time`) | yes | no |
+| `id` | `string` | yes | no |
+| `labels` | array of `string` | yes | yes |
+| `notes` | `string` | no | no |
+| `priority` | `integer` | yes | no |
+| `status` | [`Status`](status.md) | yes | no |
+| `title` | `string` | yes | no |

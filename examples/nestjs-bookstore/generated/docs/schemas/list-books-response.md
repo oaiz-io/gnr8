@@ -8,8 +8,8 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `books` | array of [`BookDto`](book-dto.md) | yes | no |  |  |  |  |
-| `nextCursor` | `string` | yes | yes |  |  |  |  |
-| `total` | `number` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `books` | array of [`BookDto`](book-dto.md) | yes | no |
+| `nextCursor` | `string` | yes | yes |
+| `total` | `number` | yes | no |

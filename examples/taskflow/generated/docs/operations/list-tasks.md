@@ -14,15 +14,15 @@ Pass a status to narrow the results to one status; omit it to list everything.
 
 ### Query
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `status` | `string` | no |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `status` | `string` | no |
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`TaskList`](../schemas/task-list.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`TaskList`](../schemas/task-list.md) | `application/json` |
 
 ## Example
 

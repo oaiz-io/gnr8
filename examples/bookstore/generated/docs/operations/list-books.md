@@ -14,15 +14,15 @@ Pass a genre to narrow the results to one genre; omit it to list everything.
 
 ### Query
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `genre` | `string` | no |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `genre` | `string` | no |
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`BookList`](../schemas/book-list.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`BookList`](../schemas/book-list.md) | `application/json` |
 
 ## Example
 

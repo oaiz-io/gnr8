@@ -10,11 +10,11 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `author` | [`AuthorDto`](author-dto.md) | yes | no |  |  |  |  |
-| `format` | [`BookFormat`](book-format.md) | yes | no |  |  |  |  |
-| `id` | `number` | yes | no |  |  |  |  |
-| `rating` | `number` | no | yes |  |  |  |  |
-| `tags` | array of `string` | no | no |  |  |  |  |
-| `title` | `string` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `author` | [`AuthorDto`](author-dto.md) | yes | no |
+| `format` | [`BookFormat`](book-format.md) | yes | no |
+| `id` | `number` | yes | no |
+| `rating` | `number` | no | yes |
+| `tags` | array of `string` | no | no |
+| `title` | `string` | yes | no |

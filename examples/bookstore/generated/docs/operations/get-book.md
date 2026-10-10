@@ -12,16 +12,16 @@ Returns one book by its identifier.
 
 ### Path
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `id` | `string` | yes |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `id` | `string` | yes |
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`Book`](../schemas/book.md) | `application/json` |  |  |
-| `404` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`Book`](../schemas/book.md) | `application/json` |
+| `404` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |
 
 ## Example
 

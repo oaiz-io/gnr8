@@ -20,10 +20,10 @@ Required: yes
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `201` | [`Book`](../schemas/book.md) | `application/json` |  |  |
-| `400` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `201` | [`Book`](../schemas/book.md) | `application/json` |
+| `400` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |
 
 ## Example
 

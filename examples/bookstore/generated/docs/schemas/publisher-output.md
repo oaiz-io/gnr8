@@ -11,7 +11,7 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `country` | `string` | yes | no |  |  |  |  |
-| `name` | `string` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `country` | `string` | yes | no |
+| `name` | `string` | yes | no |

@@ -16,9 +16,9 @@ Required: yes
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `201` | [`CreatedMessage`](../schemas/created-message.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `201` | [`CreatedMessage`](../schemas/created-message.md) | `application/json` |
 
 ## Example
 

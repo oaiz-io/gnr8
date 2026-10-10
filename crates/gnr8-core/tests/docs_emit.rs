@@ -580,6 +580,38 @@ fn parameter_table_renders_parameter_prose() {
     );
 }
 
+/// A column with no cell in any row says nothing, so a table leaves it out; a column some row fills
+/// keeps an empty cell for every row that has nothing there.
+#[test]
+fn tables_drop_a_column_empty_in_every_row() {
+    let pages = render(&bookstore(), &[]);
+    let get = section(page(&pages, "operations/get-book.md"), "Responses");
+    assert!(
+        get.contains("| Status | Body | Media types |\n| --- | --- | --- |\n"),
+        "{get}"
+    );
+    assert!(!get.contains("Headers"), "{get}");
+    assert!(!get.contains("Description"), "{get}");
+    let create = section(page(&pages, "operations/create-book.md"), "Responses");
+    assert!(
+        create.contains("| Status | Body | Media types | Description |\n"),
+        "{create}"
+    );
+    assert!(
+        create.contains(
+            "| `400` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |\n"
+        ),
+        "{create}"
+    );
+    let path = section(page(&pages, "operations/get-book.md"), "Parameters");
+    assert!(
+        path.contains(
+            "| Name | Type | Required |\n| --- | --- | --- |\n| `id` | `string` | yes |\n"
+        ),
+        "{path}"
+    );
+}
+
 #[test]
 fn tags_render_as_code_spans() {
     let pages = render(&bookstore(), &[]);
@@ -1265,11 +1297,11 @@ fn imported_parameter_constraints_steer_the_sample_and_show_on_the_page() {
     let text = page(&pages, "operations/list-measures.md");
     let parameters = section(text, "Parameters");
     assert!(
-        parameters.contains("| `limit` | `integer` | yes |  | `minimum: 1`, `maximum: 5` |"),
+        parameters.contains("| `limit` | `integer` | yes | `minimum: 1`, `maximum: 5` |"),
         "{parameters}"
     );
     assert!(
-        parameters.contains("| `tag` | `string` | yes |  | `minLength: 6` |"),
+        parameters.contains("| `tag` | `string` | yes | `minLength: 6` |"),
         "{parameters}"
     );
     let example = section(text, "Example");

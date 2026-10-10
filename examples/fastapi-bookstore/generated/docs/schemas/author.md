@@ -10,7 +10,7 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `bio` | `string` | yes | yes |  |  |  |  |
-| `name` | `string` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `bio` | `string` | yes | yes |
+| `name` | `string` | yes | no |

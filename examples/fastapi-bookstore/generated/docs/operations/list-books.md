@@ -12,17 +12,17 @@ beginning.
 
 ### Query
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `cursor` | `string` | no |  |  |  |
-| `genre` | `string` | yes |  |  |  |
-| `sort` | `string` | no |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `cursor` | `string` | no |
+| `genre` | `string` | yes |
+| `sort` | `string` | no |
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`ListBooksResponse`](../schemas/list-books-response.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`ListBooksResponse`](../schemas/list-books-response.md) | `application/json` |
 
 ## Example
 

@@ -21,10 +21,10 @@ Required: yes
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `201` | [`CommandMessageWithUUID`](../schemas/command-message-with-uuid.md) | `application/json` |  |  |
-| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `201` | [`CommandMessageWithUUID`](../schemas/command-message-with-uuid.md) | `application/json` |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |
 
 ## Example
 

@@ -21,10 +21,10 @@ Required: yes
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `201` | [`Task`](../schemas/task.md) | `application/json` |  |  |
-| `400` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `201` | [`Task`](../schemas/task.md) | `application/json` |
+| `400` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |
 
 ## Example
 

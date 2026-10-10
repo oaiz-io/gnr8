@@ -13,9 +13,9 @@ keeps this route generated so change reporting can apply explicit tag-based gate
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`TaskList`](../schemas/task-list.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`TaskList`](../schemas/task-list.md) | `application/json` |
 
 ## Example
 

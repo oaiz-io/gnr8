@@ -707,18 +707,32 @@ impl<'a> Writer<'a> {
         self.push(lines.join("\n"), Kind::Gnr8);
     }
 
+    /// A pipe table. A column whose cell is empty in every row states nothing, so it is left out;
+    /// a column some row fills keeps an empty cell in the rows that have nothing there.
     fn table(&mut self, table: &Table) {
-        let mut out = table_row(
-            &table
-                .columns
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-        );
-        out.push_str(&table_row(&vec!["---".to_string(); table.columns.len()]));
-        for row in &table.rows {
-            let cells: Vec<String> = row.iter().map(|cell| self.inline(cell)).collect();
-            out.push_str(&table_row(&cells));
+        let rows: Vec<Vec<String>> = table
+            .rows
+            .iter()
+            .map(|row| row.iter().map(|cell| self.inline(cell)).collect())
+            .collect();
+        let kept: Vec<usize> = (0..table.columns.len())
+            .filter(|column| {
+                rows.is_empty()
+                    || rows
+                        .iter()
+                        .any(|row| row.get(*column).is_some_and(|cell| !cell.is_empty()))
+            })
+            .collect();
+        let pick = |cells: &[String]| -> Vec<String> {
+            kept.iter()
+                .map(|column| cells.get(*column).cloned().unwrap_or_default())
+                .collect()
+        };
+        let columns: Vec<String> = table.columns.iter().map(ToString::to_string).collect();
+        let mut out = table_row(&pick(&columns));
+        out.push_str(&table_row(&vec!["---".to_string(); kept.len()]));
+        for row in &rows {
+            out.push_str(&table_row(&pick(row)));
         }
         self.push(out.trim_end_matches('\n').to_string(), Kind::Gnr8);
     }

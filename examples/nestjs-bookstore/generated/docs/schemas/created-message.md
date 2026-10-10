@@ -9,7 +9,7 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `id` | `number` | yes | no |  |  |  |  |
-| `message` | `string` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `id` | `number` | yes | no |
+| `message` | `string` | yes | no |

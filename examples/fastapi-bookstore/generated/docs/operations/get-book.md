@@ -10,21 +10,21 @@ Returns the book when it is in stock, and an out-of-stock notice otherwise.
 
 ### Path
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `book_id` | `integer` | yes |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `book_id` | `integer` | yes |
 
 ### Query
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `fmt` | [`BookFormat`](../schemas/book-format.md) | no |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `fmt` | [`BookFormat`](../schemas/book-format.md) | no |
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`BookOrError`](../schemas/book-or-error.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`BookOrError`](../schemas/book-or-error.md) | `application/json` |
 
 ## Example
 

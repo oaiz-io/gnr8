@@ -14,9 +14,9 @@ Fields omitted from the payload keep their current values.
 
 ### Path
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `id` | `string` | yes |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `id` | `string` | yes |
 
 ## Request body
 
@@ -28,10 +28,10 @@ Required: yes
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`Task`](../schemas/task.md) | `application/json` |  |  |
-| `404` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`Task`](../schemas/task.md) | `application/json` |
+| `404` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |
 
 ## Example
 

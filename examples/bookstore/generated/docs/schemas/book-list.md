@@ -8,6 +8,6 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `books` | array of [`Book`](book.md) | yes | yes |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `books` | array of [`Book`](book.md) | yes | yes |

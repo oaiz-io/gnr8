@@ -107,10 +107,10 @@ Required: yes
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `201` | [`CommandMessageWithUUID`](../schemas/command-message-with-uuid.md) | `application/json` |  |  |
-| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `201` | [`CommandMessageWithUUID`](../schemas/command-message-with-uuid.md) | `application/json` |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |
 
 ## Example
 
@@ -172,16 +172,16 @@ Permanently removes one goal.
 
 ### Path
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `uuid` | `string` | yes |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `uuid` | `string` | yes |
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`CommandMessage`](../schemas/command-message.md) | `application/json` |  |  |
-| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`CommandMessage`](../schemas/command-message.md) | `application/json` |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |
 
 ## Example
 
@@ -237,17 +237,17 @@ cursor from the previous page to continue; omit it to start from the beginning.
 
 ### Query
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `aggregation` | `string` | no |  |  |  |
-| `cursor` | `string` | no |  |  |  |
-| `page_size` | `string` | no |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `aggregation` | `string` | no |
+| `cursor` | `string` | no |
+| `page_size` | `string` | no |
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`ListGoalsOutput`](../schemas/list-goals-output.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`ListGoalsOutput`](../schemas/list-goals-output.md) | `application/json` |
 
 ## Example
 
@@ -327,9 +327,9 @@ unchanged; the goal's identifier and creation time are never modified.
 
 ### Path
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `uuid` | `string` | yes |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `uuid` | `string` | yes |
 
 ## Request body
 
@@ -341,10 +341,10 @@ Required: yes
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`CommandMessage`](../schemas/command-message.md) | `application/json` |  |  |
-| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`CommandMessage`](../schemas/command-message.md) | `application/json` |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |
 
 ## Example
 
@@ -396,10 +396,10 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `message` | `string` | yes | no |  |  |  |  |
-| `uuid` | `string` (`uuid`) | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `message` | `string` | yes | no |
+| `uuid` | `string` (`uuid`) | yes | no |
 --- schemas/command-message.md ---
 # `CommandMessage`
 
@@ -412,9 +412,9 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `message` | `string` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `message` | `string` | yes | no |
 --- schemas/create-goal-input.md ---
 # `CreateGoalInput`
 
@@ -426,14 +426,14 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `analyticsQuery` | [`GoalAnalyticsQueryInput`](goal-analytics-query-input.md) | yes | yes |  |  |  |  |
-| `description` | `string` | no | yes |  |  | Longer explanation |  |
-| `name` | `string` | yes | no |  |  | Short human-readable goal name |  |
-| `targetDirection` | [`TargetDirection`](target-direction.md) | no | yes |  |  |  |  |
-| `targetValue` | `number` | no | yes |  |  |  |  |
-| `workflowChainIds` | array of `string` (`uuid`) | no | yes |  |  |  |  |
+| Field | Type | Required | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryInput`](goal-analytics-query-input.md) | yes | yes |  |
+| `description` | `string` | no | yes | Longer explanation |
+| `name` | `string` | yes | no | Short human-readable goal name |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | yes |  |
+| `targetValue` | `number` | no | yes |  |
+| `workflowChainIds` | array of `string` (`uuid`) | no | yes |  |
 --- schemas/goal-analytics-query-input.md ---
 # `GoalAnalyticsQueryInput`
 
@@ -446,11 +446,11 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `includePast` | `boolean` | no | yes |  |  | Whether to include historical data points |  |
-| `metric` | `string` | yes | no |  |  | Analytics metric to evaluate |  |
-| `windowDays` | `integer` | no | yes |  |  | Rolling window size in days |  |
+| Field | Type | Required | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| `includePast` | `boolean` | no | yes | Whether to include historical data points |
+| `metric` | `string` | yes | no | Analytics metric to evaluate |
+| `windowDays` | `integer` | no | yes | Rolling window size in days |
 --- schemas/goal-analytics-query-output.md ---
 # `GoalAnalyticsQueryOutput`
 
@@ -462,11 +462,11 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `includePast` | `boolean` | no | no |  |  | Whether to include historical data points |  |
-| `metric` | `string` | yes | no |  |  | Analytics metric to evaluate |  |
-| `windowDays` | `integer` | yes | no |  |  | Rolling window size in days |  |
+| Field | Type | Required | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| `includePast` | `boolean` | no | no | Whether to include historical data points |
+| `metric` | `string` | yes | no | Analytics metric to evaluate |
+| `windowDays` | `integer` | yes | no | Rolling window size in days |
 --- schemas/goal-response.md ---
 # `GoalResponse`
 
@@ -478,16 +478,16 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `analyticsQuery` | [`GoalAnalyticsQueryOutput`](goal-analytics-query-output.md) | yes | no |  |  |  |  |
-| `createdAt` | `string` (`date-time`) | yes | no |  |  |  |  |
-| `description` | `string` | no | no |  |  |  |  |
-| `metadata` | `object` (free-form) | no | no |  |  |  |  |
-| `name` | `string` | yes | no |  |  |  |  |
-| `targetDirection` | [`TargetDirection`](target-direction.md) | no | no |  |  |  |  |
-| `targetValue` | `number` | no | no |  |  |  |  |
-| `uuid` | `string` (`uuid`) | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryOutput`](goal-analytics-query-output.md) | yes | no |
+| `createdAt` | `string` (`date-time`) | yes | no |
+| `description` | `string` | no | no |
+| `metadata` | `object` (free-form) | no | no |
+| `name` | `string` | yes | no |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | no |
+| `targetValue` | `number` | no | no |
+| `uuid` | `string` (`uuid`) | yes | no |
 --- schemas/http-error.md ---
 # `HttpError`
 
@@ -501,11 +501,11 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `hints` | array of `string` | no | no |  |  |  |  |
-| `message` | `string` | yes | no |  |  |  | `error message` |
-| `slug` | `string` | no | no |  |  |  | `error-slug` |
+| Field | Type | Required | Nullable | Example |
+| --- | --- | --- | --- | --- |
+| `hints` | array of `string` | no | no |  |
+| `message` | `string` | yes | no | `error message` |
+| `slug` | `string` | no | no | `error-slug` |
 --- schemas/list-goals-output.md ---
 # `ListGoalsOutput`
 
@@ -517,12 +517,12 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `goals` | array of [`GoalResponse`](goal-response.md) | yes | yes |  |  |  |  |
-| `nextCursor` | `string` (`uuid`) | no | no |  |  |  |  |
-| `pageSize` | `integer` | yes | no |  |  |  |  |
-| `total` | `integer` | yes | no |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `goals` | array of [`GoalResponse`](goal-response.md) | yes | yes |
+| `nextCursor` | `string` (`uuid`) | no | no |
+| `pageSize` | `integer` | yes | no |
+| `total` | `integer` | yes | no |
 --- schemas/target-direction.md ---
 # `TargetDirection`
 
@@ -549,11 +549,11 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `analyticsQuery` | [`GoalAnalyticsQueryInput`](goal-analytics-query-input.md) | no | yes |  |  |  |  |
-| `description` | `string` | no | yes |  |  | Updated explanation |  |
-| `name` | `string` | no | yes |  |  | Updated goal name |  |
-| `targetDirection` | [`TargetDirection`](target-direction.md) | no | yes |  |  |  |  |
-| `targetValue` | `number` | no | yes |  |  |  |  |
-| `workflowChainIds` | array of `string` (`uuid`) | no | yes |  |  |  |  |
+| Field | Type | Required | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryInput`](goal-analytics-query-input.md) | no | yes |  |
+| `description` | `string` | no | yes | Updated explanation |
+| `name` | `string` | no | yes | Updated goal name |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | yes |  |
+| `targetValue` | `number` | no | yes |  |
+| `workflowChainIds` | array of `string` (`uuid`) | no | yes |  |

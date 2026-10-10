@@ -12,15 +12,15 @@ Permanently removes one task.
 
 ### Path
 
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `id` | `string` | yes |  |  |  |
+| Name | Type | Required |
+| --- | --- | --- |
+| `id` | `string` | yes |
 
 ## Responses
 
-| Status | Body | Media types | Headers | Description |
-| --- | --- | --- | --- | --- |
-| `200` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |
 
 ## Example
 

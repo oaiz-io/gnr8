@@ -9,6 +9,6 @@ Kind: object
 
 ## Fields
 
-| Field | Type | Required | Nullable | Constraints | Default | Description | Example |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `tasks` | array of [`Task`](task.md) | yes | yes |  |  |  |  |
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `tasks` | array of [`Task`](task.md) | yes | yes |
