@@ -3375,9 +3375,8 @@ fn emit_ts_request_body_arg(
             let value = match body.encoding {
                 RequestBodyEncoding::FormUrlEncoded => "this._formBody(body.value)",
                 RequestBodyEncoding::Multipart => "this._multipartBody(body.value)",
-                RequestBodyEncoding::Json
-                | RequestBodyEncoding::Text
-                | RequestBodyEncoding::Binary => "body.value",
+                RequestBodyEncoding::Json => "JSON.stringify(body.value)",
+                RequestBodyEncoding::Text | RequestBodyEncoding::Binary => "body.value",
             };
             writeln!(out, "        requestBody = {value};").map_err(sink)?;
             writeln!(out, "        break;").map_err(sink)?;
@@ -3417,9 +3416,22 @@ fn emit_ts_request_body_arg(
             }
             Ok("requestBody")
         }
-        RequestBodyEncoding::Json | RequestBodyEncoding::Text | RequestBodyEncoding::Binary => {
-            Ok("body")
+        // A JSON body is encoded here, where its media type is known: `_request` passes a string
+        // through as already encoded (a text body is one), so a bare JSON string would otherwise
+        // go out without its quotes.
+        RequestBodyEncoding::Json => {
+            if request_body.is_required() {
+                writeln!(out, "    const requestBody = JSON.stringify(body);").map_err(sink)?;
+            } else {
+                writeln!(
+                    out,
+                    "    const requestBody = body === undefined ? undefined : JSON.stringify(body);"
+                )
+                .map_err(sink)?;
+            }
+            Ok("requestBody")
         }
+        RequestBodyEncoding::Text | RequestBodyEncoding::Binary => Ok("body"),
     }
 }
 
@@ -4393,7 +4405,7 @@ mod tests {
             assert!(
                 out.contains("const res = await this._request(")
                     && out.contains("\"POST\",")
-                    && out.contains("body,")
+                    && out.contains("requestBody,")
                     && out.contains("operationId: \"createBook\",")
                     && out.contains("options,"),
                 "body op dispatches through the shared request helper:\n{out}"
@@ -4419,7 +4431,7 @@ mod tests {
             assert!(
                 out.contains("const res = await this._request(")
                     && out.contains("\"POST\",")
-                    && out.contains("body,")
+                    && out.contains("requestBody,")
                     && out.contains("options,"),
                 "{out}"
             );
@@ -4716,6 +4728,23 @@ mod tests {
                     && out.contains("function wireEscape(")
                     && !out.contains("searchParams.toString()"),
                 "URLSearchParams.toString() writes a space as `+`, unlike the page:\n{out}"
+            );
+            assert_no_unreferenced_helpers(&out);
+        }
+
+        #[test]
+        fn json_body_is_json_encoded_by_the_operation() {
+            let g = ops_graph();
+            let out = emit_operations(
+                &g,
+                "bookstore",
+                "/",
+                &g.operations.iter().collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(
+                out.contains("const requestBody = JSON.stringify(body);"),
+                "a JSON body, a bare string included, goes out JSON-encoded:\n{out}"
             );
             assert_no_unreferenced_helpers(&out);
         }
