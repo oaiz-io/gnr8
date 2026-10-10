@@ -602,6 +602,7 @@ impl Importer {
     /// the root included, beside a base path that is not — cannot be represented beside that base
     /// path, and says so.
     fn import_servers(&mut self) -> Vec<crate::graph::OpenApiServer> {
+        let base_path = self.base_path();
         let declared: Vec<(crate::graph::OpenApiServer, Result<String, String>)> =
             if self.version == SpecVersion::Swagger2 {
                 let Some(host) = self.root.get("host").and_then(Value::as_str) else {
@@ -619,7 +620,9 @@ impl Importer {
                                 url: format!("{scheme}://{host}"),
                                 description: None,
                             },
-                            Ok("/".to_string()),
+                            // A Swagger 2 server is `host` under each scheme, and `basePath` is
+                            // the path every one of them serves.
+                            Ok(base_path.clone()),
                         )
                     })
                     .collect()
@@ -644,7 +647,6 @@ impl Importer {
                     })
                     .collect()
             };
-        let base_path = self.base_path();
         let mut servers = Vec::with_capacity(declared.len());
         for (mut server, path) in declared {
             match path {
@@ -6209,6 +6211,28 @@ paths:
         assert_eq!(
             swagger.openapi_metadata.servers[0].url,
             "https://api.example.com"
+        );
+        // Swagger 2's `basePath` is every server's path: no server sits beside it.
+        assert!(swagger.diagnostics.is_empty(), "{:?}", swagger.diagnostics);
+        let swagger_schemes = import_yaml(
+            r#"
+swagger: "2.0"
+info: { title: P, version: "1" }
+host: api.example.com
+basePath: /v1
+schemes: [https, http]
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses: { "204": { description: none } }
+"#,
+        );
+        assert_eq!(swagger_schemes.openapi_metadata.servers.len(), 2);
+        assert!(
+            swagger_schemes.diagnostics.is_empty(),
+            "{:?}",
+            swagger_schemes.diagnostics
         );
     }
 
