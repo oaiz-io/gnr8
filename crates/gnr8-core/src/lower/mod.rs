@@ -41,8 +41,8 @@ mod yaml;
 use crate::analyze::facts::{Constraints, LiteralValue};
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{
-    split_local_component_ref, ApiGraph, Field, Operation as GraphOp, OperationDocsPolicy, Prim,
-    Schema, SecurityScheme as GraphSecurityScheme, Type, WellKnown,
+    intersect_enum_values, split_local_component_ref, ApiGraph, Field, Operation as GraphOp,
+    OperationDocsPolicy, Prim, Schema, SecurityScheme as GraphSecurityScheme, Type, WellKnown,
 };
 use model::{
     Components, Info, MediaExample, OpenApiDoc, Operation, Parameter, PathItem, RequestBody,
@@ -908,7 +908,7 @@ fn lower_named_schema(
     match &schema.body {
         Type::Enum(members) => Ok(SchemaObject {
             type_name: Some("string".to_string()),
-            enum_values: members.clone(),
+            enum_values: Some(members.clone()),
             ..SchemaObject::default()
         }),
         Type::Object(fields) => lower_object(fields, ref_to_name, directions),
@@ -997,11 +997,10 @@ fn apply_constraints(constraints: &Constraints, prop: &mut SchemaObject) {
     prop.exclusive_maximum
         .clone_from(&constraints.exclusive_maximum);
     prop.pattern.clone_from(&constraints.pattern);
-    if !constraints.enum_values.is_empty() {
-        let mut enum_values = constraints.enum_values.clone();
-        enum_values.sort();
-        prop.enum_values = enum_values;
-    }
+    prop.enum_values = intersect_enum_values(
+        prop.enum_values.as_deref(),
+        (!constraints.enum_values.is_empty()).then_some(constraints.enum_values.as_slice()),
+    );
 }
 
 /// Lower a field's neutral [`Type`] applying the field's `nullable` axis: a nullable scalar/array/map
@@ -1024,6 +1023,7 @@ fn lower_field_schema(
     if lowered.schema_ref.is_some() || !lowered.one_of.is_empty() {
         return Ok(SchemaObject {
             one_of: vec![lowered, null_schema()],
+            nullable: true,
             ..SchemaObject::default()
         });
     }
@@ -1095,7 +1095,7 @@ fn lower_schema_type(
         Type::Object(fields) => lower_object(fields, ref_to_name, directions),
         Type::Enum(members) => Ok(SchemaObject {
             type_name: Some("string".to_string()),
-            enum_values: members.clone(),
+            enum_values: Some(members.clone()),
             ..SchemaObject::default()
         }),
         // A sum type lowers to the 3.1 `oneOf` of its lowered variants.
@@ -1936,8 +1936,9 @@ mod tests {
         let block = yaml.split("CreateGoalInput:").nth(1).expect("schema block");
         let block = block.split("GoalResponse:").next().unwrap_or(block);
         assert!(
-            block
-                .contains("sort:\n          type: [string, 'null']\n          enum: [asc, desc]\n"),
+            block.contains(
+                "sort:\n          type: [string, 'null']\n          enum: [asc, desc, null]\n"
+            ),
             "nullable enum must render the 3.1 type-array form with enum keys:\n{block}"
         );
     }
@@ -2142,7 +2143,7 @@ mod tests {
                 "          type: object\n",
                 "          additionalProperties:\n",
                 "            type: string\n",
-                "            enum: [red, green]\n",
+                "            enum: [green, red]\n",
             )),
             "{yaml}"
         );

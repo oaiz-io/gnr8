@@ -418,17 +418,12 @@ fn write_schema(schema: &SchemaObject) -> Value {
             Value::String(description.clone()),
         );
     }
-    if !schema.enum_values.is_empty() {
-        out.insert(
-            "enum".to_string(),
-            Value::Array(
-                schema
-                    .enum_values
-                    .iter()
-                    .map(|member| Value::String(member.clone()))
-                    .collect(),
-            ),
-        );
+    if let Some(members) = &schema.enum_values {
+        let mut values: Vec<Value> = members.iter().cloned().map(Value::String).collect();
+        if schema.nullable {
+            values.push(Value::Null);
+        }
+        out.insert("enum".to_string(), Value::Array(values));
     }
     if let Some(min_length) = schema.min_length {
         out.insert("minLength".to_string(), Value::from(min_length));
@@ -628,7 +623,7 @@ mod tests {
                                 "direction".to_string(),
                                 SchemaObject {
                                     type_name: Some("string".to_string()),
-                                    enum_values: vec!["gte".to_string(), "lte".to_string()],
+                                    enum_values: Some(vec!["gte".to_string(), "lte".to_string()]),
                                     ..SchemaObject::default()
                                 },
                             ),

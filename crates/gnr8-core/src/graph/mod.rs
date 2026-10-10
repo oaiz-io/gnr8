@@ -15,7 +15,22 @@ pub(crate) mod projection;
 
 pub use gnr8::graph::*;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Combine closed value sets without giving either declaration precedence. `None` is unrestricted;
+/// `Some([])` admits no values. Preserve that distinction in every generated artifact.
+pub(crate) fn intersect_enum_values(
+    left: Option<&[String]>,
+    right: Option<&[String]>,
+) -> Option<Vec<String>> {
+    let mut sets = [left, right].into_iter().flatten();
+    let first = sets.next()?;
+    let mut allowed: BTreeSet<&String> = first.iter().collect();
+    for set in sets {
+        allowed.retain(|member| set.contains(member));
+    }
+    Some(allowed.into_iter().cloned().collect())
+}
 
 /// Indexed resolver for the standard tags that classify operations in one graph.
 pub(crate) struct EffectiveOperationTags<'a> {

@@ -1940,7 +1940,7 @@ fn generated_cli_helper_failure_is_exit_1_without_stack_trace() {
     run_go(&["build", "-o", "bookstore", "./cmd/bookstore"], &dir)
         .expect("go build ./cmd/bookstore must succeed");
     for (helper, expected) in [
-        ("/bin/false", "credential helper failed (exit 1)"),
+        ("false", "credential helper failed (exit 1)"),
         (
             "/bin/echo \"unterminated",
             "cannot parse BOOKSTORE_CREDENTIAL_HELPER",
