@@ -942,11 +942,35 @@ fn redirect_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
     Vec::new()
 }
 
-/// The credential values one request carries on the wire.
+/// One value a request carries: a literal, or a credential whose value the reader supplies.
 ///
 /// A contract case sends the contract constants; a docs page prints placeholders, because the reader
-/// supplies their own. Both go through [`request_query`] and [`request_headers`], so the request a page
-/// prints and the request a contract case asserts are one derivation with two sets of values.
+/// supplies their own. Both resolve the same [`request_query_values`] and [`request_header_values`],
+/// so the request a page prints and the request a contract case asserts are one derivation with two
+/// sets of credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WireValue {
+    /// A value exactly as derived from the sample, before any encoding.
+    Literal(String),
+    /// A credential, after a fixed scheme prefix (`Bearer `, `Basic `, or none).
+    Credential {
+        prefix: &'static str,
+        slot: CredentialSlot,
+    },
+}
+
+/// Which credential a [`WireValue::Credential`] stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialSlot {
+    /// The API key, in whichever header or query parameter the scheme names.
+    ApiKey,
+    /// The bearer token after `Bearer `.
+    Bearer,
+    /// The basic credentials after `Basic `.
+    Basic,
+}
+
+/// The credential values one request carries on the wire.
 pub(crate) struct WireCredentials {
     /// The API key, in whichever header or query parameter the scheme names.
     pub(crate) api_key: String,
@@ -967,68 +991,120 @@ impl WireCredentials {
             ),
         }
     }
+
+    /// The credential a slot stands for.
+    pub(crate) fn slot(&self, slot: CredentialSlot) -> &str {
+        match slot {
+            CredentialSlot::ApiKey => &self.api_key,
+            CredentialSlot::Bearer => &self.bearer,
+            CredentialSlot::Basic => &self.basic,
+        }
+    }
+
+    /// The text one value carries with these credentials, unencoded.
+    pub(crate) fn resolve(&self, value: &WireValue) -> String {
+        match value {
+            WireValue::Literal(text) => text.clone(),
+            WireValue::Credential { prefix, slot } => format!("{prefix}{}", self.slot(*slot)),
+        }
+    }
 }
 
 /// The query parameters one request carries, sorted by name: sampled query parameters, then an
 /// API key a query-parameter scheme sends.
-pub(crate) fn request_query(
+pub(crate) fn request_query_values(
     params: &[SampleParam],
     auth: &[SampleAuth],
-    credentials: &WireCredentials,
-) -> Vec<(String, Vec<String>)> {
-    let mut pairs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+) -> Vec<(String, Vec<WireValue>)> {
+    let mut pairs: BTreeMap<String, Vec<WireValue>> = BTreeMap::new();
     for param in params.iter().filter(|p| p.location == "query") {
         pairs
             .entry(param.name.clone())
             .or_default()
-            .push(param.wire.clone());
+            .push(WireValue::Literal(param.wire.clone()));
     }
     for auth in auth {
         if let SampleCredential::ApiKeyQuery { name } = &auth.credential {
             pairs
                 .entry(name.clone())
                 .or_default()
-                .push(credentials.api_key.clone());
+                .push(WireValue::Credential {
+                    prefix: "",
+                    slot: CredentialSlot::ApiKey,
+                });
         }
     }
     pairs.into_iter().collect()
 }
 
+/// [`request_query_values`] with `credentials` filled in.
+pub(crate) fn request_query(
+    params: &[SampleParam],
+    auth: &[SampleAuth],
+    credentials: &WireCredentials,
+) -> Vec<(String, Vec<String>)> {
+    request_query_values(params, auth)
+        .into_iter()
+        .map(|(name, values)| {
+            let values = values
+                .iter()
+                .map(|value| credentials.resolve(value))
+                .collect();
+            (name, values)
+        })
+        .collect()
+}
+
 /// The request headers one request must carry, lowercase names, sorted.
+pub(crate) fn request_header_values(
+    params: &[SampleParam],
+    body: Option<&SampleBody>,
+    auth: &[SampleAuth],
+) -> Vec<(String, WireValue)> {
+    let mut headers: BTreeMap<String, WireValue> = BTreeMap::new();
+    for param in params.iter().filter(|p| p.location == "header") {
+        headers.insert(
+            param.name.to_ascii_lowercase(),
+            WireValue::Literal(param.wire.clone()),
+        );
+    }
+    if let Some(body) = body {
+        headers.insert(
+            "content-type".to_string(),
+            WireValue::Literal(body.content_type.clone()),
+        );
+    }
+    for auth in auth {
+        let (name, prefix, slot) = match &auth.credential {
+            SampleCredential::ApiKeyHeader { name } => {
+                (name.to_ascii_lowercase(), "", CredentialSlot::ApiKey)
+            }
+            SampleCredential::Bearer => (
+                "authorization".to_string(),
+                "Bearer ",
+                CredentialSlot::Bearer,
+            ),
+            SampleCredential::Basic => {
+                ("authorization".to_string(), "Basic ", CredentialSlot::Basic)
+            }
+            SampleCredential::ApiKeyQuery { .. } => continue,
+        };
+        headers.insert(name, WireValue::Credential { prefix, slot });
+    }
+    headers.into_iter().collect()
+}
+
+/// [`request_header_values`] with `credentials` filled in.
 pub(crate) fn request_headers(
     params: &[SampleParam],
     body: Option<&SampleBody>,
     auth: &[SampleAuth],
     credentials: &WireCredentials,
 ) -> Vec<(String, String)> {
-    let mut headers: BTreeMap<String, String> = BTreeMap::new();
-    for param in params.iter().filter(|p| p.location == "header") {
-        headers.insert(param.name.to_ascii_lowercase(), param.wire.clone());
-    }
-    if let Some(body) = body {
-        headers.insert("content-type".to_string(), body.content_type.clone());
-    }
-    for auth in auth {
-        match &auth.credential {
-            SampleCredential::ApiKeyHeader { name } => {
-                headers.insert(name.to_ascii_lowercase(), credentials.api_key.clone());
-            }
-            SampleCredential::Bearer => {
-                headers.insert(
-                    "authorization".to_string(),
-                    format!("Bearer {}", credentials.bearer),
-                );
-            }
-            SampleCredential::Basic => {
-                headers.insert(
-                    "authorization".to_string(),
-                    format!("Basic {}", credentials.basic),
-                );
-            }
-            SampleCredential::ApiKeyQuery { .. } => {}
-        }
-    }
-    headers.into_iter().collect()
+    request_header_values(params, body, auth)
+        .into_iter()
+        .map(|(name, value)| (name, credentials.resolve(&value)))
+        .collect()
 }
 
 /// Join the base path and the operation path, substituting sampled path parameters.
