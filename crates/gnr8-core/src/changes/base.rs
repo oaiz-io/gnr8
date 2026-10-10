@@ -19,8 +19,9 @@ pub struct BaseGraph {
     pub graph: ApiGraph,
     /// Whether the committed artifact was schema version 1, read through the one upgrade step.
     ///
-    /// A version 1 artifact never held the bounds of the schema an imported parameter names with
-    /// `$ref`, so the comparison reads such a parameter's base constraints as partial
+    /// A version 1 artifact held less than this graph does — the bounds of the schema an imported
+    /// parameter names with `$ref`, some field facts — and kept the base path on an imported
+    /// server, so the comparison reads such a base for what it held
     /// ([`crate::changes::diff_base_graph`]).
     pub upgraded_from_version_1: bool,
 }

@@ -2438,7 +2438,11 @@ impl Importer {
     }
 
     fn span(&self) -> SourceSpan {
-        document_span(self.display_file())
+        SourceSpan {
+            file: self.display_file(),
+            start_line: 1,
+            end_line: 1,
+        }
     }
 
     fn warn(&mut self, message: String) {
@@ -3281,10 +3285,11 @@ fn parameter_items_mut(raw: &mut Value) -> Option<&mut Value> {
 /// it, kept a parameter's example among its raw fields, and kept the base path on the imported
 /// servers too. This applies the importer's own rules to that graph: [`take_constraints`] moves
 /// each kept raw schema's keywords (and its items') into typed constraints,
-/// [`take_parameter_examples`] moves a scalar parameter's example into its typed example, and a
-/// server whose path is the base path loses it. A keyword beside a
-/// `$ref` moves; the bounds of the schema a `$ref` names were never in a version 1 graph and stay
-/// unknown.
+/// [`take_parameter_examples`] moves a scalar parameter's example into its typed example. A keyword
+/// beside a `$ref` moves; the bounds of the schema a `$ref` names were never in a version 1 graph
+/// and stay unknown. A version 1 imported server still holds the base path; the comparison reads
+/// it as the server without it ([`crate::changes::diff_base_graph`]), so the upgrade never has to
+/// decide who wrote a server.
 ///
 /// Version 1 also kept a field's OpenAPI 3.0 / Swagger 2 boolean `exclusiveMinimum: true` as the
 /// bound text `"true"` beside the inclusive `minimum`; [`boolean_exclusive_bounds`] reads it as the
@@ -3333,16 +3338,6 @@ pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
     for_each_field(graph, &mut |field| {
         boolean_exclusive_bounds(&mut field.meta.constraints);
     });
-    // Only the importer kept the base path on a server; a server set in configuration was the
-    // user's own URL in version 1 and still is.
-    let base_path = normalize_path(&graph.base_path);
-    if base_path != "/" && imported_from_openapi(graph) {
-        for server in &mut graph.openapi_metadata.servers {
-            if server_url_path(&server.url) == base_path {
-                server.url = server_url_without_path(&server.url);
-            }
-        }
-    }
 }
 
 /// Read a version 1 bound pair that holds the OpenAPI 3.0 boolean flag as its exclusive bound
@@ -3405,27 +3400,6 @@ fn for_each_field(graph: &mut ApiGraph, visit: &mut dyn FnMut(&mut crate::graph:
             walk(&mut header.schema, visit);
         }
     }
-}
-
-/// The provenance the importer gives every fact it imports: the document itself, as a whole
-/// (line 1 to line 1). No extractor writes it — an extracted operation names the line of its
-/// route registration, which a source file never has on its first line.
-fn document_span(file: String) -> SourceSpan {
-    SourceSpan {
-        file,
-        start_line: 1,
-        end_line: 1,
-    }
-}
-
-/// Whether a graph's operations are the importer's: it has some, and every one carries the
-/// importer's span of one document ([`document_span`]).
-fn imported_from_openapi(graph: &ApiGraph) -> bool {
-    let Some(first) = graph.operations.first() else {
-        return false;
-    };
-    let document = document_span(first.provenance.file.clone());
-    graph.operations.iter().all(|op| op.provenance == document)
 }
 
 /// An `OpenAPI` 3 Server Object's path, normalized, with every `{variable}` in it replaced by the
@@ -5585,8 +5559,8 @@ components:
     }
 
     /// A graph that artifact schema version 1 wrote — the parameter's raw schema still holding its
-    /// keywords, the first server still holding the base path — reads exactly as this importer
-    /// represents the same document, so `gnr8 changes` against such a base reports no change.
+    /// keywords, the first server still holding the base path — reads as this importer represents
+    /// the same document, so `gnr8 changes` against such a base reports no change.
     #[test]
     fn a_version_1_graph_upgrades_to_the_graph_this_importer_writes() {
         let limit_schema = serde_json::json!({
@@ -5638,6 +5612,22 @@ components:
             "the version 1 shape must differ before the upgrade"
         );
         super::upgrade_graph_from_artifact_v1(&mut version_1);
+        // The server keeps the base path it was written with; the comparison reads it as the
+        // server without it.
+        let report = crate::changes::diff_base_graph(
+            &crate::changes::BaseGraph {
+                reference: "main".to_string(),
+                commit: "0".repeat(40),
+                graph: version_1.clone(),
+                upgraded_from_version_1: true,
+            },
+            &current,
+            &std::collections::BTreeSet::new(),
+            &[],
+        )
+        .expect("diff");
+        assert!(report.changes.is_empty(), "{:?}", report.changes);
+        version_1.openapi_metadata.servers[0].url = "https://api.example.com".to_string();
         assert_eq!(version_1, current);
     }
 
@@ -5954,28 +5944,107 @@ components:
         );
     }
 
-    /// The version 1 importer kept the base path on the servers it imported; a server set in
-    /// configuration was never touched, by either version. So the upgrade strips the base path only
-    /// from a graph the importer wrote — never from a `SetBasePath` + `OpenApiMetadata::server`
-    /// pair, which would report a server change the API never made.
+    /// The version 1 importer kept the base path on the servers it imported (`https://api.example.com/v1`
+    /// where this importer writes `https://api.example.com` beside the base path `/v1`); a server
+    /// set in configuration keeps whatever URL it was given, in either version. The comparison
+    /// reads a version 1 base server whose URL is a current server's URL followed by the base path
+    /// as that same server, whoever wrote the graph — so neither an imported graph (whatever its
+    /// operations' provenance) nor a `SetBasePath` + `OpenApiMetadata::server` pair reports a
+    /// server change the API never made, and a server that did change is still reported.
     #[test]
-    fn the_version_1_upgrade_leaves_a_configured_server_alone() {
-        let mut configured: crate::graph::ApiGraph = serde_json::from_value(serde_json::json!({
-            "module": "example.com/svc", "base_path": "/v1", "title": "Svc", "diagnostics": [],
-            "security": [],
-            "openapi_metadata": {"servers": [{"url": "https://api.example.com/v1"}]},
-            "operations": [{
-                "id": "listItems", "method": "GET", "path": "/items", "handler": "listItems",
-                "params": [], "request_body": null,
-                "responses": [{"status": 204, "body": null, "body_kind": "empty"}],
-                "provenance": {"file": "handlers.go", "start_line": 12, "end_line": 14}
-            }],
-            "schemas": []
-        }))
-        .expect("graph");
-        let before = configured.clone();
-        super::upgrade_graph_from_artifact_v1(&mut configured);
-        assert_eq!(configured, before, "a configured server keeps its path");
+    fn a_version_1_server_holding_the_base_path_is_the_same_server() {
+        let graph = |servers: &[&str], file: &str| -> crate::graph::ApiGraph {
+            serde_json::from_value(serde_json::json!({
+                "module": "example.com/svc", "base_path": "/v1", "title": "Svc", "diagnostics": [],
+                "security": [],
+                "openapi_metadata": {"servers": servers
+                    .iter()
+                    .map(|url| serde_json::json!({"url": url}))
+                    .collect::<Vec<_>>()},
+                "operations": [{
+                    "id": "listItems", "method": "GET", "path": "/items", "handler": "listItems",
+                    "params": [], "request_body": null,
+                    "responses": [{"status": 204, "body": null, "body_kind": "empty"}],
+                    "provenance": {"file": file, "start_line": 12, "end_line": 14}
+                }],
+                "schemas": []
+            }))
+            .expect("graph")
+        };
+        let diff = |base: crate::graph::ApiGraph, current: &crate::graph::ApiGraph| {
+            let mut base = base;
+            super::upgrade_graph_from_artifact_v1(&mut base);
+            let base = crate::changes::BaseGraph {
+                reference: "main".to_string(),
+                commit: "0".repeat(40),
+                graph: base,
+                upgraded_from_version_1: true,
+            };
+            let report = crate::changes::diff_base_graph(
+                &base,
+                current,
+                &std::collections::BTreeSet::new(),
+                &[],
+            )
+            .expect("diff");
+            let mut changes = report
+                .changes
+                .into_iter()
+                .map(|change| change.message)
+                .collect::<Vec<_>>();
+            changes.sort();
+            changes
+        };
+        let both = [
+            "https://api.example.com/v1",
+            "https://staging.example.com/v1/",
+        ];
+        // Imported, whatever the provenance its operations carry (a transform may add or move one).
+        for file in ["openapi.yaml", "handlers.go"] {
+            assert_eq!(
+                diff(
+                    graph(&both, file),
+                    &graph(
+                        &["https://api.example.com", "https://staging.example.com"],
+                        file
+                    )
+                ),
+                Vec::<String>::new(),
+                "{file}"
+            );
+        }
+        // Configured beside `SetBasePath`: the URL never moved.
+        assert_eq!(
+            diff(graph(&both, "handlers.go"), &graph(&both, "handlers.go")),
+            Vec::<String>::new()
+        );
+        // A server that did change is reported, in the base's own spelling.
+        assert_eq!(
+            diff(
+                graph(&["https://api.example.com/v1"], "openapi.yaml"),
+                &graph(&["https://api.example.org"], "openapi.yaml")
+            ),
+            vec![
+                "server `https://api.example.com/v1` removed".to_string(),
+                "server `https://api.example.org` added as the new default".to_string(),
+            ]
+        );
+        // A version 2 base is compared as written.
+        let mut version_2 = graph(&["https://api.example.com/v1"], "openapi.yaml");
+        version_2.openapi_metadata.servers[0].url = "https://api.example.com/v1".to_string();
+        let report = crate::changes::diff_base_graph(
+            &crate::changes::BaseGraph {
+                reference: "main".to_string(),
+                commit: "0".repeat(40),
+                graph: version_2,
+                upgraded_from_version_1: false,
+            },
+            &graph(&["https://api.example.com"], "openapi.yaml"),
+            &std::collections::BTreeSet::new(),
+            &[],
+        )
+        .expect("diff");
+        assert_eq!(report.changes.len(), 2, "{:?}", report.changes);
     }
 
     /// The graph artifacts gnr8 0.18.0 wrote (schema version 1) for two imported documents compare

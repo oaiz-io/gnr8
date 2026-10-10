@@ -333,8 +333,10 @@ impl<'a> GraphIndex<'a> {
 
 struct Collector {
     changes: Vec<Change>,
-    /// Whether the base was read from a version 1 artifact, which never held the bounds of the
-    /// schema a parameter names with `$ref` ([`comparable_parameter_constraints`]).
+    /// Whether the base was read from a version 1 artifact, which held less than this graph does:
+    /// no bounds of the schema a parameter names with `$ref` ([`comparable_parameter_constraints`]),
+    /// not every field fact ([`version_1_field_facts`], [`enum_unknown_on_version_1`]), and the
+    /// base path on an imported server ([`version_1_servers`]).
     base_from_version_1: bool,
 }
 
@@ -379,7 +381,9 @@ pub fn diff_graphs(
 
 /// Compare a committed base graph with the current one, as [`diff_graphs_with_gate_operations`]
 /// does, reading a base upgraded from a version 1 artifact for what it held: a parameter whose base
-/// schema is a `$ref` is compared only on the constraint keywords the base states.
+/// schema is a `$ref` is compared only on the constraint keywords the base states, a field fact a
+/// version 1 artifact could not hold is unknown rather than added, and a server that still holds
+/// the base path is the current server without it.
 ///
 /// # Errors
 ///
@@ -542,12 +546,16 @@ fn compare_document(base: &GraphIndex<'_>, current: &GraphIndex<'_>, out: &mut C
             "document metadata changed".to_string(),
         );
     }
-    compare_servers(
-        &base.graph.openapi_metadata,
-        &current.graph.openapi_metadata,
-        &scope,
-        out,
-    );
+    let base_servers = if out.base_from_version_1 {
+        version_1_servers(
+            &base.graph.openapi_metadata,
+            &current.graph.openapi_metadata,
+            &base.graph.base_path,
+        )
+    } else {
+        base.graph.openapi_metadata.clone()
+    };
+    compare_servers(&base_servers, &current.graph.openapi_metadata, &scope, out);
     compare_security_schemes(base, current, &scope, out);
     let base_security = document_security_alternatives(base.graph);
     let current_security = document_security_alternatives(current.graph);
@@ -561,6 +569,40 @@ fn compare_document(base: &GraphIndex<'_>, current: &GraphIndex<'_>, out: &mut C
             "global security requirements changed".to_string(),
         );
     }
+}
+
+/// A version 1 base's servers as the current ones can be compared with them.
+///
+/// The version 1 importer kept the base path on each server it imported
+/// (`https://api.example.com/v1` beside the base path `/v1`), where the importer now writes the
+/// server without it. A server set in configuration keeps the URL it was given in both versions.
+/// So a base server is read as the current server whose URL, followed by the base's base path, is
+/// its URL — whoever wrote either graph. Any other base server is compared as written.
+fn version_1_servers(
+    base: &OpenApiMetadataPolicy,
+    current: &OpenApiMetadataPolicy,
+    base_path: &str,
+) -> OpenApiMetadataPolicy {
+    let mut base = base.clone();
+    let base_path = base_path.trim_matches('/');
+    if base_path.is_empty() {
+        return base;
+    }
+    for server in &mut base.servers {
+        if current.servers.iter().any(|now| now.url == server.url) {
+            continue;
+        }
+        let written = server.url.trim_end_matches('/');
+        if let Some(now) = current.servers.iter().find(|now| {
+            written
+                .strip_prefix(now.url.trim_end_matches('/'))
+                .and_then(|rest| rest.strip_prefix('/'))
+                == Some(base_path)
+        }) {
+            server.url.clone_from(&now.url);
+        }
+    }
+    base
 }
 
 fn compare_servers(

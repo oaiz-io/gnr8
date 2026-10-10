@@ -23,10 +23,10 @@ must move the minor version.
   now live in its typed constraints instead of the raw schema the graph keeps, and an imported
   server no longer repeats the base path. Tools that read the artifact must accept version 2.
   `gnr8 changes --base <ref>` still reads a version 1 base: it applies the importer's rules to it,
-  so the first comparison after upgrading reports no change the API did not make. The base path is
-  taken off a version 1 server only when the importer wrote the graph (its operations carry the
-  imported document's provenance), so a server set with `OpenApiMetadata::server` beside
-  `SetBasePath` keeps its URL and reports no change. A version 1 artifact never held the bounds of
+  so the first comparison after upgrading reports no change the API did not make. A version 1 base
+  server whose URL is a current server's URL followed by the base path (`https://api.example.com/v1`
+  beside `/v1`) is compared as that server, whoever wrote the graph, and a server set with
+  `OpenApiMetadata::server` beside `SetBasePath` keeps its URL in both. A version 1 artifact never held the bounds of
   a schema an imported parameter names with `$ref`, so such a parameter is compared only on the
   constraint keywords the base states: the referenced bounds are not reported as added. A
   parameter's example moves into the new typed `Param::example` the same way. `BaseGraph` gains
