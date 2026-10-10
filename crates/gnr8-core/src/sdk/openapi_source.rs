@@ -540,7 +540,7 @@ impl Importer {
         schemes
     }
 
-    fn import_metadata(&self) -> crate::graph::OpenApiMetadataPolicy {
+    fn import_metadata(&mut self) -> crate::graph::OpenApiMetadataPolicy {
         let info = self.root.get("info").and_then(Value::as_object);
         let contact = info
             .and_then(|info| info.get("contact"))
@@ -590,10 +590,31 @@ impl Importer {
         }
     }
 
-    fn import_servers(&self) -> Vec<crate::graph::OpenApiServer> {
-        if self.version != SpecVersion::Swagger2 {
-            return self
-                .root
+    /// The document's servers, each without the path the graph carries as its base path.
+    ///
+    /// The base path (the first server's path, or Swagger 2's `basePath`) is the one place a path
+    /// prefix lives: every operation path, `openapi.yaml`'s paths, the SDKs and the docs request
+    /// line carry it. A server that kept it too would put it on the wire twice
+    /// (`https://api.example.com/v1` + `/v1/items`), so it is taken off the server URL. A server
+    /// with a different path cannot be represented beside that base path, and says so.
+    fn import_servers(&mut self) -> Vec<crate::graph::OpenApiServer> {
+        let declared: Vec<crate::graph::OpenApiServer> = if self.version == SpecVersion::Swagger2 {
+            let Some(host) = self.root.get("host").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            self.root
+                .get("schemes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|scheme| crate::graph::OpenApiServer {
+                    url: format!("{scheme}://{host}"),
+                    description: None,
+                })
+                .collect()
+        } else {
+            self.root
                 .get("servers")
                 .and_then(Value::as_array)
                 .into_iter()
@@ -608,27 +629,25 @@ impl Importer {
                             .map(ToString::to_string),
                     })
                 })
-                .collect();
-        }
-        let Some(host) = self.root.get("host").and_then(Value::as_str) else {
-            return Vec::new();
+                .collect()
         };
-        let base_path = self
-            .root
-            .get("basePath")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        self.root
-            .get("schemes")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(|scheme| crate::graph::OpenApiServer {
-                url: format!("{scheme}://{host}{base_path}"),
-                description: None,
-            })
-            .collect()
+        let base_path = self.base_path();
+        let mut servers = Vec::with_capacity(declared.len());
+        for mut server in declared {
+            let path = server_url_path(&server.url);
+            if path == base_path && base_path != "/" {
+                server.url = server_url_without_path(&server.url);
+            } else if path != "/" {
+                self.warn(format!(
+                    "server '{}' has path '{path}', but every generated path carries the base path \
+                     '{base_path}' taken from the first server; this server's paths are not \
+                     representable",
+                    server.url
+                ));
+            }
+            servers.push(server);
+        }
+        servers
     }
 
     fn collect_root_schemas(&mut self) {
@@ -2934,6 +2953,18 @@ fn normalize_path(path: &str) -> String {
     } else {
         format!("/{}", trimmed.trim_matches('/'))
     }
+}
+
+/// A server URL with its path taken off: the scheme and host of an absolute URL, `/` for a
+/// relative one.
+fn server_url_without_path(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let host = rest
+            .find('/')
+            .map_or(rest, |path_start| &rest[..path_start]);
+        return format!("{scheme}://{host}");
+    }
+    "/".to_string()
 }
 
 fn server_url_path(url: &str) -> String {
@@ -5300,6 +5331,74 @@ components:
                 && diagnostic.message.contains("constraints are unknown")),
             "{:?}",
             graph.diagnostics
+        );
+    }
+
+    /// The base path is the one place a path prefix lives. The first server's path becomes it and
+    /// every generated path carries it, so the servers drop it — otherwise `openapi.yaml`, the SDK
+    /// base URL and the docs request line would all put `/v1` on the wire twice. A server with a
+    /// different path cannot sit beside that base path, and a diagnostic says so.
+    #[test]
+    fn the_base_path_is_taken_off_the_servers_it_came_from() {
+        let graph = import_yaml(
+            r#"
+openapi: 3.1.0
+info: { title: P, version: "1" }
+servers:
+  - { url: "https://api.example.com/v1", description: prod }
+  - { url: "https://staging.example.com" }
+  - { url: "https://old.example.com/v0/" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses: { "204": { description: none } }
+"#,
+        );
+        assert_eq!(graph.base_path, "/v1");
+        let urls: Vec<&str> = graph
+            .openapi_metadata
+            .servers
+            .iter()
+            .map(|server| server.url.as_str())
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://api.example.com",
+                "https://staging.example.com",
+                "https://old.example.com/v0/"
+            ]
+        );
+        assert!(
+            graph.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("server 'https://old.example.com/v0/' has path '/v0'")),
+            "{:?}",
+            graph.diagnostics
+        );
+        let yaml = to_openapi(&graph, "P", &graph.base_path, &graph.security).unwrap();
+        assert!(yaml.contains("url: 'https://api.example.com'\n"), "{yaml}");
+        assert!(yaml.contains("  '/v1/items':\n"), "{yaml}");
+
+        let swagger = import_yaml(
+            r#"
+swagger: "2.0"
+info: { title: P, version: "1" }
+host: api.example.com
+basePath: /v1
+schemes: [https]
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses: { "204": { description: none } }
+"#,
+        );
+        assert_eq!(swagger.base_path, "/v1");
+        assert_eq!(
+            swagger.openapi_metadata.servers[0].url,
+            "https://api.example.com"
         );
     }
 }

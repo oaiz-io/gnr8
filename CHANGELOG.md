@@ -90,6 +90,12 @@ must move the minor version.
   `exclusiveMinimum: true` / `exclusiveMaximum: true` is published in the 3.1 spelling
   (`exclusiveMinimum: 5`), and members of a parameter enum that can never validate (another kind than
   the declared `type`, or `null`) are left out.
+- An imported document's base path is no longer stated twice. The first server's path (or Swagger
+  2's `basePath`) becomes the graph's base path, which every generated path, the SDKs and the docs
+  request line already carry; the imported servers now drop it (`https://api.example.com/v1` is
+  published as `https://api.example.com`), so `openapi.yaml`, an SDK built with a listed server as
+  its base URL, and the docs page no longer resolve to `/v1/v1/…`. A server with a different path
+  cannot be represented beside that base path and is reported as a diagnostic.
 - A non-string parameter enum (`type: integer, enum: [1, 2, 3]`) imports as a constraint, so samples
   and docs pick a member; a mixed enum keeps its members of the declared type instead of losing all
   of them. A string enum stays the parameter's type.
