@@ -1471,9 +1471,15 @@ impl<'g> Sampler<'g> {
                 self.visiting.remove(id);
                 value
             }
-            Type::Enum(members) => Ok(enum_candidate(ty, Some(members), constraints, subject)),
+            Type::Enum(members) => Ok(enum_candidate(
+                ty,
+                Some(members),
+                constraints,
+                self.side,
+                subject,
+            )),
             _ if !constraints.enum_values.is_empty() => {
-                Ok(enum_candidate(ty, None, constraints, subject))
+                Ok(enum_candidate(ty, None, constraints, self.side, subject))
             }
             Type::Primitive(Prim::String) => {
                 if constraints
@@ -1738,10 +1744,15 @@ fn unsatisfiable(subject: &str, constraint: &str) -> Result<Value, SampleRefusal
 ///
 /// `enum_values` is the domain when it is declared (intersected with an inline enum's members, in
 /// `enum_values` order); an inline enum's members are the domain otherwise.
+///
+/// A member is a declared value, so it meets the rules a declared example meets on its `side`: a
+/// float or integer member the wire rules for numbers, and a date-time member in a request the
+/// spelling Go sends ([`DeclaredLimit::DateTime`]).
 fn enum_candidate(
     ty: &Type,
     inline: Option<&Vec<String>>,
     constraints: &Constraints,
+    side: Side,
     subject: &str,
 ) -> Result<Value, SampleRefusal> {
     let members: Vec<&String> = if constraints.enum_values.is_empty() {
@@ -1784,6 +1795,19 @@ fn enum_candidate(
             {
                 Some(SampleRefusal::IntegerWire {
                     subject: subject.to_string(),
+                })
+            }
+            // Go sends a `time.Time` in its own spelling; Python and TypeScript send the string.
+            Type::WellKnown(WellKnown::DateTime)
+                if side == Side::Request
+                    && !candidate
+                        .as_str()
+                        .is_some_and(crate::gosdk::callsite::is_canonical_rfc3339) =>
+            {
+                Some(SampleRefusal::Declared {
+                    subject: subject.to_string(),
+                    value: candidate.to_string(),
+                    limit: DeclaredLimit::DateTime,
                 })
             }
             _ => None,

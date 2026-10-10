@@ -2200,6 +2200,59 @@ fn only_a_request_float_must_print_alike_and_only_a_float32_narrows() {
     ));
 }
 
+/// A request date-time enum member is a declared value too: it is the sample only when it is
+/// spelled the way Go sends it. A reply member is decoded, so any RFC 3339 spelling is the reply.
+#[test]
+fn a_request_date_time_enum_member_must_be_spelled_the_way_go_sends_it() {
+    let date_time = json!({"type": "well_known", "of": "date_time"});
+    let padded = "2024-01-02T03:04:05.120Z";
+    let canonical = "2024-01-02T03:04:05.12Z";
+    let only_padded = probe(
+        &[query(
+            "at",
+            &date_time,
+            true,
+            &json!({"enum_values": [padded]}),
+        )],
+        None,
+        None,
+        &[],
+    );
+    let refused = refusal(&only_padded);
+    assert!(
+        matches!(
+            &refused,
+            SampleRefusal::Declared { subject, limit: super::DeclaredLimit::DateTime, .. }
+                if subject == "query.at"
+        ),
+        "{refused:?}"
+    );
+    let both = probe(
+        &[query(
+            "at",
+            &date_time,
+            true,
+            &json!({"enum_values": [padded, canonical]}),
+        )],
+        None,
+        None,
+        &[],
+    );
+    assert_eq!(sample(&both).params[0].value, json!(canonical));
+    let reply = probe(
+        &[],
+        None,
+        Some(&object(&[meta_fld(
+            "at",
+            &date_time,
+            true,
+            &json!({"constraints": {"enum_values": [padded]}}),
+        )])),
+        &[],
+    );
+    assert_eq!(reply_json(&reply), json!({"at": padded}));
+}
+
 /// A declared request date-time has to be spelled the way Go sends one, or Go's bytes differ from
 /// the string Python and TypeScript send as written. A canonical one is the sample as declared.
 #[test]
