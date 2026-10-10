@@ -1717,7 +1717,10 @@ mod tests {
                     .to("gen/go"),
             )
             .plan();
-        assert!(super::docs_suites(&plan, &docs_graph()).unwrap().is_empty(), "expected no docs suites");
+        assert!(
+            super::docs_suites(&plan, &docs_graph()).unwrap().is_empty(),
+            "expected no docs suites"
+        );
         let docs_alone = Pipeline::new()
             .target(decl::StaticDocs::new().to("gen/docs"))
             .plan();
