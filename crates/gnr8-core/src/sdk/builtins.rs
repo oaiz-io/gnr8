@@ -159,6 +159,17 @@ impl SiblingSdk<'_> {
         }
     }
 
+    /// Whether the target writes its `README.md` and `reference.md` (`SdkDocs`).
+    #[must_use]
+    pub fn emits_docs(&self) -> bool {
+        let docs = match self {
+            Self::Go(t) => &t.docs,
+            Self::Python(t) => &t.docs,
+            Self::TypeScript(t) => &t.docs,
+        };
+        !docs.is_none()
+    }
+
     /// The declaration's stage name, as host diagnostics spell it.
     #[must_use]
     pub fn label(&self) -> &'static str {
@@ -3167,7 +3178,7 @@ impl TargetExec for GoSdk {
                 )?;
             }
         }
-        write_sdk_docs(out, &self.dir, "Go", &model.package, ir, &model, &self.docs)?;
+        write_sdk_docs(out, SiblingSdk::Go(self), ir, &self.docs)?;
         if let Some(cli) = &self.cli {
             let cli_files =
                 crate::gosdk::generate_cli(ir, &self.module, &model.package, cli, &mut formatter)?;
@@ -3327,15 +3338,7 @@ impl TargetExec for PySdk {
                 )?;
             }
         }
-        write_sdk_docs(
-            out,
-            &self.dir,
-            "Python",
-            &model.package,
-            ir,
-            &model,
-            &self.docs,
-        )?;
+        write_sdk_docs(out, SiblingSdk::Python(self), ir, &self.docs)?;
         Ok(())
     }
 
@@ -3579,15 +3582,7 @@ impl TargetExec for TsSdk {
                 )?;
             }
         }
-        write_sdk_docs(
-            out,
-            &self.dir,
-            "TypeScript",
-            &model.package,
-            ir,
-            &model,
-            &self.docs,
-        )?;
+        write_sdk_docs(out, SiblingSdk::TypeScript(self), ir, &self.docs)?;
         Ok(())
     }
 
@@ -4596,7 +4591,56 @@ pub fn target_docs_suites(
         cases,
         refused,
         units,
-    } = crate::docs::verify::plan_units(ir, &sdks)?;
+    } = crate::docs::verify::plan_units(ir, &sdks, true)?;
+    docs_snippet_suites(docs.dir(), sdks, units, cases, refused)
+}
+
+/// The docs code-sample suites of a plan that declares no `StaticDocs` target: one per SDK target
+/// that writes its `README.md` and `reference.md` and has a consumer identity, whose samples those
+/// two files print. An SDK without an identity prints no sample, so it has no suite.
+///
+/// # Errors
+///
+/// Returns the sampler's or a call-site renderer's graph error, or a sibling's configuration error.
+pub fn sdk_docs_suites(
+    ir: &ApiGraph,
+    plan: &PlanTargets<'_>,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    let sdks: Vec<SiblingSdk<'_>> = plan.sdks().filter(SiblingSdk::emits_docs).collect();
+    if sdks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let crate::docs::verify::PlanUnits {
+        cases,
+        refused,
+        units,
+    } = crate::docs::verify::plan_units(ir, &sdks, false)?;
+    let (sdks, units): (Vec<_>, Vec<_>) = sdks
+        .into_iter()
+        .zip(units)
+        .filter(|(_, unit)| unit.is_some())
+        .unzip();
+    let mut suites = Vec::new();
+    for (sdk, unit) in sdks.into_iter().zip(units) {
+        suites.extend(docs_snippet_suites(
+            sdk.dir(),
+            vec![sdk],
+            vec![unit],
+            cases,
+            refused,
+        )?);
+    }
+    Ok(suites)
+}
+
+/// One docs suite per SDK and its compile unit, whose pages live under `docs_dir`.
+fn docs_snippet_suites(
+    docs_dir: &str,
+    sdks: Vec<SiblingSdk<'_>>,
+    units: Vec<Option<crate::docs::verify::CompileUnit>>,
+    cases: usize,
+    refused: usize,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
     sdks.into_iter()
         .zip(units)
         .map(|(sdk, compile_unit)| {
@@ -4615,7 +4659,7 @@ pub fn target_docs_suites(
             };
             Ok(crate::verify::DocsSnippetSuite {
                 language: sdk.language(),
-                docs_dir: docs.dir().trim_end_matches('/').to_string(),
+                docs_dir: docs_dir.trim_end_matches('/').to_string(),
                 sdk_output_path: dir.trim_end_matches('/').to_string(),
                 package: sdk_package(module)?,
                 compile_unit,

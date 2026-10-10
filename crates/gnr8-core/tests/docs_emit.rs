@@ -1704,7 +1704,7 @@ fn schema_pages_follow_every_root_and_print_every_published_format() {
 /// description that happens to print an HTTP block of its own is never mistaken for one.
 #[test]
 fn every_unit_block_is_on_its_page_as_whole_lines() {
-    use gnr8_engine::docs::verify::{compile_unit, embeds};
+    use gnr8_engine::docs::verify::{compile_unit, embeds, EntryKind, PageRoot};
     use gnr8_engine::sdk::builtins::SiblingSdk;
     let mut value = bookstore_json();
     value["operations"][0]["description"] =
@@ -1719,16 +1719,24 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
         !unit.entries.is_empty(),
         "the bookstore samples some operation"
     );
-    for entry in &unit.entries {
+    for (index, entry) in unit.entries.iter().enumerate() {
         // The request block and the sample's own block; a typed-error sample also relies on the
         // error reply block its harness answers with.
-        let relied_on = if entry.kind == gnr8_engine::docs::verify::EntryKind::TypedError {
+        let relied_on = if entry.kind == EntryKind::TypedError {
             3
         } else {
             2
         };
-        assert_eq!(entry.embeds.len(), relied_on, "{}", entry.operation_id);
-        for embed in &entry.embeds {
+        let on = |root: PageRoot, page: Option<&str>| {
+            entry
+                .embeds
+                .iter()
+                .filter(|embed| embed.root == root && page.is_none_or(|page| embed.page == page))
+                .collect::<Vec<_>>()
+        };
+        let site = on(PageRoot::Docs, None);
+        assert_eq!(site.len(), relied_on, "{}", entry.operation_id);
+        for embed in &site {
             assert!(
                 embeds(page(&pages, &embed.page), &embed.block),
                 "{}:\n{}",
@@ -1736,8 +1744,25 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
                 embed.block
             );
         }
-        assert!(entry.embeds[0].block.starts_with("```http\n"));
-        assert!(!entry.embeds[0].block.contains("/decoy"));
+        assert!(site[0].block.starts_with("```http\n"));
+        assert!(!site[0].block.contains("/decoy"));
+        // The SDK writes its README and reference, so its reference prints the same blocks, and its
+        // README the first sample's call as its quick start.
+        let reference = on(PageRoot::Sdk, Some("reference.md"));
+        assert_eq!(
+            reference
+                .iter()
+                .map(|embed| &embed.block)
+                .collect::<Vec<_>>(),
+            site.iter().map(|embed| &embed.block).collect::<Vec<_>>()
+        );
+        let readme = on(PageRoot::Sdk, Some("README.md"));
+        assert_eq!(
+            readme.len(),
+            usize::from(index == 0),
+            "{}",
+            entry.operation_id
+        );
     }
 }
 

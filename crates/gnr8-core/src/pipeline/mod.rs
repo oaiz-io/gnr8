@@ -265,6 +265,11 @@ pub fn docs_suites(
     for (_, spec) in &builtin_targets {
         suites.extend(builtins::target_docs_suites(spec, ir, &siblings)?);
     }
+    // Without a `StaticDocs` target, the samples an SDK's README and reference print are checked
+    // on their own: docs are verified wherever gnr8 writes a sample.
+    if suites.is_empty() {
+        suites = builtins::sdk_docs_suites(ir, &siblings)?;
+    }
     Ok(suites)
 }
 
@@ -283,12 +288,13 @@ pub fn docs_suites_of_run(
     plan: &StagePlan,
     artifacts: &[Artifact],
 ) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
-    let declares_docs = plan.targets.iter().any(|stage| {
-        matches!(
-            stage,
-            PlanStage::Builtin(gnr8::sdk::BuiltinTarget::StaticDocs(_))
-        )
-    });
+    let builtin_targets = emission::builtin_targets(&plan.targets);
+    let declares_docs = builtin_targets
+        .iter()
+        .any(|(_, spec)| matches!(spec, gnr8::sdk::BuiltinTarget::StaticDocs(_)))
+        || builtins::PlanTargets::new(&builtin_targets)
+            .sdks()
+            .any(|sdk| sdk.emits_docs());
     if !declares_docs {
         return Ok(Vec::new());
     }
@@ -1708,8 +1714,10 @@ mod tests {
         assert_eq!(unit.entries[0].page, "operations/list-items.md");
     }
 
+    /// Without `StaticDocs`, an SDK that writes its README and reference has the samples those two
+    /// files print checked, in its own directory; one that writes no docs has nothing to check.
     #[test]
-    fn no_static_docs_means_no_docs_suites() {
+    fn without_static_docs_only_sdk_docs_have_suites() {
         let plan = Pipeline::new()
             .target(
                 decl::GoSdk::new()
@@ -1717,9 +1725,30 @@ mod tests {
                     .to("gen/go"),
             )
             .plan();
+        let suites = super::docs_suites(&plan, &docs_graph()).unwrap();
+        assert_eq!(suites.len(), 1);
+        assert_eq!(suites[0].docs_dir, "gen/go");
+        let unit = suites[0]
+            .compile_unit
+            .as_ref()
+            .expect("a Go SDK has an identity");
+        assert!(unit.entries.iter().all(|entry| entry
+            .embeds
+            .iter()
+            .all(|embed| embed.root == crate::docs::verify::PageRoot::Sdk)));
+        let quiet = Pipeline::new()
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go")
+                    .without_docs(),
+            )
+            .plan();
         assert!(
-            super::docs_suites(&plan, &docs_graph()).unwrap().is_empty(),
-            "expected no docs suites"
+            super::docs_suites(&quiet, &docs_graph())
+                .unwrap()
+                .is_empty(),
+            "an SDK that writes no docs has no docs suite"
         );
         let docs_alone = Pipeline::new()
             .target(decl::StaticDocs::new().to("gen/docs"))

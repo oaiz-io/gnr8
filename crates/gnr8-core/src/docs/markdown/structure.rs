@@ -116,7 +116,7 @@ fn broken_structure(
     };
     CoreError::DocsGen {
         message: format!(
-            "StaticDocs cannot print {path}: {what}{effect}. Close it in the source's own prose — \
+            "gnr8 cannot print {path}: {what}{effect}. Close it in the source's own prose — \
              gnr8 prints prose verbatim and never edits it"
         ),
     }

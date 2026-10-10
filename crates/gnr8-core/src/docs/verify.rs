@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use crate::docs::identity::{go_sdk_import, ConsumerIdentity};
 use crate::docs::model::{
-    CodeSample, DocsModel, ErrorReplyDoc, ExampleDoc, Expect, SampleKind, SdkSamples,
+    CodeSample, DocsModel, ErrorReplyDoc, ExampleDoc, Expect, SampleKind, SdkSamples, View,
 };
 use crate::docs::sample::go_import_block;
 use crate::gosdk::ERROR_TYPE as GO_ERROR_TYPE;
@@ -129,11 +129,28 @@ struct UnitSample<'a> {
 /// One block a page must print, byte for byte, as a contiguous run of whole lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageEmbed {
-    /// Docs-relative page path.
+    /// The directory the page lives in.
+    pub root: PageRoot,
+    /// The page's path inside [`Self::root`].
     pub page: String,
     /// The block, fences included.
     pub block: String,
 }
+
+/// Where a page a sample is printed on lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageRoot {
+    /// The `StaticDocs` directory: a docs-relative page such as `operations/create-book.md`.
+    Docs,
+    /// The SDK's own directory: its `README.md` and `reference.md`.
+    Sdk,
+}
+
+/// The SDK's reference, which prints every sample of every operation.
+pub const SDK_REFERENCE: &str = "reference.md";
+
+/// The SDK's README, whose quick start is the first sampled operation's call.
+pub const SDK_README: &str = "README.md";
 
 /// The Go file a compile unit is written to, beside the SDK's own sources.
 pub(crate) const GO_UNIT_FILE: &str = "docs_snippets_test.go";
@@ -155,7 +172,11 @@ fn unit_of(
     model: &DocsModel,
     index: usize,
     sdk: SiblingSdk<'_>,
+    site: bool,
 ) -> Result<Option<CompileUnit>, CoreError> {
+    // The SDK's own README and reference print the same blocks, rendered by the same functions.
+    let sdk_docs = sdk.emits_docs();
+    let mut quick_start = sdk_docs;
     let Some(identity) = model.sdks.get(index).and_then(|sdk| sdk.identity.as_ref()) else {
         return Ok(None);
     };
@@ -184,29 +205,43 @@ fn unit_of(
         .into_iter()
         .flatten()
         {
-            let mut embeds = vec![
-                PageEmbed {
-                    page: page.clone(),
-                    block: request_block.clone(),
-                },
-                PageEmbed {
-                    page: page.clone(),
-                    block: render::sample_block(sample),
-                },
-            ];
+            let mut blocks = vec![request_block.clone(), render::sample_block(sample)];
             if let (SampleKind::TypedError, Some(ErrorReplyDoc::Printed { reply, .. })) =
                 (sample.kind, error_reply)
             {
+                blocks.push(render::error_reply_block(reply));
+            }
+            let mut embeds = Vec::new();
+            for (wanted, root, page) in [
+                (site, PageRoot::Docs, page.as_str()),
+                (sdk_docs, PageRoot::Sdk, SDK_REFERENCE),
+            ] {
+                if wanted {
+                    embeds.extend(blocks.iter().map(|block| PageEmbed {
+                        root,
+                        page: page.to_string(),
+                        block: block.clone(),
+                    }));
+                }
+            }
+            // The README's quick start is the first sampled operation's call.
+            if quick_start && sample.kind == SampleKind::Call {
+                quick_start = false;
                 embeds.push(PageEmbed {
-                    page: page.clone(),
-                    block: render::error_reply_block(reply),
+                    root: PageRoot::Sdk,
+                    page: SDK_README.to_string(),
+                    block: render::sample_block(sample),
                 });
             }
             let entry = CompileEntry {
                 operation_id: op.id.clone(),
                 kind: EntryKind::of(sample.kind),
                 embeds,
-                page: page.clone(),
+                page: if site {
+                    page.clone()
+                } else {
+                    SDK_REFERENCE.to_string()
+                },
                 snippet: sample.body.clone(),
                 request: (**request).clone(),
             };
@@ -244,15 +279,20 @@ pub(crate) struct PlanUnits {
 }
 
 /// Build the docs model for `ir` once, exactly as the `StaticDocs` target builds it for its pages,
-/// and read every sibling's compile unit from it.
+/// and read every sibling's compile unit from it. With `site`, every sample's blocks must be on its
+/// `StaticDocs` page; an SDK that writes `README.md` and `reference.md` must print them there too.
 ///
 /// # Errors
 ///
 /// Returns the sampler's or the call-site renderer's graph error, or a sibling's configuration
 /// error.
-pub(crate) fn plan_units(ir: &ApiGraph, sdks: &[SiblingSdk<'_>]) -> Result<PlanUnits, CoreError> {
+pub(crate) fn plan_units(
+    ir: &ApiGraph,
+    sdks: &[SiblingSdk<'_>],
+    site: bool,
+) -> Result<PlanUnits, CoreError> {
     let projected = crate::graph::projection::for_generation(ir)?;
-    let model = DocsModel::build(&projected, sdks)?;
+    let model = DocsModel::build(&projected, sdks, View::Site)?;
     let cases = model
         .operations
         .iter()
@@ -261,7 +301,7 @@ pub(crate) fn plan_units(ir: &ApiGraph, sdks: &[SiblingSdk<'_>]) -> Result<PlanU
     let units = sdks
         .iter()
         .enumerate()
-        .map(|(index, sdk)| unit_of(&model, index, *sdk))
+        .map(|(index, sdk)| unit_of(&model, index, *sdk, site))
         .collect::<Result<Vec<_>, CoreError>>()?;
     Ok(PlanUnits {
         cases,
@@ -285,8 +325,8 @@ pub fn compile_unit(
     sdk: SiblingSdk<'_>,
 ) -> Result<Option<CompileUnit>, CoreError> {
     let projected = crate::graph::projection::for_generation(graph)?;
-    let model = DocsModel::build(&projected, &[sdk])?;
-    unit_of(&model, 0, sdk)
+    let model = DocsModel::build(&projected, &[sdk], View::Site)?;
+    unit_of(&model, 0, sdk, true)
 }
 
 /// The Python file a compile unit is written to, beside the copied package.

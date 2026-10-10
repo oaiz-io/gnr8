@@ -137,18 +137,19 @@ pub(crate) fn reply_doc(op: &Operation, reply: &SuccessOutcome) -> Result<ReplyD
     })
 }
 
-/// The media type the operation declares for a success status's body: the first of its declared
-/// media types, the one the `OpenAPI` lowering lists first.
+/// The media type a status's reply travels in, by the one rule every consumer of a response shares
+/// (`response_media_type`, through `verify::reply_media`): the first declared media type in sorted
+/// order — a concrete type for a media range — or `application/json` when the response declares
+/// none. The sampler picks the reply's declared example by the same media type.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::DocsGen`] for a status that carries a body but declares no media type,
-/// which the lowering refuses as well.
+/// Returns [`CoreError::DocsGen`] for a status the operation does not declare, which the sampler
+/// never samples a reply for.
 fn reply_media_type(op: &Operation, status: u16) -> Result<String, CoreError> {
-    // The sampler picks the reply's declared example by the same media type.
     crate::verify::reply_media(op, status).ok_or_else(|| CoreError::DocsGen {
         message: format!(
-            "operation '{}' response {status} carries a body but declares no media type",
+            "operation '{}' declares no response {status} for its sampled reply",
             op.id
         ),
     })

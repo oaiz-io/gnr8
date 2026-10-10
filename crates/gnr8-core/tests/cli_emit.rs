@@ -1312,6 +1312,13 @@ fn scoping_the_cli_leaves_every_other_artifact_byte_identical() {
         if path.contains("/cli/") {
             continue;
         }
+        // The reference prints each wrapped operation's CLI invocation, so it is the one document
+        // the scope reaches: exactly the operations left out lose their CLI section.
+        if path.ends_with("/reference.md") {
+            assert_eq!(scoped[path].matches("#### CLI — `bookstore`").count(), 1);
+            assert_eq!(unscoped_text.matches("#### CLI — `bookstore`").count(), 2);
+            continue;
+        }
         assert_eq!(
             unscoped_text, &scoped[path],
             "{path} must not change when the CLI is scoped"

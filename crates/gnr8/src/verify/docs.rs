@@ -15,7 +15,9 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use gnr8_engine::docs::verify::{check_operation_wire, embeds, CompileUnit, WireRecord, WIRE_ENV};
+use gnr8_engine::docs::verify::{
+    check_operation_wire, embeds, CompileUnit, PageRoot, WireRecord, WIRE_ENV,
+};
 use gnr8_engine::sdk::Artifact;
 use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite};
 
@@ -249,7 +251,11 @@ fn check_pages(
 ) -> Result<(), DocsReason> {
     for entry in &unit.entries {
         for embed in &entry.embeds {
-            let path = format!("{}/{}", suite.docs_dir.trim_end_matches('/'), embed.page);
+            let dir = match embed.root {
+                PageRoot::Docs => &suite.docs_dir,
+                PageRoot::Sdk => &suite.sdk_output_path,
+            };
+            let path = format!("{}/{}", dir.trim_end_matches('/'), embed.page);
             let Some(page) = artifacts.iter().find(|artifact| artifact.path == path) else {
                 let mut reason = DocsReason::new(
                     DocsFailure::MissingPage,
@@ -692,7 +698,8 @@ mod tests {
     use super::{run_with_runner, DocsFailure, DocsStatus};
     use crate::verify::cli_help::ProcessRunner;
     use gnr8_engine::docs::verify::{
-        CompileEntry, CompileUnit, CredentialSlot, EntryKind, HttpRequest, PageEmbed, WireValue,
+        CompileEntry, CompileUnit, CredentialSlot, EntryKind, HttpRequest, PageEmbed, PageRoot,
+        WireValue,
     };
     use gnr8_engine::sdk::Artifact;
     use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite, GoVerificationModule};
@@ -802,10 +809,12 @@ mod tests {
             snippet: snippet.to_string(),
             embeds: vec![
                 PageEmbed {
+                    root: PageRoot::Docs,
                     page: page.to_string(),
                     block: REQUEST_BLOCK.to_string(),
                 },
                 PageEmbed {
+                    root: PageRoot::Docs,
                     page: page.to_string(),
                     block: sample_block(snippet),
                 },
@@ -958,6 +967,31 @@ mod tests {
         );
         assert_eq!(reason.operation.as_deref(), Some("createBook"));
         assert!(reason.explain().contains("docs/operations/create-book.md"));
+    }
+
+    /// A sample the SDK's own README prints is held to it in the SDK's directory: a README whose
+    /// quick start no longer prints the sample fails rung 2 naming the README, though the docs page
+    /// still prints it.
+    #[test]
+    fn a_readme_quick_start_that_differs_from_its_sample_fails_naming_the_readme() {
+        let mut runner = FakeRunner::default();
+        let mut unit = unit();
+        unit.entries[0].embeds.push(PageEmbed {
+            root: PageRoot::Sdk,
+            page: "README.md".to_string(),
+            block: sample_block(CREATE),
+        });
+        let mut artifacts = artifacts();
+        artifacts.push(Artifact::new(
+            "sdk/README.md",
+            format!("# SDK\n\n## Quick start\n\n{}", sample_block(LIST)),
+        ));
+        let report = run(&suite(Some(unit)), &artifacts, &mut runner);
+        assert_eq!(report.status, DocsStatus::Failed);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::SnippetNotInPage);
+        assert_eq!(reason.page.as_deref(), Some("sdk/README.md"));
+        assert_eq!(reason.operation.as_deref(), Some("createBook"));
     }
 
     /// Rung 2 holds the whole printed sample, imports included: a post-processor that rewrites an

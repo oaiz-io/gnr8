@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::docs::model::PageRef;
+use crate::docs::model::{PageRef, View};
 use crate::graph::ApiGraph;
 use crate::sdk::emit_common::kebab;
 use crate::CoreError;
@@ -23,7 +23,15 @@ impl<'g> Nav<'g> {
     /// Returns [`CoreError::DocsGen`] naming both subjects when two operations, two schemas or two
     /// groups slug to one file, and naming the subject when one slugs to nothing or to a name
     /// Windows reserves.
-    pub(super) fn build(graph: &'g ApiGraph) -> Result<Self, CoreError> {
+    pub(super) fn build(graph: &'g ApiGraph, view: View) -> Result<Self, CoreError> {
+        // A single file writes no page, so it names one without refusing it.
+        let slug =
+            |dir: &str, kind: &str, subject: &'g str, taken: &mut BTreeMap<String, &'g str>| {
+                match view {
+                    View::Site => slug(dir, kind, subject, taken),
+                    View::Sdk => Ok(kebab(subject)),
+                }
+            };
         let mut operations = BTreeMap::new();
         let mut taken = BTreeMap::new();
         for op in &graph.operations {
@@ -159,7 +167,7 @@ mod tests {
                 end_line: 1,
             },
         });
-        let nav = Nav::build(&graph).unwrap();
+        let nav = Nav::build(&graph, crate::docs::model::View::Site).unwrap();
         let (page, name) = nav.schema("internal/dto.Book").unwrap();
         assert_eq!((page.path().as_str(), name), ("schemas/book.md", "Book"));
         let err = nav.schema("internal/dto.Missing").unwrap_err();

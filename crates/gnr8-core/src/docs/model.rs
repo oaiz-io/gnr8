@@ -32,6 +32,17 @@ pub(crate) struct DocsModel {
     pub(crate) api_diagnostics: Vec<DiagnosticDoc>,
 }
 
+/// Which view a model is built for. Both derive every fact the same way; they differ only in where
+/// the text lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum View {
+    /// `StaticDocs`: one file per page, linked. Every page name must be writable and unique.
+    Site,
+    /// `SdkDocs`: one `reference.md`, whose pages are sections and print no link, so a page name is
+    /// never written and never refused.
+    Sdk,
+}
+
 /// A page the docs views can link to. Only the builder mints one, and only for a page it emits,
 /// so a link can name nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

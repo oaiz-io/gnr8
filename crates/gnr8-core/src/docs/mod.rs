@@ -5,7 +5,7 @@
 //! fact; verification ([`verify`]) checks the samples against the same model. `StaticDocs` is one
 //! view of it. Nothing here reads another target's output.
 
-mod build;
+pub(crate) mod build;
 pub mod identity;
 pub(crate) mod markdown;
 pub(crate) mod model;

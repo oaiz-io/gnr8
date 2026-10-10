@@ -11,7 +11,7 @@
 use std::path::{Component, Path};
 
 use crate::docs::markdown::render;
-use crate::docs::model::DocsModel;
+use crate::docs::model::{DocsModel, View};
 use crate::graph::ApiGraph;
 use crate::sdk::builtins::{PlanTargets, StaticDocs};
 use crate::sdk::Artifacts;
@@ -38,7 +38,7 @@ pub(crate) fn generate(
     let projected = crate::graph::projection::for_generation(ir)?;
     // Code samples cover exactly the SDK targets the same plan declares, in plan order.
     let sdks: Vec<_> = plan.sdks().collect();
-    let model = DocsModel::build(&projected, &sdks)?;
+    let model = DocsModel::build(&projected, &sdks, View::Site)?;
     let pages = render::site(&model)?;
     let dir = decl.dir().trim_end_matches('/');
     for (path, text) in pages {

@@ -338,7 +338,9 @@ fn typescript_unresolvable_import_fails_rung_two() {
     );
 }
 
-use gnr8_engine::docs::verify::{check_operation_wire, embeds, CompileUnit, WireRecord, WIRE_ENV};
+use gnr8_engine::docs::verify::{
+    check_operation_wire, embeds, CompileUnit, PageRoot, WireRecord, WIRE_ENV,
+};
 use gnr8_engine::verify::ContractTestLanguage;
 
 /// Assert every block the unit relies on is printed on its page as whole lines (rung 2's page
@@ -354,9 +356,16 @@ fn assert_records_match(
     let pages = run.pages();
     for entry in &unit.entries {
         for embed in &entry.embeds {
-            let page = pages
-                .get(&embed.page)
-                .unwrap_or_else(|| panic!("no page {}", embed.page));
+            // A run declares one SDK, so its README and reference are the only ones.
+            let page = match embed.root {
+                PageRoot::Docs => pages.get(&embed.page),
+                PageRoot::Sdk => run
+                    .artifacts
+                    .iter()
+                    .find(|(path, _)| path.ends_with(&format!("/{}", embed.page)))
+                    .map(|(_, text)| text),
+            }
+            .unwrap_or_else(|| panic!("no page {}", embed.page));
             assert!(
                 embeds(page, &embed.block),
                 "{} does not print:\n{}",

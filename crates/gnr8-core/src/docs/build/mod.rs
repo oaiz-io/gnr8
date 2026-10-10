@@ -1,7 +1,7 @@
 //! The one derivation of the docs model from a projected graph and the plan's sibling SDKs.
 
 use crate::docs::identity::consumer_identity;
-use crate::docs::model::{DocsModel, SdkDoc};
+use crate::docs::model::{DocsModel, SdkDoc, View};
 use crate::graph::direction::{schema_consumers, schema_directions};
 use crate::graph::ApiGraph;
 use crate::sdk::builtins::SiblingSdk;
@@ -16,7 +16,7 @@ pub(crate) use catalog::language_name;
 
 impl DocsModel {
     /// Derive the model for `graph` — the projected graph every target consumes — with samples for
-    /// `sdks`, the plan's sibling SDK declarations in plan order.
+    /// `sdks`, the plan's sibling SDK declarations in plan order, for `view`.
     ///
     /// Rung 0's structural facts are checked here, before anything is rendered: no heading the
     /// renderer emits is empty, no two subjects share a page, and every operation has exactly one
@@ -27,7 +27,11 @@ impl DocsModel {
     /// Returns [`CoreError::InvalidExample`] for a declared example that is not a value of its
     /// input, [`CoreError::DocsGen`] for a blank title or group name, a slug collision or an
     /// unwritable page name, and the graph's own error for a fact the shared SDK helpers reject.
-    pub(crate) fn build(graph: &ApiGraph, sdks: &[SiblingSdk<'_>]) -> Result<Self, CoreError> {
+    pub(crate) fn build(
+        graph: &ApiGraph,
+        sdks: &[SiblingSdk<'_>],
+        view: View,
+    ) -> Result<Self, CoreError> {
         // Declared examples are sampler inputs: every one is checked before any page samples.
         crate::verify::check_declared_examples(graph)?;
         // No empty heading: the only headings whose text is not a fixed word, an id or a schema
@@ -36,7 +40,7 @@ impl DocsModel {
         // as a heading.
         if graph.title.trim().is_empty() {
             return Err(CoreError::DocsGen {
-                message: "StaticDocs cannot print an empty heading: the API title is blank — set \
+                message: "the docs cannot print an empty heading: the API title is blank — set \
                           one with SetTitle"
                     .to_string(),
             });
@@ -48,7 +52,7 @@ impl DocsModel {
         }) {
             return Err(CoreError::DocsGen {
                 message: format!(
-                    "StaticDocs cannot print an empty heading: operation '{}' has a blank group \
+                    "the docs cannot print an empty heading: operation '{}' has a blank group \
                      name",
                     op.id
                 ),
@@ -63,7 +67,7 @@ impl DocsModel {
             &crate::sdk::layout::SdkFileLayout::default(),
         )?
         .errors;
-        let nav = nav::Nav::build(graph)?;
+        let nav = nav::Nav::build(graph, view)?;
         let sdks = sdks
             .iter()
             .map(|sdk| {
