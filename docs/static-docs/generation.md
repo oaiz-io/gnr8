@@ -205,7 +205,10 @@ table and code fence of its own. Each must still start a block where it was prin
 code block gnr8 opened must close where gnr8 closed it. Prose that opens a fenced code block, an
 HTML comment or another HTML block of types 1–5 and never closes it would swallow the sections
 after it, so generation fails naming the page, the operation whose prose opened it, the line it
-opened on, and the line it swallowed. Fix it in the source's own prose. A heading, list or quote
+opened on, and the line it swallowed. An HTML block of type 6 (a block-level tag such as
+`<details>` or `<div>`) or type 7 (a complete tag alone on its line) runs to the next blank line,
+and a fence line inside it is HTML, not a fence — so `<details>` around a fenced block that holds
+a blank line fails, and a fence line inside `<div>` with no blank line passes. Fix it in the source's own prose. A heading, list or quote
 in prose is the user's own structure and passes. The check derives no fact and changes no byte.
 
 Rung 2 runs each language's own tool over a temporary copy of the SDK: Go samples are checked with

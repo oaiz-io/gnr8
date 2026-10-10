@@ -9,10 +9,11 @@
 //!
 //! The scanner follows the block structure a renderer builds line by line: block quotes (`>`) and
 //! list items (their content offset), fenced code (`` ``` `` or `~~~`, indented at most three
-//! columns, closed by the same character at least as long), HTML blocks of types 1–5 (which run
-//! across blank lines until their end condition), indented code (four columns, tabs to the next stop
-//! of four), paragraphs and their lazy continuation lines. Constructs that end at the first blank
-//! line cannot swallow the next gnr8 block, which always follows one, so they are not modelled.
+//! columns, closed by the same character at least as long), HTML blocks — types 1–5 run across
+//! blank lines until their end condition, types 6 (a block-level tag from `CommonMark`'s list) and 7
+//! (a complete tag alone on its line, which cannot interrupt a paragraph) run to the first blank
+//! line, and a fence inside any of them is HTML, not a fence — indented code (four columns, tabs to
+//! the next stop of four), paragraphs and their lazy continuation lines.
 
 use crate::CoreError;
 
@@ -155,9 +156,18 @@ enum Leaf {
         opener: usize,
     },
     Html {
-        end: &'static [&'static str],
+        end: HtmlEnd,
         opener: usize,
     },
+}
+
+/// What ends an HTML block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HtmlEnd {
+    /// Types 1–5: the first line that contains one of these strings, ignoring ASCII case.
+    Contains(&'static [&'static str]),
+    /// Types 6 and 7: the first blank line, which is not part of the block.
+    BlankLine,
 }
 
 impl Leaf {
@@ -228,11 +238,23 @@ impl Scanner {
                 }
                 return Outcome::Inside;
             }
-            Leaf::Html { end, .. } => {
+            Leaf::Html {
+                end: HtmlEnd::Contains(end),
+                ..
+            } => {
                 if end.iter().any(|end| contains_ignore_case(rest, end)) {
                     self.leaf = Leaf::None;
                 }
                 return Outcome::Inside;
+            }
+            Leaf::Html {
+                end: HtmlEnd::BlankLine,
+                ..
+            } => {
+                if !rest.trim().is_empty() {
+                    return Outcome::Inside;
+                }
+                self.leaf = Leaf::None;
             }
             Leaf::None | Leaf::Paragraph | Leaf::IndentedCode => {}
         }
@@ -311,9 +333,15 @@ impl Scanner {
                 self.leaf = Leaf::None;
                 return false;
             }
-            if let Some(end) = html_start(text) {
+            if let Some(end) = html_start(text, self.leaf == Leaf::Paragraph) {
                 let opening = text.get(1..).unwrap_or_default();
-                self.leaf = if end.iter().any(|end| contains_ignore_case(opening, end)) {
+                let ends_here = match end {
+                    HtmlEnd::Contains(end) => {
+                        end.iter().any(|end| contains_ignore_case(opening, end))
+                    }
+                    HtmlEnd::BlankLine => false,
+                };
+                self.leaf = if ends_here {
                     Leaf::None
                 } else {
                     Leaf::Html {
@@ -376,7 +404,7 @@ fn is_lazy_continuation(text: &str) -> bool {
         || list_marker(text, true).is_some()
         || fence_opener(text).is_some()
         || is_atx_heading(text)
-        || html_start(text).is_some())
+        || html_start(text, true).is_some())
 }
 
 /// The width of a list marker at the start of `text` (`-`, `+`, `*`, or one to nine digits and `.`
@@ -466,10 +494,11 @@ fn is_setext_underline(text: &str) -> bool {
     trimmed.chars().all(|ch| ch == mark)
 }
 
-/// The end conditions of an HTML block of type 1–5 starting at `text`; `None` for any other line.
+/// The end condition of an HTML block starting at `text`; `None` for any other line. With
+/// `interrupts_paragraph`, the line would interrupt an open paragraph, which type 7 cannot.
 ///
 /// Every opener is ASCII, so it is compared byte for byte: the text after it may be anything.
-fn html_start(text: &str) -> Option<&'static [&'static str]> {
+fn html_start(text: &str, interrupts_paragraph: bool) -> Option<HtmlEnd> {
     const RAW: &[&str] = &["</script>", "</pre>", "</style>", "</textarea>"];
     if !text.starts_with('<') {
         return None;
@@ -481,22 +510,184 @@ fn html_start(text: &str) -> Option<&'static [&'static str]> {
                 None | Some(b' ' | b'>' | b'\t')
             )
         {
-            return Some(RAW);
+            return Some(HtmlEnd::Contains(RAW));
         }
     }
     if text.starts_with("<!--") {
-        return Some(&["-->"]);
+        return Some(HtmlEnd::Contains(&["-->"]));
     }
     if text.starts_with("<?") {
-        return Some(&["?>"]);
+        return Some(HtmlEnd::Contains(&["?>"]));
     }
     if text.starts_with("<![CDATA[") {
-        return Some(&["]]>"]);
+        return Some(HtmlEnd::Contains(&["]]>"]));
     }
     if text.starts_with("<!") && text.as_bytes().get(2).is_some_and(u8::is_ascii_alphabetic) {
-        return Some(&[">"]);
+        return Some(HtmlEnd::Contains(&[">"]));
+    }
+    if starts_block_level_tag(text) {
+        return Some(HtmlEnd::BlankLine);
+    }
+    if !interrupts_paragraph {
+        if let Some((name, after)) = complete_tag(text) {
+            let raw = ["pre", "script", "style", "textarea"];
+            if !raw.iter().any(|tag| name.eq_ignore_ascii_case(tag))
+                && after.trim_matches([' ', '\t']).is_empty()
+            {
+                return Some(HtmlEnd::BlankLine);
+            }
+        }
     }
     None
+}
+
+/// The block-level tag names an HTML block of type 6 starts with (`CommonMark` 0.31.2).
+const BLOCK_LEVEL_TAGS: [&str; 62] = [
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "search",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
+];
+
+/// Type 6: `<` or `</`, a block-level tag name in any ASCII case, then a space, a tab, the end of
+/// the line, `>` or `/>`.
+fn starts_block_level_tag(text: &str) -> bool {
+    let after = text
+        .strip_prefix("</")
+        .or_else(|| text.strip_prefix('<'))
+        .unwrap_or_default();
+    BLOCK_LEVEL_TAGS.iter().any(|tag| {
+        starts_with_ignore_case(after, tag) && {
+            let rest = &after.as_bytes()[tag.len()..];
+            matches!(rest.first(), None | Some(b' ' | b'\t' | b'>')) || rest.starts_with(b"/>")
+        }
+    })
+}
+
+/// A complete open tag (`<name attr="v" …>` or `/>`) or closing tag (`</name>`) at the start of
+/// `text`, as `CommonMark`'s raw-HTML grammar spells one: its tag name and the text after it.
+fn complete_tag(text: &str) -> Option<(&str, &str)> {
+    let bytes = text.as_bytes();
+    let is_space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t'));
+    let skip_spaces = |mut at: usize| {
+        while is_space(at) {
+            at += 1;
+        }
+        at
+    };
+    let closing = bytes.get(1) == Some(&b'/');
+    let start = if closing { 2 } else { 1 };
+    if !bytes.get(start)?.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut at = start + 1;
+    while bytes
+        .get(at)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
+        at += 1;
+    }
+    let name = &text[start..at];
+    if closing {
+        at = skip_spaces(at);
+        return (bytes.get(at) == Some(&b'>')).then(|| (name, &text[at + 1..]));
+    }
+    loop {
+        let spaced = is_space(at);
+        at = skip_spaces(at);
+        match bytes.get(at)? {
+            b'>' => return Some((name, &text[at + 1..])),
+            b'/' if bytes.get(at + 1) == Some(&b'>') => return Some((name, &text[at + 2..])),
+            byte if spaced && (byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':')) => {
+                at += 1;
+                while bytes.get(at).is_some_and(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-')
+                }) {
+                    at += 1;
+                }
+                let value = skip_spaces(at);
+                if bytes.get(value) == Some(&b'=') {
+                    at = skip_spaces(value + 1);
+                    at = match bytes.get(at)? {
+                        quote @ (b'"' | b'\'') => {
+                            let close = text[at + 1..].find(char::from(*quote))?;
+                            at + 1 + close + 1
+                        }
+                        _ => {
+                            let unquoted = text[at..]
+                                .find(|ch: char| {
+                                    matches!(ch, ' ' | '\t' | '"' | '\'' | '=' | '<' | '>' | '`')
+                                })
+                                .unwrap_or(text.len() - at);
+                            if unquoted == 0 {
+                                return None;
+                            }
+                            at + unquoted
+                        }
+                    };
+                }
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// Whether `text` starts with the ASCII `prefix`, ignoring ASCII case.
@@ -587,6 +778,33 @@ mod tests {
         assert!(fails("<script>\nlet x;").contains("an HTML block"));
         assert!(fails("````\n```").contains("fenced code block"));
         assert!(fails("~~~\n```").contains("fenced code block"));
+    }
+
+    /// HTML blocks of types 6 and 7 run to the first blank line, and a fence inside one is HTML,
+    /// not a fence.
+    #[test]
+    fn block_level_and_complete_tag_html_blocks_end_at_a_blank_line() {
+        // Type 6: the fence opener is HTML; the blank line ends the block; the later ``` opens a
+        // fence that swallows the page.
+        assert!(fails("<details>\n```json\n{\n\n}\n```\n</details>").contains("fenced code block"));
+        passes("<div>\n```\n</div>");
+        passes("<DIV class=\"x\">\n```\n</DIV>");
+        passes("</details>\n```");
+        passes("<hr/>\n```");
+        passes("> <div>\n> ```\n> </div>");
+        // Type 6 interrupts a paragraph.
+        passes("Text\n<div>\n```\n</div>");
+        // Type 7: a complete tag alone on its line.
+        passes("<my-widget data-x=\"1\" hidden>\n```\n</my-widget>");
+        passes("<span>\n```");
+        passes("</span>\n```");
+        // Type 7 cannot interrupt a paragraph, and needs nothing but whitespace after the tag.
+        assert!(fails("Text\n<my-widget>\n```").contains("fenced code block"));
+        assert!(fails("<span>text</span>\n```").contains("fenced code block"));
+        assert!(fails("<span\n```").contains("fenced code block"));
+        assert!(fails("<a href=>\n```").contains("fenced code block"));
+        // A raw-text tag name is type 1 or nothing, never type 7.
+        assert!(fails("</script>\n```").contains("fenced code block"));
     }
 
     /// An opener is recognised by its ASCII bytes, wherever the first multibyte character after it
