@@ -1,0 +1,21 @@
+# Bookstore API
+
+## books
+
+- [books](groups/books.md): Browse and manage the catalogue
+- [listBooks](operations/list-books.md): Returns every book in the catalogue.
+- [createBook](operations/create-book.md): Adds a book to the catalogue.
+- [deleteBook](operations/delete-book.md): Permanently removes one book from the catalogue.
+- [getBook](operations/get-book.md): Returns one book by its identifier.
+- [updateBook](operations/update-book.md): Replaces the mutable fields of one book.
+
+## Schemas
+
+- [Book](schemas/book.md)
+- [BookList](schemas/book-list.md)
+- [CreateBookRequest](schemas/create-book-request.md)
+- [ErrorResponse](schemas/error-response.md)
+- [Genre](schemas/genre.md)
+- [PublisherInput](schemas/publisher-input.md)
+- [PublisherOutput](schemas/publisher-output.md)
+- [UpdateBookRequest](schemas/update-book-request.md)
