@@ -232,6 +232,32 @@ func TestRequestShapeRequestObservations(t *testing.T) {
 	assertContractWire(t, request, "GET", "/v1/items/request-observations", url.Values{}, map[string]string{"x-helper-observed": "gnr8", "x-observed": "gnr8", "x-required": "gnr8"})
 }
 
+func TestBodySelectionUploadFileApplicationJSON(t *testing.T) {
+	transport := &contractTransport{responses: []*http.Response{contractResponse(204, map[string]string{}, "")}}
+	client := contractClient(transport)
+	out, err := client.UploadFile(context.Background(), UploadFileJSONBody{Value: CreateUploadRequest{}})
+	if err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+	_ = out
+	request := contractSingleRequest(t, transport)
+	assertContractWire(t, request, "POST", "/v1/files/upload", url.Values{}, map[string]string{"content-type": "application/json"})
+	assertContractBody(t, request, "{}")
+}
+
+func TestBodySelectionUpdateUploadFileApplicationJSON(t *testing.T) {
+	transport := &contractTransport{responses: []*http.Response{contractResponse(204, map[string]string{}, "")}}
+	client := contractClient(transport)
+	out, err := client.UpdateUploadFile(context.Background(), "gnr8", UpdateUploadFileJSONBody{Value: UpdateItemRequest{}})
+	if err != nil {
+		t.Fatalf("UpdateUploadFile: %v", err)
+	}
+	_ = out
+	request := contractSingleRequest(t, transport)
+	assertContractWire(t, request, "PATCH", "/v1/files/upload/gnr8", url.Values{}, map[string]string{"content-type": "application/json"})
+	assertContractBody(t, request, "{}")
+}
+
 func TestResponseDecodeLoginPresent(t *testing.T) {
 	transport := &contractTransport{responses: []*http.Response{contractResponse(200, map[string]string{"content-type": "application/json"}, "{\"token\":\"gnr8\"}")}}
 	client := contractClient(transport)

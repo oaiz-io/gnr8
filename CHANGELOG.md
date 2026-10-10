@@ -199,6 +199,11 @@ must move the minor version.
   body with no JSON representation, a success reply, or a declared error model — is counted, and
   `gnr8 verify` prints `N cases, M refused samples counted, not run` under the suite and carries
   `refused` in `--json`.
+- An operation with several request representations no longer loses its body-selection cases when
+  one representation cannot be sampled. Each representation with a sample gets its case, and each
+  without one (a refused JSON body, or a representation that is not JSON) is counted as a refused
+  sample naming its media type. `OperationSample` gains `refused_bodies`, `RefusedScope` gains
+  `BodyRepresentation` and `SampleRefusal` gains `NotJson`.
 - Integer samples stay within ±(2^53 − 1). Bounds such as `minimum: 9007199254740993` used to yield
   a sample the TypeScript SDK sent as `…992`; they are now a typed refusal naming the input.
 - An imported parameter's validation keywords (`minimum`, `maxLength`, `pattern`, a non-string

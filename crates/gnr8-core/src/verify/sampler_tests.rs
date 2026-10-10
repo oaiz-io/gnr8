@@ -2159,3 +2159,72 @@ fn a_declared_request_date_time_must_be_spelled_the_way_go_sends_it() {
         "{plan:?}"
     );
 }
+
+/// An operation whose JSON body is `Req` with a second representation `application/vnd.t+json`
+/// carrying `second`, and a 200 reply.
+fn two_bodies(second: &Value) -> ApiGraph {
+    let mut graph = probe(
+        &[],
+        Some(&object(&[fld("name", &string(), true)])),
+        Some(&object(&[fld("id", &string(), true)])),
+        &[schema("Second", second)],
+    );
+    graph.operations[0].request_body_variants = serde_json::from_value(json!([
+        {"content_type": "application/vnd.t+json", "body": {"ref_id": "t.Second"}}
+    ]))
+    .unwrap();
+    graph
+}
+
+/// D-P: a refused second request representation is recorded and counted, and the representation
+/// that can be sampled still gets its body-selection case — never a silent loss of both.
+#[test]
+fn a_refused_second_representation_is_counted_and_the_first_still_selected() {
+    let graph = two_bodies(&object(&[meta_fld(
+        "code",
+        &string(),
+        true,
+        &json!({"constraints": unmeetable()}),
+    )]));
+    let sampled = sample(&graph);
+    assert_eq!(sampled.bodies.len(), 1);
+    assert_eq!(
+        sampled
+            .refused_bodies
+            .iter()
+            .map(|refused| (refused.selection, refused.content_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "application/vnd.t+json")]
+    );
+    let plan = plan_contract_tests(&graph).unwrap();
+    let selection: Vec<&str> = plan
+        .cases
+        .iter()
+        .filter(|case| case.class == ContractCaseClass::BodySelection)
+        .map(|case| case.name.as_str())
+        .collect();
+    assert_eq!(selection, vec!["body_selection_probe_application_json"]);
+    assert_eq!(
+        plan.refused
+            .iter()
+            .map(|refused| (refused.scope, refused.reason.to_string()))
+            .collect::<Vec<_>>(),
+        vec![(
+            RefusedScope::BodyRepresentation { selection: 1 },
+            "request body `application/vnd.t+json`: field `code` cannot satisfy `maxLength`"
+                .to_string()
+        )]
+    );
+
+    // With both representations sampled, both are selected and nothing is refused.
+    let complete = two_bodies(&object(&[fld("code", &string(), true)]));
+    let plan = plan_contract_tests(&complete).unwrap();
+    assert_eq!(
+        plan.cases
+            .iter()
+            .filter(|case| case.class == ContractCaseClass::BodySelection)
+            .count(),
+        2
+    );
+    assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+}

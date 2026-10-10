@@ -190,13 +190,28 @@ pub struct OperationSample {
     /// Whether the operation's request body is required.
     pub body_required: bool,
     /// Why a declared request body has no constructible JSON representation, when it has none: the
-    /// first refused representation's reason, or [`SampleRefusal::NoJsonBody`]. Only an optional
-    /// body reaches a sample this way — a required one refuses the operation.
+    /// first refused JSON representation's reason, or [`SampleRefusal::NoJsonBody`]. Only an
+    /// optional body reaches a sample this way — a required one refuses the operation.
     pub body_refusal: Option<Box<SampleRefusal>>,
+    /// Every declared representation the sample holds no body for, in the operation's media-type
+    /// order: a JSON one with its refusal, any other with [`SampleRefusal::NotJson`]. Each is a
+    /// representation no case sends, so the contract plan counts it.
+    pub refused_bodies: Vec<RefusedBody>,
     /// The credentials one call configures.
     pub auth: Vec<SampleAuth>,
     /// The canned success reply the page prints.
     pub reply: SuccessOutcome,
+}
+
+/// One declared request representation the sample holds no body for, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedBody {
+    /// The representation's media type.
+    pub content_type: String,
+    /// Its index in the operation's sorted request-body list, as `SampleBody::selection`.
+    pub selection: usize,
+    /// Why it has no sample.
+    pub reason: SampleRefusal,
 }
 
 /// What one operation's canned success reply is.
@@ -329,6 +344,9 @@ pub enum SampleRefusal {
     },
     /// A required body that declares no JSON representation at all.
     NoJsonBody,
+    /// One request representation that is not JSON, beside another that is: the sampler states
+    /// only JSON bodies.
+    NotJson,
     /// A required body none of whose JSON representations can be sampled, with the first refused
     /// representation's media type and reason. One constructible representation is enough: the
     /// call sends it.
@@ -428,6 +446,9 @@ impl fmt::Display for SampleRefusal {
                 }
             }
             Self::NoJsonBody => f.write_str("the request body declares no JSON representation"),
+            Self::NotJson => {
+                f.write_str("the representation is not JSON, and a sample states only JSON")
+            }
             Self::BodyRefused {
                 content_type,
                 inner,
@@ -621,9 +642,15 @@ pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, Cor
     let declared = request_body_models_of(op, graph)?;
     let policy = docs_policy(op, graph);
     let mut bodies = Vec::new();
-    let mut first_refusal: Option<(String, SampleRefusal)> = None;
+    let mut refused_bodies = Vec::new();
     for (index, model) in declared.iter().enumerate() {
+        let refuse = |reason| RefusedBody {
+            content_type: model.content_type.clone(),
+            selection: index,
+            reason,
+        };
         if model.encoding != RequestBodyEncoding::Json {
+            refused_bodies.push(refuse(SampleRefusal::NotJson));
             continue;
         }
         let schema = schema_by_id(graph, &model.schema_id)?;
@@ -643,17 +670,18 @@ pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, Cor
                 unmet,
                 example: example.map(|example| example.name.clone()),
             }),
-            Err(refusal) => {
-                first_refusal.get_or_insert((model.content_type.clone(), refusal));
-            }
+            Err(refusal) => refused_bodies.push(refuse(refusal)),
         }
     }
     let body_required = declared.first().is_some_and(|model| model.required);
     let body_refusal = (!declared.is_empty() && bodies.is_empty()).then(|| {
-        Box::new(match first_refusal {
-            Some((content_type, inner)) => SampleRefusal::BodyRefused {
-                content_type,
-                inner: Box::new(inner),
+        let first_json = refused_bodies
+            .iter()
+            .find(|refused| refused.reason != SampleRefusal::NotJson);
+        Box::new(match first_json {
+            Some(refused) => SampleRefusal::BodyRefused {
+                content_type: refused.content_type.clone(),
+                inner: Box::new(refused.reason.clone()),
             },
             None => SampleRefusal::NoJsonBody,
         })
@@ -672,6 +700,7 @@ pub fn sample_operation(op: &Operation, graph: &ApiGraph) -> Result<Sampled, Cor
         bodies,
         body_required,
         body_refusal,
+        refused_bodies,
         auth,
         reply,
     }))

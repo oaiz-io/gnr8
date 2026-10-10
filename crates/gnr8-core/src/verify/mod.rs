@@ -29,7 +29,7 @@ mod sample;
 
 pub use sample::{
     check_declared_examples, sample_operation, satisfies, DeclaredLimit, OperationSample,
-    SampleRefusal, Sampled, SuccessOutcome, SuccessSample, UnmetConstraint, Violation,
+    RefusedBody, SampleRefusal, Sampled, SuccessOutcome, SuccessSample, UnmetConstraint, Violation,
 };
 pub(crate) use sample::{credential_of, reply_media};
 use sample::{error_payload, success_sample};
@@ -470,6 +470,12 @@ pub enum RefusedScope {
     /// An optional request body with no constructible JSON representation: a case would have to
     /// send it, so none calls the operation.
     OptionalBody,
+    /// One request representation of an operation that has a sampled one — so no body-selection
+    /// case sends it. The reason names its media type.
+    BodyRepresentation {
+        /// Its index in the operation's sorted request-body list.
+        selection: usize,
+    },
     /// The success reply — so no case that needs one calls the operation.
     SuccessReply,
     /// The declared error model of one status — so that typed-error case is skipped.
@@ -577,6 +583,21 @@ pub fn plan_contract_tests(graph: &ApiGraph) -> Result<ContractTestPlan, CoreErr
                 if let (false, Some(reason)) = (sample.body_required, &sample.body_refusal) {
                     refused.push(refuse(RefusedScope::OptionalBody, (**reason).clone()));
                 }
+                // Beside a sampled representation, every other one without a sample is a
+                // body-selection case no plan can hold: each is counted.
+                if !sample.bodies.is_empty() {
+                    for body in &sample.refused_bodies {
+                        refused.push(refuse(
+                            RefusedScope::BodyRepresentation {
+                                selection: body.selection,
+                            },
+                            SampleRefusal::BodyRefused {
+                                content_type: body.content_type.clone(),
+                                inner: Box::new(body.reason.clone()),
+                            },
+                        ));
+                    }
+                }
                 if let SuccessOutcome::Refused(reason) = &sample.reply {
                     refused.push(refuse(RefusedScope::SuccessReply, reason.clone()));
                 }
@@ -620,8 +641,8 @@ struct Candidate<'op> {
     reply_wire: Option<CannedResponse>,
     /// Whether the operation declares a body at all (even one the sampler cannot construct).
     declares_body: bool,
-    /// Whether every declared representation was constructible.
-    bodies_complete: bool,
+    /// How many request representations the operation declares.
+    representations: usize,
     absolute_path: String,
 }
 
@@ -642,7 +663,7 @@ impl<'op> Candidate<'op> {
         Ok(Self {
             op,
             declares_body: !declared.is_empty(),
-            bodies_complete: sample.bodies.len() == declared.len(),
+            representations: declared.len(),
             params: sample.params,
             bodies: sample.bodies,
             auth: sample.auth,
@@ -665,9 +686,10 @@ impl<'op> Candidate<'op> {
         self.bodies.first()
     }
 
-    /// Whether a case for this operation can send every declared representation.
+    /// Whether the operation's body wrapper selects among representations and one has a sample. A
+    /// representation without one is counted on the plan, never dropped with the rest.
     fn can_select_bodies(&self) -> bool {
-        self.bodies_complete && self.bodies.len() > 1
+        self.representations > 1 && !self.bodies.is_empty()
     }
 
     fn query_pairs(&self) -> Vec<(String, Vec<String>)> {
