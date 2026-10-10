@@ -134,7 +134,7 @@ components:
           type: [number, 'null']
         sort:
           type: [string, 'null']
-          enum: [asc, desc]
+          enum: [asc, desc, null]
     BookFormat:
       type: string
       enum: [hardcover, paperback]
