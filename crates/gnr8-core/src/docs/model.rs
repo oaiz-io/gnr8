@@ -27,6 +27,9 @@ pub(crate) struct DocsModel {
     pub(crate) errors: Option<ErrorCatalog>,
     /// The authentication reference, when the graph declares security.
     pub(crate) auth: Option<AuthDoc>,
+    /// What extraction could not state about the API as a whole: every published diagnostic that
+    /// names no operation the graph carries. Each other one is printed on its operation's page.
+    pub(crate) api_diagnostics: Vec<DiagnosticDoc>,
 }
 
 /// A page the docs views can link to. Only the builder mints one, and only for a page it emits,

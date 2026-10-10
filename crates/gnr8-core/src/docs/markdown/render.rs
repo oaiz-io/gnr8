@@ -11,8 +11,8 @@ use std::fmt::Write as _;
 use crate::docs::build::language_name;
 use crate::docs::identity::NO_IDENTITY_NOTE;
 use crate::docs::model::{
-    CodeSample, DeclaredExample, DocsModel, ExampleDoc, ExampleValue, HttpRequest, Inline,
-    OperationDoc, PageRef, ReplyDoc, SchemaBody, SchemaDoc, SchemeUse, SdkSamples, Table,
+    CodeSample, DeclaredExample, DiagnosticDoc, DocsModel, ExampleDoc, ExampleValue, HttpRequest,
+    Inline, OperationDoc, PageRef, ReplyDoc, SchemaBody, SchemaDoc, SchemeUse, SdkSamples, Table,
 };
 use crate::verify::ContractTestLanguage;
 use crate::CoreError;
@@ -54,7 +54,7 @@ const ERRORS: &str = "Errors";
 const REFERENCE: &str = "Reference";
 /// `## Pagination` on an operation page.
 const PAGINATION: &str = "Pagination";
-/// `## Diagnostics` on an operation page.
+/// `## Diagnostics` on an operation page and on the index.
 const DIAGNOSTICS: &str = "Diagnostics";
 /// `### CLI — <program>` inside the example.
 const CLI: &str = "CLI";
@@ -253,6 +253,7 @@ fn index(w: &mut Writer<'_>, model: &DocsModel) {
             .collect();
         w.list(&items);
     }
+    diagnostics(w, &model.api_diagnostics);
 }
 
 /// The reference pages this run emits, as `(label, page)`, in index order.
@@ -456,20 +457,25 @@ fn trailer(w: &mut Writer<'_>, op: &OperationDoc) {
         items.push(Inline::text(pagination.termination));
         w.list(&items);
     }
-    if !op.diagnostics.is_empty() {
-        w.heading(2, &Inline::text(DIAGNOSTICS));
-        let items: Vec<Inline> = op
-            .diagnostics
-            .iter()
-            .map(|diagnostic| {
-                Inline::text(format!(
-                    "{}: {} ({})",
-                    diagnostic.severity, diagnostic.message, diagnostic.location
-                ))
-            })
-            .collect();
-        w.list(&items);
+    diagnostics(w, &op.diagnostics);
+}
+
+/// A `## Diagnostics` section; nothing when there is no diagnostic.
+fn diagnostics(w: &mut Writer<'_>, diagnostics: &[DiagnosticDoc]) {
+    if diagnostics.is_empty() {
+        return;
     }
+    w.heading(2, &Inline::text(DIAGNOSTICS));
+    let items: Vec<Inline> = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            Inline::text(format!(
+                "{}: {} ({})",
+                diagnostic.severity, diagnostic.message, diagnostic.location
+            ))
+        })
+        .collect();
+    w.list(&items);
 }
 
 fn declared_examples(w: &mut Writer<'_>, examples: &[DeclaredExample]) {

@@ -108,6 +108,22 @@ impl DocsModel {
         let (groups, ungrouped) = catalog::groups(graph, &nav);
         let errors = catalog::error_catalog(graph, &nav, &errors, &sdks)?;
         let auth = catalog::auth_doc(graph, &sdks)?;
+        // A diagnostic naming no operation the graph carries is about the API as a whole, so every
+        // published diagnostic is printed exactly once.
+        let identities: std::collections::BTreeSet<String> = graph
+            .operations
+            .iter()
+            .map(operation::diagnostic_identity)
+            .collect();
+        let api_diagnostics = operation::published_diagnostics(graph)
+            .filter(|diagnostic| {
+                diagnostic
+                    .operation
+                    .as_ref()
+                    .is_none_or(|identity| !identities.contains(identity))
+            })
+            .map(operation::diagnostic_doc)
+            .collect();
         Ok(Self {
             api: catalog::api_doc(graph),
             sdks: sdks.into_iter().map(|(_, doc)| doc).collect(),
@@ -117,6 +133,7 @@ impl DocsModel {
             schemas,
             errors,
             auth,
+            api_diagnostics,
         })
     }
 }

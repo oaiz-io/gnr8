@@ -507,23 +507,40 @@ fn pagination(graph: &ApiGraph, op: &Operation) -> Option<PaginationDoc> {
     })
 }
 
-/// What extraction could not state about this operation, matched by its `METHOD path` identity and
-/// filtered exactly as the SDK reference filters it, so no machine-dependent location is published.
+/// The `METHOD path` identity a diagnostic names its operation by.
+pub(super) fn diagnostic_identity(op: &Operation) -> String {
+    format!("{} {}", op.method, op.path)
+}
+
+/// What extraction could not state about this operation, matched by its `METHOD path` identity.
 fn diagnostics(graph: &ApiGraph, op: &Operation) -> Vec<DiagnosticDoc> {
-    let identity = format!("{} {}", op.method, op.path);
+    let identity = diagnostic_identity(op);
+    published_diagnostics(graph)
+        .filter(|diagnostic| diagnostic.operation.as_deref() == Some(identity.as_str()))
+        .map(diagnostic_doc)
+        .collect()
+}
+
+/// Every diagnostic a docs view may print, filtered exactly as `is_publishable` says, so no
+/// machine-dependent location is published.
+pub(super) fn published_diagnostics(
+    graph: &ApiGraph,
+) -> impl Iterator<Item = &crate::graph::Diagnostic> {
     graph
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.operation.as_deref() == Some(identity.as_str()))
         .filter(|diagnostic| crate::sdk::docs::is_publishable(diagnostic))
-        .map(|diagnostic| DiagnosticDoc {
-            severity: diagnostic.severity.clone(),
-            message: one_line(&diagnostic.message),
-            // A module-relative path printed with `/`, so the same source extracted on Windows and
-            // on a POSIX system prints one page.
-            location: format!("{}:{}", diagnostic.file.replace('\\', "/"), diagnostic.line),
-        })
-        .collect()
+}
+
+/// One diagnostic as a page prints it.
+pub(super) fn diagnostic_doc(diagnostic: &crate::graph::Diagnostic) -> DiagnosticDoc {
+    DiagnosticDoc {
+        severity: diagnostic.severity.clone(),
+        message: one_line(&diagnostic.message),
+        // A module-relative path printed with `/`, so the same source extracted on Windows and on a
+        // POSIX system prints one page.
+        location: format!("{}:{}", diagnostic.file.replace('\\', "/"), diagnostic.line),
+    }
 }
 
 pub(super) fn nonblank(text: Option<&str>) -> Option<&str> {

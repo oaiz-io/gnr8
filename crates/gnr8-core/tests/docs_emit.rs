@@ -1092,6 +1092,49 @@ fn diagnostic_attaches_to_its_operation_page() {
     }
 }
 
+/// A diagnostic that names no operation — or one the graph does not carry — is about the API as a
+/// whole, so the index prints it under its own `## Diagnostics`, with the module-relative path
+/// spelled with `/` whichever host extracted it. Every publishable diagnostic is printed once.
+#[test]
+fn unscoped_diagnostic_is_printed_on_the_index() {
+    let mut whole = diagnostic(
+        "",
+        r"internal\http\routes.go",
+        "source.openapi.unrepresentable",
+        "server path cannot be represented",
+    );
+    whole["operation"] = Value::Null;
+    let mut value = bookstore_json();
+    value["diagnostics"] = json!([
+        whole,
+        diagnostic(
+            "GET /gone",
+            "main.go",
+            "request.parameter.unresolved",
+            "names an operation the graph does not carry"
+        ),
+        diagnostic(
+            "GET /books",
+            "main.go",
+            "request.parameter.unresolved",
+            "scoped to listBooks"
+        )
+    ]);
+    let pages = render(&graph_of(value), &[]);
+    let index = page(&pages, "index.md");
+    assert!(
+        index.ends_with(
+            "## Diagnostics\n\n- WARN: server path cannot be represented (internal/http/routes.go:49)\n- WARN: names an operation the graph does not carry (main.go:49)\n"
+        ),
+        "{index}"
+    );
+    assert!(!index.contains("scoped to listBooks"), "{index}");
+    assert!(
+        page(&pages, "operations/list-books.md").contains("scoped to listBooks"),
+        "the scoped diagnostic stays on its page"
+    );
+}
+
 #[test]
 fn unpublishable_diagnostic_is_omitted() {
     let mut value = bookstore_json();
