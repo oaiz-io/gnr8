@@ -1085,12 +1085,11 @@ pub(crate) fn success_sample(
 /// The declared error model is used when the graph names one, so the body a target decodes matches
 /// the shape it declares. Its body follows the rule every reply follows: the first response example
 /// declared for the status and its JSON media type when there is one, a value built from the model
-/// when there is none. The generic message/slug envelope is sent only where it always was: a
-/// status with no declared response or body, or a model refused as a whole as recursive, too deep,
-/// holding an empty enum or holding an empty union. A model refused by an unsatisfiable constraint,
-/// a sampler limit or a map key skips the case instead, so the envelope gains no trigger. A
-/// `pattern` refuses nothing: the payload carries the sample, its pattern unmet, as every other
-/// contract reply does.
+/// when there is none. The generic message/slug envelope is sent only for a status that declares
+/// no body, where there is no model to describe. A declared model with no sample — for any reason —
+/// skips the case and is counted (AGENTS.md rule 3: the envelope never stands in for a model it
+/// does not describe). A `pattern` refuses nothing: the payload carries the sample, its pattern
+/// unmet, as every other contract reply does.
 ///
 /// # Errors
 ///
@@ -1108,13 +1107,7 @@ pub(crate) fn error_payload(
     };
     let value = match error_body_sample(op, status, graph)? {
         Some(Ok((value, _))) => value,
-        None
-        | Some(Err(
-            SampleRefusal::Recursive { .. }
-            | SampleRefusal::TooDeep { .. }
-            | SampleRefusal::EmptyEnum { .. }
-            | SampleRefusal::EmptyUnion { .. },
-        )) => envelope(),
+        None => envelope(),
         Some(Err(refusal)) => return Ok(Err(refusal)),
     };
     Ok(Ok(json_text(&value)?))
@@ -1125,8 +1118,8 @@ pub(crate) type BodySample = Result<(Value, Vec<UnmetConstraint>), SampleRefusal
 
 /// The declared body of one error status — its declared example when it declares one, else a value
 /// built from its schema, by the one rule every body follows — with the constraints it leaves
-/// unmet; `None` when the status declares no body. A contract case sends the generic
-/// envelope for some refusals ([`error_payload`]); a docs typed-error sample prints none at all.
+/// unmet; `None` when the status declares no body. A contract case refuses with it
+/// ([`error_payload`]); a docs typed-error sample prints none at all.
 ///
 /// # Errors
 ///

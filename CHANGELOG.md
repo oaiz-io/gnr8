@@ -343,6 +343,11 @@ must move the minor version.
   a sample Go would send in different bytes.
 - An `OpenApiFieldPatch` whose `constraints` set `multiple_of` or `unique_items` now writes them to
   the published field. Both were ignored.
+- A declared error model with no sample (recursive, too deep, or holding an empty enum or union)
+  skips its typed-error contract case and is counted, as every other refused error model is. It
+  used to be answered with the generic `contract_test_error` envelope, a body the model does not
+  describe; that envelope now answers only a status that declares no body. A refused error model
+  is counted only when no other operation supplies a case for that status.
 
 ## 0.18.0 — 2026-10-10
 

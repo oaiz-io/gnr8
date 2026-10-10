@@ -1190,14 +1190,22 @@ fn refused_declared_error_model_skips_its_typed_error_case_and_frees_the_status(
         .cases
         .iter()
         .any(|case| case.operation_id == "first" && case.class == ContractCaseClass::TypedError));
-    // The skipped case is counted, not lost.
-    assert!(
+    // `second` supplies the 404 case, so no 404 case is lost and nothing is counted.
+    assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+    // With no other operation to supply it, the skipped case is counted, not lost.
+    let mut alone = graph.clone();
+    alone.operations.truncate(1);
+    let plan = plan_contract_tests(&alone).unwrap();
+    assert!(!plan
+        .cases
+        .iter()
+        .any(|case| matches!(case.outcome, CaseOutcome::TypedError { status: 404 })));
+    assert_eq!(
         plan.refused
             .iter()
-            .any(|refused| refused.operation_id == "first"
-                && refused.scope == RefusedScope::ErrorReply { status: 404 }),
-        "{:?}",
-        plan.refused
+            .map(|refused| (refused.operation_id.as_str(), &refused.scope))
+            .collect::<Vec<_>>(),
+        vec![("first", &RefusedScope::ErrorReply { status: 404 })]
     );
 }
 
@@ -1220,16 +1228,35 @@ fn a_patterned_declared_error_model_keeps_its_typed_error_case() {
     );
 }
 
+/// Rule 3: a declared error model that cannot be sampled — here an empty union — is a refused
+/// sample like any other, never replaced by a generic envelope the model does not describe.
 #[test]
-fn empty_union_error_model_keeps_the_generic_envelope() {
+fn a_refused_error_model_is_counted_never_replaced_by_an_envelope() {
     let graph = two_404s(&object(&[fld(
         "u",
         &json!({"type": "union", "of": []}),
         true,
     )]));
-    let (operation, body) = typed_error_404(&graph).expect("a 404 case");
-    assert_eq!(operation, "first");
-    assert!(body.contains("contract_test_error"), "{body}");
+    assert_eq!(
+        typed_error_404(&graph),
+        Some(("second".to_string(), "{\"message\":\"gnr8\"}".to_string()))
+    );
+    let mut alone = graph.clone();
+    alone.operations.truncate(1);
+    let plan = plan_contract_tests(&alone).unwrap();
+    assert!(!plan
+        .cases
+        .iter()
+        .any(|case| matches!(case.outcome, CaseOutcome::TypedError { status: 404 })));
+    assert!(
+        plan.refused
+            .iter()
+            .any(|refused| refused.operation_id == "first"
+                && refused.scope == RefusedScope::ErrorReply { status: 404 }
+                && matches!(refused.reason, SampleRefusal::EmptyUnion { .. })),
+        "{:?}",
+        plan.refused
+    );
 }
 
 #[test]

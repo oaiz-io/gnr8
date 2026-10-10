@@ -858,6 +858,9 @@ fn typed_error_cases(
 ) -> Result<Vec<ContractCase>, CoreError> {
     let mut seen: BTreeSet<u16> = BTreeSet::new();
     let mut cases = Vec::new();
+    // Refused error models, counted only for a status no operation ends up supplying: a status
+    // another operation covers loses no case.
+    let mut pending: Vec<RefusedSample> = Vec::new();
     for candidate in candidates {
         let body = candidate.primary_body();
         if candidate.declares_body && body.is_none() {
@@ -878,12 +881,12 @@ fn typed_error_cases(
             if seen.contains(&status) {
                 continue;
             }
-            // A declared error model refused by a constraint skips this case — counted — and leaves
-            // the status unclaimed, so a later operation that declares it can still supply one.
+            // A declared error model with no sample skips this case and leaves the status
+            // unclaimed, so a later operation that declares it can still supply one.
             let payload = match error_payload(candidate.op, status, graph)? {
                 Ok(payload) => payload,
                 Err(reason) => {
-                    refused.push(RefusedSample {
+                    pending.push(RefusedSample {
                         operation_id: candidate.op.id.clone(),
                         scope: RefusedScope::ErrorReply { status },
                         reason,
@@ -905,6 +908,9 @@ fn typed_error_cases(
             ));
         }
     }
+    refused.extend(pending.into_iter().filter(|sample| {
+        !matches!(sample.scope, RefusedScope::ErrorReply { status } if seen.contains(&status))
+    }));
     Ok(cases)
 }
 
