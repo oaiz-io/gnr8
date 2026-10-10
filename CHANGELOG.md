@@ -45,8 +45,8 @@ must move the minor version.
   the only way a pattern-bound input gets a sample on a page. A valid example that no call can
   state, such as a `null` in a request, a whole number in a float field, or a request date-time not
   spelled the way Go sends it (`…05.120Z`, `+00:00`), prints `No sample call: …` and names the
-  value. An operation page prints a declared example's value once, in the Example
-  section. Where the example is declared, the page keeps its name and prose. `SampleBody` and
+  value. An operation page prints a declared example's value once, in the Example section. Where
+  the example is declared, the page keeps its name and prose. `SampleBody` and
   `SuccessSample` gain `example`, `SampleRefusal` gains `Declared`, and `CoreError` gains
   `InvalidExample`.
 - **An SDK target refuses a path parameter that is not one scalar segment.** A path parameter
@@ -174,16 +174,18 @@ must move the minor version.
   longer imports that schema. The decode is strict in all three: a body that is not valid UTF-8
   fails the call with the SDK's decode error (a Go `error`, a Python `UnicodeDecodeError`, a
   TypeScript `ResponseDecodeError` with `failure: "invalid_text"`), and a returned text reply whose
-  media type declares a charset other than UTF-8 is a generation error. A schema-backed reply in a media type that is neither JSON nor text
-  (`application/xml`, say) was decoded as JSON too; it is now returned as bytes (`[]byte`, `bytes`,
-  `Blob`), as a download is. One classification of a media type — JSON for `application/json`,
-  `+json` and a range that admits JSON (`*/*`, `application/*`), text for `text/*`, anything else
-  neither — now serves the SDKs, the contract tests and the docs page. A schema-backed reply under
-  `*/*` or `application/*` still returns its model, as before. A text reply is the return type only when the operation declares no JSON model;
-  beside one it is a status the method does not return, read from a response hook, and opaque bytes
-  beside a text reply are too. Contract tests answer a text reply with the text under its declared
-  media type (`content-type: text/plain`, body `gnr8`), and a text reply whose sample is not a string
-  drives no case, as its docs page prints no body. Generated operations and `contract_test.*` files
+  media type declares a charset other than UTF-8 is a generation error. A schema-backed reply in a
+  media type that is neither JSON nor text (`application/xml`, say) was decoded as JSON too; it is
+  now returned as bytes (`[]byte`, `bytes`, `Blob`), as a download is. One classification of a
+  media type — JSON for `application/json`, `+json` and a range that admits JSON (`*/*`,
+  `application/*`), text for `text/*`, anything else neither — now serves the SDKs, the contract
+  tests and the docs page. A schema-backed reply under `*/*` or `application/*` still returns its
+  model, as before, and the contract tests and the docs check send it as `application/json`. A
+  text reply is the return type only when the operation declares no JSON model; beside one it is
+  a status the method does not return, read from a response hook, and opaque bytes beside a text
+  reply are too. Contract tests answer a text reply with the text under its declared media type
+  (`content-type: text/plain`, body `gnr8`), and a text reply whose sample is not a string drives
+  no case, as its docs page prints no body. Generated operations and `contract_test.*` files
   change for every operation with a non-JSON schema-backed success reply.
 
 - A `pattern` no longer costs contract-test coverage. gnr8 still never synthesizes a value for one:
