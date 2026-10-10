@@ -3315,6 +3315,9 @@ pub(crate) struct CallSite {
     pub(crate) construct: String,
     /// The statement that calls the operation and binds its result.
     pub(crate) call: String,
+    /// The call's arguments as `call` spells them, joined: what a helper taking the operation's
+    /// own arguments (a pagination iterator) is called with.
+    pub(crate) arguments: String,
 }
 
 /// One operation's human prose, normalized into lines ready for comment emission.

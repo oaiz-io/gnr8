@@ -7,18 +7,26 @@
 //! never spell a call three ways.
 
 use crate::docs::identity::{go_sdk_import, ConsumerIdentity};
-use crate::graph::{ApiGraph, Operation};
+use crate::gosdk::ERROR_TYPE as GO_ERROR_TYPE;
+use crate::graph::{ApiGraph, Operation, PaginationTermination};
+use crate::pysdk::ERROR_TYPE as PY_ERROR_TYPE;
 use crate::sdk::builtins::SiblingSdk;
-use crate::sdk::emit_common::{media_family, CallInputs, CallSite, MediaFamily, Qualify};
+use crate::sdk::emit_common::{
+    error_response_bodies_of, media_family, CallInputs, CallSite, MediaFamily, Qualify,
+};
+use crate::tssdk::ERROR_TYPE as TS_ERROR_TYPE;
 use crate::verify::{
     absolute_path, percent_encode, request_header_values, request_query_values,
-    ContractTestLanguage, OperationSample, SampleParam, SuccessOutcome, SuccessSample,
-    WireCredentials, WireValue, CONTRACT_TEST_BASE_URL,
+    ContractTestLanguage, OperationSample, SampleParam, SampleRefusal, SuccessOutcome,
+    SuccessSample, WireCredentials, WireValue, CONTRACT_TEST_BASE_URL,
 };
 use crate::CoreError;
 
 use super::markdown::escape::json_string;
-use super::model::{CannedReply, CodeSample, HttpRequest, ReplyDoc, WireHarness, WireReply};
+use super::model::{
+    CannedReply, CodeSample, CodeSamples, ErrorReplyDoc, Expect, HttpRequest, ReplyDoc, SampleKind,
+    SdkSamples, WireHarness, WireReply,
+};
 
 /// The placeholders a page prints where a contract case sends its constants.
 pub(crate) fn placeholders() -> WireCredentials {
@@ -213,145 +221,421 @@ fn canned_reply(reply: &ReplyDoc) -> CannedReply {
             status: wire.status,
             content_type: wire.content_type.clone(),
             body: wire.body.clone(),
-            success: true,
+            expect: Expect::Success,
         },
         ReplyDoc::Refused(_) | ReplyDoc::Absent => CannedReply {
             status: NO_REPLY_STATUS,
             content_type: String::new(),
             body: String::new(),
-            success: false,
+            expect: Expect::Status,
         },
     }
 }
 
-/// One operation's call sample for one sibling SDK.
+/// The reply the typed-error samples receive: the lowest error status the operation declares a JSON
+/// body for — the first one every generated client decodes into a model — with that body sampled
+/// by the one sampler. `None` when the operation declares no error body.
+///
+/// A body the sampler refuses, or one that leaves a constraint unmet, is refused: the page prints
+/// why, and no SDK prints a typed-error sample.
+///
+/// # Errors
+///
+/// Returns the graph's own error for a dangling schema, and [`CoreError::DocsGen`] for a status
+/// with a body but no media type.
+pub(crate) fn error_reply_doc(
+    graph: &ApiGraph,
+    op: &Operation,
+) -> Result<Option<ErrorReplyDoc>, CoreError> {
+    let Some(first) = error_response_bodies_of(op, graph)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let status = first.status;
+    let refused = |refusal: SampleRefusal| {
+        Ok(Some(ErrorReplyDoc::Refused {
+            status,
+            reason: format!("{refusal}"),
+        }))
+    };
+    let value = match crate::verify::error_body_sample(op, status, graph)? {
+        None => return Ok(None),
+        Some(Err(refusal)) => return refused(refusal),
+        Some(Ok((_, unmet))) if !unmet.is_empty() => {
+            return refused(SampleRefusal::Unmet(unmet[0].clone()));
+        }
+        Some(Ok((value, _))) => value,
+    };
+    let content_type = reply_media_type(op, status)?;
+    if media_family(&content_type) != MediaFamily::Json {
+        return Ok(None);
+    }
+    Ok(Some(ErrorReplyDoc::Printed {
+        model: first.model,
+        reply: WireReply {
+            status,
+            content_type,
+            body: value.to_string(),
+            printed: pretty(&value)?,
+        },
+    }))
+}
+
+/// The reply that ends an iteration after its first page: the printed reply with the next cursor
+/// set to `""` (every generated iterator stops on an empty cursor, and a required or nullable cursor
+/// field still decodes) or the items field emptied, as the pagination policy's termination rule
+/// says. `None` when the operation declares no pagination or its page prints no JSON object reply.
+pub(crate) fn terminating_reply(
+    graph: &ApiGraph,
+    op: &Operation,
+    reply: &ReplyDoc,
+) -> Option<CannedReply> {
+    let policy = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)?;
+    let ReplyDoc::Printed(wire) = reply else {
+        return None;
+    };
+    if media_family(&wire.content_type) != MediaFamily::Json {
+        return None;
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&wire.body).ok()?;
+    let object = value.as_object_mut()?;
+    match policy.termination {
+        PaginationTermination::NoNextCursor => {
+            let field = policy.next_cursor_field.as_ref()?;
+            object.insert(field.clone(), serde_json::Value::String(String::new()));
+        }
+        PaginationTermination::EmptyItems => {
+            object.insert(
+                policy.items_field.clone(),
+                serde_json::Value::Array(Vec::new()),
+            );
+        }
+    }
+    Some(CannedReply {
+        status: wire.status,
+        content_type: wire.content_type.clone(),
+        body: value.to_string(),
+        expect: Expect::Success,
+    })
+}
+
+/// One SDK's call site for one sample, and the client a rung-3 harness builds in its place.
+struct Rendered<'a> {
+    sdk: SiblingSdk<'a>,
+    identity: &'a ConsumerIdentity,
+    call_site: CallSite,
+    client: String,
+}
+
+impl<'a> Rendered<'a> {
+    /// Render the call of `op` with the sampled inputs, through the language's own call-site
+    /// renderer — the one the contract tests use.
+    fn render(
+        graph: &ApiGraph,
+        op: &Operation,
+        sample: &OperationSample,
+        sdk: SiblingSdk<'a>,
+        identity: &'a ConsumerIdentity,
+    ) -> Result<Self, CoreError> {
+        let inputs = CallInputs {
+            params: &sample.params,
+            body: sample.bodies.first(),
+            auth: &sample.auth,
+        };
+        let qualify = Qualify::Consumer { identity };
+        let base_url = json_string(CONTRACT_TEST_BASE_URL);
+        let (site, client) = match sdk {
+            SiblingSdk::Go(_) => {
+                let site = crate::gosdk::callsite::render_call(graph, op, &inputs, &qualify)?;
+                let qualifier = format!("{}.", identity.qualifier);
+                let options = crate::gosdk::callsite::credential_options(
+                    &sample.auth,
+                    &qualifier,
+                    false,
+                    ", ",
+                );
+                let client = format!(
+                    "client := {qualifier}NewClient({base_url}, {qualifier}WithHTTPClient(&http.Client{{Transport: transport}}){options})"
+                );
+                (site, client)
+            }
+            SiblingSdk::Python(t) => {
+                let site = crate::pysdk::callsite::render_call(
+                    graph,
+                    op,
+                    &inputs,
+                    &qualify,
+                    t.model_style,
+                )?;
+                let credentials = crate::pysdk::callsite::client_credentials(&sample.auth, false);
+                let client = format!(
+                    "client = _DocsClient({base_url}, opener=urllib.request.build_opener(wire){credentials})"
+                );
+                (site, client)
+            }
+            SiblingSdk::TypeScript(_) => {
+                let site = crate::tssdk::callsite::render_call(graph, op, &inputs, &qualify)?;
+                let credentials = crate::tssdk::callsite::client_credentials(&sample.auth, false);
+                let client = format!(
+                    "const client = new Client({{ baseUrl: {base_url}, fetch: fetchStub{credentials} }});"
+                );
+                (site, client)
+            }
+        };
+        Ok(Self {
+            sdk,
+            identity,
+            call_site: site,
+            client,
+        })
+    }
+
+    /// A sample of `kind` from its imports, body and the statement a harness runs.
+    fn sample(
+        &self,
+        kind: SampleKind,
+        imports: Vec<String>,
+        body: String,
+        call: String,
+        reply: CannedReply,
+    ) -> CodeSample {
+        let language = self.sdk.language();
+        let text = match language {
+            ContractTestLanguage::Go => format!("{}\n\n{body}", go_import_block(&imports)),
+            ContractTestLanguage::Python | ContractTestLanguage::TypeScript => {
+                format!("{}\n\n{body}", imports.join("\n"))
+            }
+        };
+        CodeSample {
+            language,
+            kind,
+            imports,
+            body,
+            call,
+            text,
+            wire: WireHarness {
+                client: self.client.clone(),
+                reply,
+            },
+        }
+    }
+
+    /// The Go import list: the call site's own standard-library imports and `extra`, sorted, then
+    /// the SDK.
+    fn go_imports(&self, extra: &[&str]) -> Result<Vec<String>, CoreError> {
+        let mut imports: Vec<String> = self
+            .call_site
+            .imports
+            .iter()
+            .filter(|import| **import != self.identity.import)
+            .cloned()
+            .collect();
+        imports.extend(extra.iter().map(ToString::to_string));
+        imports.sort();
+        imports.dedup();
+        imports.push(String::new());
+        imports.push(go_sdk_import(self.identity)?);
+        Ok(imports)
+    }
+
+    /// The Python import line: `Client`, every model the call builds, and `extra`.
+    fn py_imports(&self, extra: &[&str]) -> Vec<String> {
+        let mut names = self.call_site.imports.clone();
+        names.push("Client".to_string());
+        names.extend(extra.iter().map(ToString::to_string));
+        names.sort();
+        names.dedup();
+        vec![format!(
+            "from {} import {}",
+            self.identity.import,
+            names.join(", ")
+        )]
+    }
+
+    /// The TypeScript import line: `names` from the `package.json` name. Object literals are
+    /// structural, so no model is imported.
+    fn ts_imports(&self, names: &str) -> Vec<String> {
+        vec![format!(
+            "import {{ {names} }} from {};",
+            json_string(&self.identity.import)
+        )]
+    }
+}
+
+/// One operation's samples for one sibling SDK: the call, the typed-error sample when the operation
+/// declares an error body, and the pagination iterator when it declares pagination.
 ///
 /// # Errors
 ///
 /// Returns the call-site renderer's error when a sampled value has no literal in the language.
-pub(crate) fn call_sample(
+pub(crate) fn sdk_samples(
     graph: &ApiGraph,
     op: &Operation,
     sample: &OperationSample,
     reply: &ReplyDoc,
+    error_reply: Option<&ErrorReplyDoc>,
     sdk: SiblingSdk<'_>,
     identity: &ConsumerIdentity,
-) -> Result<CodeSample, CoreError> {
-    let inputs = CallInputs {
-        params: &sample.params,
-        body: sample.bodies.first(),
-        auth: &sample.auth,
+) -> Result<SdkSamples, CoreError> {
+    let site = Rendered::render(graph, op, sample, sdk, identity)?;
+    let call = call_sample(&site, canned_reply(reply))?;
+    let typed_error = match error_reply {
+        Some(ErrorReplyDoc::Printed { model, reply }) => {
+            Some(typed_error_sample(&site, model, reply)?)
+        }
+        Some(ErrorReplyDoc::Refused { .. }) | None => None,
     };
-    let qualify = Qualify::Consumer { identity };
-    let base_url = json_string(CONTRACT_TEST_BASE_URL);
-    let reply = canned_reply(reply);
-    let language = sdk.language();
-    let (imports, body, call, client) = match sdk {
-        SiblingSdk::Go(_) => {
-            let site = crate::gosdk::callsite::render_call(graph, op, &inputs, &qualify)?;
-            let qualifier = format!("{}.", identity.qualifier);
-            let options =
-                crate::gosdk::callsite::credential_options(&sample.auth, &qualifier, false, ", ");
-            let client = format!(
-                "client := {qualifier}NewClient({base_url}, {qualifier}WithHTTPClient(&http.Client{{Transport: transport}}){options})"
-            );
-            let (imports, body, call) = go_call(&site, identity)?;
-            (imports, body, call, client)
-        }
-        SiblingSdk::Python(t) => {
-            let site =
-                crate::pysdk::callsite::render_call(graph, op, &inputs, &qualify, t.model_style)?;
-            let credentials = crate::pysdk::callsite::client_credentials(&sample.auth, false);
-            let client = format!(
-                "client = _DocsClient({base_url}, opener=urllib.request.build_opener(wire){credentials})"
-            );
-            let (imports, body, call) = py_call(&site, identity);
-            (imports, body, call, client)
-        }
-        SiblingSdk::TypeScript(_) => {
-            let site = crate::tssdk::callsite::render_call(graph, op, &inputs, &qualify)?;
-            let credentials = crate::tssdk::callsite::client_credentials(&sample.auth, false);
-            let client = format!(
-                "const client = new Client({{ baseUrl: {base_url}, fetch: fetchStub{credentials} }});"
-            );
-            let (imports, body, call) = ts_call(&site, identity);
-            (imports, body, call, client)
-        }
+    let iterate = match terminating_reply(graph, op, reply) {
+        Some(terminating) => iterate_sample(graph, op, &site, terminating)?,
+        None => None,
     };
-    let text = match language {
-        ContractTestLanguage::Go => format!("{}\n\n{body}", go_import_block(&imports)),
-        ContractTestLanguage::Python | ContractTestLanguage::TypeScript => {
-            format!("{}\n\n{body}", imports.join("\n"))
-        }
-    };
-    Ok(CodeSample {
-        language,
-        imports,
-        body,
+    Ok(SdkSamples::Code(Box::new(CodeSamples {
         call,
-        text,
-        wire: WireHarness { client, reply },
+        typed_error,
+        iterate,
+    })))
+}
+
+/// The sampled call: construction, call and one use of the result.
+fn call_sample(site: &Rendered<'_>, reply: CannedReply) -> Result<CodeSample, CoreError> {
+    let call = &site.call_site.call;
+    let construct = &site.call_site.construct;
+    Ok(match site.sdk {
+        SiblingSdk::Go(_) => site.sample(
+            SampleKind::Call,
+            site.go_imports(&["fmt"])?,
+            format!(
+                "{construct}\n{call}\nif err != nil {{\n\treturn err\n}}\nfmt.Printf(\"%+v\\n\", result)"
+            ),
+            call.clone(),
+            reply,
+        ),
+        SiblingSdk::Python(_) => site.sample(
+            SampleKind::Call,
+            site.py_imports(&[]),
+            format!("{construct}\nresult = {call}\nprint(result)"),
+            format!("result = {call}"),
+            reply,
+        ),
+        SiblingSdk::TypeScript(_) => site.sample(
+            SampleKind::Call,
+            site.ts_imports("Client"),
+            format!("{construct}\nconst result = await {call};\nconsole.log(result);"),
+            format!("const result = await {call};"),
+            reply,
+        ),
     })
 }
 
-/// Python: one `from <package> import …` line naming `Client` and every model the call builds,
-/// then construction, call and one use of the result.
-fn py_call(site: &CallSite, identity: &ConsumerIdentity) -> (Vec<String>, String, String) {
-    let mut names = site.imports.clone();
-    names.push("Client".to_string());
-    names.sort();
-    names.dedup();
-    (
-        vec![format!(
-            "from {} import {}",
-            identity.import,
-            names.join(", ")
-        )],
-        format!("{}\nresult = {}\nprint(result)", site.construct, site.call),
-        format!("result = {}", site.call),
-    )
+/// The call again, handling the typed error the `reply` status raises: Go `errors.As` and the
+/// typed body, Python `isinstance` on the error's body, TypeScript `instanceof` and the status.
+/// A harness answers with exactly `reply` and asserts the typed body it decodes.
+fn typed_error_sample(
+    site: &Rendered<'_>,
+    model: &str,
+    reply: &WireReply,
+) -> Result<CodeSample, CoreError> {
+    let call = &site.call_site.call;
+    let construct = &site.call_site.construct;
+    let status = reply.status;
+    let canned = CannedReply {
+        status,
+        content_type: reply.content_type.clone(),
+        body: reply.body.clone(),
+        expect: Expect::TypedBody {
+            model: model.to_string(),
+        },
+    };
+    Ok(match site.sdk {
+        SiblingSdk::Go(_) => {
+            let q = &site.identity.qualifier;
+            site.sample(
+                SampleKind::TypedError,
+                site.go_imports(&["errors", "fmt"])?,
+                format!(
+                    "{construct}\n{call}\nvar apiErr *{q}.{GO_ERROR_TYPE}\nif errors.As(err, &apiErr) && apiErr.StatusCode == {status} {{\n\tbody, _ := apiErr.Body.({q}.{model})\n\tfmt.Printf(\"%+v\\n\", body)\n\treturn nil\n}}\nif err != nil {{\n\treturn err\n}}\nfmt.Printf(\"%+v\\n\", result)"
+                ),
+                call.clone(),
+                canned,
+            )
+        }
+        SiblingSdk::Python(_) => site.sample(
+            SampleKind::TypedError,
+            site.py_imports(&[PY_ERROR_TYPE, model]),
+            format!(
+                "{construct}\ntry:\n    result = {call}\n    print(result)\nexcept {PY_ERROR_TYPE} as error:\n    if error.status_code != {status} or not isinstance(error.body, {model}):\n        raise\n    print(error.body)"
+            ),
+            format!("result = {call}"),
+            canned,
+        ),
+        SiblingSdk::TypeScript(_) => site.sample(
+            SampleKind::TypedError,
+            site.ts_imports(&format!("{TS_ERROR_TYPE}, Client")),
+            format!(
+                "{construct}\ntry {{\n  const result = await {call};\n  console.log(result);\n}} catch (error) {{\n  if (!(error instanceof {TS_ERROR_TYPE}) || error.status !== {status}) {{\n    throw error;\n  }}\n  console.log(error.body);\n}}"
+            ),
+            format!("const result = await {call};"),
+            canned,
+        ),
+    })
 }
 
-/// TypeScript: `Client` from the `package.json` name — object literals are structural, so nothing
-/// else is imported — then construction, the awaited call and one use of the result.
-fn ts_call(site: &CallSite, identity: &ConsumerIdentity) -> (Vec<String>, String, String) {
-    (
-        vec![format!(
-            "import {{ Client }} from {};",
-            json_string(&identity.import)
-        )],
-        format!(
-            "{}\nconst result = await {};\nconsole.log(result);",
-            site.construct, site.call
-        ),
-        format!("const result = await {};", site.call),
-    )
-}
-
-/// Go: construction, call, the error check and one use of the result, so it compiles as written.
-fn go_call(
-    site: &CallSite,
-    identity: &ConsumerIdentity,
-) -> Result<(Vec<String>, String, String), CoreError> {
-    let mut imports: Vec<String> = site
-        .imports
-        .iter()
-        .filter(|import| **import != identity.import)
-        .cloned()
-        .collect();
-    imports.push("fmt".to_string());
-    imports.sort();
-    imports.dedup();
-    imports.push(String::new());
-    imports.push(go_sdk_import(identity)?);
-    Ok((
-        imports,
-        format!(
-            "{}\n{}\nif err != nil {{\n\treturn err\n}}\nfmt.Printf(\"%+v\\n\", result)",
-            site.construct, site.call
-        ),
-        site.call.clone(),
-    ))
+/// The pagination iterator, called with the operation's own arguments: every item of every page.
+/// A harness answers with `reply`, the terminating reply, so the iteration sends one request.
+fn iterate_sample(
+    graph: &ApiGraph,
+    op: &Operation,
+    site: &Rendered<'_>,
+    reply: CannedReply,
+) -> Result<Option<CodeSample>, CoreError> {
+    let construct = &site.call_site.construct;
+    let arguments = &site.call_site.arguments;
+    Ok(Some(match site.sdk {
+        SiblingSdk::Go(_) => {
+            let qualifier = format!("{}.", site.identity.qualifier);
+            let Some(item) = crate::gosdk::callsite::iterate_item_type(graph, op, &qualifier)?
+            else {
+                return Ok(None);
+            };
+            let iterate = crate::gosdk::callsite::iterate_method(op);
+            let call = format!(
+                "err := client.{iterate}({arguments}, func(item {item}) bool {{\n\tfmt.Printf(\"%+v\\n\", item)\n\treturn true\n}})"
+            );
+            site.sample(
+                SampleKind::Iterate,
+                site.go_imports(&["fmt"])?,
+                format!("{construct}\n{call}\nif err != nil {{\n\treturn err\n}}"),
+                call,
+                reply,
+            )
+        }
+        SiblingSdk::Python(_) => {
+            let iterate = crate::pysdk::callsite::iterate_method(op);
+            let call = format!("for item in client.{iterate}({arguments}):\n    print(item)");
+            site.sample(
+                SampleKind::Iterate,
+                site.py_imports(&[]),
+                format!("{construct}\n{call}"),
+                call,
+                reply,
+            )
+        }
+        SiblingSdk::TypeScript(_) => {
+            let iterate = crate::tssdk::callsite::iterate_method(op);
+            let call = format!(
+                "for await (const item of client.{iterate}({arguments})) {{\n  console.log(item);\n}}"
+            );
+            site.sample(
+                SampleKind::Iterate,
+                site.ts_imports("Client"),
+                format!("{construct}\n{call}"),
+                call,
+                reply,
+            )
+        }
+    }))
 }
 
 /// A Go import block; an empty entry separates the standard library from the SDK.

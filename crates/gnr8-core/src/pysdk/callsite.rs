@@ -24,6 +24,11 @@ use crate::CoreError;
 
 use super::emit::{operation_method_name, py_field_ident, py_string_literal, resolve_op_args_for};
 
+/// The pagination iterator a paginated operation's client gains, as the emitter names it.
+pub(crate) fn iterate_method(op: &Operation) -> String {
+    super::emit::pagination_names(&operation_method_name(op)).iterate
+}
+
 /// Render the client construction and the call of `op` with `inputs`.
 ///
 /// `CallSite::imports` names every generated model the call constructs, sorted; `call` is the call
@@ -48,10 +53,12 @@ pub(crate) fn render_call(
     } else {
         format!("client = _contract_client(handler{credentials})")
     };
+    let arguments = args.join(", ");
     Ok(CallSite {
         imports: models.into_iter().collect(),
         construct,
-        call: format!("client.{}({})", operation_method_name(op), args.join(", ")),
+        call: format!("client.{}({arguments})", operation_method_name(op)),
+        arguments,
     })
 }
 

@@ -69,6 +69,18 @@ content-type: application/json
 }
 ```
 
+The typed-error samples receive this `404` reply:
+
+```http
+HTTP/1.1 404
+content-type: application/json
+
+{
+  "code": "gnr8",
+  "message": "gnr8"
+}
+```
+
 ### Go — `example.com/taskflow/sdk`
 
 ```go
@@ -80,6 +92,30 @@ import (
 
 client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
 result, err := client.UpdateTask(ctx, "gnr8", sdk.UpdateTaskRequest{})
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+
+Handling the `404` reply:
+
+```go
+import (
+	"errors"
+	"fmt"
+
+	"example.com/taskflow/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.UpdateTask(ctx, "gnr8", sdk.UpdateTaskRequest{})
+var apiErr *sdk.APIError
+if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+	body, _ := apiErr.Body.(sdk.ErrorResponse)
+	fmt.Printf("%+v\n", body)
+	return nil
+}
 if err != nil {
 	return err
 }

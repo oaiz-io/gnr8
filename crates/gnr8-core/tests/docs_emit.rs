@@ -466,7 +466,11 @@ fn declared_examples_drive_the_sample_and_are_printed_once() {
     // is the reply it gets.
     assert!(example.contains("\"title\": \"Dune\""), "{example}");
     assert!(example.contains("\"id\": \"b-1\""), "{example}");
-    assert!(!example.contains("gnr8"), "{example}");
+    // Only the error reply, which declares no example, is sampled from its schema.
+    let exchange = &example[..example
+        .find("The typed-error samples receive")
+        .unwrap_or(example.len())];
+    assert!(!exchange.contains("gnr8"), "{example}");
 
     // Each keeps its name and prose where it is declared, and its value is printed once.
     let request = section(text, "Request body");
@@ -1181,6 +1185,76 @@ fn pagination_section_only_with_a_policy() {
     }
 }
 
+/// An operation that declares an error body gets a typed-error sample per SDK, after the error reply
+/// it receives — the lowest error status with a body — and a paginated one an iterator sample. An
+/// error body with no sample prints why instead, and no SDK prints a typed-error sample.
+#[test]
+fn typed_error_and_iterator_samples_follow_the_call() {
+    let mut value = bookstore_json();
+    value["operations"][0]["params"]
+        .as_array_mut()
+        .unwrap()
+        .push(
+            json!({"name": "cursor", "location": "query", "required": false,
+                     "schema": string(), "provenance": span()}),
+        );
+    value["schemas"][1]["body"]["of"]
+        .as_array_mut()
+        .unwrap()
+        .push(field("next_cursor", &string(), false));
+    value["pagination"] = json!([{
+        "operation_id": "listBooks", "mode": "cursor", "items_field": "books",
+        "cursor_param": "cursor", "next_cursor_field": "next_cursor",
+        "termination": "no_next_cursor"
+    }]);
+    let pages = render(&graph_of(value), &[go_sdk(), py_sdk(), ts_sdk(true)]);
+    let created = section(page(&pages, "operations/create-book.md"), "Example");
+    assert!(
+        created.contains(
+            "The typed-error samples receive this `400` reply:\n\n```http\nHTTP/1.1 400\ncontent-type: application/json\n\n{\n  \"message\": \"gnr8\"\n}\n```\n"
+        ),
+        "{created}"
+    );
+    for handling in [
+        "if errors.As(err, &apiErr) && apiErr.StatusCode == 400 {\n\tbody, _ := apiErr.Body.(sdk.ErrorResponse)",
+        "from sdk import ApiError, Client, CreateBookRequest, ErrorResponse, Genre\n",
+        "    if error.status_code != 400 or not isinstance(error.body, ErrorResponse):\n        raise\n",
+        "import { ApiError, Client } from \"@example/bookstore-sdk\";\n",
+        "  if (!(error instanceof ApiError) || error.status !== 400) {\n    throw error;\n  }\n",
+    ] {
+        assert!(created.contains(handling), "{handling} in:\n{created}");
+    }
+    assert_eq!(created.matches("Handling the `400` reply:").count(), 3);
+
+    let listed = section(page(&pages, "operations/list-books.md"), "Example");
+    assert!(!listed.contains("typed-error"), "{listed}");
+    assert_eq!(
+        listed
+            .matches("Iterating over every item of every page:")
+            .count(),
+        3
+    );
+    for iterate in [
+        "err := client.IterateListBooks(ctx, sdk.ListBooksParams{",
+        "}, func(item sdk.Book) bool {\n\tfmt.Printf(\"%+v\\n\", item)\n\treturn true\n})\n",
+        "for item in client.iter_list_books(",
+        "for await (const item of client.iterateListBooks(",
+    ] {
+        assert!(listed.contains(iterate), "{iterate} in:\n{listed}");
+    }
+
+    // An error body the sampler refuses stands in for every typed-error sample.
+    let mut value = bookstore_json();
+    value["schemas"][3]["body"]["of"][0]["meta"] = json!({"constraints": {"pattern": "^E"}});
+    let pages = render(&graph_of(value), &[go_sdk()]);
+    let created = section(page(&pages, "operations/create-book.md"), "Example");
+    assert!(
+        created.contains("No typed-error sample for the `400` reply: "),
+        "{created}"
+    );
+    assert!(!created.contains("Handling the"), "{created}");
+}
+
 /// A request the docs model says a sample sends.
 fn request(
     method: &str,
@@ -1646,7 +1720,14 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
         "the bookstore samples some operation"
     );
     for entry in &unit.entries {
-        assert_eq!(entry.embeds.len(), 2, "{}", entry.operation_id);
+        // The request block and the sample's own block; a typed-error sample also relies on the
+        // error reply block its harness answers with.
+        let relied_on = if entry.kind == gnr8_engine::docs::verify::EntryKind::TypedError {
+            3
+        } else {
+            2
+        };
+        assert_eq!(entry.embeds.len(), relied_on, "{}", entry.operation_id);
         for embed in &entry.embeds {
             assert!(
                 embeds(page(&pages, &embed.page), &embed.block),

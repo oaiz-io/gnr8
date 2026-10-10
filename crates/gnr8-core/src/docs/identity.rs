@@ -126,6 +126,8 @@ const GO_TAKEN_NAMES: &[&str] = &[
     // The sample's locals and imports, and the wrapper's parameters.
     "client",
     "result",
+    "item",
+    "apiErr",
     "err",
     "ctx",
     "fmt",
@@ -163,7 +165,9 @@ const GO_TAKEN_NAMES: &[&str] = &[
     "text",
     "operation",
     "outcome",
-    "apiErr",
+    "ok",
+    "want",
+    "reflect",
     // Predeclared identifiers.
     "any",
     "append",

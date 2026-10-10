@@ -13,7 +13,7 @@ mod docs_pipeline;
 use std::process::Command;
 
 use docs_pipeline::{temp_dir, DocsRun, SDK_DIR};
-use gnr8_engine::docs::verify::compile_unit;
+use gnr8_engine::docs::verify::{compile_unit, EntryKind};
 use gnr8_engine::sdk::builtins::SiblingSdk;
 use gnr8_engine::sdk::prelude::*;
 
@@ -54,7 +54,19 @@ fn assert_go_unit_vets(run: &DocsRun, go: &GoSdk, label: &str) -> usize {
         unit.text
     );
     let _ = std::fs::remove_dir_all(&dir);
-    unit.entries.len()
+    assert!(
+        kind_count(&unit, EntryKind::TypedError) > 0,
+        "{label}: an operation declaring an error body has a typed-error sample"
+    );
+    kind_count(&unit, EntryKind::Call)
+}
+
+/// How many of a unit's samples are of `kind`.
+fn kind_count(unit: &CompileUnit, kind: EntryKind) -> usize {
+    unit.entries
+        .iter()
+        .filter(|entry| entry.kind == kind)
+        .count()
 }
 
 #[test]
@@ -164,7 +176,11 @@ fn python_docs_snippet_calls_raise_api_error_through_the_stub_opener() {
         .unwrap()
         .expect("a Python SDK with package metadata has a consumer identity");
     assert_eq!(unit.identity, "sdk");
-    assert_eq!(unit.entries.len(), run.graph.operations.len());
+    assert_eq!(
+        kind_count(&unit, EntryKind::Call),
+        run.graph.operations.len()
+    );
+    assert!(kind_count(&unit, EntryKind::TypedError) > 0);
     let pages = run.pages();
     for entry in &unit.entries {
         assert!(
@@ -273,7 +289,11 @@ fn typescript_docs_snippets_typecheck_under_the_gate_options_with_paths() {
         .unwrap()
         .expect("a TypeScript SDK with package metadata has a consumer identity");
     assert_eq!(unit.identity, "@example/goalservice-sdk");
-    assert_eq!(unit.entries.len(), run.graph.operations.len());
+    assert_eq!(
+        kind_count(&unit, EntryKind::Call),
+        run.graph.operations.len()
+    );
+    assert!(kind_count(&unit, EntryKind::TypedError) > 0);
     let pages = run.pages();
     for entry in &unit.entries {
         assert!(
@@ -344,7 +364,7 @@ fn assert_records_match(
                 embed.block
             );
         }
-        check_operation_wire(&entry.request, records, &entry.operation_id, language)
+        check_operation_wire(&entry.request, records, &entry.mark(), language)
             .unwrap_or_else(|field| panic!("{}: {field}", entry.operation_id));
     }
 }
@@ -1039,4 +1059,210 @@ paths:
         unit.text
     );
     assert_python_records_match(&run, &py);
+}
+
+/// A paginated API with declared error bodies, for the typed-error and iterator samples: a cursor
+/// listing whose next cursor is required and nullable, a page listing that ends on empty items,
+/// and error statuses of which the lowest with a body is the one sampled.
+const PAGED_SPEC: &str = r##"openapi: 3.1.0
+info: { title: Paged, version: "1.0.0" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - { name: cursor, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: one page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ItemPage" }
+        "404":
+          description: missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Problem" }
+  /pages:
+    get:
+      operationId: listPages
+      parameters:
+        - { name: page, in: query, required: false, schema: { type: integer } }
+        - { name: size, in: query, required: false, schema: { type: integer } }
+      responses:
+        "200":
+          description: one page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PagePage" }
+        "500":
+          description: broken
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "422":
+          description: invalid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Problem" }
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+    ItemPage:
+      type: object
+      required: [items, next]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Item" } }
+        next: { type: [string, "null"] }
+    PagePage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Item" } }
+    Problem:
+      type: object
+      required: [code, detail]
+      properties:
+        code: { type: string }
+        detail: { type: string }
+"##;
+
+/// The paged API with `targets`, its listings paginated.
+fn paged_run(targets: impl FnOnce(Pipeline) -> Pipeline) -> DocsRun {
+    docs_pipeline::docs_from_spec(PAGED_SPEC, |pipeline| {
+        targets(
+            pipeline
+                .transform(ConfigurePagination::cursor(
+                    OperationSelector::operation("listItems"),
+                    "cursor",
+                    "next",
+                    "items",
+                ))
+                .transform(ConfigurePagination::page(
+                    OperationSelector::operation("listPages"),
+                    "page",
+                    "size",
+                    "items",
+                )),
+        )
+    })
+}
+
+/// Every unit carries a typed-error and an iterator sample per paginated operation: the typed error
+/// of the lowest error status with a body (`422`, not `500`), the iterator over every item.
+fn assert_paged_entries(unit: &CompileUnit) {
+    let kinds: Vec<(&str, EntryKind)> = unit
+        .entries
+        .iter()
+        .map(|entry| (entry.operation_id.as_str(), entry.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("listItems", EntryKind::Call),
+            ("listItems", EntryKind::TypedError),
+            ("listItems", EntryKind::Iterate),
+            ("listPages", EntryKind::Call),
+            ("listPages", EntryKind::TypedError),
+            ("listPages", EntryKind::Iterate),
+        ]
+    );
+    assert!(unit.text.contains("422"), "{}", unit.text);
+    assert!(!unit.text.contains("500"), "{}", unit.text);
+}
+
+/// Go: the typed-error sample's `errors.As` and typed body vet as printed, and at rung 3 the call
+/// answered with the page's error reply surfaces `*APIError` carrying a `Problem` equal to it; the
+/// iterator sends exactly the page's request and stops on the terminating reply. A typed-error reply
+/// whose body differs from the page's fails rung 3.
+#[test]
+fn typed_error_and_iterator_samples_hold_at_rungs_two_and_three_in_go() {
+    if !docs_pipeline::go_available() {
+        return;
+    }
+    let go = GoSdk::new().module("example.com/paged/sdk").to(SDK_DIR);
+    let run = paged_run(|pipeline| pipeline.target(go.clone()));
+    let unit = compile_unit(&run.graph, SiblingSdk::Go(&go))
+        .unwrap()
+        .unwrap();
+    assert_paged_entries(&unit);
+    go_unit_rungs(&run, &go, "paged-go", &unit);
+
+    // The canned error body the harness answers with differs from the one it asserts.
+    let respond = "transport.respond(404, \"application/json\", \"{\\\"code\\\":\\\"gnr8\\\"";
+    let planted = CompileUnit {
+        text: unit.text.replacen(
+            respond,
+            "transport.respond(404, \"application/json\", \"{\\\"code\\\":\\\"other\\\"",
+            1,
+        ),
+        ..unit.clone()
+    };
+    assert_ne!(planted.text, unit.text, "the plant must change the unit");
+    let outcome = std::panic::catch_unwind(|| go_unit_rungs(&run, &go, "paged-planted", &planted));
+    let message = outcome
+        .err()
+        .and_then(|panic| panic.downcast::<String>().ok())
+        .map_or_else(
+            || panic!("a typed body unlike the page's must fail rung 3"),
+            |message| *message,
+        );
+    assert!(message.contains("expected the body"), "{message}");
+}
+
+/// Python: rung 2 runs every sample against the refusing stub, and rung 3 checks the typed body
+/// with `isinstance` and the iterator's single request.
+#[test]
+fn typed_error_and_iterator_samples_hold_at_rungs_two_and_three_in_python() {
+    if !python_available() || !pydantic_available() {
+        eprintln!("skipping: python3 with pydantic is not available");
+        return;
+    }
+    let py = PySdk::new()
+        .module("example.com/paged/sdk")
+        .to("generated/py");
+    let run = paged_run(|pipeline| pipeline.target(py.clone()));
+    let unit = compile_unit(&run.graph, SiblingSdk::Python(&py))
+        .unwrap()
+        .unwrap();
+    assert_paged_entries(&unit);
+    let output = run_python_unit(&run, &unit.text, &unit.file_name, &unit.identity);
+    assert!(
+        output.status.success(),
+        "{}\n--- {} ---\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        unit.file_name,
+        unit.text
+    );
+    assert_python_records_match(&run, &py);
+}
+
+/// TypeScript: the samples type-check under the gate options, and rung 3 checks `instanceof` and
+/// the status, the body as JSON, and the iterator's single request.
+#[test]
+fn typed_error_and_iterator_samples_hold_at_rungs_two_and_three_in_typescript() {
+    if !typescript_available() {
+        return;
+    }
+    let ts = TsSdk::new()
+        .module("paged")
+        .package(SdkPackageMetadata::new().registry_name("@example/paged-sdk"))
+        .to("generated/ts");
+    let run = paged_run(|pipeline| pipeline.target(ts.clone()));
+    let unit = compile_unit(&run.graph, SiblingSdk::TypeScript(&ts))
+        .unwrap()
+        .unwrap();
+    assert_paged_entries(&unit);
+    let output = run_tsc(&run, &unit.text, &unit.identity);
+    assert!(
+        output.status.success(),
+        "{}\n--- snippets.ts ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        unit.text
+    );
+    typescript_rung_three(&run, &ts);
 }

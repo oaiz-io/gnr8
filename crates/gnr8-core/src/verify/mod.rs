@@ -31,7 +31,7 @@ pub use sample::{
     check_declared_examples, sample_operation, satisfies, DeclaredLimit, OperationSample,
     RefusedBody, SampleRefusal, Sampled, SuccessOutcome, SuccessSample, UnmetConstraint, Violation,
 };
-pub(crate) use sample::{credential_of, reply_media};
+pub(crate) use sample::{credential_of, error_body_sample, reply_media};
 use sample::{error_payload, success_sample};
 
 /// The largest number of cases one target's contract test may carry.

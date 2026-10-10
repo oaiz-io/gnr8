@@ -65,6 +65,18 @@ content-type: application/json
 }
 ```
 
+The typed-error samples receive this `400` reply:
+
+```http
+HTTP/1.1 400
+content-type: application/json
+
+{
+  "code": "gnr8",
+  "message": "gnr8"
+}
+```
+
 ### Go — `example.com/taskflow/sdk`
 
 ```go
@@ -76,6 +88,30 @@ import (
 
 client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
 result, err := client.CreateTask(ctx, sdk.CreateTaskRequest{Status: sdk.Status("done"), Title: "gnr8"})
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+
+Handling the `400` reply:
+
+```go
+import (
+	"errors"
+	"fmt"
+
+	"example.com/taskflow/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.CreateTask(ctx, sdk.CreateTaskRequest{Status: sdk.Status("done"), Title: "gnr8"})
+var apiErr *sdk.APIError
+if errors.As(err, &apiErr) && apiErr.StatusCode == 400 {
+	body, _ := apiErr.Body.(sdk.ErrorResponse)
+	fmt.Printf("%+v\n", body)
+	return nil
+}
 if err != nil {
 	return err
 }

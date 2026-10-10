@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::docs::identity::{go_sdk_import, ConsumerIdentity};
-use crate::docs::model::{CodeSample, DocsModel, ExampleDoc, SdkSamples};
+use crate::docs::model::{
+    CodeSample, DocsModel, ErrorReplyDoc, ExampleDoc, Expect, SampleKind, SdkSamples,
+};
 use crate::docs::sample::go_import_block;
 use crate::gosdk::ERROR_TYPE as GO_ERROR_TYPE;
 use crate::graph::ApiGraph;
@@ -44,16 +46,84 @@ pub struct CompileUnit {
 pub struct CompileEntry {
     /// The graph operation id.
     pub operation_id: String,
+    /// What the sample shows: the call, its typed error, or the pagination iterator.
+    pub kind: EntryKind,
     /// Docs-relative path of the page the sample is printed on, e.g. `operations/create-book.md`.
     pub page: String,
     /// The sample's body exactly as the unit wraps it (construction + call + result use), which
     /// names the entry a tool's complaint points into.
     pub snippet: String,
     /// Every block rung 2 requires the finished pages to print as whole lines: the sample's code
-    /// block and the HTTP request block rung 3 compares against.
+    /// block, the HTTP request block rung 3 compares against, and, for a typed-error sample, the
+    /// error reply block its harness answers with.
     pub embeds: Vec<PageEmbed>,
     /// The request the sample's call must send — the one the embedded HTTP block prints.
     pub request: HttpRequest,
+}
+
+impl CompileEntry {
+    /// The name the unit's rung-3 harness marks this sample's requests with: the operation id, with
+    /// the sample kind after a `/` for any sample but the call.
+    #[must_use]
+    pub fn mark(&self) -> String {
+        match self.kind {
+            EntryKind::Call => self.operation_id.clone(),
+            EntryKind::TypedError => format!("{}/typed-error", self.operation_id),
+            EntryKind::Iterate => format!("{}/iterate", self.operation_id),
+        }
+    }
+}
+
+/// What one compile entry's sample shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// The call and one use of its result.
+    Call,
+    /// The call, handling the typed error of the operation's error reply.
+    TypedError,
+    /// The pagination iterator over every item.
+    Iterate,
+}
+
+impl EntryKind {
+    /// How a report names the sample.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Call => "call",
+            Self::TypedError => "typed-error sample",
+            Self::Iterate => "iterator sample",
+        }
+    }
+
+    const fn of(kind: SampleKind) -> Self {
+        match kind {
+            SampleKind::Call => Self::Call,
+            SampleKind::TypedError => Self::TypedError,
+            SampleKind::Iterate => Self::Iterate,
+        }
+    }
+
+    /// The suffix a wrapper's name carries after the operation's, so no two wrappers share a name:
+    /// an operation-derived name never holds an underscore run.
+    const fn wrapper_suffix(self, snake: bool) -> &'static str {
+        match (self, snake) {
+            (Self::Call, _) => "",
+            (Self::TypedError, true) => "__typed_error",
+            (Self::TypedError, false) => "_TypedError",
+            (Self::Iterate, true) => "__iterate",
+            (Self::Iterate, false) => "_Iterate",
+        }
+    }
+}
+
+/// One sample a unit carries: its operation, the mark its requests are recorded under, and the
+/// sample itself.
+struct UnitSample<'a> {
+    operation: &'a str,
+    kind: EntryKind,
+    mark: String,
+    sample: &'a CodeSample,
 }
 
 /// One block a page must print, byte for byte, as a contiguous run of whole lines.
@@ -90,35 +160,64 @@ fn unit_of(
         return Ok(None);
     };
     let mut entries = Vec::new();
-    let mut samples: Vec<(&str, &CodeSample)> = Vec::new();
+    let mut samples: Vec<UnitSample<'_>> = Vec::new();
     for op in &model.operations {
         let ExampleDoc::Sampled {
-            request, per_sdk, ..
+            request,
+            error_reply,
+            per_sdk,
+            ..
         } = &op.example
         else {
             continue;
         };
-        let Some(SdkSamples::Code { call }) = per_sdk.get(index) else {
+        let Some(SdkSamples::Code(code)) = per_sdk.get(index) else {
             continue;
         };
         let page = op.page.path();
-        entries.push(CompileEntry {
-            operation_id: op.id.clone(),
-            embeds: vec![
+        let request_block = render::request_block(request)?;
+        for sample in [
+            Some(&code.call),
+            code.typed_error.as_ref(),
+            code.iterate.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut embeds = vec![
                 PageEmbed {
                     page: page.clone(),
-                    block: render::request_block(request)?,
+                    block: request_block.clone(),
                 },
                 PageEmbed {
                     page: page.clone(),
-                    block: render::sample_block(call),
+                    block: render::sample_block(sample),
                 },
-            ],
-            page,
-            snippet: call.body.clone(),
-            request: (**request).clone(),
-        });
-        samples.push((op.id.as_str(), call));
+            ];
+            if let (SampleKind::TypedError, Some(ErrorReplyDoc::Printed { reply, .. })) =
+                (sample.kind, error_reply)
+            {
+                embeds.push(PageEmbed {
+                    page: page.clone(),
+                    block: render::error_reply_block(reply),
+                });
+            }
+            let entry = CompileEntry {
+                operation_id: op.id.clone(),
+                kind: EntryKind::of(sample.kind),
+                embeds,
+                page: page.clone(),
+                snippet: sample.body.clone(),
+                request: (**request).clone(),
+            };
+            samples.push(UnitSample {
+                operation: op.id.as_str(),
+                kind: entry.kind,
+                mark: entry.mark(),
+                sample,
+            });
+            entries.push(entry);
+        }
     }
     let (file_name, text) = match sdk {
         SiblingSdk::Go(t) => (
@@ -234,11 +333,12 @@ fn indent(body: &str, by: &str) -> String {
 /// client is built through the opener seam with a stub that refuses every request. A sample passes
 /// only when its call raises the SDK's typed `ApiError`, which proves the method name, every method
 /// keyword, every model constructor and every required model field resolved and a request was built.
-fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -> String {
+fn py_unit_text(identity: &ConsumerIdentity, snippets: &[UnitSample<'_>]) -> String {
     let package = &identity.import;
-    // The models one sample builds, imported inside the function that runs it: a model then never
-    // shares the module namespace with the harness's own names (`DocsWire`, `_Wire`, …), so a schema
-    // may be called anything the SDK itself accepts.
+    // The names one sample imports beyond `Client` — the models it builds, the error type and the
+    // model a typed-error sample checks — imported inside the function that runs it: a model then
+    // never shares the module namespace with the harness's own names (`DocsWire`, `_Wire`, …), so a
+    // schema may be called anything the SDK itself accepts.
     let model_import = |snippet: &CodeSample| -> Option<String> {
         let models: Vec<&str> = snippet
             .imports
@@ -249,21 +349,28 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -
             .collect();
         (!models.is_empty()).then(|| format!("from {package} import {}", models.join(", ")))
     };
+    let wrapper = |unit: &UnitSample<'_>| {
+        format!(
+            "{}{}",
+            py_wrapper_name(unit.operation),
+            unit.kind.wrapper_suffix(true)
+        )
+    };
     let mut out = String::from(
         "from __future__ import annotations\n\nimport email.message\nimport io\nimport json\nimport os\nimport unittest\nimport urllib.parse\nimport urllib.request\nimport urllib.response\n\n",
     );
     let _ = writeln!(out, "from {package} import {PY_ERROR_TYPE}");
     let _ = writeln!(out, "from {package} import Client as _DocsClient");
     out.push_str(PY_STUB);
-    for (op, snippet) in snippets {
-        let body = match model_import(snippet) {
-            Some(import) => format!("{import}\n{}", snippet.body),
-            None => snippet.body.clone(),
+    for unit in snippets {
+        let body = match model_import(unit.sample) {
+            Some(import) => format!("{import}\n{}", unit.sample.body),
+            None => unit.sample.body.clone(),
         };
         let _ = write!(
             out,
             "\n\ndef {}(base_url, api_key, token, username, password):\n{}\n",
-            py_wrapper_name(op),
+            wrapper(unit),
             indent(&body, "    ")
         );
     }
@@ -271,8 +378,8 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -
     if snippets.is_empty() {
         out.push_str("    pass\n");
     }
-    for (op, _) in snippets {
-        let name = py_wrapper_name(op);
+    for unit in snippets {
+        let name = wrapper(unit);
         let _ = write!(
             out,
             "    def test_{name}(self) -> None:\n        with self.assertRaises({PY_ERROR_TYPE}):\n            {name}(\"http://gnr8.test\", \"key\", \"token\", \"user\", \"secret\")\n\n"
@@ -282,7 +389,8 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -
         out,
         "\n@unittest.skipUnless(os.environ.get(\"{WIRE_ENV}\"), \"rung 3 runs only when {WIRE_ENV} names a file\")\nclass DocsWire(unittest.TestCase):\n    def test_record(self) -> None:\n        wire = _Wire()\n"
     );
-    for (op, snippet) in snippets {
+    for unit in snippets {
+        let snippet = unit.sample;
         let reply = &snippet.wire.reply;
         let _ = writeln!(
             out,
@@ -292,30 +400,60 @@ fn py_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -
             json_string(&reply.body)
         );
         let call = match model_import(snippet) {
-            Some(import) => format!("{import}\n            {}", snippet.call),
+            Some(import) => format!("{import}\n{}", snippet.call),
             None => snippet.call.clone(),
         };
-        if reply.success {
-            let _ = write!(
-                out,
-                "        outcome = \"\"\n        try:\n            {}\n            {}\n            del result\n        except Exception as error:  # noqa: BLE001 - any failure is the finding\n            outcome = \"the call failed on the page's reply: \" + repr(error)\n",
-                snippet.wire.client, call
-            );
-        } else {
-            let _ = write!(
-                out,
-                "        outcome = \"expected the SDK's typed {PY_ERROR_TYPE} with status {status}, but the call returned\"\n        try:\n            {}\n            {}\n            del result\n        except {PY_ERROR_TYPE} as error:\n            outcome = \"\" if error.status_code == {status} else \"expected status {status}, got \" + str(error.status_code)\n        except Exception as error:  # noqa: BLE001 - any other failure is the finding\n            outcome = \"expected the SDK's typed {PY_ERROR_TYPE} with status {status}, got \" + repr(error)\n",
-                snippet.wire.client,
-                call,
-                status = reply.status
-            );
-        }
-        let _ = writeln!(out, "        wire.mark({}, outcome)", json_string(op));
+        out.push_str(&py_harness(snippet, &call));
+        let _ = writeln!(
+            out,
+            "        wire.mark({}, outcome)",
+            json_string(&unit.mark)
+        );
     }
     let _ = write!(
         out,
         "        with open(os.environ[\"{WIRE_ENV}\"], \"w\", encoding=\"utf-8\") as handle:\n            json.dump(wire.records, handle)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
     );
+    out
+}
+
+/// One Python sample's rung-3 run: build the harness client, run `call` (the sample's statement,
+/// after the names it imports), and set `outcome` to what the call made of its reply when that is
+/// not what the page says.
+fn py_harness(snippet: &CodeSample, call: &str) -> String {
+    let mut out = String::new();
+    let reply = &snippet.wire.reply;
+    let mut attempt = format!(
+        "        try:\n            {}\n{}\n",
+        snippet.wire.client,
+        indent(call, "            ")
+    );
+    if snippet.kind != SampleKind::Iterate {
+        attempt.push_str("            del result\n");
+    }
+    let status = reply.status;
+    let typed = format!("expected the SDK's typed {PY_ERROR_TYPE} with status {status}");
+    match &reply.expect {
+        Expect::Success => {
+            let _ = write!(
+                    out,
+                    "        outcome = \"\"\n{attempt}        except Exception as error:  # noqa: BLE001 - any failure is the finding\n            outcome = \"the call failed on the page's reply: \" + repr(error)\n"
+                );
+        }
+        Expect::Status => {
+            let _ = write!(
+                    out,
+                    "        outcome = \"{typed}, but the call returned\"\n{attempt}        except {PY_ERROR_TYPE} as error:\n            outcome = \"\" if error.status_code == {status} else \"expected status {status}, got \" + str(error.status_code)\n        except Exception as error:  # noqa: BLE001 - any other failure is the finding\n            outcome = \"{typed}, got \" + repr(error)\n"
+                );
+        }
+        Expect::TypedBody { model } => {
+            let body = json_string(&reply.body);
+            let _ = write!(
+                    out,
+                    "        outcome = \"{typed}, but the call returned\"\n{attempt}        except {PY_ERROR_TYPE} as error:\n            if error.status_code != {status}:\n                outcome = \"expected status {status}, got \" + str(error.status_code)\n            elif not isinstance(error.body, {model}):\n                outcome = \"expected a {model} body, got \" + repr(error.body)\n            elif error.json_body != json.loads({body}):\n                outcome = \"expected the body \" + {body} + \", got \" + repr(error.json_body)\n            else:\n                outcome = \"\"\n        except Exception as error:  # noqa: BLE001 - any other failure is the finding\n            outcome = \"{typed}, got \" + repr(error)\n"
+                );
+        }
+    }
     out
 }
 
@@ -383,14 +521,15 @@ def Client(*args, **kwargs):  # noqa: N802 - stands in for the SDK's Client
     return _DocsClient(*args, opener=urllib.request.build_opener(_Refuse()), **kwargs)
 "#;
 
-fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -> String {
+fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[UnitSample<'_>]) -> String {
     if snippets.is_empty() {
         return "export {};\n".to_string();
     }
-    let names = if snippets
-        .iter()
-        .any(|(_, snippet)| !snippet.wire.reply.success)
-    {
+    // The error type, when a sample handles it or the harness checks for it.
+    let names = if snippets.iter().any(|unit| {
+        unit.sample.kind == SampleKind::TypedError
+            || unit.sample.wire.reply.expect != Expect::Success
+    }) {
         format!("{TS_ERROR_TYPE}, Client")
     } else {
         "Client".to_string()
@@ -399,16 +538,18 @@ fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -
         "import {{ {names} }} from {};\n",
         json_string(&identity.import)
     );
-    for (op, snippet) in snippets {
+    for unit in snippets {
         let _ = write!(
             out,
-            "\nexport async function {}(baseUrl: string, apiKey: string, token: string, username: string, password: string): Promise<void> {{\n{}\n}}\n",
-            ts_wrapper_name(op),
-            indent(&snippet.body, "  ")
+            "\nexport async function {}{}(baseUrl: string, apiKey: string, token: string, username: string, password: string): Promise<void> {{\n{}\n}}\n",
+            ts_wrapper_name(unit.operation),
+            unit.kind.wrapper_suffix(false),
+            indent(&unit.sample.body, "  ")
         );
     }
     out.push_str(TS_WIRE_HEAD);
-    for (op, snippet) in snippets {
+    for unit in snippets {
+        let snippet = unit.sample;
         let reply = &snippet.wire.reply;
         let _ = writeln!(
             out,
@@ -417,24 +558,43 @@ fn ts_unit_text(identity: &ConsumerIdentity, snippets: &[(&str, &CodeSample)]) -
             json_string(&reply.content_type),
             json_string(&reply.body)
         );
-        if reply.success {
-            let _ = write!(
-                out,
-                "  {{\n    let outcome = \"\";\n    try {{\n      {}\n      {}\n      void result;\n    }} catch (error) {{\n      outcome = `the call failed on the page's reply: ${{String(error)}}`;\n    }}\n    mark({}, outcome);\n  }}\n",
-                snippet.wire.client,
-                snippet.call,
-                json_string(op)
-            );
+        let status = reply.status;
+        let typed = format!("expected the SDK's typed {TS_ERROR_TYPE} with status {status}");
+        let (initial, caught) = match &reply.expect {
+            Expect::Success => (
+                String::new(),
+                "      outcome = `the call failed on the page's reply: ${String(error)}`;\n"
+                    .to_string(),
+            ),
+            Expect::Status => (
+                format!("{typed}, but the call returned"),
+                format!(
+                    "      outcome =\n        error instanceof {TS_ERROR_TYPE} && error.status === {status}\n          ? \"\"\n          : `{typed}, got ${{String(error)}}`;\n"
+                ),
+            ),
+            Expect::TypedBody { .. } => {
+                let body = json_string(&reply.body);
+                (
+                    format!("{typed}, but the call returned"),
+                    format!(
+                        "      outcome =\n        !(error instanceof {TS_ERROR_TYPE}) || error.status !== {status}\n          ? `{typed}, got ${{String(error)}}`\n          : JSON.stringify(error.body) !== JSON.stringify(JSON.parse({body}))\n            ? \"expected the body \" + {body} + \", got \" + JSON.stringify(error.body)\n            : \"\";\n"
+                    ),
+                )
+            }
+        };
+        let used = if snippet.kind == SampleKind::Iterate {
+            ""
         } else {
-            let _ = write!(
-                out,
-                "  {{\n    let outcome = \"expected the SDK's typed {TS_ERROR_TYPE} with status {status}, but the call returned\";\n    try {{\n      {}\n      {}\n      void result;\n    }} catch (error) {{\n      outcome =\n        error instanceof {TS_ERROR_TYPE} && error.status === {status}\n          ? \"\"\n          : `expected the SDK's typed {TS_ERROR_TYPE} with status {status}, got ${{String(error)}}`;\n    }}\n    mark({}, outcome);\n  }}\n",
-                snippet.wire.client,
-                snippet.call,
-                json_string(op),
-                status = reply.status
-            );
-        }
+            "      void result;\n"
+        };
+        let _ = write!(
+            out,
+            "  {{\n    let outcome = {};\n    try {{\n      {}\n{}\n{used}    }} catch (error) {{\n{caught}    }}\n    mark({}, outcome);\n  }}\n",
+            json_string(&initial),
+            snippet.wire.client,
+            indent(&snippet.call, "      "),
+            json_string(&unit.mark)
+        );
     }
     out.push_str("  return records;\n}\n");
     out
@@ -499,25 +659,26 @@ export async function docsWire(): Promise<DocsWireRecord[]> {
 
 /// One snippet wrapped in a function whose parameters are the variables a page leaves to the
 /// reader, so `go vet` resolves every name the snippet uses.
-fn go_wrapper(operation_id: &str, body: &str) -> String {
+fn go_wrapper(unit: &UnitSample<'_>) -> String {
     format!(
-        "func docsSnippet{}(ctx context.Context, baseURL, apiKey, token, username, password string) error {{\n{}\n\treturn nil\n}}\n",
-        crate::gosdk::callsite::exported(operation_id),
-        indent(body, "\t")
+        "func docsSnippet{}{}(ctx context.Context, baseURL, apiKey, token, username, password string) error {{\n{}\n\treturn nil\n}}\n",
+        crate::gosdk::callsite::exported(unit.operation),
+        unit.kind.wrapper_suffix(false),
+        indent(&unit.sample.body, "\t")
     )
 }
 
 fn go_unit_text(
     package: &str,
     identity: &ConsumerIdentity,
-    snippets: &[(&str, &CodeSample)],
+    snippets: &[UnitSample<'_>],
 ) -> Result<String, CoreError> {
     if snippets.is_empty() {
         return Ok(format!("package {package}_test\n"));
     }
     let mut standard: Vec<String> = snippets
         .iter()
-        .flat_map(|(_, snippet)| snippet.imports.iter())
+        .flat_map(|unit| unit.sample.imports.iter())
         .filter(|import| !import.is_empty() && !import.ends_with(&identity.import))
         .cloned()
         .collect();
@@ -535,49 +696,68 @@ fn go_unit_text(
         ]
         .map(str::to_string),
     );
-    if snippets
-        .iter()
-        .any(|(_, snippet)| !snippet.wire.reply.success)
-    {
+    let expects = |pick: fn(&Expect) -> bool| {
+        snippets
+            .iter()
+            .any(|unit| pick(&unit.sample.wire.reply.expect))
+    };
+    if expects(|expect| *expect != Expect::Success) {
         standard.push("errors".to_string());
+    }
+    if expects(|expect| matches!(expect, Expect::TypedBody { .. })) {
+        standard.push("reflect".to_string());
     }
     standard.sort();
     standard.dedup();
     standard.push(String::new());
     standard.push(go_sdk_import(identity)?);
     let mut out = format!("package {package}_test\n\n{}\n", go_import_block(&standard));
-    for (op, snippet) in snippets {
+    for unit in snippets {
         out.push('\n');
-        out.push_str(&go_wrapper(op, &snippet.body));
+        out.push_str(&go_wrapper(unit));
     }
     out.push_str(GO_WIRE_HEAD);
-    for (op, snippet) in snippets {
+    let q = &identity.qualifier;
+    for unit in snippets {
+        let snippet = unit.sample;
         let reply = &snippet.wire.reply;
         let _ = write!(
             out,
-            "\t{{\n\t\ttransport.respond({}, {}, {})\n\t\t{}\n\t\t{}\n\t\t_ = result\n",
+            "\t{{\n\t\ttransport.respond({}, {}, {})\n\t\t{}\n{}\n",
             reply.status,
             json_string(&reply.content_type),
             json_string(&reply.body),
             snippet.wire.client,
-            snippet.call
+            indent(&snippet.call, "\t\t")
         );
-        if reply.success {
-            out.push_str(
-                "\t\toutcome := \"\"\n\t\tif err != nil {\n\t\t\toutcome = \"the call failed on the page's reply: \" + err.Error()\n\t\t}\n",
-            );
-        } else {
-            let _ = write!(
-                out,
-                "\t\toutcome := \"\"\n\t\tvar apiErr *{}.{GO_ERROR_TYPE}\n\t\tif !errors.As(err, &apiErr) || apiErr.StatusCode != {status} {{\n\t\t\toutcome = fmt.Sprintf(\"expected the SDK's typed *{GO_ERROR_TYPE} with status {status}, got %v\", err)\n\t\t}}\n",
-                identity.qualifier,
-                status = reply.status
-            );
+        if snippet.kind != SampleKind::Iterate {
+            out.push_str("\t\t_ = result\n");
+        }
+        out.push_str("\t\toutcome := \"\"\n");
+        let status = reply.status;
+        let typed = format!("expected the SDK's typed *{GO_ERROR_TYPE} with status {status}");
+        match &reply.expect {
+            Expect::Success => out.push_str(
+                "\t\tif err != nil {\n\t\t\toutcome = \"the call failed on the page's reply: \" + err.Error()\n\t\t}\n",
+            ),
+            Expect::Status => {
+                let _ = write!(
+                    out,
+                    "\t\tvar apiErr *{q}.{GO_ERROR_TYPE}\n\t\tif !errors.As(err, &apiErr) || apiErr.StatusCode != {status} {{\n\t\t\toutcome = fmt.Sprintf(\"{typed}, got %v\", err)\n\t\t}}\n"
+                );
+            }
+            Expect::TypedBody { model } => {
+                let body = json_string(&reply.body);
+                let _ = write!(
+                    out,
+                    "\t\tvar apiErr *{q}.{GO_ERROR_TYPE}\n\t\tif !errors.As(err, &apiErr) || apiErr.StatusCode != {status} {{\n\t\t\toutcome = fmt.Sprintf(\"{typed}, got %v\", err)\n\t\t}} else if _, ok := apiErr.Body.({q}.{model}); !ok {{\n\t\t\toutcome = fmt.Sprintf(\"expected a {q}.{model} body, got %T\", apiErr.Body)\n\t\t}} else {{\n\t\t\tvar want any\n\t\t\t_ = json.Unmarshal([]byte({body}), &want)\n\t\t\tif !reflect.DeepEqual(apiErr.JSONBody, want) {{\n\t\t\t\toutcome = fmt.Sprintf(\"expected the body %s, got %v\", {body}, apiErr.JSONBody)\n\t\t\t}}\n\t\t}}\n"
+                );
+            }
         }
         let _ = write!(
             out,
             "\t\ttransport.mark({}, outcome)\n\t}}\n",
-            json_string(op)
+            json_string(&unit.mark)
         );
     }
     let _ = write!(

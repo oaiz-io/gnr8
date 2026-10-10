@@ -316,9 +316,22 @@ pub(crate) enum ExampleDoc {
     Sampled {
         request: Box<HttpRequest>,
         reply: ReplyDoc,
+        /// The reply the typed-error samples receive, when the operation declares an error body.
+        error_reply: Option<ErrorReplyDoc>,
         /// One entry per [`DocsModel::sdks`] entry, in the same order.
         per_sdk: Vec<SdkSamples>,
     },
+}
+
+/// The error reply an operation's typed-error samples receive: its lowest error status with a
+/// JSON body, which every generated client decodes into the status's model.
+#[derive(Debug, Clone)]
+pub(crate) enum ErrorReplyDoc {
+    /// The sampled reply, and the model the SDKs decode it into.
+    Printed { model: String, reply: WireReply },
+    /// The body has no sample: the sentence printed in place of the reply and every typed-error
+    /// sample.
+    Refused { status: u16, reason: String },
 }
 
 /// The request a sample sends, exactly as its page prints it.
@@ -368,21 +381,44 @@ pub(crate) enum SdkSamples {
     /// The SDK emits no package manifest, so there is no import to print.
     NoIdentity,
     /// The samples, each verified against the SDK by `gnr8 verify`.
-    Code {
-        /// The sampled call.
-        call: CodeSample,
-    },
+    Code(Box<CodeSamples>),
+}
+
+/// One SDK's samples for one operation that has a sample.
+#[derive(Debug, Clone)]
+pub(crate) struct CodeSamples {
+    /// The sampled call.
+    pub(crate) call: CodeSample,
+    /// The call handling its typed error, when the operation declares an error body that has a
+    /// sample.
+    pub(crate) typed_error: Option<CodeSample>,
+    /// The pagination iterator, when the operation declares pagination and its page prints a JSON
+    /// reply.
+    pub(crate) iterate: Option<CodeSample>,
+}
+
+/// What a code sample shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SampleKind {
+    /// The call and one use of its result.
+    Call,
+    /// The call, handling the typed error of the operation's error reply.
+    TypedError,
+    /// The pagination iterator over every item.
+    Iterate,
 }
 
 /// One code sample: the exact text a page prints, and what rung 3 re-runs of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeSample {
     pub(crate) language: ContractTestLanguage,
+    pub(crate) kind: SampleKind,
     /// Import specifiers or lines, standard library first, each once.
     pub(crate) imports: Vec<String>,
     /// Construction, call and result use, exactly as printed.
     pub(crate) body: String,
-    /// The call expression or statement alone, exactly as the body prints it.
+    /// The statement a rung-3 harness runs, exactly as the body prints it: the call binding its
+    /// result, or the whole iteration.
     pub(crate) call: String,
     /// The whole code block the page prints: the imports, then the body.
     pub(crate) text: String,
@@ -402,17 +438,30 @@ pub(crate) struct WireHarness {
 
 /// The reply a rung-3 harness answers one sample's call with.
 ///
-/// It is the reply the page prints — its status, its declared media type and its body in that
-/// media type's wire form — and the call must succeed on it. An operation whose page prints no
+/// For a call it is the reply the page prints — its status, its declared media type and its body in
+/// that media type's wire form — and the call must succeed on it. An operation whose page prints no
 /// reply is answered with an empty-bodied `400`, and the call must surface the SDK's typed error
-/// carrying that status.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// carrying that status. A typed-error sample gets the error reply its page prints; an iterator the
+/// page's reply with the iteration ended (`docs::sample::terminating_reply`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CannedReply {
     pub(crate) status: u16,
     pub(crate) content_type: String,
     pub(crate) body: String,
-    /// `true`: the call must succeed; `false`: it must raise the typed error with `status`.
-    pub(crate) success: bool,
+    /// What the call must make of it.
+    pub(crate) expect: Expect,
+}
+
+/// What a sample's call must make of its canned reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Expect {
+    /// Succeed.
+    Success,
+    /// Raise the SDK's typed error carrying the reply's status.
+    Status,
+    /// Raise the typed error carrying the status, its body decoded into `model` and equal to the
+    /// reply's body as JSON.
+    TypedBody { model: String },
 }
 
 /// A generated CLI's invocation of one operation.

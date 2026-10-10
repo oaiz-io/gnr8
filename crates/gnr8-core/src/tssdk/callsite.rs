@@ -31,6 +31,11 @@ const BODY_SLOT: &str = "body";
 /// The expression the generated call passes in the request-options slot.
 const OPTIONS_SLOT: &str = "options";
 
+/// The pagination iterator a paginated operation's client gains, as the emitter names it.
+pub(crate) fn iterate_method(op: &Operation) -> String {
+    super::emit::pagination_names(&operation_method_name(op)).iterate
+}
+
 /// Render the client construction and the call of `op` with `inputs`.
 ///
 /// `call` is the call expression, which the caller awaits.
@@ -54,10 +59,12 @@ pub(crate) fn render_call(
             "const client = new Client({{ baseUrl: BASE_URL, fetch: transport.fetch{credentials} }});"
         )
     };
+    let arguments = args.join(", ");
     Ok(CallSite {
         imports: Vec::new(),
         construct,
-        call: format!("client.{}({})", operation_method_name(op), args.join(", ")),
+        call: format!("client.{}({arguments})", operation_method_name(op)),
+        arguments,
     })
 }
 

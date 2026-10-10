@@ -11,8 +11,9 @@ use std::fmt::Write as _;
 use crate::docs::build::language_name;
 use crate::docs::identity::NO_IDENTITY_NOTE;
 use crate::docs::model::{
-    CodeSample, DeclaredExample, DiagnosticDoc, DocsModel, ExampleDoc, ExampleValue, HttpRequest,
-    Inline, OperationDoc, PageRef, ReplyDoc, SchemaBody, SchemaDoc, SchemeUse, SdkSamples, Table,
+    CodeSample, DeclaredExample, DiagnosticDoc, DocsModel, ErrorReplyDoc, ExampleDoc, ExampleValue,
+    HttpRequest, Inline, OperationDoc, PageRef, ReplyDoc, SchemaBody, SchemaDoc, SchemeUse,
+    SdkSamples, Table, WireReply,
 };
 use crate::verify::ContractTestLanguage;
 use crate::CoreError;
@@ -510,6 +511,7 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
         ExampleDoc::Sampled {
             request,
             reply,
+            error_reply,
             per_sdk,
         } => {
             w.paragraph(&Inline::text(EXAMPLE_NOTE));
@@ -522,12 +524,44 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
                 ))),
                 ReplyDoc::Absent => {}
             }
+            let error_status = match error_reply {
+                Some(ErrorReplyDoc::Printed { reply, .. }) => {
+                    w.paragraph(&Inline::Seq(vec![
+                        Inline::text("The typed-error samples receive this "),
+                        Inline::code(reply.status.to_string()),
+                        Inline::text(" reply:"),
+                    ]));
+                    w.block(&error_reply_block(reply));
+                    Some(reply.status)
+                }
+                Some(ErrorReplyDoc::Refused { status, reason }) => {
+                    w.paragraph(&Inline::Seq(vec![
+                        Inline::text("No typed-error sample for the "),
+                        Inline::code(status.to_string()),
+                        Inline::text(format!(" reply: {reason}.")),
+                    ]));
+                    None
+                }
+                None => None,
+            };
             for (sdk, samples) in model.sdks.iter().zip(per_sdk) {
                 w.heading(3, &sdk.heading());
                 match samples {
                     SdkSamples::NoIdentity => w.paragraph(&Inline::text(NO_IDENTITY_NOTE)),
-                    SdkSamples::Code { call } => {
-                        w.block(&sample_block(call));
+                    SdkSamples::Code(samples) => {
+                        w.block(&sample_block(&samples.call));
+                        if let (Some(sample), Some(status)) = (&samples.typed_error, error_status) {
+                            w.paragraph(&Inline::Seq(vec![
+                                Inline::text("Handling the "),
+                                Inline::code(status.to_string()),
+                                Inline::text(" reply:"),
+                            ]));
+                            w.block(&sample_block(sample));
+                        }
+                        if let Some(sample) = &samples.iterate {
+                            w.paragraph(&Inline::text("Iterating over every item of every page:"));
+                            w.block(&sample_block(sample));
+                        }
                     }
                 }
             }
@@ -557,6 +591,12 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
 /// Returns [`CoreError::DocsGen`] for a body that is not serializable.
 pub(crate) fn request_block(request: &HttpRequest) -> Result<String, CoreError> {
     Ok(code_block("http", &request.page_text()?))
+}
+
+/// The error reply block an operation page prints for its typed-error samples: the block rung 2
+/// requires on the page, and the reply rung 3 answers those samples with.
+pub(crate) fn error_reply_block(reply: &WireReply) -> String {
+    code_block("http", &reply.page_text())
 }
 
 /// The code block one sample is printed in.

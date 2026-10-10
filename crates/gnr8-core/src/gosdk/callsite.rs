@@ -32,6 +32,11 @@ pub(crate) use super::emit::exported;
 /// The Go standard-library import a rendered date-time literal needs.
 pub(crate) const TIME_IMPORT: &str = "time";
 
+/// The pagination iterator a paginated operation's client gains, as the emitter names it.
+pub(crate) fn iterate_method(op: &Operation) -> String {
+    super::emit::pagination_names(&operation_method_name(op)).iterate
+}
+
 /// Render the client construction and the call of `op` with `inputs`.
 ///
 /// # Errors
@@ -48,13 +53,14 @@ pub(crate) fn render_call(
     let mut speller = Speller::new(graph, qualify);
     let args = speller.call_arguments(op, inputs)?;
     let method = operation_method_name(op);
+    let arguments = args.join(", ");
     let (construct, call) = match qualify {
         Qualify::InPackage => (
             format!(
                 "client := contractClient(transport{})",
                 speller.client_options(inputs.auth, ", ")
             ),
-            format!("out, err := client.{method}({})", args.join(", ")),
+            format!("out, err := client.{method}({arguments})"),
         ),
         Qualify::Consumer { .. } => (
             format!(
@@ -62,7 +68,7 @@ pub(crate) fn render_call(
                 speller.qualifier,
                 speller.client_options(inputs.auth, ", ")
             ),
-            format!("result, err := client.{method}({})", args.join(", ")),
+            format!("result, err := client.{method}({arguments})"),
         ),
     };
     let mut imports = Vec::new();
@@ -76,7 +82,35 @@ pub(crate) fn render_call(
         imports,
         construct,
         call,
+        arguments,
     })
+}
+
+/// The Go type of one item a paginated operation's iterator yields, spelled with `qualifier` (the
+/// consumer's package qualifier with its dot); `None` when the operation declares no pagination.
+///
+/// # Errors
+///
+/// Returns the emitter's own error for a pagination policy it rejects.
+pub(crate) fn iterate_item_type(
+    graph: &ApiGraph,
+    op: &Operation,
+    qualifier: &str,
+) -> Result<Option<String>, CoreError> {
+    let Some(policy) = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)
+    else {
+        return Ok(None);
+    };
+    let info = super::emit::go_pagination_info(graph, op, policy)?;
+    Ok(Some(go_type_in(
+        &info.item_schema,
+        false,
+        graph,
+        qualifier,
+    )?))
 }
 
 /// The client options that configure `auth`, each prefixed by `separator`.

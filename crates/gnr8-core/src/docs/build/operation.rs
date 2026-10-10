@@ -6,7 +6,7 @@ use crate::docs::model::{
     OperationDoc, PageRef, PaginationDoc, Prose, ReplyDoc, RequestBodyDoc, ResponsesDoc, SdkDoc,
     SdkSamples, Table,
 };
-use crate::docs::sample::{call_sample, http_request, reply_doc};
+use crate::docs::sample::{error_reply_doc, http_request, reply_doc, sdk_samples};
 use crate::graph::{
     ApiGraph, MediaExample, Operation, OperationDocsPolicy, PaginationMode, PaginationTermination,
     Param,
@@ -137,21 +137,27 @@ fn example_doc(
             shown.reply = Some((wire.status, wire.content_type.clone(), name.clone()));
         }
     }
+    let error_reply = error_reply_doc(graph, op)?;
     let per_sdk = sdks
         .iter()
-        .map(|(sdk, doc)| {
-            Ok(match &doc.identity {
-                None => SdkSamples::NoIdentity,
-                Some(identity) => SdkSamples::Code {
-                    call: call_sample(graph, op, &sample, &reply, *sdk, identity)?,
-                },
-            })
+        .map(|(sdk, doc)| match &doc.identity {
+            None => Ok(SdkSamples::NoIdentity),
+            Some(identity) => sdk_samples(
+                graph,
+                op,
+                &sample,
+                &reply,
+                error_reply.as_ref(),
+                *sdk,
+                identity,
+            ),
         })
         .collect::<Result<Vec<_>, CoreError>>()?;
     Ok((
         ExampleDoc::Sampled {
             request: Box::new(http_request(graph, op, &sample)),
             reply,
+            error_reply,
             per_sdk,
         },
         shown,

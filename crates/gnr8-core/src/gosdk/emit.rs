@@ -1868,6 +1868,8 @@ fn emit_operation(
 pub(super) struct GoPaginationInfo {
     page_type: String,
     item_type: String,
+    /// The item's schema, for code that spells the item type from outside the package.
+    pub(super) item_schema: Type,
     items_field: String,
     items_pointer_depth: usize,
     next_cursor_field: Option<String>,
@@ -2275,6 +2277,7 @@ pub(super) fn go_pagination_info(
     Ok(GoPaginationInfo {
         page_type,
         item_type: go_type(item_schema, false, graph)?,
+        item_schema: (**item_schema).clone(),
         items_field: exported(&items.json_name),
         items_pointer_depth,
         next_cursor_field,

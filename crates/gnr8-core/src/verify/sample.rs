@@ -1106,31 +1106,56 @@ pub(crate) fn error_payload(
             "slug": "contract_test_error",
         })
     };
-    let declared = op
+    let value = match error_body_sample(op, status, graph)? {
+        Some(Ok((value, _))) => value,
+        None
+        | Some(Err(
+            SampleRefusal::Recursive { .. }
+            | SampleRefusal::TooDeep { .. }
+            | SampleRefusal::EmptyEnum { .. }
+            | SampleRefusal::EmptyUnion { .. },
+        )) => envelope(),
+        Some(Err(refusal)) => return Ok(Err(refusal)),
+    };
+    Ok(Ok(json_text(&value)?))
+}
+
+/// A sampled body and the constraints it leaves unmet, or why it has no sample.
+pub(crate) type BodySample = Result<(Value, Vec<UnmetConstraint>), SampleRefusal>;
+
+/// The declared body of one error status — its declared example when it declares one, else a value
+/// built from its schema, by the one rule every body follows — with the constraints it leaves
+/// unmet; `None` when the status declares no body. A contract case sends the generic
+/// envelope for some refusals ([`error_payload`]); a docs typed-error sample prints none at all.
+///
+/// # Errors
+///
+/// Returns [`CoreError::SdkGen`] for a body that names a schema the graph does not carry.
+pub(crate) fn error_body_sample(
+    op: &Operation,
+    status: u16,
+    graph: &ApiGraph,
+) -> Result<Option<BodySample>, CoreError> {
+    let Some(body) = op
         .responses
         .iter()
         .find(|response| response.status == status)
-        .and_then(|response| response.body.as_ref());
-    let value = match declared {
-        None => envelope(),
-        Some(body) => {
-            let schema = schema_by_id(graph, &body.ref_id)?;
-            let example = reply_example(op, graph, status);
-            let declared = example.map(|example| (example, response_origin(op, status, example)));
-            let subject = format!("error.{status}");
-            match body_value(graph, Side::Response, schema, &subject, declared)? {
-                Ok((value, _)) => value,
-                Err(
-                    SampleRefusal::Recursive { .. }
-                    | SampleRefusal::TooDeep { .. }
-                    | SampleRefusal::EmptyEnum { .. }
-                    | SampleRefusal::EmptyUnion { .. },
-                ) => envelope(),
-                Err(refusal) => return Ok(Err(refusal)),
-            }
-        }
+        .and_then(|response| response.body.as_ref())
+    else {
+        return Ok(None);
     };
-    Ok(Ok(json_text(&value)?))
+    let schema = schema_by_id(graph, &body.ref_id)?;
+    // A declared example for the status is the body, exactly as a success reply's is.
+    let example = reply_example(op, graph, status);
+    let declared = example.map(|example| (example, response_origin(op, status, example)));
+    let subject = format!("error.{status}");
+    Ok(Some(body_value(
+        graph,
+        Side::Response,
+        schema,
+        &subject,
+        declared,
+    )?))
 }
 
 /// The value of a request body or a reply, and the constraints it leaves unmet: its declared

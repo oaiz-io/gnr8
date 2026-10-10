@@ -551,12 +551,14 @@ fn compare_wire(
 ) -> Result<(), DocsReason> {
     for entry in &unit.entries {
         let path = format!("{}/{}", suite.docs_dir.trim_end_matches('/'), entry.page);
-        let outcome =
-            check_operation_wire(&entry.request, records, &entry.operation_id, suite.language);
+        let outcome = check_operation_wire(&entry.request, records, &entry.mark(), suite.language);
         if let Err(field) = outcome {
             let mut reason = DocsReason::new(
                 DocsFailure::WireMismatch,
-                format!("the sample does not send the page's request: {field}"),
+                format!(
+                    "the {} does not send the page's request: {field}",
+                    entry.kind.label()
+                ),
             );
             reason.operation = Some(entry.operation_id.clone());
             reason.page = Some(path);
@@ -690,7 +692,7 @@ mod tests {
     use super::{run_with_runner, DocsFailure, DocsStatus};
     use crate::verify::cli_help::ProcessRunner;
     use gnr8_engine::docs::verify::{
-        CompileEntry, CompileUnit, CredentialSlot, HttpRequest, PageEmbed, WireValue,
+        CompileEntry, CompileUnit, CredentialSlot, EntryKind, HttpRequest, PageEmbed, WireValue,
     };
     use gnr8_engine::sdk::Artifact;
     use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite, GoVerificationModule};
@@ -795,6 +797,7 @@ mod tests {
     fn entry(operation: &str, page: &str, snippet: &str) -> CompileEntry {
         CompileEntry {
             operation_id: operation.to_string(),
+            kind: EntryKind::Call,
             page: page.to_string(),
             snippet: snippet.to_string(),
             embeds: vec![

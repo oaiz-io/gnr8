@@ -69,6 +69,16 @@ result = client.list_books(cursor="gnr8", genre="gnr8", sort="gnr8")
 print(result)
 ```
 
+Iterating over every item of every page:
+
+```python
+from sdk import Client
+
+client = Client(base_url)
+for item in client.iter_list_books(cursor="gnr8", genre="gnr8", sort="gnr8"):
+    print(item)
+```
+
 ### CLI — `bookstore`
 
 `bookstore books list`
