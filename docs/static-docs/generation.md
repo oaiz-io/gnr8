@@ -132,9 +132,16 @@ model constructor and required model field; an optional Python model keyword is 
 
 Rung 3 runs each sample's call statement against a recording transport, with the contract test's
 credentials and the base URL `http://gnr8.test` in place of the page's placeholders and variables,
-and compares the request it sent with the page's HTTP exchange field by field — the body as JSON,
-numbers by value, and the `cookie:` line except for TypeScript, whose client leaves cookies to the
-`fetch` transport (a browser owns them). The transport answers each call with the reply its page
+and compares the request it sent with the page's HTTP exchange field by field — the path and the
+query string as encoded text, the body as JSON, numbers by value, and the `cookie:` line except for
+TypeScript, whose client leaves cookies to the `fetch` transport (a browser owns them). Each call
+must send exactly one request.
+
+A page, a contract test and every generated client encode a path segment, a query name or value,
+and a cookie name or value with one rule: every byte but an RFC 3986 unreserved one
+(`A-Z a-z 0-9 - . _ ~`) becomes `%XX`, so a space is `%20`, never `+`. Rung 3 compares the query's
+`name=value` pairs in order within one name; the order between different names is not one the page
+states. The transport answers each call with the reply its page
 prints, and the call must succeed on it; an operation whose page prints no reply (a download, or a
 refused reply) is answered with an empty-bodied `400`, and the call must surface the SDK's typed
 error carrying that status. The client is built the way the contract test builds it, so rung 3
@@ -162,9 +169,6 @@ escaped and summaries are folded to one line.
 - Formats gnr8 does not map to a well-known scalar (`hostname`, `password`, …) are annotations: a
   string carrying one is sampled as `"gnr8"`.
 - An enum member is printed as declared, even when it contradicts a mapped format.
-- A Python SDK in the dataclass model style sends unset optional fields as explicit `null`, so its
-  samples do not send the request the page prints, and rung 3 reports the difference. The default
-  Pydantic style omits them.
 - An error status with no declared response body keeps the contract test's generic error envelope;
   error bodies are never printed on a page.
 - A printed sample holds at most 64 array or map entries and 1024 string characters; a lower bound
@@ -174,10 +178,8 @@ escaped and summaries are folded to one line.
   spelled `日本語`), or one Windows reserves as a device name (`con`, `nul`, `com1`, …), stops
   generation with an error naming it.
 - The index omits the version when none is declared; `openapi.yaml` prints its `0.1.0` default.
-- Two Go SDK defects predate the docs target and surface through it: a path parameter whose sample
-  contains `@` or `:` is escaped differently by the Go client than the page (and the Go contract
-  test) expects, and a `date-time` path parameter fails to build the Go SDK. Both are SDK fixes, not
-  docs fixes.
+- A Python SDK whose package is named after a standard-library module (`json`, `email`, …) cannot
+  be imported under that name, by a consumer or by rung 2, so its samples fail; rename the module.
 
 ## Not included
 

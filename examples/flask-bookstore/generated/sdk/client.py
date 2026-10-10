@@ -199,6 +199,11 @@ class Client:
             return "true" if value else "false"
         return str(value)
 
+    def _path_segment(self, value: Any) -> str:
+        return urllib.parse.quote(
+            self._parameter_scalar(self._wire_value(value)), safe=""
+        )
+
     def _parameter_pairs(
         self,
         name: str,
@@ -589,7 +594,7 @@ class Client:
         request_options: Optional[RequestOptions] = None,
     ) -> OrderConfirmation:
         """Fetch one order by its identifier."""
-        path = f"/orders/{urllib.parse.quote(str(order_id), safe='')}"
+        path = f"/orders/{self._path_segment(order_id)}"
         _status, _headers, _raw = self._do(
             "GET",
             path,

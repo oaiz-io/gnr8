@@ -203,6 +203,11 @@ class Client:
             return "true" if value else "false"
         return str(value)
 
+    def _path_segment(self, value: Any) -> str:
+        return urllib.parse.quote(
+            self._parameter_scalar(self._wire_value(value)), safe=""
+        )
+
     def _parameter_pairs(
         self,
         name: str,
@@ -609,7 +614,7 @@ class Client:
 
         Returns the book when it is in stock, and an out-of-stock notice otherwise.
         """
-        path = f"/books/{urllib.parse.quote(str(book_id), safe='')}"
+        path = f"/books/{self._path_segment(book_id)}"
         _query: list[tuple[str, str]] = []
         _allow_reserved: set[int] = set()
         if fmt is not None:
@@ -643,7 +648,7 @@ class Client:
 
         Filters left unset in the payload keep their current values.
         """
-        path = f"/books/{urllib.parse.quote(str(book_id), safe='')}"
+        path = f"/books/{self._path_segment(book_id)}"
         _status, _headers, _raw = self._do(
             "PUT",
             path,

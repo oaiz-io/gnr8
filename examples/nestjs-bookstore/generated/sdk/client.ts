@@ -561,7 +561,7 @@ export class Client {
         searchParams.append(wireName, wireValue);
       }
     }
-    const qs = searchParams.toString();
+    const qs = wireQueryString(searchParams);
     if (qs) {
       path = path + "?" + qs;
     }
@@ -609,11 +609,12 @@ export class Client {
     let path = `/books/`;
     const headers: Record<string, string> = {};
     headers["Content-Type"] = "application/json";
+    const requestBody = JSON.stringify(body);
     const res = await this._request(
       "POST",
       path,
       headers,
-      body,
+      requestBody,
       {
         operationId: "createBook",
         pathTemplate: "/books/",
@@ -650,7 +651,7 @@ export class Client {
     params?: GetBookParams,
     options?: RequestOptions,
   ): Promise<models.BookOrError> {
-    let path = `/books/${encodeURIComponent(String(bookId))}`;
+    let path = `/books/${wireEscape(String(bookId))}`;
     const searchParams = new URLSearchParams();
     if (params?.fmt !== undefined) {
       for (const [wireName, wireValue] of wireParameterPairs(
@@ -662,7 +663,7 @@ export class Client {
         searchParams.append(wireName, wireValue);
       }
     }
-    const qs = searchParams.toString();
+    const qs = wireQueryString(searchParams);
     if (qs) {
       path = path + "?" + qs;
     }
@@ -708,14 +709,15 @@ export class Client {
     body: models.BookFilters,
     options?: RequestOptions,
   ): Promise<models.CreatedMessage> {
-    let path = `/books/${encodeURIComponent(String(bookId))}`;
+    let path = `/books/${wireEscape(String(bookId))}`;
     const headers: Record<string, string> = {};
     headers["Content-Type"] = "application/json";
+    const requestBody = JSON.stringify(body);
     const res = await this._request(
       "PUT",
       path,
       headers,
-      body,
+      requestBody,
       {
         operationId: "updateBook",
         pathTemplate: "/books/{bookId}",
@@ -786,4 +788,34 @@ function wireParameterPairs(
     return [[name, parts.join(delimiter)]];
   }
   return [[name, String(value)]];
+}
+
+function wireQueryString(
+  values: URLSearchParams,
+  allowReserved: Set<number> = new Set<number>(),
+): string {
+  const restoreReserved = (value: string): string =>
+    value.replace(
+      /%3A|%2F|%3F|%23|%5B|%5D|%40|%21|%24|%26|%27|%28|%29|%2A|%2B|%2C|%3B|%3D/gi,
+      (token) => decodeURIComponent(token),
+    );
+  const parts: string[] = [];
+  let index = 0;
+  values.forEach((value, key) => {
+    const encoded = wireEscape(value);
+    parts.push(
+      wireEscape(key) +
+        "=" +
+        (allowReserved.has(index) ? restoreReserved(encoded) : encoded),
+    );
+    index += 1;
+  });
+  return parts.join("&");
+}
+
+function wireEscape(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (char) => "%" + char.charCodeAt(0).toString(16).toUpperCase(),
+  );
 }

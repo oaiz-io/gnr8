@@ -7,7 +7,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -459,4 +462,35 @@ func sleepRetry(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// wireEscape percent-encodes one path segment, query name or value, or cookie name or value:
+// every byte but an unreserved one (A-Z a-z 0-9 - . _ ~) becomes %XX, so a space is %20.
+func wireEscape(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+}
+
+// encodeWireQuery writes a query string with wireEscape: names sorted, each name's values in
+// order. A value allowReserved marks keeps the reserved characters RFC 3986 lets it carry.
+func encodeWireQuery(values url.Values, allowReserved map[string]map[int]bool) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0)
+	for _, key := range keys {
+		for index, value := range values[key] {
+			encoded := wireEscape(value)
+			if allowReserved[key][index] {
+				encoded = strings.NewReplacer(
+					"%3A", ":", "%2F", "/", "%3F", "?", "%23", "#", "%5B", "[", "%5D", "]",
+					"%40", "@", "%21", "!", "%24", "$", "%26", "&", "%27", "'", "%28", "(",
+					"%29", ")", "%2A", "*", "%2B", "+", "%2C", ",", "%3B", ";", "%3D", "=",
+				).Replace(encoded)
+			}
+			parts = append(parts, wireEscape(key)+"="+encoded)
+		}
+	}
+	return strings.Join(parts, "&")
 }

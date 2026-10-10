@@ -25,6 +25,43 @@ must move the minor version.
   the published spec. The configuration error names the target, the field and the facts. Set them
   in the source or with a `Transform` that edits the field. Patches that only add `x-*` extensions
   are unaffected.
+- **Generated Go `client.go` carries `wireEscape` and `encodeWireQuery`**, and imports `net/url`,
+  `sort` and `strings`. The shared wire helpers no longer define `encodeWireQuery` or
+  `wireCookieEscape`. Generated TypeScript operation files define `wireEscape` and
+  `wireQueryString` whenever an operation has a path or query parameter.
+- **The Python docs compile unit is `docs_snippets.py`** (was `snippets.py`), and imports each
+  sample's models inside the function that runs it.
+
+### Fixed
+
+- **Every generated client encodes a path segment, a query name and value, and a cookie with the
+  rule the docs page and the contract test spell them with**: every byte but an RFC 3986 unreserved
+  one becomes `%XX`. Go used `url.PathEscape` (leaving `+ $ & = @ :`) and wrote a query space as
+  `+`; TypeScript used `encodeURIComponent` (leaving `! ' ( ) *`) and `URLSearchParams.toString()`
+  (a space as `+`, `*` bare). Generated Go and TypeScript operation files change for every operation
+  with a path or query parameter.
+- **A Go SDK with a `date-time` path parameter builds**: the segment is sent as RFC 3339, as a
+  `date-time` query or header value already was, and the file imports `time`.
+- **The Go contract test records the path as sent** (`URL.EscapedPath()`), which is what its expected
+  path spells; a path value that needs escaping no longer fails it.
+- **Go samples and contract tests compile for an optional enum, date-time or scalar body**: the call
+  passes `sdk.Ptr[T](…)` instead of taking the address of a non-composite literal.
+- **A Python path parameter is sent as its wire value**: a named-enum argument went out as
+  `Kind._1ST` and a boolean as `True`. Path segments now go through `Client._path_segment`, which
+  converts the value as query, header and cookie values already were. Generated `client.py` changes
+  for every operation with a path parameter.
+- **Python dataclass models send their wire names and leave unset optional fields out.** Every
+  generated dataclass owns a `to_dict`, and the client sends it instead of `dataclasses.asdict`, which
+  sent `class_` for `class` and `null` for every unset optional. Generated dataclass `models.py`
+  changes for every object model.
+- **A TypeScript JSON request body that is a string is sent JSON-encoded** (`"hello"`, not `hello`):
+  each operation encodes its JSON body with `JSON.stringify`. Generated TypeScript operations with a
+  JSON body change.
+- **Rung 3 compares the raw query string**, so a `+` where the page prints `%20` is a finding, and
+  fails a sample whose call sent no request or more than one.
+- **An SDK package or model name can no longer break a docs compile unit**: a Go package named
+  `errors` or `outcome` is imported under an alias, a Python model named after the unit's own test
+  classes no longer replaces one, and a Python package named `snippets` no longer shadows the unit.
 
 ## 0.17.2 — 2026-10-10
 
@@ -63,9 +100,7 @@ must move the minor version.
   each sample's call against a fake transport and asserts it sends the request printed on the page,
   with credentials and base URL substituted. The transport answers with the reply the page prints,
   and the call must succeed on it; an operation whose page prints no reply is answered with an empty
-  `400`, and the call must raise the SDK's typed error with that status. A Python SDK in the
-  dataclass model style sends unset optional fields as explicit `null`, so its docs samples fail
-  this check on any request body with an optional field; the default pydantic style passes.
+  `400`, and the call must raise the SDK's typed error with that status.
 
 ### Fixed
 

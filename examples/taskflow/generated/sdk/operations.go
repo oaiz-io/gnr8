@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 )
 
 // ListTasksParams carries the query parameters for ListTasks.
@@ -40,7 +39,7 @@ func (c *Client) ListTasks(ctx context.Context, params ListTasksParams, opts ...
 	if params.Status != nil {
 		q.Set("status", *params.Status)
 	}
-	req.URL.RawQuery = q.Encode()
+	req.URL.RawQuery = encodeWireQuery(q, nil)
 	if selectedAuth["ApiKeyAuth"] {
 		if key := c.apiKeys["ApiKeyAuth"]; key != "" {
 			req.Header.Set("X-API-Key", key)
@@ -264,7 +263,7 @@ func (c *Client) DebugTasks(ctx context.Context, opts ...RequestOption) (TaskLis
 // DELETE /tasks/{id}
 func (c *Client) DeleteTask(ctx context.Context, id string, opts ...RequestOption) (ErrorResponse, error) {
 	var out ErrorResponse
-	reqURL := c.baseURL + fmt.Sprintf("/tasks/%s", url.PathEscape(fmt.Sprint(id)))
+	reqURL := c.baseURL + fmt.Sprintf("/tasks/%s", wireEscape(fmt.Sprint(id)))
 	selectedAuth := map[string]bool{}
 	if !c.authTransport {
 		if c.apiKeys["ApiKeyAuth"] != "" || c.apiKeys["X-API-Key"] != "" || c.apiKey != "" {
@@ -336,7 +335,7 @@ func (c *Client) DeleteTask(ctx context.Context, id string, opts ...RequestOptio
 // GET /tasks/{id}
 func (c *Client) GetTask(ctx context.Context, id string, opts ...RequestOption) (Task, error) {
 	var out Task
-	reqURL := c.baseURL + fmt.Sprintf("/tasks/%s", url.PathEscape(fmt.Sprint(id)))
+	reqURL := c.baseURL + fmt.Sprintf("/tasks/%s", wireEscape(fmt.Sprint(id)))
 	selectedAuth := map[string]bool{}
 	if !c.authTransport {
 		if c.apiKeys["ApiKeyAuth"] != "" || c.apiKeys["X-API-Key"] != "" || c.apiKey != "" {
@@ -423,7 +422,7 @@ func (c *Client) UpdateTask(ctx context.Context, id string, in UpdateTaskRequest
 		return out, err
 	}
 	reqBody := bytes.NewReader(payload)
-	reqURL := c.baseURL + fmt.Sprintf("/tasks/%s", url.PathEscape(fmt.Sprint(id)))
+	reqURL := c.baseURL + fmt.Sprintf("/tasks/%s", wireEscape(fmt.Sprint(id)))
 	selectedAuth := map[string]bool{}
 	if !c.authTransport {
 		if c.apiKeys["ApiKeyAuth"] != "" || c.apiKeys["X-API-Key"] != "" || c.apiKey != "" {
