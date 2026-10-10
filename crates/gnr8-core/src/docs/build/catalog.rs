@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::docs::identity::sdk_label;
 use crate::docs::markdown::escape::one_line;
 use crate::docs::model::{
-    ApiDoc, AuthDoc, AuthSchemeDoc, ErrorCatalog, GroupDoc, Inline, PageRef, SdkDoc, ServerDoc,
-    Table,
+    ApiDoc, AuthDoc, AuthSchemeDoc, ErrorCatalog, GroupDoc, Inline, PageRef, Prose, SdkDoc,
+    ServerDoc, Table,
 };
 use crate::graph::ApiGraph;
 use crate::sdk::builtins::SiblingSdk;
@@ -22,7 +22,8 @@ pub(super) fn api_doc(graph: &ApiGraph) -> ApiDoc {
     let metadata = &graph.openapi_metadata;
     ApiDoc {
         title: graph.title.clone(),
-        description: nonblank(metadata.description.as_deref()).map(str::to_string),
+        description: nonblank(metadata.description.as_deref())
+            .map(|description| Prose::new("the API description", description)),
         version: nonblank(metadata.version.as_deref()).map(|version| version.trim().to_string()),
         base_path: (!graph.base_path.is_empty() && graph.base_path != "/")
             .then(|| graph.base_path.clone()),

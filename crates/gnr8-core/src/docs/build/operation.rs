@@ -69,9 +69,15 @@ pub(super) fn operation_doc(
         group,
         tags: crate::graph::effective_operation_tags(graph, op).to_vec(),
         deprecated: policy.is_some_and(|policy| policy.deprecated),
-        summary: prose.summary.map(Prose::new),
-        description: (!prose.description.is_empty())
-            .then(|| Prose::new(prose.description.join("\n"))),
+        summary: prose
+            .summary
+            .map(|summary| Prose::new(format!("operation `{}`", op.id), summary)),
+        description: (!prose.description.is_empty()).then(|| {
+            Prose::new(
+                format!("operation `{}`", op.id),
+                prose.description.join("\n"),
+            )
+        }),
         auth: auth_alternatives(graph, op)?,
         parameters: parameters(nav, op)?,
         request_body: request_body(graph, nav, op, policy, &shown)?,
@@ -315,6 +321,7 @@ fn request_body(
             rows,
         },
         examples: declared_examples(
+            &op.id,
             policy.map_or(&[][..], |policy| policy.request_examples.as_slice()),
             &content_types,
             shown
@@ -397,6 +404,7 @@ fn responses(
                 )
             });
         let declared = declared_examples(
+            &op.id,
             docs.map_or(&[][..], |docs| docs.examples.as_slice()),
             &content_types.iter().map(String::as_str).collect::<Vec<_>>(),
             received,
@@ -419,6 +427,7 @@ fn responses(
 /// (`shown`: media type, name, and what the exchange does with it) keeps its label and prose, and
 /// the exchange stands in for its value.
 fn declared_examples(
+    operation: &str,
     examples: &[MediaExample],
     content_types: &[&str],
     shown: Option<(&str, &str, &ExampleValue)>,
@@ -448,8 +457,15 @@ fn declared_examples(
                 name: example.name.clone(),
                 content_type: example.content_type.clone(),
                 summary: nonblank(example.summary.as_deref()).map(one_line),
-                description: nonblank(example.description.as_deref())
-                    .map(|description| Prose::new(description.trim_end())),
+                description: nonblank(example.description.as_deref()).map(|description| {
+                    Prose::new(
+                        format!(
+                            "the declared example `{}` of operation `{operation}`",
+                            example.name
+                        ),
+                        description.trim_end(),
+                    )
+                }),
                 value,
             })
         })

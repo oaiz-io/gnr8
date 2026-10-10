@@ -1486,7 +1486,10 @@ fn every_unit_block_is_on_its_page_as_whole_lines() {
         .module("example.com/bookstore/sdk")
         .to("generated/sdk");
     let unit = compile_unit(&graph, SiblingSdk::Go(&go)).unwrap().unwrap();
-    assert!(!unit.entries.is_empty());
+    assert!(
+        !unit.entries.is_empty(),
+        "the bookstore samples some operation"
+    );
     for entry in &unit.entries {
         assert_eq!(entry.embeds.len(), 2, "{}", entry.operation_id);
         for embed in &entry.embeds {
@@ -1524,4 +1527,44 @@ fn the_example_note_holds_when_a_declared_example_is_the_value() {
         !example.contains("Values are sampled from the schema"),
         "{example}"
     );
+}
+
+/// Rung 0 reads the finished page: prose that opens a fence it never closes would swallow every
+/// section after it, so generation fails naming the operation, the page, the line the fence opened
+/// on and the gnr8 line it swallowed — and writes nothing.
+#[test]
+fn prose_that_breaks_the_page_structure_stops_generation() {
+    for (prose, construct) in [
+        ("Intro.\n\n```text\nnever closed", "a fenced code block"),
+        ("Intro.\n\n<!-- never closed", "an HTML block"),
+    ] {
+        let mut value = bookstore_json();
+        value["operations"][0]["description"] = json!(prose);
+        let err = try_render(&graph_of(value), &[]).unwrap_err();
+        assert!(matches!(err, CoreError::DocsGen { .. }), "{err:?}");
+        let text = err.to_string();
+        for needle in [
+            "operations/list-books.md",
+            "operation `listBooks`",
+            construct,
+            "swallows the line gnr8 printed",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+    }
+}
+
+/// Prose is the user's and stays verbatim: its own headings and its blank-line runs are printed as
+/// written, and a fence it closes — even one inside a quote or a list item
+/// that ends before gnr8's next section — leaves the page intact.
+#[test]
+fn prose_stays_verbatim_when_it_keeps_the_page_structure() {
+    let prose =
+        "First.\n\n\n## Their heading\n\n> ```\n> quoted code\n\n- item\n\n  ```\n  listed code";
+    let mut value = bookstore_json();
+    value["operations"][0]["description"] = json!(prose);
+    let pages = render(&graph_of(value), &[]);
+    let text = page(&pages, "operations/list-books.md");
+    assert!(text.contains(prose), "{text}");
+    assert!(text.contains("\n\n## Example\n"), "{text}");
 }

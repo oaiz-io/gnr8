@@ -152,10 +152,20 @@ compiles as printed.
 
 | Rung | Checks | Where |
 |---|---|---|
-| 0 | one page per operation, every link names an emitted page, no slug collision, no empty heading | every generation; a failure stops it |
+| 0 | one page per operation, every link names an emitted page, no slug collision, no empty heading, and no prose breaks the page structure | every generation; a failure stops it |
 | 1 | the same graph and declarations produce the same bytes | `gnr8 check` |
-| 2 | every name and argument in every sample resolves against its SDK, and every sample appears verbatim in its page after post-processors | `gnr8 verify` |
+| 2 | every name and argument in every sample resolves against its SDK, and every block a sample relies on — its code block and the HTTP request block — appears on its page after post-processors, byte for byte, as whole lines | `gnr8 verify` |
 | 3 | every sample's call sends the request its page prints | `gnr8 verify` |
+
+Prose is printed verbatim: gnr8 never tokenizes, folds or rewrites a doc comment or an imported
+description, inside a page or between its blocks. Rung 0 reads the finished page instead, in
+CommonMark's block grammar, at the lines gnr8 itself printed — each heading, paragraph, list,
+table and code fence of its own. Each must still start a block where it was printed, and each
+code block gnr8 opened must close where gnr8 closed it. Prose that opens a fenced code block, an
+HTML comment or another HTML block of types 1–5 and never closes it would swallow the sections
+after it, so generation fails naming the page, the operation whose prose opened it, the line it
+opened on, and the line it swallowed. Fix it in the source's own prose. A heading, list or quote
+in prose is the user's own structure and passes. The check derives no fact and changes no byte.
 
 Rung 2 runs each language's own tool over a temporary copy of the SDK: Go samples are checked with
 `go vet`, TypeScript samples with the project's `tsc` under strict options, and Python samples are

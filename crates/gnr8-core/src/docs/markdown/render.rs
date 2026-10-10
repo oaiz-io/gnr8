@@ -18,6 +18,7 @@ use crate::verify::ContractTestLanguage;
 use crate::CoreError;
 
 use super::escape::{code_block, code_span, link_label, one_line, table_row};
+use super::structure::{self, Landmark, ProseSpan, RenderedPage};
 
 /// `## Servers` on the index.
 const SERVERS: &str = "Servers";
@@ -96,8 +97,10 @@ pub(crate) fn site(model: &DocsModel) -> Result<BTreeMap<String, String>, CoreEr
         let path = page.path();
         let mut writer = Writer::new(&path, &mut links);
         render(&mut writer)?;
-        let text = writer.finish();
-        pages.insert(path, text);
+        let page = writer.finish();
+        // Rung 0: the user's verbatim prose leaves every block gnr8 printed intact.
+        structure::check(&path, &page)?;
+        pages.insert(path, page.text);
         Ok::<(), CoreError>(())
     };
     emit(&PageRef::index(), &|w| {
@@ -158,7 +161,7 @@ pub(crate) fn site(model: &DocsModel) -> Result<BTreeMap<String, String>, CoreEr
             Ok(())
         })?;
     }
-    pages.insert(LLMS_TXT.to_string(), finish(&llms_txt(model)));
+    pages.insert(LLMS_TXT.to_string(), llms_txt(model));
     let emitted: BTreeSet<String> = pages.keys().cloned().collect();
     links.check(&emitted)?;
     Ok(pages)
@@ -168,7 +171,7 @@ fn index(w: &mut Writer<'_>, model: &DocsModel) {
     let api = &model.api;
     w.heading(1, &Inline::text(api.title.trim()));
     if let Some(description) = &api.description {
-        w.raw(description.trim_end());
+        w.prose(description.origin(), description.text().trim_end());
     }
     let mut facts = Vec::new();
     if let Some(version) = &api.version {
@@ -300,11 +303,8 @@ fn operation(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result
         line.push(Inline::Strong(Box::new(Inline::text("Deprecated"))));
     }
     w.paragraph(&Inline::join(line, " · "));
-    if let Some(summary) = &op.summary {
-        w.raw(summary.text());
-    }
-    if let Some(description) = &op.description {
-        w.raw(description.text());
+    for prose in [&op.summary, &op.description].into_iter().flatten() {
+        w.prose(prose.origin(), prose.text());
     }
     auth_section(w, op);
     if !op.parameters.is_empty() {
@@ -434,7 +434,7 @@ fn declared_examples(w: &mut Writer<'_>, examples: &[DeclaredExample]) {
         }
         w.paragraph(&Inline::Seq(label));
         if let Some(description) = &example.description {
-            w.raw(description.text());
+            w.prose(description.origin(), description.text());
         }
         match &example.value {
             ExampleValue::Json(value) => w.code("json", value),
@@ -556,13 +556,18 @@ fn llms_txt(model: &DocsModel) -> String {
     if let Some(description) = model
         .api
         .description
-        .as_deref()
-        .map(str::trim)
+        .as_ref()
+        .map(|description| description.text().trim())
         .filter(|description| !description.is_empty())
     {
         out.push('\n');
         for line in description.lines() {
-            let _ = writeln!(out, "> {}", line.trim_end());
+            match line.trim_end() {
+                "" => out.push_str(">\n"),
+                line => {
+                    let _ = writeln!(out, "> {line}");
+                }
+            }
         }
     }
     let operation_line = |out: &mut String, index: &usize| {
@@ -620,11 +625,22 @@ fn llms_line(label: &str, page: &str, summary: Option<&str>) -> String {
     }
 }
 
-/// One page being written: its blocks, separated by one blank line, and the links it prints.
+/// What one block is, for rung 0.
+enum Kind {
+    /// A block gnr8 wrote: its first line must start a block where it is printed.
+    Gnr8,
+    /// A code block gnr8 wrote: its closing fence must also close it.
+    Fenced,
+    /// The user's verbatim prose, and what it documents.
+    Prose(String),
+}
+
+/// One page being written: its blocks, separated by exactly one blank line, and the links it
+/// prints. The renderer owns every blank line; nothing rewrites the page after it.
 struct Writer<'a> {
     page: &'a str,
     links: &'a mut Links,
-    blocks: Vec<String>,
+    blocks: Vec<(String, Kind)>,
 }
 
 impl<'a> Writer<'a> {
@@ -650,19 +666,23 @@ impl<'a> Writer<'a> {
         }
     }
 
+    fn push(&mut self, text: String, kind: Kind) {
+        self.blocks.push((text, kind));
+    }
+
     fn heading(&mut self, level: usize, text: &Inline) {
         let text = self.inline(text);
-        self.blocks.push(format!("{} {text}", "#".repeat(level)));
+        self.push(format!("{} {text}", "#".repeat(level)), Kind::Gnr8);
     }
 
     fn paragraph(&mut self, text: &Inline) {
         let text = self.inline(text);
-        self.blocks.push(text);
+        self.push(text, Kind::Gnr8);
     }
 
-    /// The user's verbatim prose, as one block.
-    fn raw(&mut self, text: &str) {
-        self.blocks.push(text.to_string());
+    /// The user's verbatim prose, as one block; `origin` names what it documents.
+    fn prose(&mut self, origin: &str, text: &str) {
+        self.push(text.to_string(), Kind::Prose(origin.to_string()));
     }
 
     /// A bullet list; nothing when `items` is empty.
@@ -674,7 +694,7 @@ impl<'a> Writer<'a> {
             .iter()
             .map(|item| format!("- {}", self.inline(item)))
             .collect();
-        self.blocks.push(lines.join("\n"));
+        self.push(lines.join("\n"), Kind::Gnr8);
     }
 
     fn table(&mut self, table: &Table) {
@@ -690,24 +710,47 @@ impl<'a> Writer<'a> {
             let cells: Vec<String> = row.iter().map(|cell| self.inline(cell)).collect();
             out.push_str(&table_row(&cells));
         }
-        self.blocks.push(out.trim_end_matches('\n').to_string());
+        self.push(out.trim_end_matches('\n').to_string(), Kind::Gnr8);
     }
 
-    /// A block printed exactly as given, as its own run of lines.
+    /// A code block printed exactly as given, as its own run of lines.
     fn block(&mut self, text: &str) {
-        self.blocks.push(text.trim_end_matches('\n').to_string());
+        self.push(text.trim_end_matches('\n').to_string(), Kind::Fenced);
     }
 
     fn code(&mut self, language: &str, body: &str) {
-        self.blocks.push(
-            code_block(language, body)
-                .trim_end_matches('\n')
-                .to_string(),
-        );
+        self.block(&code_block(language, body));
     }
 
-    fn finish(self) -> String {
-        finish(&(self.blocks.join("\n\n") + "\n"))
+    /// The page: every block, one blank line between each, one newline at the end, with the lines
+    /// gnr8 printed and the prose spans rung 0 reads.
+    fn finish(self) -> RenderedPage {
+        let mut page = RenderedPage::default();
+        let mut line = 0;
+        for (index, (text, kind)) in self.blocks.into_iter().enumerate() {
+            if index > 0 {
+                page.text.push_str("\n\n");
+                line += 2;
+            }
+            let lines = text.split('\n').count();
+            match kind {
+                Kind::Gnr8 => page.landmarks.push((line, Landmark::Block)),
+                Kind::Fenced => {
+                    page.landmarks.push((line, Landmark::Block));
+                    page.landmarks
+                        .push((line + lines.saturating_sub(1), Landmark::FenceClose));
+                }
+                Kind::Prose(origin) => page.prose.push(ProseSpan {
+                    start: line,
+                    end: line + lines,
+                    origin,
+                }),
+            }
+            page.text.push_str(&text);
+            line += lines - 1;
+        }
+        page.text.push('\n');
+        page
     }
 }
 
@@ -773,80 +816,13 @@ fn relative(from: &str, to: &str) -> String {
     parts.join("/")
 }
 
-/// A fenced-code-block marker: the fence character and its run length, when `line` opens or
-/// closes one (`` ``` `` or `~~~`, three or more, indented at most three spaces).
-fn fence_marker(line: &str) -> Option<(char, usize)> {
-    let trimmed = line.trim_start_matches(' ');
-    if line.len() - trimmed.len() > 3 {
-        return None;
-    }
-    let fence = trimmed
-        .chars()
-        .next()
-        .filter(|ch| *ch == '`' || *ch == '~')?;
-    let run = trimmed.chars().take_while(|ch| *ch == fence).count();
-    (run >= 3).then_some((fence, run))
-}
-
-/// Tracks which lines of a page sit inside a fenced code block, for both fence kinds: a fence is
-/// closed only by the same character, at least as long, with nothing after it.
-#[derive(Default)]
-struct Fences {
-    open: Option<(char, usize)>,
-}
-
-impl Fences {
-    /// Feed one line; returns whether it is inside a fence (fence lines themselves included).
-    fn inside(&mut self, line: &str) -> bool {
-        match (self.open, fence_marker(line)) {
-            (None, Some(marker)) => {
-                self.open = Some(marker);
-                true
-            }
-            (Some((fence, run)), Some((closing, length)))
-                if closing == fence
-                    && length >= run
-                    && line.trim().chars().all(|ch| ch == fence) =>
-            {
-                self.open = None;
-                true
-            }
-            (open, _) => open.is_some(),
-        }
-    }
-}
-
-/// Normalize a rendered page: `\n` line endings, no trailing whitespace on any line, no run of more
-/// than one blank line, and exactly one trailing newline.
-pub(crate) fn finish(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut blank_run = 0;
-    let mut fences = Fences::default();
-    for line in text.replace("\r\n", "\n").lines() {
-        let line = line.trim_end();
-        let in_fence = fences.inside(line);
-        if line.is_empty() && !in_fence {
-            blank_run += 1;
-            if blank_run > 1 {
-                continue;
-            }
-        } else {
-            blank_run = 0;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    let trimmed = out.trim_end_matches('\n');
-    format!("{}\n", trimmed.trim_start_matches('\n'))
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::collections::BTreeSet;
 
-    use super::{finish, relative, Links};
+    use super::{relative, Links, Writer};
 
     /// Every fixed heading a page can print, for the vocabulary test.
     const FIXED_HEADINGS: &[&str] = &[
@@ -932,12 +908,25 @@ mod tests {
         assert!(links.check(&whole).is_ok());
     }
 
+    /// The renderer owns every blank line: blocks are separated by exactly one, the page ends in
+    /// one newline, and prose is printed as written — its blank lines and trailing spaces too.
     #[test]
-    fn finished_pages_have_one_trailing_newline_and_no_trailing_space() {
-        assert_eq!(finish("# a  \n\n\n\nb\n\n\n"), "# a\n\nb\n");
-        assert_eq!(finish("```\n\n\n```\n"), "```\n\n\n```\n");
-        assert_eq!(finish("~~~\n\n\n~~~\n\n\nx\n"), "~~~\n\n\n~~~\n\nx\n");
-        // A shorter or different fence does not close a block.
-        assert_eq!(finish("````\n```\n\n\n````\n"), "````\n```\n\n\n````\n");
+    fn blocks_are_one_blank_line_apart_and_prose_is_verbatim() {
+        let mut links = Links::default();
+        let mut writer = Writer::new("index.md", &mut links);
+        writer.heading(1, &super::Inline::text("t"));
+        writer.prose("the API description", "a  \n\n\n\nb");
+        writer.code("go", "x := 1\n");
+        let page = writer.finish();
+        assert_eq!(page.text, "# t\n\na  \n\n\n\nb\n\n```go\nx := 1\n```\n");
+        assert_eq!(
+            page.landmarks,
+            vec![
+                (0, super::Landmark::Block),
+                (8, super::Landmark::Block),
+                (10, super::Landmark::FenceClose)
+            ]
+        );
+        assert_eq!((page.prose[0].start, page.prose[0].end), (2, 7));
     }
 }

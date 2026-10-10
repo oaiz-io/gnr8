@@ -133,17 +133,28 @@ impl Inline {
 }
 
 /// The user's own words — a doc comment, an imported description — printed verbatim. The model
-/// never reads inside it.
+/// never reads inside it; it only knows what the words document, so rung 0 can name them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Prose(String);
+pub(crate) struct Prose {
+    origin: String,
+    text: String,
+}
 
 impl Prose {
-    pub(crate) fn new(text: impl Into<String>) -> Self {
-        Self(text.into())
+    /// `origin` names what the words document, as an error says it: "operation `createBook`".
+    pub(crate) fn new(origin: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            origin: origin.into(),
+            text: text.into(),
+        }
+    }
+
+    pub(crate) fn origin(&self) -> &str {
+        &self.origin
     }
 
     pub(crate) fn text(&self) -> &str {
-        &self.0
+        &self.text
     }
 }
 
@@ -160,7 +171,7 @@ pub(crate) struct ApiDoc {
     /// The title exactly as the graph carries it; never blank.
     pub(crate) title: String,
     /// The description, when it is not blank.
-    pub(crate) description: Option<String>,
+    pub(crate) description: Option<Prose>,
     /// The declared version, trimmed, when one is declared.
     pub(crate) version: Option<String>,
     /// The base path, when it is not the server root.
