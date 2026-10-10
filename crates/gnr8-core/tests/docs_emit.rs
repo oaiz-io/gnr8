@@ -1723,3 +1723,22 @@ fn prose_stays_verbatim_when_it_keeps_the_page_structure() {
     assert!(text.contains(prose), "{text}");
     assert!(text.contains("\n\n## Example\n"), "{text}");
 }
+
+/// Operation prose is printed as the graph carries it: a line's trailing spaces (a Markdown hard
+/// break), a tab and a summary's own spelling survive. Only the whitespace after the last word is
+/// left to the page, which owns the blank lines between blocks.
+#[test]
+fn operation_prose_keeps_trailing_spaces_and_tabs() {
+    let mut value = bookstore_json();
+    value["operations"][0]["summary"] = json!("Returns\tevery book.");
+    value["operations"][0]["description"] =
+        json!("First line,  \nbroken hard.\n\n    code\twith a tab\n\n");
+    let pages = render(&graph_of(value), &[]);
+    let text = page(&pages, "operations/list-books.md");
+    assert!(
+        text.contains(
+            "\n\nReturns\tevery book.\n\nFirst line,  \nbroken hard.\n\n    code\twith a tab\n\n## "
+        ),
+        "{text:?}"
+    );
+}

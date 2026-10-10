@@ -14,7 +14,7 @@ use crate::graph::{
 use crate::sdk::builtins::SiblingSdk;
 use crate::sdk::emit_common::{
     cli_operations, command_examples, command_invocation, join_path, operation_auth_alternatives,
-    operation_prose, request_body_models_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
+    request_body_models_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
 };
 use crate::verify::{sample_operation, Sampled, SuccessOutcome};
 use crate::CoreError;
@@ -55,7 +55,6 @@ pub(super) fn operation_doc(
         .find(|policy| policy.operation_id == op.id);
     let (example, shown) = example_doc(graph, op, sdks)?;
     let cli = cli_docs(graph, op, sdks)?;
-    let prose = operation_prose(op, &[], "");
     let group = op.group.as_deref().and_then(|name| {
         nav.groups
             .get(name)
@@ -69,14 +68,14 @@ pub(super) fn operation_doc(
         group,
         tags: crate::graph::effective_operation_tags(graph, op).to_vec(),
         deprecated: policy.is_some_and(|policy| policy.deprecated),
-        summary: prose
-            .summary
-            .map(|summary| Prose::new(format!("operation `{}`", op.id), summary)),
-        description: (!prose.description.is_empty()).then(|| {
-            Prose::new(
-                format!("operation `{}`", op.id),
-                prose.description.join("\n"),
-            )
+        // The graph's own words, verbatim (D-PROSE). The SDK emitters fold and sanitize the same
+        // prose for their comment forms (`operation_prose`); a page is not a comment, so nothing
+        // here reads or rewrites it. Only the whitespace after the last word is left to the
+        // renderer, which owns the blank lines between blocks.
+        summary: nonblank(op.summary.as_deref())
+            .map(|summary| Prose::new(format!("operation `{}`", op.id), summary.trim_end())),
+        description: nonblank(op.description.as_deref()).map(|description| {
+            Prose::new(format!("operation `{}`", op.id), description.trim_end())
         }),
         auth: auth_alternatives(graph, op)?,
         parameters: parameters(nav, op)?,
