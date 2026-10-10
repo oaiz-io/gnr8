@@ -2126,6 +2126,11 @@ class Client:
             return \"true\" if value else \"false\"
         return str(value)
 
+    def _path_segment(self, value: Any) -> str:
+        return urllib.parse.quote(
+            self._parameter_scalar(self._wire_value(value)), safe=\"\"
+        )
+
     def _parameter_pairs(
         self,
         name: str,
@@ -2433,7 +2438,7 @@ class Client:
 /// `ops` are all of the graph's operations, in graph order. Each method:
 /// - takes `self`, then path params as positional args, then a typed `body` arg for body-bearing ops,
 ///   then optional query params (each defaulting to `None`);
-/// - interpolates each path param through `urllib.parse.quote(str(value), safe="")` (V5 path-injection
+/// - interpolates each path param through `self._path_segment(value)` (V5 path-injection
 ///   mitigation — twin of Go `url.PathEscape`); builds the query with `urllib.parse.urlencode` over the
 ///   present optional params; joins `base_path` + `op.path`;
 /// - calls `self._do`, raises the `ApiError` built by `self._error` for rejected responses, and decodes
@@ -2894,11 +2899,10 @@ fn emit_operation(
                 .find(|(pp, _)| &pp.name == token)
                 .map_or_else(|| safe_ident(&snake(token)), |(_, id)| id.clone());
             let placeholder = format!("{{{token}}}");
-            // `safe=''` uses SINGLE quotes inside the double-quoted f-string: a backslash in an
-            // f-string expression part is a `SyntaxError` on Python 3.9-3.11 ("f-string expression
-            // part cannot include a backslash"), so escaped double-quotes (`safe=\"\"`) would not
-            // compile. Single quotes need no escape and are valid on every Python 3.x (PYSDK-02).
-            let escaped = format!("{{urllib.parse.quote(str({ident}), safe='')}}");
+            // `_path_segment` sends the value the way a query, header or cookie value goes out — an
+            // enum member as its wire value (never `str(Kind.A)`'s `Kind.A`), a boolean as
+            // `true`/`false` — percent-encoded by `urllib.parse.quote(safe="")`, the page's one rule.
+            let escaped = format!("{{self._path_segment({ident})}}");
             fstring = fstring.replace(&placeholder, &escaped);
         }
         writeln!(out, "        path = f\"{fstring}\"").map_err(sink)?;
@@ -4700,12 +4704,12 @@ mod tests {
         }
 
         #[test]
-        fn templated_path_escapes_each_param_with_urllib_quote() {
+        fn templated_path_escapes_each_param_through_path_segment() {
             let g = ops_graph();
             let out = emit_operations(&g, "bookstore", "/", &ops_for(&g, "getBook")).unwrap();
             assert!(
                 out.contains(
-                    "path = f\"/books/{urllib.parse.quote(str(book_id), safe='')}\""
+                    "path = f\"/books/{self._path_segment(book_id)}\""
                 ),
                 "path param must be percent-escaped (V5) with a backslash-free f-string (PYSDK-02):\n{out}"
             );
