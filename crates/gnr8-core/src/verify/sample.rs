@@ -1964,54 +1964,60 @@ fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, 
     if let Err(keyword) = numeric_interval(constraints) {
         return unsatisfiable(subject, keyword);
     }
-    let lowest = [
+    // An exclusive bound at the edge of `i128` has no integer past it: no integer meets it.
+    let Some(lowest) = admissible_edge(
         constraints
             .minimum
             .as_deref()
-            .and_then(|text| integer_bound(text, true)),
+            .and_then(|text| integer_bound(text, true))
+            .map(Some),
         constraints
             .exclusive_minimum
             .as_deref()
             .and_then(|text| integer_bound(text, false))
-            .map(|bound| bound + 1),
-    ]
-    .into_iter()
-    .flatten()
-    .max();
-    let highest = [
+            .map(|bound| bound.checked_add(1)),
+        Ord::max,
+    ) else {
+        return unsatisfiable(subject, "exclusiveMinimum");
+    };
+    let Some(highest) = admissible_edge(
         constraints
             .maximum
             .as_deref()
-            .and_then(|text| integer_bound(text, false)),
+            .and_then(|text| integer_bound(text, false))
+            .map(Some),
         constraints
             .exclusive_maximum
             .as_deref()
             .and_then(|text| integer_bound(text, true))
-            .map(|bound| bound - 1),
-    ]
-    .into_iter()
-    .flatten()
-    .min();
+            .map(|bound| bound.checked_sub(1)),
+        Ord::min,
+    ) else {
+        return unsatisfiable(subject, "exclusiveMaximum");
+    };
     let chosen = match (lowest, highest) {
         (Some(lowest), _) if BASE < lowest => lowest,
         (_, Some(highest)) if BASE > highest => highest,
         _ => BASE,
     };
     // Under a `multipleOf`, the admissible multiple nearest the base: one of the two multiples
-    // around `chosen`, since `chosen` is the admissible integer nearest the base.
+    // around `chosen`, since `chosen` is the admissible integer nearest the base. A multiple beyond
+    // `i128` is no integer a sample can hold, so it is not a candidate.
     let chosen = match constraints.multiple_of.as_deref().map(integer_step) {
         None => chosen,
         Some(None) => return unsatisfiable(subject, "multipleOf"),
         Some(Some(step)) => {
-            let down = chosen.div_euclid(step) * step;
+            let down = chosen.div_euclid(step).checked_mul(step);
+            let up = down.and_then(|down| down.checked_add(step));
             let admissible = |candidate: &i128| {
                 lowest.is_none_or(|lowest| *candidate >= lowest)
                     && highest.is_none_or(|highest| *candidate <= highest)
             };
-            let Some(multiple) = [down, down + step]
+            let Some(multiple) = [down, up]
                 .into_iter()
+                .flatten()
                 .filter(admissible)
-                .min_by_key(|candidate| (candidate - BASE).abs())
+                .min_by_key(|candidate| candidate.abs_diff(BASE))
             else {
                 return unsatisfiable(subject, "multipleOf");
             };
@@ -2030,6 +2036,22 @@ fn integer_candidate(constraints: &Constraints, subject: &str) -> Result<Value, 
         });
     }
     Ok(value)
+}
+
+/// The tighter of an inclusive and an exclusive integer edge, each already moved onto the
+/// admissible integer (`None` inside when an exclusive edge has no integer past it). `None` when
+/// such an edge is declared; `Some(None)` when the side is unbounded.
+fn admissible_edge(
+    inclusive: Option<Option<i128>>,
+    exclusive: Option<Option<i128>>,
+    tighter: fn(i128, i128) -> i128,
+) -> Option<Option<i128>> {
+    let mut edge = None;
+    for side in [inclusive, exclusive].into_iter().flatten() {
+        let side = side?;
+        edge = Some(edge.map_or(side, |edge| tighter(edge, side)));
+    }
+    Some(edge)
 }
 
 /// The smallest positive integer that is a multiple of the `multipleOf` text `of` — `of` itself

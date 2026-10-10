@@ -2433,3 +2433,29 @@ fn a_declared_error_example_is_the_error_reply() {
         json!({"code": "not_found"})
     );
 }
+
+/// An integer bound far beyond any integer a sample can hold — an `OpenAPI` 3.0
+/// `maximum: -1e300, exclusiveMaximum: true` — is a typed refusal, never an arithmetic overflow.
+#[test]
+fn an_integer_bound_beyond_every_integer_is_refused_without_overflow() {
+    for bounds in [
+        json!({"exclusive_maximum": "-1e300"}),
+        json!({"exclusive_minimum": "1e300"}),
+        json!({"maximum": "-1e300"}),
+        json!({"minimum": "1e300"}),
+        json!({"maximum": "-1e300", "multiple_of": "3"}),
+        json!({"minimum": "1e300", "multiple_of": "3"}),
+        json!({"exclusive_maximum": "-1e300", "multiple_of": "7"}),
+        json!({"maximum": "-170141183460469231731687303715884105728", "multiple_of": "3"}),
+        json!({"minimum": "170141183460469231731687303715884105727", "multiple_of": "3"}),
+        json!({"exclusive_minimum": "170141183460469231731687303715884105727"}),
+        json!({"exclusive_maximum": "-170141183460469231731687303715884105728"}),
+    ] {
+        let graph = probe(&[query("q", &int(), true, &bounds)], None, None, &[]);
+        let refused = refusal(&graph);
+        assert!(
+            matches!(&refused, SampleRefusal::Unsatisfiable { subject, .. } if subject == "query.q"),
+            "{bounds}: {refused:?}"
+        );
+    }
+}
