@@ -79,16 +79,18 @@ target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` w
   its fields' examples play no part in it. A field example counts only where a body or reply is
   built, and the reply of an operation that declares no response example shows its fields'
   examples. A field example is text read as a value of the field's type, the way an enum member is,
-  so it states a scalar only. Parameters declare no example.
+  so it states a scalar only. A scalar parameter declares one with its `example`, read the same
+  way.
 - **Declared examples are checked.** Before any page is sampled, every declared example is checked
   against the input it is declared for, whether the sample uses it or not. The check covers the
   type, the required fields, fields the schema does not declare, `null` where the field is not
   nullable, and every constraint below except `pattern`. One that breaks its input stops generation
-  with an error that names where it is declared (schema and field, or operation, status, example
-  name and media type) and what it breaks. It is never skipped or replaced. The contract tests run
+  with an error that names where it is declared (schema and field, operation and parameter, or
+  operation, status, example name and media type, with the file) and what it breaks. It is never skipped or replaced. The contract tests run
   the same check.
 - **Values are sampled, and valid.** A built value satisfies every declared constraint on its input
-  at once: enum, length, range, item count and property count. A string whose format gnr8 maps to a
+  at once: enum, length, range, `multipleOf`, item count and property count. A string whose format
+  gnr8 maps to a
   well-known scalar (`uuid`, `date-time`, `date`, `duration`, `decimal`, `email`, `uri`) takes that
   scalar's literal. Other formats are annotations and are not honoured. An enum member is printed as
   declared. A parameter imported from an OpenAPI document carries its `minimum`, `maxLength` and
@@ -108,7 +110,9 @@ target, then the generated CLI's invocation when a `GoSdk`/`PySdk` `.cli(...)` w
   but that no call can state prints `No sample call: …` with the value: a `null` in a request, a
   free-form value other than `{}` in a request, or a number that breaks the number rule above. A
   canned reply that cannot be sampled, or that carries a `pattern`, prints `No sample response
-  body: …`. A file
+  body: …`. The same holds for a `uniqueItems` array the sample fills past one element (it repeats
+  one item), and for a validation keyword gnr8 does not model that an imported parameter's schema
+  still states (`const`, `not`, an enum with no scalar `type`). A file
   download, no success status, or a first success status outside 2xx prints neither a reply nor a
   note. The generated contract tests draw on the same sample but still send a value under a
   `pattern` — no SDK validates one — so a pattern costs a page its example, never a contract case.
