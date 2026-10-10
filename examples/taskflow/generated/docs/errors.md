@@ -1,6 +1,6 @@
 # Errors
 
-Every generated client surfaces a non-success status as its typed error — Go `*APIError`, Python and TypeScript `ApiError` — including a status the API does not declare.
+Each generated SDK surfaces a non-success status as its typed error, including a status the API does not declare: Go `*APIError`.
 
 | Status | Body | Operations |
 | --- | --- | --- |

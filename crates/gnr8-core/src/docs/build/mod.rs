@@ -106,7 +106,7 @@ impl DocsModel {
             })
             .collect::<Result<Vec<_>, CoreError>>()?;
         let (groups, ungrouped) = catalog::groups(graph, &nav);
-        let errors = catalog::error_catalog(graph, &nav, &errors)?;
+        let errors = catalog::error_catalog(graph, &nav, &errors, &sdks)?;
         let auth = catalog::auth_doc(graph, &sdks)?;
         Ok(Self {
             api: catalog::api_doc(graph),

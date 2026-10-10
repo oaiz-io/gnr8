@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use crate::docs::build::language_name;
 use crate::docs::identity::NO_IDENTITY_NOTE;
 use crate::docs::model::{
     CodeSample, DeclaredExample, DocsModel, ExampleDoc, ExampleValue, HttpRequest, Inline,
@@ -75,10 +76,10 @@ sampled from the schema, and satisfies every declared constraint. Credentials ar
 code samples take them and the base URL as variables. Paths start at the server root; a server URL \
 with a path prefix prepends it to every path.";
 
-/// The one guarantee the error catalog states, once.
-const UNDECLARED_STATUS_GUARANTEE: &str = "Every generated client surfaces a non-success status \
-as its typed error — Go `*APIError`, Python and TypeScript `ApiError` — including a status the API \
-does not declare.";
+/// The one guarantee the error catalog states, once, before the declared SDKs' error types.
+const UNDECLARED_STATUS_GUARANTEE: &str =
+    "Each generated SDK surfaces a non-success status as its typed error, including a status the \
+     API does not declare: ";
 
 /// Render every `StaticDocs` page, keyed by docs-relative path.
 ///
@@ -129,7 +130,23 @@ pub(crate) fn site(model: &DocsModel) -> Result<BTreeMap<String, String>, CoreEr
     if let Some(errors) = &model.errors {
         emit(&errors.page, &|w| {
             w.heading(1, &Inline::text(ERRORS));
-            w.paragraph(&Inline::text(UNDECLARED_STATUS_GUARANTEE));
+            if !errors.error_types.is_empty() {
+                let types = errors
+                    .error_types
+                    .iter()
+                    .map(|(language, name)| {
+                        Inline::Seq(vec![
+                            Inline::text(format!("{} ", language_name(*language))),
+                            Inline::code(name.clone()),
+                        ])
+                    })
+                    .collect();
+                w.paragraph(&Inline::Seq(vec![
+                    Inline::text(UNDECLARED_STATUS_GUARANTEE),
+                    Inline::join(types, ", "),
+                    Inline::text("."),
+                ]));
+            }
             w.table(&errors.table);
             Ok(())
         })?;

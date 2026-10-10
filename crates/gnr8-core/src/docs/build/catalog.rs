@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::docs::identity::error_type;
 use crate::docs::markdown::escape::one_line;
 use crate::docs::model::{
     ApiDoc, AuthDoc, AuthSchemeDoc, ErrorCatalog, GroupDoc, Inline, PageRef, Prose, SdkDoc,
@@ -11,6 +12,7 @@ use crate::graph::ApiGraph;
 use crate::sdk::builtins::SiblingSdk;
 use crate::sdk::emit_common::{declared_auth_schemes, operation_auth_alternatives};
 use crate::sdk::model::SdkErrorPlan;
+use crate::verify::ContractTestLanguage;
 use crate::CoreError;
 
 use super::nav::Nav;
@@ -76,6 +78,7 @@ pub(super) fn error_catalog(
     graph: &ApiGraph,
     nav: &Nav<'_>,
     plan: &SdkErrorPlan,
+    sdks: &[(SiblingSdk<'_>, SdkDoc)],
 ) -> Result<Option<ErrorCatalog>, CoreError> {
     if plan.responses.is_empty() {
         return Ok(None);
@@ -130,8 +133,18 @@ pub(super) fn error_catalog(
             Inline::join(cells, "; "),
         ]);
     }
+    let mut error_types: Vec<(ContractTestLanguage, String)> = Vec::new();
+    for (_, doc) in sdks {
+        if !error_types
+            .iter()
+            .any(|(language, _)| *language == doc.language)
+        {
+            error_types.push((doc.language, error_type(doc.language)));
+        }
+    }
     Ok(Some(ErrorCatalog {
         page: PageRef::errors(),
+        error_types,
         table: Table {
             columns: vec!["Status", "Body", "Operations"],
             rows: table_rows,

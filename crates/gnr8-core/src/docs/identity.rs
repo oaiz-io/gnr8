@@ -47,6 +47,16 @@ impl ConsumerIdentity {
     }
 }
 
+/// The SDK's typed error as a consumer's code names it: the emitter's own `ERROR_TYPE`, a pointer in
+/// Go, where the client returns `*APIError`.
+pub(crate) fn error_type(language: ContractTestLanguage) -> String {
+    match language {
+        ContractTestLanguage::Go => format!("*{}", crate::gosdk::ERROR_TYPE),
+        ContractTestLanguage::Python => crate::pysdk::ERROR_TYPE.to_string(),
+        ContractTestLanguage::TypeScript => crate::tssdk::ERROR_TYPE.to_string(),
+    }
+}
+
 /// The note an SDK section prints when its target emits no package manifest.
 pub(crate) const NO_IDENTITY_NOTE: &str =
     "No sample call: this SDK target emits no package metadata, so it has no published import name.";

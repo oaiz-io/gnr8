@@ -948,6 +948,38 @@ fn undeclared_status_guarantee_is_stated_once() {
     assert_eq!(page(&pages, "errors.md").matches(guarantee).count(), 1);
 }
 
+/// The guarantee names each declared SDK's own error type, as that SDK's emitter spells it, and no
+/// type of an SDK the pipeline does not declare. Without a declared SDK there is no generated
+/// client to promise anything of, so the sentence is left out and the catalog stays.
+#[test]
+fn undeclared_status_guarantee_names_only_the_declared_sdks_error_types() {
+    let pages = render(&bookstore(), &[go_sdk()]);
+    let errors = page(&pages, "errors.md");
+    assert!(
+        errors.contains(
+            "# Errors\n\nEach generated SDK surfaces a non-success status as its typed error, \
+             including a status the API does not declare: Go `*APIError`.\n"
+        ),
+        "{errors}"
+    );
+    assert!(!errors.contains("ApiError"), "{errors}");
+
+    let pages = render(&bookstore(), &[ts_sdk(false), py_sdk(), go_sdk()]);
+    assert!(
+        page(&pages, "errors.md").contains(
+            "including a status the API does not declare: TypeScript `ApiError`, Python \
+             `ApiError`, Go `*APIError`.\n"
+        ),
+        "{}",
+        page(&pages, "errors.md")
+    );
+
+    let pages = render(&bookstore(), &[]);
+    let errors = page(&pages, "errors.md");
+    assert!(errors.starts_with("# Errors\n\n| Status |"), "{errors}");
+    assert!(!errors.contains("does not declare"), "{errors}");
+}
+
 #[test]
 fn authentication_page_only_when_security_is_declared() {
     let pages = render(&bookstore(), &[go_sdk(), py_sdk(), ts_sdk(true)]);

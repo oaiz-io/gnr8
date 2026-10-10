@@ -471,6 +471,9 @@ pub(crate) enum SchemaBody {
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorCatalog {
     pub(crate) page: PageRef,
+    /// Each declared SDK language, once, in plan order, with the typed error its client raises for
+    /// every non-success status; empty when the plan declares no SDK.
+    pub(crate) error_types: Vec<(ContractTestLanguage, String)>,
     /// One row per status and schema, each with every operation that declares it.
     pub(crate) table: Table,
 }
