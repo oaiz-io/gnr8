@@ -48,6 +48,8 @@ pub(crate) enum DocsFailure {
     NoConsumerIdentity,
     /// The language's tool is not installed.
     ToolchainAbsent,
+    /// Every operation's sample is refused, so there is nothing to compile or run.
+    NoSamples,
     /// A page a sample belongs to is not among this run's fresh artifacts.
     MissingPage,
     /// A sample does not appear verbatim in its page after post-processors.
@@ -65,6 +67,7 @@ impl DocsFailure {
         match self {
             Self::NoConsumerIdentity => "no_consumer_identity",
             Self::ToolchainAbsent => "toolchain_absent",
+            Self::NoSamples => "no_samples",
             Self::MissingPage => "missing_page",
             Self::SnippetNotInPage => "snippet_not_in_page",
             Self::Materialization => "materialization",
@@ -138,8 +141,18 @@ pub(crate) fn run(
     artifacts: &[Artifact],
     label: String,
 ) -> DocsReport {
-    run_with_runner(root, suite, artifacts, label, &mut NativeRunner)
+    run_with_runner(
+        root,
+        suite,
+        artifacts,
+        label,
+        &mut NativeRunner,
+        &crate::typescript_compiler,
+    )
 }
+
+/// How a run finds the `typescript` compiler, given the project root and the SDK's output path.
+type CompilerLookup<'a> = &'a dyn Fn(&Path, &str) -> Option<crate::TypeScriptCompiler>;
 
 fn run_with_runner(
     root: &Path,
@@ -147,6 +160,7 @@ fn run_with_runner(
     artifacts: &[Artifact],
     label: String,
     runner: &mut impl ProcessRunner,
+    typescript: CompilerLookup<'_>,
 ) -> DocsReport {
     let started = std::time::Instant::now();
     let (tool, probe, probe_arg) = match suite.language {
@@ -179,11 +193,38 @@ fn run_with_runner(
                 ),
             ),
         )),
+        // Refused operations are counted, not run: with none sampled there is nothing to check.
+        Some(unit) if unit.entries.is_empty() => Err((
+            DocsStatus::Skipped,
+            DocsReason::new(
+                DocsFailure::NoSamples,
+                format!(
+                    "every operation's sample is refused ({} counted), so there is nothing to \
+                     compile or run",
+                    suite.refused
+                ),
+            ),
+        )),
         Some(unit) => check_pages(suite, unit, artifacts)
             .map_err(|reason| (DocsStatus::Failed, reason))
             .and_then(|()| probe_tool(runner, root, probe, probe_arg))
-            .and_then(|()| {
-                run_unit(root, suite, unit, artifacts, runner)
+            .and_then(|()| match suite.language {
+                ContractTestLanguage::TypeScript => typescript(root, &suite.sdk_output_path)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        (
+                            DocsStatus::Skipped,
+                            DocsReason::new(
+                                DocsFailure::ToolchainAbsent,
+                                "typescript compiler not found; install it in the project with \
+                                 `npm install --save-dev typescript` or provide `tsc` on PATH",
+                            ),
+                        )
+                    }),
+                ContractTestLanguage::Go | ContractTestLanguage::Python => Ok(None),
+            })
+            .and_then(|compiler| {
+                run_unit(root, suite, unit, artifacts, runner, compiler)
                     .map_err(|reason| (DocsStatus::Failed, reason))
             }),
     };
@@ -277,6 +318,7 @@ fn run_unit(
     unit: &CompileUnit,
     artifacts: &[Artifact],
     runner: &mut impl ProcessRunner,
+    typescript: Option<crate::TypeScriptCompiler>,
 ) -> Result<(), DocsReason> {
     let materialization = |message: String| DocsReason::new(DocsFailure::Materialization, message);
     let owned = super::artifacts_under(artifacts, &suite.sdk_output_path);
@@ -343,14 +385,9 @@ fn run_unit(
             read_records(&wire)?
         }
         ContractTestLanguage::TypeScript => {
-            let compiler =
-                crate::typescript_compiler(root, &suite.sdk_output_path).ok_or_else(|| {
-                    DocsReason::new(
-                        DocsFailure::ToolchainAbsent,
-                        "typescript compiler not found; install it in the project with \
-                         `npm install --save-dev typescript` or provide `tsc` on PATH",
-                    )
-                })?;
+            let compiler = typescript.ok_or_else(|| {
+                materialization("the TypeScript docs suite ran without a compiler".into())
+            })?;
             let seed = crate::safe_temp_artifact_path(root, &suite.sdk_output_path).ok();
             let tree = crate::materialize_artifact_group(
                 &suite.sdk_output_path,
@@ -442,7 +479,8 @@ fn accepted(
     if output.status.success() {
         return Ok(());
     }
-    let mut reason = DocsReason::new(DocsFailure::Rejected, "the tool rejected a sample");
+    let (message, excerpt) = rejection(output);
+    let mut reason = DocsReason::new(DocsFailure::Rejected, message);
     if let Some(index) = failing_entry(unit, output) {
         let entry = &unit.entries[index];
         reason.operation = Some(entry.operation_id.clone());
@@ -452,8 +490,33 @@ fn accepted(
             entry.page
         ));
     }
-    reason.output = Some(crate::command_output_excerpt(output));
+    reason.output = Some(excerpt);
     Err(reason)
+}
+
+/// What a failed tool run says, as a message and an excerpt. A Python unit that cannot import a
+/// module the SDK needs (pydantic, say) fails before any sample runs, and `unittest` buries the
+/// `ModuleNotFoundError` mid-report; it is named rather than excerpted away.
+fn rejection(output: &Output) -> (&'static str, String) {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    match text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("ModuleNotFoundError:"))
+    {
+        Some(line) => (
+            "the unit could not import a module the SDK needs, so no sample ran",
+            line.to_string(),
+        ),
+        None => (
+            "the tool rejected a sample",
+            crate::command_output_excerpt(output),
+        ),
+    }
 }
 
 fn read_records(path: &Path) -> Result<Vec<WireRecord>, DocsReason> {
@@ -771,9 +834,52 @@ mod tests {
         runner: &mut FakeRunner,
     ) -> super::DocsReport {
         let root = crate::verify::tests::temp_root("docs");
-        let report = run_with_runner(&root, suite, artifacts, "Go docs samples".into(), runner);
+        let report = run_with_runner(
+            &root,
+            suite,
+            artifacts,
+            "Go docs samples".into(),
+            runner,
+            &|_, _| None,
+        );
         let _ = std::fs::remove_dir_all(root);
         report
+    }
+
+    /// Refused operations are counted, not run: a suite whose every operation is refused has no
+    /// sample to compile, so it is skipped with that reason and the count — never failed, and never
+    /// passed with nothing checked.
+    #[test]
+    fn every_sample_refused_is_skipped_with_the_count() {
+        let mut runner = FakeRunner::default();
+        let mut empty = unit();
+        empty.entries.clear();
+        empty.text = "package sdk_test\n".to_string();
+        let mut suite = suite(Some(empty));
+        suite.cases = 0;
+        suite.refused = 3;
+        let report = run(&suite, &artifacts(), &mut runner);
+        assert_eq!(report.status, DocsStatus::Skipped);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::NoSamples);
+        assert!(reason.message.contains("(3 counted)"), "{}", reason.message);
+        assert!(runner.programs.is_empty(), "{:?}", runner.programs);
+    }
+
+    /// Node answers but no `typescript` compiler is found: a missing toolchain, so skipped with the
+    /// install hint, exactly like a missing `node`.
+    #[test]
+    fn node_without_typescript_is_reported_skipped() {
+        let mut runner = FakeRunner::default();
+        let mut typescript = suite(Some(unit()));
+        typescript.language = ContractTestLanguage::TypeScript;
+        typescript.go_verification = None;
+        let report = run(&typescript, &artifacts(), &mut runner);
+        assert_eq!(report.status, DocsStatus::Skipped, "{:?}", report.reason);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::ToolchainAbsent);
+        assert!(reason.message.contains("typescript"), "{}", reason.message);
+        assert_eq!(runner.programs, vec!["node".to_string()]);
     }
 
     #[test]
@@ -924,5 +1030,77 @@ mod tests {
         assert!(report.no_checks_executed());
         assert!(report.render_human().contains("Go docs samples"));
         assert!(report.render_human().contains("no package metadata"));
+    }
+
+    /// The host runner's Python and TypeScript paths, end to end with the real tools: the docs-edge
+    /// fixture generated in process, then each docs suite run as `gnr8 verify` runs it — rung 2 and
+    /// rung 3, against the materialized artifacts. Each language returns early when its toolchain
+    /// (python3 with pydantic; node with typescript) is absent.
+    #[test]
+    fn host_runner_runs_python_and_typescript_suites_end_to_end() {
+        use gnr8_engine::sdk::prelude::*;
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/docs-edge/openapi.yaml");
+        let root = crate::verify::tests::temp_root("docs-e2e");
+        std::fs::copy(&fixture, root.join("openapi.yaml")).unwrap();
+        let pipeline = Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(
+                PySdk::new()
+                    .module("example.com/edge/sdk")
+                    .to("generated/py"),
+            )
+            .target(
+                TsSdk::new()
+                    .module("edge")
+                    .package(SdkPackageMetadata::new().registry_name("@example/edge-sdk"))
+                    .to("generated/ts"),
+            )
+            .target(StaticDocs::new().to("generated/docs"));
+        let outcome =
+            gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), None).unwrap();
+        let has = |program: &str, args: &[&str]| {
+            Command::new(program)
+                .args(args)
+                .output()
+                .is_ok_and(|output| output.status.success())
+        };
+        for suite in &outcome.docs_suites {
+            let available = match suite.language {
+                ContractTestLanguage::Python => has("python3", &["-c", "import pydantic"]),
+                ContractTestLanguage::TypeScript => {
+                    has("node", &["--version"])
+                        && crate::typescript_compiler(&root, &suite.sdk_output_path).is_some()
+                }
+                ContractTestLanguage::Go => continue,
+            };
+            if !available {
+                eprintln!(
+                    "skipping the {} docs suite: toolchain absent",
+                    suite.language.id()
+                );
+                continue;
+            }
+            let report = super::run(&root, suite, &outcome.artifacts, "docs".into());
+            assert_eq!(
+                report.status,
+                DocsStatus::Passed,
+                "{}: {:?}",
+                suite.language.id(),
+                report.reason.map(|reason| reason.explain())
+            );
+            assert!(report.cases > 0);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_missing_python_module_is_named_not_excerpted_away() {
+        let stderr = "snippets (unittest.loader._FailedTest.snippets) ... ERROR\n\n======\nERROR: snippets\n------\nImportError: Failed to import test module: snippets\nTraceback (most recent call last):\n  File \"snippets.py\", line 12, in <module>\n    from sdk import ApiError\n  File \"sdk/models.py\", line 5, in <module>\n    from pydantic import BaseModel\nModuleNotFoundError: No module named 'pydantic'\n\n------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n";
+        let (message, excerpt) = super::rejection(&output(1, stderr));
+        assert!(message.contains("could not import"), "{message}");
+        assert_eq!(excerpt, "ModuleNotFoundError: No module named 'pydantic'");
+        let (message, _) = super::rejection(&output(1, "vet: x.go:3:1: undefined: Foo"));
+        assert_eq!(message, "the tool rejected a sample");
     }
 }

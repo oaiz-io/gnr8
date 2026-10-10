@@ -334,12 +334,14 @@ fn diagnostics_section(graph: &ApiGraph, op: &Operation) -> String {
     }
     let mut out = format!("\n## {DIAGNOSTICS}\n\n");
     for diagnostic in published {
+        // A module-relative path printed with `/`, so the same source extracted on Windows and on
+        // a POSIX system prints one page.
         let _ = writeln!(
             out,
             "- {}: {} ({}:{})",
             diagnostic.severity,
             one_line(&diagnostic.message),
-            diagnostic.file,
+            diagnostic.file.replace('\\', "/"),
             diagnostic.line
         );
     }
@@ -425,17 +427,28 @@ pub(crate) fn render_authentication(
     links: &mut LinkRegistry,
 ) -> Result<String, CoreError> {
     let graph = site.graph;
+    // An operation requires a scheme only when every one of its alternatives includes it; a scheme
+    // that appears in some alternatives is one way, among others, to meet its requirement.
     let mut required_by: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
+    let mut accepted_by: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
     for op in &graph.operations {
-        for alternative in operation_auth_alternatives(graph, op)? {
-            for scheme in &alternative {
-                let users = required_by
-                    .entry(scheme_id(scheme).to_string())
-                    .or_default();
-                if !users.iter().any(|user| user.id == op.id) {
-                    users.push(op);
-                }
+        let alternatives = operation_auth_alternatives(graph, op)?;
+        let mut seen: Vec<&str> = Vec::new();
+        for scheme in alternatives.iter().flatten() {
+            let id = scheme_id(scheme);
+            if seen.contains(&id) {
+                continue;
             }
+            seen.push(id);
+            let in_every = alternatives
+                .iter()
+                .all(|alternative| alternative.iter().any(|other| scheme_id(other) == id));
+            let list = if in_every {
+                &mut required_by
+            } else {
+                &mut accepted_by
+            };
+            list.entry(id.to_string()).or_default().push(op);
         }
     }
     let mut out = format!("# {AUTHENTICATION}\n");
@@ -455,8 +468,14 @@ pub(crate) fn render_authentication(
             out.push('\n');
             out.push_str(&table(&["SDK", "Credential option"], &rows));
         }
-        if let Some(users) = required_by.get(id) {
-            out.push_str("\nRequired by:\n\n");
+        for (label, lists) in [
+            ("Required by:", &required_by),
+            ("Accepted by, as one of their alternatives:", &accepted_by),
+        ] {
+            let Some(users) = lists.get(id) else {
+                continue;
+            };
+            let _ = write!(out, "\n{label}\n\n");
             for op in users {
                 let target = site.nav.operation_page(&op.id)?;
                 let _ = writeln!(
@@ -723,12 +742,10 @@ pub(crate) fn render_schema(
         out.push('\n');
     }
     match &schema.body {
-        Type::Object(fields) => {
+        Type::Object(fields) if !fields.is_empty() => {
             let directions = directions_of(&site.directions, &schema.id);
-            let rows = fields
-                .iter()
-                .map(|field| field_row(site, &page, field, directions, links))
-                .collect::<Result<Vec<_>, CoreError>>()?;
+            let mut rows = Vec::new();
+            field_rows(site, &page, "", fields, directions, links, &mut rows)?;
             let _ = write!(
                 out,
                 "## {FIELDS}\n\n{}",
@@ -747,6 +764,9 @@ pub(crate) fn render_schema(
                 )
             );
         }
+        // An object with no fields, or an enum with no members, has no table or list to print.
+        Type::Object(_) => {}
+        Type::Enum(members) if members.is_empty() => {}
         Type::Enum(members) => {
             let _ = write!(out, "## {MEMBERS}\n\n");
             for member in members {
@@ -764,18 +784,62 @@ pub(crate) fn render_schema(
     Ok(out)
 }
 
+/// The rows of an object's fields, each followed by the rows of the fields of an inline object it
+/// holds — directly, as an array's items (`name[].field`) or as a map's values (`name{}.field`) —
+/// since `openapi.yaml` publishes those nested facts as well. An inline object is in the same
+/// payload position as the schema carrying it, so the same directions decide its presence.
+fn field_rows(
+    site: &Site<'_>,
+    page: &str,
+    prefix: &str,
+    fields: &[Field],
+    directions: SchemaDirections,
+    links: &mut LinkRegistry,
+    rows: &mut Vec<Vec<String>>,
+) -> Result<(), CoreError> {
+    for field in fields {
+        let name = format!("{prefix}{}", field.json_name);
+        rows.push(field_row(site, page, &name, field, directions, links)?);
+        let (nested, marker) = match &field.schema {
+            Type::Object(inner) => (Some(inner), ""),
+            Type::Array(items) => match items.as_ref() {
+                Type::Object(inner) => (Some(inner), "[]"),
+                _ => (None, ""),
+            },
+            Type::Map { value, .. } => match value.as_ref() {
+                Type::Object(inner) => (Some(inner), "{}"),
+                _ => (None, ""),
+            },
+            _ => (None, ""),
+        };
+        if let Some(inner) = nested {
+            field_rows(
+                site,
+                page,
+                &format!("{name}{marker}."),
+                inner,
+                directions,
+                links,
+                rows,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// One field row, with exactly the field facts the `OpenAPI` target publishes for it: type and
 /// format, required, nullable, constraints, default, description and example. Vendor extensions
 /// are machine metadata for other tools and are not rendered.
 fn field_row(
     site: &Site<'_>,
     page: &str,
+    name: &str,
     field: &Field,
     directions: SchemaDirections,
     links: &mut LinkRegistry,
 ) -> Result<Vec<String>, CoreError> {
     Ok(vec![
-        code_span(&field.json_name),
+        code_span(name),
         type_label(
             &field.schema,
             field.meta.format.as_deref(),

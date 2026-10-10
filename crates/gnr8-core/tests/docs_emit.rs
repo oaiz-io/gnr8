@@ -655,17 +655,38 @@ fn files_end_with_one_newline_and_no_trailing_space() {
 
 #[test]
 fn windows_and_posix_module_paths_render_identically() {
-    let posix = bookstore();
-    let mut value = bookstore_json();
-    value["module"] = json!("C:\\work\\bookstore");
-    for op in value["operations"].as_array_mut().unwrap() {
+    // The one module path a page prints is a publishable diagnostic's file: the same diagnostic
+    // extracted on Windows and on a POSIX system must print the same line.
+    let diagnostic = |file: &str| {
+        json!([{
+            "code": "request.parameter.unresolved", "severity": "WARN",
+            "category": "request_parameter",
+            "message": "type inferred as string only",
+            "file": file, "line": 49,
+            "span": {"file": file, "start_line": 49, "end_line": 49},
+            "operation": "GET /books", "subject": "genre"
+        }])
+    };
+    let mut posix = bookstore_json();
+    posix["module"] = json!("/work/bookstore");
+    posix["diagnostics"] = diagnostic("internal/books.go");
+    let mut windows = bookstore_json();
+    windows["module"] = json!("C:\\work\\bookstore");
+    windows["diagnostics"] = diagnostic("internal\\books.go");
+    for op in windows["operations"].as_array_mut().unwrap() {
         op["provenance"]["file"] = json!("internal\\books.go");
     }
-    for schema in value["schemas"].as_array_mut().unwrap() {
+    for schema in windows["schemas"].as_array_mut().unwrap() {
         schema["provenance"]["file"] = json!("internal\\models.go");
     }
-    let windows = graph_of(value);
-    assert_eq!(render(&posix, &[go_sdk()]), render(&windows, &[go_sdk()]));
+    let posix = render(&graph_of(posix), &[go_sdk()]);
+    assert!(
+        page(&posix, "operations/list-books.md")
+            .contains("- WARN: type inferred as string only (internal/books.go:49)\n"),
+        "{}",
+        page(&posix, "operations/list-books.md")
+    );
+    assert_eq!(posix, render(&graph_of(windows), &[go_sdk()]));
 }
 
 #[test]
@@ -1095,4 +1116,100 @@ fn blank_title_or_group_name_is_a_typed_error() {
     value["operations"][3]["group"] = json!(" ");
     let err = try_render(&graph_of(value), &[]).unwrap_err();
     assert!(err.to_string().contains("group"), "{err}");
+}
+
+/// With alternative schemes (API key OR bearer), neither is required by an operation: each is one
+/// way to meet it. The page says so instead of listing the operation as requiring both.
+#[test]
+fn authentication_page_distinguishes_required_from_alternative_schemes() {
+    let pages = edge_pages();
+    let text = page(&pages, "authentication.md");
+    assert!(!text.contains("Required by:"), "{text}");
+    let api_key =
+        &text[text.find("## `ApiKeyAuth`").unwrap()..text.find("## `BearerAuth`").unwrap()];
+    assert!(
+        api_key.contains("Accepted by, as one of their alternatives:\n\n- [`uploadAvatar`]"),
+        "{api_key}"
+    );
+    assert!(
+        api_key.contains("- [`listMeasures`](operations/list-measures.md)\n"),
+        "{api_key}"
+    );
+}
+
+/// An inline object's fields are field facts `openapi.yaml` publishes too, so the schema page
+/// lists them as rows of their own under a dotted name (`[]` for an array's items), with every fact
+/// a top-level field gets (D1).
+#[test]
+fn inline_object_fields_render_with_their_own_facts() {
+    let mut width = field(
+        "width",
+        &json!({"type": "primitive", "of": {"prim": "float", "bits": 64}}),
+        true,
+    );
+    width["description"] = json!("Width in metres.");
+    width["meta"] = json!({"constraints": {"minimum": "0", "maximum": "10"}});
+    let note = field("note", &string(), false);
+    let mut value = bookstore_json();
+    let fields = value["schemas"][0]["body"]["of"].as_array_mut().unwrap();
+    fields.push(field(
+        "dimensions",
+        &json!({"type": "object", "of": [width.clone(), note.clone()]}),
+        true,
+    ));
+    fields.push(field(
+        "parts",
+        &json!({"type": "array", "of": {"type": "object", "of": [note]}}),
+        false,
+    ));
+    let pages = render(&graph_of(value), &[]);
+    let fields = section(page(&pages, "schemas/book.md"), "Fields");
+    assert!(
+        fields.contains("| `dimensions` | `object` | yes | no |"),
+        "{fields}"
+    );
+    assert!(
+        fields.contains(
+            "| `dimensions.width` | `number` | yes | no | `minimum: 0`, `maximum: 10` |  | Width in metres. |  |"
+        ),
+        "{fields}"
+    );
+    assert!(
+        fields.contains("| `dimensions.note` | `string` | no | no |"),
+        "{fields}"
+    );
+    assert!(
+        fields.contains("| `parts[].note` | `string` | no | no |"),
+        "{fields}"
+    );
+}
+
+/// The sampler's whole surface is reachable from outside the crate: an integration test can sample
+/// an operation and read the canned reply's status, model, JSON body and checked field.
+#[test]
+fn operation_sample_reply_is_readable_from_an_integration_test() {
+    use gnr8_engine::verify::{sample_operation, Sampled, SuccessOutcome, SuccessSample};
+    let graph = bookstore();
+    let op = graph
+        .operations
+        .iter()
+        .find(|op| op.id == "getBook")
+        .unwrap();
+    let Sampled::Sample(sample) = sample_operation(op, &graph).unwrap() else {
+        panic!("getBook samples");
+    };
+    let SuccessOutcome::Sample(SuccessSample {
+        status,
+        model,
+        body,
+        field,
+    }) = sample.reply
+    else {
+        panic!("getBook has a reply");
+    };
+    assert_eq!(status, 200);
+    assert_eq!(model.as_deref(), Some("Book"));
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["genre"], json!("fiction"));
+    assert_eq!(field.map(|field| field.json_name), Some("id".to_string()));
 }

@@ -36,6 +36,17 @@ use super::{
 /// value, so it is `Unsatisfiable` rather than a page the size of the bound.
 const MAX_SAMPLE_ENTRIES: u64 = 64;
 
+/// The longest string a printed sample holds; a `minLength` above it is a [`SampleRefusal::SampleCap`].
+const MAX_SAMPLE_CHARS: u64 = 1024;
+
+fn sample_cap(subject: &str, constraint: &str, limit: u64) -> SampleRefusal {
+    SampleRefusal::SampleCap {
+        subject: subject.to_string(),
+        constraint: constraint.to_string(),
+        limit,
+    }
+}
+
 /// One operation's sample, or the reason it has none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sampled {
@@ -151,6 +162,17 @@ pub enum SampleRefusal {
         /// The input.
         subject: String,
     },
+    /// A lower bound beyond what a printed sample may hold: more entries than
+    /// `MAX_SAMPLE_ENTRIES`, or a longer string than `MAX_SAMPLE_CHARS`. The bound can be met; the
+    /// sample would not fit a page.
+    SampleCap {
+        /// The input.
+        subject: String,
+        /// The `OpenAPI` keyword of the bound (`minItems`, `minProperties`, `minLength`).
+        constraint: String,
+        /// The sampler's limit for that bound.
+        limit: u64,
+    },
     /// No candidate satisfies every constraint at once.
     Unsatisfiable {
         /// The input.
@@ -199,6 +221,15 @@ impl fmt::Display for SampleRefusal {
                 phrase(subject)
             ),
             Self::Pattern { subject } => write!(f, "{} declares `pattern`", phrase(subject)),
+            Self::SampleCap {
+                subject,
+                constraint,
+                limit,
+            } => write!(
+                f,
+                "{} declares `{constraint}` above the {limit} a printed sample holds",
+                phrase(subject)
+            ),
             Self::FloatWire { subject } => write!(
                 f,
                 "{} admits no decimal that Go, Python and TypeScript print alike",
@@ -866,6 +897,12 @@ impl<'g> Sampler<'g> {
                 Ok(enum_candidate(ty, None, constraints, subject))
             }
             Type::Primitive(Prim::String) => {
+                if constraints
+                    .min_length
+                    .is_some_and(|min| min > MAX_SAMPLE_CHARS)
+                {
+                    return Ok(Err(sample_cap(subject, "minLength", MAX_SAMPLE_CHARS)));
+                }
                 let candidate = match restriction.format.and_then(mapped_format_literal) {
                     // A mapped literal is never truncated: it is that literal or nothing.
                     Some(literal) => literal,
@@ -920,7 +957,7 @@ impl<'g> Sampler<'g> {
         depth: usize,
     ) -> Outcome {
         let Some(count) = entry_count(constraints.min_items, constraints.max_items) else {
-            return Ok(unsatisfiable(subject, "minItems"));
+            return Ok(Err(sample_cap(subject, "minItems", MAX_SAMPLE_ENTRIES)));
         };
         let elements = if count == 0 {
             Vec::new()
@@ -955,7 +992,11 @@ impl<'g> Sampler<'g> {
         };
         let Some(count) = entry_count(constraints.min_properties, constraints.max_properties)
         else {
-            return Ok(unsatisfiable(subject, "minProperties"));
+            return Ok(Err(sample_cap(
+                subject,
+                "minProperties",
+                MAX_SAMPLE_ENTRIES,
+            )));
         };
         let mut map = Map::new();
         if count > 0 {
@@ -1219,7 +1260,7 @@ fn sized_string(constraints: &Constraints) -> String {
         length = length.min(max);
     }
     if let Some(min) = constraints.min_length {
-        length = length.max(min.min(MAX_SAMPLE_ENTRIES * 16));
+        length = length.max(min.min(MAX_SAMPLE_CHARS));
     }
     BASE.chars()
         .cycle()

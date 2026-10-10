@@ -416,37 +416,40 @@ fn page_of<'a>(pages: &'a std::collections::BTreeMap<String, String>, operation:
         .unwrap_or_else(|| panic!("no page for {operation}"))
 }
 
+/// Rung 3 for the default (pydantic) Python SDK: every sample's call sends exactly the request its
+/// page prints. pydantic is a third-party package the SDK depends on, so without it this test has
+/// nothing to run and says so.
 #[test]
 fn python_snippet_call_sends_the_page_request() {
-    if !python_available() {
+    if !python_available() || !pydantic_available() {
+        eprintln!("skipping: python3 with pydantic is not available");
         return;
     }
-    if pydantic_available() {
-        // The default model style: unset optional fields are left out of the request.
-        let py = PySdk::new()
-            .module("example.com/goalservice/sdk")
-            .to("generated/py");
-        let Some(run) = docs_pipeline::goalservice_with(|pipeline| pipeline.target(py.clone()))
-        else {
-            return;
-        };
-        let (records, entries) = python_wire(&run, &py);
-        assert_eq!(records.len(), entries);
-        let pages = run.pages();
-        for record in &records {
-            check_wire(
-                page_of(&pages, &record.operation),
-                record,
-                ContractTestLanguage::Python,
-            )
-            .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
-        }
+    let py = PySdk::new()
+        .module("example.com/goalservice/sdk")
+        .to("generated/py");
+    let Some(run) = docs_pipeline::goalservice_with(|pipeline| pipeline.target(py.clone())) else {
         return;
+    };
+    let (records, entries) = python_wire(&run, &py);
+    assert_eq!(records.len(), entries);
+    let pages = run.pages();
+    for record in &records {
+        check_wire(
+            page_of(&pages, &record.operation),
+            record,
+            ContractTestLanguage::Python,
+        )
+        .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
     }
-    // Without pydantic only the dataclass style runs here, and it serializes with
-    // `dataclasses.asdict`: every unset optional field goes out as an explicit `null`. That is a
-    // real difference from the request the page prints, and rung 3 names it — on the body alone,
-    // and only as added null keys; method, path, query and headers all match.
+}
+
+/// The dataclass-style Python SDK serializes with `dataclasses.asdict`, so every unset optional
+/// field goes out as an explicit `null` — a real difference from the request the page prints, which
+/// rung 3 names on the body alone, and only as added null keys (a known limitation, disclosed in the
+/// changelog and the docs guide).
+#[test]
+fn python_dataclass_rung_three_names_the_null_body_keys() {
     let Some((run, py)) = python_run() else {
         return;
     };
@@ -693,5 +696,30 @@ fn rung_three_asserts_success_on_the_page_reply_and_the_typed_error_otherwise() 
                 |message| *message,
             );
         assert!(message.contains(finding), "{message}");
+    }
+}
+
+/// The docs-edge fixture through the default (pydantic) Python SDK: floats, imported bounds, the
+/// cookie line, the `hal+json` reply and the no-reply download all hold at rung 3.
+#[test]
+fn docs_edge_samples_send_the_page_request_in_python() {
+    if !python_available() || !pydantic_available() {
+        eprintln!("skipping: python3 with pydantic is not available");
+        return;
+    }
+    let py = PySdk::new()
+        .module("example.com/edge/sdk")
+        .to("generated/py");
+    let run = docs_pipeline::docs_edge(|pipeline| pipeline.target(py.clone()));
+    let (records, entries) = python_wire(&run, &py);
+    assert_eq!(records.len(), entries);
+    let pages = run.pages();
+    for record in &records {
+        check_wire(
+            page_of(&pages, &record.operation),
+            record,
+            ContractTestLanguage::Python,
+        )
+        .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
     }
 }

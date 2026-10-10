@@ -996,28 +996,6 @@ fn int_keyed_error_map_skips_its_typed_error_case_and_frees_the_status() {
 }
 
 #[test]
-fn operation_sample_reply_is_readable_from_an_integration_test() {
-    let graph = probe(&[], None, Some(&object(&[fld("id", &string(), true)])), &[]);
-    let OperationSample { reply, .. } = sample(&graph);
-    let SuccessOutcome::Sample(SuccessSample {
-        status,
-        model,
-        body,
-        field,
-    }) = reply
-    else {
-        panic!("a sampled reply");
-    };
-    assert_eq!(status, 200);
-    assert_eq!(model.as_deref(), Some("Res"));
-    assert_eq!(
-        serde_json::from_str::<Value>(&body).unwrap(),
-        json!({"id": "gnr8"})
-    );
-    assert_eq!(field.map(|field| field.json_name), Some("id".to_string()));
-}
-
-#[test]
 fn dangling_reference_is_an_error_not_a_refusal() {
     let graph = probe(
         &[query("q", &named("t.Missing"), true, &json!({}))],
@@ -1112,6 +1090,8 @@ fn every_sample_satisfies_all_its_constraints() {
     ];
 
     let mut checked = 0;
+    let mut positions = 0;
+    let mut refused = std::collections::BTreeSet::new();
     for (ty, sets) in scalar_cases.iter().chain(collection_cases.iter()) {
         for set in sets {
             let expected = constraints(set);
@@ -1124,7 +1104,10 @@ fn every_sample_satisfies_all_its_constraints() {
                             .unwrap_or_else(|v| panic!("param {ty} {set}: {v}"));
                         checked += 1;
                     }
-                    Sampled::Refused(refusal) => assert_refusal(&refusal, set),
+                    Sampled::Refused(refusal) => {
+                        assert_refusal(&refusal, set);
+                        refused.insert(set.to_string());
+                    }
                 }
             }
             let meta = json!({"constraints": set});
@@ -1142,6 +1125,7 @@ fn every_sample_satisfies_all_its_constraints() {
                 }
                 Sampled::Refused(SampleRefusal::BodyRefused { inner, .. }) => {
                     assert_refusal(&inner, set);
+                    refused.insert(set.to_string());
                 }
                 Sampled::Refused(other) => panic!("{other:?}"),
             }
@@ -1158,12 +1142,32 @@ fn every_sample_satisfies_all_its_constraints() {
                         .unwrap_or_else(|v| panic!("response {ty} {set}: {v}"));
                     checked += 1;
                 }
-                SuccessOutcome::Refused(refusal) => assert_refusal(&refusal, set),
+                SuccessOutcome::Refused(refusal) => {
+                    assert_refusal(&refusal, set);
+                    refused.insert(set.to_string());
+                }
                 SuccessOutcome::NoReply => panic!("a declared reply has something to print"),
             }
+            positions += if is_scalar { 3 } else { 2 };
         }
     }
-    assert!(checked >= 60, "only {checked} samples were checked");
+    // Exactly the sets no value can meet are refused — a pattern, or contradictory bounds — and
+    // every other position printed a value that satisfies all of its constraints.
+    let expected: std::collections::BTreeSet<String> = [
+        json!({"pattern": "x"}),
+        json!({"min_length": 4, "max_length": 3}),
+        json!({"enum_values": ["a"], "max_length": 0}),
+        json!({"minimum": "5", "maximum": "4"}),
+        json!({"max_length": 1}),
+        json!({"min_items": 3, "max_items": 1}),
+        json!({"min_properties": 2, "max_properties": 1}),
+    ]
+    .iter()
+    .map(Value::to_string)
+    .collect();
+    assert_eq!(refused, expected);
+    let refused_positions = 7 * 3 - 2;
+    assert_eq!(checked, positions - refused_positions);
 }
 
 /// A refusal under a constraint set is legitimate only as `Pattern` (the set carries a pattern)
@@ -1246,4 +1250,80 @@ fn float_samples_print_alike_in_go_python_and_typescript() {
         param_value(&float(), &json!({"enum_values": ["2", "2.5"]})),
         json!(2.5)
     );
+}
+
+/// The sampler's own size limits are not the API's: a bound above them can be met, so the refusal
+/// names the limit rather than calling the bound unsatisfiable.
+#[test]
+fn sampler_size_limits_are_their_own_typed_refusal() {
+    for (schema, bound, keyword, limit) in [
+        (array(&int()), json!({"min_items": 65}), "minItems", 64),
+        (
+            map(&string(), &int()),
+            json!({"min_properties": 100}),
+            "minProperties",
+            64,
+        ),
+        (string(), json!({"min_length": 2000}), "minLength", 1024),
+    ] {
+        let graph = probe(
+            &[],
+            Some(&object(&[meta_fld(
+                "v",
+                &schema,
+                true,
+                &json!({"constraints": bound}),
+            )])),
+            None,
+            &[],
+        );
+        let SampleRefusal::BodyRefused { inner, .. } = refusal(&graph) else {
+            panic!("a refused body");
+        };
+        assert_eq!(
+            inner.to_string(),
+            format!("field `v` declares `{keyword}` above the {limit} a printed sample holds")
+        );
+    }
+}
+
+#[test]
+fn request_union_is_a_typed_refusal() {
+    let graph = probe(
+        &[],
+        Some(&object(&[fld(
+            "u",
+            &json!({"type": "union", "of": [string(), int()]}),
+            true,
+        )])),
+        None,
+        &[],
+    );
+    let SampleRefusal::BodyRefused { inner, .. } = refusal(&graph) else {
+        panic!("a refused body");
+    };
+    assert_eq!(
+        *inner,
+        SampleRefusal::RequestUnion {
+            subject: "body.u".to_string()
+        }
+    );
+    assert_eq!(inner.to_string(), "field `u` is a union");
+}
+
+#[test]
+fn request_bytes_are_a_typed_refusal() {
+    let bytes = json!({"type": "primitive", "of": {"prim": "bytes"}});
+    let graph = probe(&[query("blob", &bytes, true, &json!({}))], None, None, &[]);
+    assert_eq!(
+        refusal(&graph),
+        SampleRefusal::Bytes {
+            subject: "query.blob".to_string()
+        }
+    );
+    let body = probe(&[], Some(&object(&[fld("b", &bytes, true)])), None, &[]);
+    let SampleRefusal::BodyRefused { inner, .. } = refusal(&body) else {
+        panic!("a refused body");
+    };
+    assert_eq!(inner.to_string(), "field `b` is a byte string");
 }
