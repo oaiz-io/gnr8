@@ -13,7 +13,7 @@ use crate::graph::{
     ApiGraph, Field, MediaExample, Operation, OperationDocsPolicy, Prim, Schema, Type, WellKnown,
 };
 use crate::sdk::emit_common::{
-    media_family, request_body_models_of, MediaFamily, RequestBodyEncoding,
+    media_family, request_body_models_of, response_media_type, MediaFamily, RequestBodyEncoding,
 };
 use crate::CoreError;
 
@@ -51,20 +51,13 @@ pub(super) fn examples_for<'e>(
         .filter(move |example| example.content_type.eq_ignore_ascii_case(content_type))
 }
 
-/// The media type a success status's body is sent in: the first of its declared media types in
-/// byte order, the one the `OpenAPI` lowering lists first. `None` when it declares none.
+/// The media type a status's body is sent in, by the one rule every consumer of a response shares
+/// ([`response_media_type`]). `None` when the operation declares no response with that status.
 pub(crate) fn reply_media(op: &Operation, status: u16) -> Option<String> {
     op.responses
         .iter()
-        .filter(|response| response.status == status)
-        .flat_map(|response| {
-            response
-                .content_types
-                .iter()
-                .chain(response.content_type.iter())
-        })
-        .min()
-        .cloned()
+        .find(|response| response.status == status)
+        .map(|response| response_media_type(response).to_string())
 }
 
 /// Whether a media type carries its value as JSON, by the one classification every consumer of a

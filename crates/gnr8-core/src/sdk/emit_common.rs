@@ -2536,8 +2536,6 @@ pub(crate) struct SuccessResponses {
     /// The statuses that carry binary/file content: an opaque body, or a schema-backed one in a
     /// media type that is neither JSON nor text ([`MediaFamily::Other`]).
     pub(crate) binary_statuses: Vec<u16>,
-    /// The media type for binary/file success content.
-    pub(crate) binary_content_type: Option<String>,
     /// Statuses that answer with a body this method's return type does not carry, sorted.
     ///
     /// An operation that answers a typed JSON body on one success and opaque bytes on another
@@ -2854,6 +2852,11 @@ pub(crate) fn media_family(media_type: &str) -> MediaFamily {
 
 /// The media type a schema-backed response answers in: the first of its declared media types in
 /// sorted order, or `application/json`, which a schema-backed response that declares none means.
+///
+/// This is the only rule that picks one media type for a response. The SDK emitters' return type,
+/// the contract tests' canned reply and the docs page's printed reply all read it, so a response
+/// declaring several media types cannot answer in one of them for one consumer and another for the
+/// next.
 pub(crate) fn response_media_type(resp: &crate::graph::Response) -> &str {
     resp.content_types
         .iter()
@@ -2862,11 +2865,11 @@ pub(crate) fn response_media_type(resp: &crate::graph::Response) -> &str {
         .map_or("application/json", String::as_str)
 }
 
-/// The media type of an opaque (binary or event-stream) success, which carries no schema body.
-fn opaque_success_media_type(
+/// Reject an opaque (binary or event-stream) success that also carries a schema body.
+fn reject_opaque_success_schema(
     op: &Operation,
     resp: &crate::graph::Response,
-) -> Result<String, CoreError> {
+) -> Result<(), CoreError> {
     if resp.body.is_some() {
         if resp.body_kind == "sse" {
             return Err(CoreError::SdkGen {
@@ -2884,11 +2887,7 @@ fn opaque_success_media_type(
             ),
         });
     }
-    Ok(resp
-        .content_type
-        .clone()
-        .or_else(|| resp.content_types.first().cloned())
-        .unwrap_or_else(|| "application/octet-stream".to_string()))
+    Ok(())
 }
 
 /// Resolve every declared successful response for one operation.
@@ -2917,7 +2916,6 @@ pub(crate) fn success_responses_of(
     let mut body_statuses = Vec::new();
     let mut binary_statuses = Vec::new();
     let mut body_model: Option<String> = None;
-    let mut binary_content_type: Option<String> = None;
     let mut text_statuses = Vec::new();
     let mut text_model: Option<String> = None;
     for resp in &op.responses {
@@ -2952,7 +2950,6 @@ pub(crate) fn success_responses_of(
                             // this media type, so the body is the bytes, as a download's is.
                             MediaFamily::Other => {
                                 binary_statuses.push(resp.status);
-                                binary_content_type.get_or_insert_with(|| media.to_string());
                                 continue;
                             }
                         }
@@ -2974,9 +2971,8 @@ pub(crate) fn success_responses_of(
                 }
                 "empty" => {}
                 "binary" | "sse" => {
-                    let content_type = opaque_success_media_type(op, resp)?;
+                    reject_opaque_success_schema(op, resp)?;
                     binary_statuses.push(resp.status);
-                    binary_content_type.get_or_insert(content_type);
                 }
                 other => {
                     return Err(CoreError::SdkGen {
@@ -3004,7 +3000,6 @@ pub(crate) fn success_responses_of(
     }
     if body_model.is_some() && !binary_statuses.is_empty() {
         unreturned_statuses.append(&mut binary_statuses);
-        binary_content_type = None;
     }
     unreturned_statuses.sort_unstable();
     Ok(SuccessResponses {
@@ -3013,7 +3008,6 @@ pub(crate) fn success_responses_of(
         body_statuses,
         text_body,
         binary_statuses,
-        binary_content_type,
         unreturned_statuses,
     })
 }
@@ -3839,10 +3833,6 @@ mod tests {
         };
         let success = success_responses_of(&op, &graph)?;
         assert_eq!(success.binary_statuses, vec![200, 206]);
-        assert_eq!(
-            success.binary_content_type.as_deref(),
-            Some("application/pdf")
-        );
         assert!(success.has_binary_body());
         assert!(!success.has_bodyless_alternative());
         Ok(())
@@ -3931,7 +3921,6 @@ mod tests {
         .unwrap();
         assert!(xml.body_model.is_none());
         assert_eq!(xml.binary_statuses, vec![200]);
-        assert_eq!(xml.binary_content_type.as_deref(), Some("application/xml"));
 
         // A schema-backed reply declared under a range that admits JSON returns the model.
         let any = success_responses_of(
@@ -3956,6 +3945,40 @@ mod tests {
         assert!(!both.text_body);
     }
 
+    /// One rule names the media type a response answers in, for the SDKs, the contract tests and
+    /// the docs alike: the first declared, sorted, or `application/json` for a schema-backed
+    /// response that declares none.
+    #[test]
+    fn one_picker_names_a_response_media_type_for_every_consumer() {
+        let op: Operation = serde_json::from_value(serde_json::json!({
+            "id": "probe", "method": "GET", "path": "/probe", "handler": "probe",
+            "params": [], "request_body": null,
+            "responses": [
+                {"status": 200, "body": {"ref_id": "t.Widget"}, "content_types": []},
+                {"status": 201, "body": {"ref_id": "t.Widget"},
+                 "content_type": "text/plain", "content_types": ["text/plain", "application/json"]}
+            ],
+            "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}
+        }))
+        .unwrap();
+        for response in &op.responses {
+            assert_eq!(
+                crate::verify::reply_media(&op, response.status).as_deref(),
+                Some(super::response_media_type(response)),
+                "status {}",
+                response.status
+            );
+        }
+        assert_eq!(
+            super::response_media_type(&op.responses[0]),
+            "application/json"
+        );
+        assert_eq!(
+            super::response_media_type(&op.responses[1]),
+            "application/json"
+        );
+    }
+
     /// The note is generated text emitted into a linted Python docstring at an 8-space indent,
     /// so it has to fit 88 columns however many statuses it names.
     #[test]
@@ -3967,7 +3990,6 @@ mod tests {
                 body_statuses: vec![200],
                 text_body: false,
                 binary_statuses: Vec::new(),
-                binary_content_type: None,
                 unreturned_statuses: statuses,
             }
             .unreturned_note()
