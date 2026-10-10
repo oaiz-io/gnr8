@@ -370,7 +370,7 @@ mod tests {
         ));
     }
 
-    /// A base artifact written by a gnr8 before 0.18 (schema version 1) is read, upgraded to the
+    /// A base artifact written by gnr8 0.18.0 or earlier (schema version 1) is read, upgraded to the
     /// version 2 representation, so a project's first comparison after upgrading still works.
     #[test]
     fn a_version_1_base_artifact_is_read_and_upgraded() {
