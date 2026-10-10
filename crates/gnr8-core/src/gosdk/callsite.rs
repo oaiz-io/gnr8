@@ -880,6 +880,7 @@ mod tests {
                 value,
                 selection: 0,
                 representations: 1,
+                unmet: Vec::new(),
             };
             let inputs = CallInputs {
                 params: &[],

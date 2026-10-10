@@ -73,8 +73,6 @@ must move the minor version.
   `errors` or `outcome` is imported under an alias, a Python model named after the unit's own test
   classes no longer replaces one, and a Python package named `snippets` no longer shadows the unit.
 
-### Fixed
-
 - A `pattern` no longer costs contract-test coverage. gnr8 still never synthesizes a value for one:
   the sample is drawn from the input's other constraints and records the pattern as unmet. A contract
   case sends that sample (no generated SDK validates `pattern`), so a pattern on a path parameter or
