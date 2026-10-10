@@ -8814,7 +8814,11 @@ func (s Server) create(c *gin.Context) {
         let docs = static_docs("generated/docs");
         let mut pattern = OpenApiFieldPatch::new("title");
         pattern.constraints.pattern = Some("^[a-z]+$".to_string());
-        let cases: [(OpenApiFieldPatch, &str); 6] = [
+        let mut multiple_of = OpenApiFieldPatch::new("title");
+        multiple_of.constraints.multiple_of = Some("5".to_string());
+        let mut unique_items = OpenApiFieldPatch::new("title");
+        unique_items.constraints.unique_items = true;
+        let cases: [(OpenApiFieldPatch, &str); 8] = [
             (OpenApiFieldPatch::new("title").min_length(3), "minLength"),
             (
                 OpenApiFieldPatch::new("title").enum_values(["a", "b"]),
@@ -8830,6 +8834,8 @@ func (s Server) create(c *gin.Context) {
             ),
             (OpenApiFieldPatch::new("title").example_number(4), "example"),
             (pattern, "pattern"),
+            (multiple_of, "multipleOf"),
+            (unique_items, "uniqueItems"),
         ];
         for (field, fact) in cases {
             for (label, openapi) in [
