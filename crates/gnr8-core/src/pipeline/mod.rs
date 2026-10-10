@@ -1724,8 +1724,11 @@ mod tests {
         let docs_alone = Pipeline::new()
             .target(decl::StaticDocs::new().to("gen/docs"))
             .plan();
-        assert!(super::docs_suites(&docs_alone, &docs_graph())
-            .unwrap()
-            .is_empty());
+        assert!(
+            super::docs_suites(&docs_alone, &docs_graph())
+                .unwrap()
+                .is_empty(),
+            "docs alone should still build suites"
+        );
     }
 }
