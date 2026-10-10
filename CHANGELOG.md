@@ -246,7 +246,13 @@ must move the minor version.
   of them. A string enum stays the parameter's type.
 - A `$ref`'d parameter schema keeps the referenced schema's bounds together with any keyword beside
   the `$ref` (the tighter bound wins), and a reference that does not resolve is a
-  `request.parameter.unresolved` diagnostic instead of silently importing no constraints.
+  `request.parameter.unresolved` diagnostic instead of silently importing no constraints. A fact
+  stated on both sides is combined by one rule, never won silently: an enum beside the `$ref` is a
+  constraint whatever kind it takes from the referenced schema, and is intersected with that
+  schema's enum, so `{$ref: Lvl, enum: [2, 3]}` with `Lvl: {enum: [1, 2]}` publishes `enum: [2]`
+  instead of Lvl's wider `[1, 2]`. Two different patterns, or two enums with no member in common,
+  are a `request.parameter.constraints.conflict` diagnostic, and the keyword stated beside the
+  `$ref` is the one carried.
 
 ## 0.18.0 — 2026-10-10
 

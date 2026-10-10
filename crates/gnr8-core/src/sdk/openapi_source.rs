@@ -1120,7 +1120,7 @@ impl Importer {
     /// The keywords the raw schema states are taken from it (`take_constraints`), so they exist
     /// once, as typed facts; the OpenAPI lowering writes them back. A `$ref` is followed to the
     /// schema it names, whose constraints the referenced component's graph schema cannot carry, and
-    /// they apply together with any keyword stated beside the `$ref` (the tighter bound wins). A
+    /// they apply together with any keyword stated beside the `$ref` ([`combined_constraints`]). A
     /// reference that does not resolve is reported, never read as "no constraints".
     fn take_parameter_constraints(
         &mut self,
@@ -1148,13 +1148,12 @@ impl Importer {
         let Some(object) = raw.as_object_mut() else {
             return Constraints::default();
         };
-        let own = take_constraints(object);
         let Some(reference) = object
             .get("$ref")
             .and_then(Value::as_str)
             .map(str::to_string)
         else {
-            return own;
+            return take_constraints(object, EnumKind::Own);
         };
         let Some(mut target) = self.resolve_schema_chain(&reference) else {
             self.warn_request_parameter(
@@ -1165,13 +1164,54 @@ impl Importer {
                      constraints are unknown"
                 ),
             );
-            return own;
+            return take_constraints(object, EnumKind::Referenced(None));
         };
+        let kind = raw_member_kind(&target);
+        let own = take_constraints(object, EnumKind::Referenced(kind));
         let named = target
             .as_object_mut()
-            .map(take_constraints)
+            .map(|target| take_constraints(target, EnumKind::Own))
             .unwrap_or_default();
-        tighter_constraints(own, named)
+        let (combined, conflicts) = combined_constraints(own, named);
+        for conflict in conflicts {
+            self.warn_constraint_conflict(operation_id, name, what, &reference, &conflict);
+        }
+        combined
+    }
+
+    fn warn_constraint_conflict(
+        &mut self,
+        operation_id: &str,
+        name: &str,
+        what: &str,
+        reference: &str,
+        conflict: &ConstraintConflict,
+    ) {
+        let reason = match conflict {
+            ConstraintConflict::Pattern { beside, named } => format!(
+                "the {what} schema of parameter '{name}' states pattern '{beside}' beside its \
+                 reference '{reference}', whose schema states pattern '{named}'; both apply, but a \
+                 parameter carries one pattern, so '{beside}' is carried and '{named}' is neither \
+                 published nor checked"
+            ),
+            ConstraintConflict::DisjointEnum => format!(
+                "the {what} schema of parameter '{name}' states an enum beside its reference \
+                 '{reference}' that shares no member with that schema's enum, so no value is valid; \
+                 the enum stated beside the reference is carried"
+            ),
+        };
+        let span = self.span();
+        self.diagnostics.push(
+            Diagnostic::new(
+                "request.parameter.constraints.conflict",
+                DiagnosticCategory::RequestParameter,
+                "WARN",
+                format!("request parameter on operation '{operation_id}': {reason}"),
+                span,
+            )
+            .operation(operation_id)
+            .subject(name),
+        );
     }
 
     /// The schema a `$ref` names, following a reference to a reference; `None` when one does not
@@ -2692,7 +2732,10 @@ fn numeric_bound(
 /// A keyword is removed exactly when it became a typed fact, so the raw object never repeats one;
 /// a keyword the graph cannot type (a non-integer `minLength`, a bare `exclusiveMinimum: true`)
 /// stays as declared. The numeric bounds are read as [`constraints_from_schema`] reads them.
-fn take_constraints(object: &mut serde_json::Map<String, Value>) -> Constraints {
+fn take_constraints(
+    object: &mut serde_json::Map<String, Value>,
+    kind: EnumKind<'_>,
+) -> Constraints {
     let mut take_count = |key: &str| -> Option<u64> {
         let count = object.get(key)?.as_u64()?;
         object.remove(key);
@@ -2713,7 +2756,7 @@ fn take_constraints(object: &mut serde_json::Map<String, Value>) -> Constraints 
     if pattern.is_some() {
         object.remove("pattern");
     }
-    let enum_values = take_enum(object);
+    let enum_values = take_enum(object, kind);
     Constraints {
         min_length,
         max_length,
@@ -2748,24 +2791,75 @@ fn take_bound(
     read
 }
 
+/// Where a raw schema object's enum members take their kind from.
+#[derive(Debug, Clone, Copy)]
+enum EnumKind<'a> {
+    /// The object's own `type`. An enum of strings there is the parameter's type, not a constraint.
+    Own,
+    /// The schema the object's `$ref` names, by the kind [`raw_member_kind`] reads from it (`None`
+    /// when it is unknown). Beside a `$ref` the type is the referenced schema, so an enum there is
+    /// always a constraint on it.
+    Referenced(Option<&'a str>),
+}
+
+/// The JSON kind of the values of the graph schema `id`, as [`raw_member_kind`] reads a raw one.
+fn graph_member_kind(id: &str, schemas: &[Schema]) -> Option<&'static str> {
+    let mut ty = &schemas.iter().find(|schema| schema.id == id)?.body;
+    let mut seen = BTreeSet::new();
+    loop {
+        return match ty {
+            Type::Named(next) if seen.insert(next.as_str()) => {
+                ty = &schemas.iter().find(|schema| &schema.id == next)?.body;
+                continue;
+            }
+            Type::Primitive(Prim::Int { .. }) => Some("integer"),
+            Type::Primitive(Prim::Float { .. }) => Some("number"),
+            Type::Primitive(Prim::Bool) => Some("boolean"),
+            Type::Primitive(Prim::String) | Type::WellKnown(_) | Type::Enum(_) => Some("string"),
+            Type::Primitive(Prim::Bytes)
+            | Type::Named(_)
+            | Type::Array(_)
+            | Type::Map { .. }
+            | Type::Object(_)
+            | Type::Union(_)
+            | Type::Any {} => None,
+        };
+    }
+}
+
+/// The JSON kind of a raw schema's values — `string`, `integer`, `number` or `boolean` — read from
+/// its scalar `type`, or `string` for an enum of strings with no type; `None` otherwise.
+fn raw_member_kind(schema: &Value) -> Option<&'static str> {
+    match schema_type(schema).0.as_deref() {
+        Some("string") => Some("string"),
+        Some("integer") => Some("integer"),
+        Some("number") => Some("number"),
+        Some("boolean") => Some("boolean"),
+        Some(_) => None,
+        None => string_enum_values(schema).map(|_| "string"),
+    }
+}
+
 /// A parameter enum's members, as the typed constraint holds them, taken out of `object`.
 ///
-/// An enum of strings is the parameter's *type* (`Type::Enum`), not a constraint, and stays where
-/// the type is read from. Otherwise the members are those of the declared scalar `type` — integers
-/// for `integer`, numbers for `number`, booleans for `boolean`, strings for `string` — in declared
-/// order, once each: a member of another kind can never validate, and `null` is no wire value. With
-/// no declared scalar type, or no member of its kind, nothing is typed and the enum stays as declared.
-fn take_enum(object: &mut serde_json::Map<String, Value>) -> Vec<String> {
+/// With [`EnumKind::Own`], an enum of strings is the parameter's *type* (`Type::Enum`), not a
+/// constraint, and stays where the type is read from. Otherwise the members are those of the
+/// object's scalar kind — integers for `integer`, numbers for `number`, booleans for `boolean`,
+/// strings for `string` — in declared order, once each: a member of another kind can never
+/// validate, and `null` is no wire value. With no known scalar kind, or no member of its kind,
+/// nothing is typed and the enum stays as declared.
+fn take_enum(object: &mut serde_json::Map<String, Value>, kind: EnumKind<'_>) -> Vec<String> {
     let schema = Value::Object(object.clone());
     let Some(members) = schema.get("enum").and_then(Value::as_array) else {
         return Vec::new();
     };
-    if string_enum_values(&schema).is_some() {
-        return Vec::new();
-    }
-    let kind = schema_type(&schema).0;
+    let kind = match kind {
+        EnumKind::Own if string_enum_values(&schema).is_some() => return Vec::new(),
+        EnumKind::Own => raw_member_kind(&schema),
+        EnumKind::Referenced(kind) => kind,
+    };
     let member_text = |member: &Value| -> Option<String> {
-        match kind.as_deref()? {
+        match kind? {
             "string" => member.as_str().map(ToString::to_string),
             "integer" if member.is_i64() || member.is_u64() => Some(member.to_string()),
             "number" if member.is_number() => Some(member.to_string()),
@@ -2785,25 +2879,66 @@ fn take_enum(object: &mut serde_json::Map<String, Value>) -> Vec<String> {
     values
 }
 
-/// The constraints of a schema stated in two places that both apply — keywords beside a `$ref` and
-/// the schema it names: per keyword the tighter bound, the enum members both admit, and the
-/// `pattern` stated beside the `$ref` when both state one (one pattern is carried).
-fn tighter_constraints(beside: Constraints, named: Constraints) -> Constraints {
+/// A fact two schemas both state that [`combined_constraints`] cannot carry as both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConstraintConflict {
+    /// Two different patterns; a parameter carries one.
+    Pattern {
+        /// The pattern stated beside the `$ref`.
+        beside: String,
+        /// The pattern of the schema it names.
+        named: String,
+    },
+    /// Two enums with no member in common: no value is valid.
+    DisjointEnum,
+}
+
+/// The constraints of a schema stated in two places that both apply — keywords beside a `$ref`
+/// and the schema it names — combined by one rule per keyword, and what that rule cannot carry.
+///
+/// A bound is the tighter of the two. Enum members are those both admit, in the order stated
+/// beside the `$ref`. A pattern stated on one side is carried; two equal patterns are one. What
+/// one constraint set cannot hold is reported, never decided silently: two different patterns
+/// carry the one stated beside the `$ref` (the parameter's own keyword), and two enums that share
+/// no member carry the one stated beside the `$ref`, each with a [`ConstraintConflict`].
+fn combined_constraints(
+    beside: Constraints,
+    named: Constraints,
+) -> (Constraints, Vec<ConstraintConflict>) {
+    let mut conflicts = Vec::new();
     let count = |a: Option<u64>, b: Option<u64>, lower: bool| match (a, b) {
         (Some(a), Some(b)) => Some(if lower { a.max(b) } else { a.min(b) }),
         (a, b) => a.or(b),
     };
     let enum_values = match (beside.enum_values.is_empty(), named.enum_values.is_empty()) {
-        (false, false) => beside
-            .enum_values
-            .iter()
-            .filter(|member| named.enum_values.contains(member))
-            .cloned()
-            .collect(),
+        (false, false) => {
+            let shared: Vec<String> = beside
+                .enum_values
+                .iter()
+                .filter(|member| named.enum_values.contains(member))
+                .cloned()
+                .collect();
+            if shared.is_empty() {
+                conflicts.push(ConstraintConflict::DisjointEnum);
+                beside.enum_values
+            } else {
+                shared
+            }
+        }
         (false, true) => beside.enum_values,
         (true, _) => named.enum_values,
     };
-    Constraints {
+    let pattern = match (beside.pattern, named.pattern) {
+        (Some(beside), Some(named)) if beside != named => {
+            conflicts.push(ConstraintConflict::Pattern {
+                beside: beside.clone(),
+                named,
+            });
+            Some(beside)
+        }
+        (beside, named) => beside.or(named),
+    };
+    let constraints = Constraints {
         min_length: count(beside.min_length, named.min_length, true),
         max_length: count(beside.max_length, named.max_length, false),
         min_items: count(beside.min_items, named.min_items, true),
@@ -2814,9 +2949,10 @@ fn tighter_constraints(beside: Constraints, named: Constraints) -> Constraints {
         maximum: tighter_bound(beside.maximum, named.maximum, false),
         exclusive_minimum: tighter_bound(beside.exclusive_minimum, named.exclusive_minimum, true),
         exclusive_maximum: tighter_bound(beside.exclusive_maximum, named.exclusive_maximum, false),
-        pattern: beside.pattern.or(named.pattern),
+        pattern,
         enum_values,
-    }
+    };
+    (constraints, conflicts)
 }
 
 /// The tighter of two numeric bounds of one keyword: the larger lower bound, the smaller upper
@@ -3048,30 +3184,43 @@ fn parameter_items_mut(raw: &mut Value) -> Option<&mut Value> {
 /// `$ref` moves; the bounds of the schema a `$ref` names were never in a version 1 graph and stay
 /// unknown.
 pub(crate) fn upgrade_graph_from_artifact_v1(graph: &mut ApiGraph) {
-    for operation in &mut graph.operations {
-        for param in &mut operation.params {
-            if param.openapi_content.is_some() {
-                continue;
-            }
-            let Some((_, raw)) = param
-                .openapi_fields
-                .iter_mut()
-                .find(|(field, _)| field == "schema")
-            else {
-                continue;
-            };
-            let own = raw
-                .as_object_mut()
-                .map(take_constraints)
-                .unwrap_or_default();
-            let items = parameter_items_mut(raw)
-                .and_then(Value::as_object_mut)
-                .map(take_constraints)
-                .unwrap_or_default();
-            param.constraints = tighter_constraints(own, std::mem::take(&mut param.constraints));
-            param.item_constraints =
-                tighter_constraints(items, std::mem::take(&mut param.item_constraints));
+    let ApiGraph {
+        operations,
+        schemas,
+        ..
+    } = graph;
+    // A raw schema object's keywords, taken as the importer takes them: an enum beside a `$ref`
+    // takes its kind from the graph schema the reference names.
+    let take = |raw: &mut Value| -> Constraints {
+        let Some(object) = raw.as_object_mut() else {
+            return Constraints::default();
+        };
+        let kind = match object.get("$ref").and_then(Value::as_str) {
+            Some(reference) => EnumKind::Referenced(
+                schema_id_from_pointer(reference).and_then(|id| graph_member_kind(&id, schemas)),
+            ),
+            None => EnumKind::Own,
+        };
+        take_constraints(object, kind)
+    };
+    for param in operations.iter_mut().flat_map(|op| op.params.iter_mut()) {
+        if param.openapi_content.is_some() {
+            continue;
         }
+        let Some((_, raw)) = param
+            .openapi_fields
+            .iter_mut()
+            .find(|(field, _)| field == "schema")
+        else {
+            continue;
+        };
+        let own = take(raw);
+        let items = parameter_items_mut(raw).map(take).unwrap_or_default();
+        // A version 1 graph held no typed constraint for an imported parameter, so the combination
+        // states nothing twice and has nothing to report.
+        param.constraints = combined_constraints(own, std::mem::take(&mut param.constraints)).0;
+        param.item_constraints =
+            combined_constraints(items, std::mem::take(&mut param.item_constraints)).0;
     }
     take_parameter_examples(graph);
     // Only the importer kept the base path on a server; a server set in configuration was the
@@ -5289,6 +5438,85 @@ components:
         );
         super::upgrade_graph_from_artifact_v1(&mut version_1);
         assert_eq!(version_1, current);
+    }
+
+    /// Rule 3: a fact stated both beside a `$ref` and in the schema it names is combined by one
+    /// explicit rule, never won silently. Enum members are intersected, whatever the type the
+    /// members take their kind from; two different patterns are reported, and the one stated beside
+    /// the `$ref` — the parameter's own keyword — is carried.
+    #[test]
+    fn a_fact_stated_beside_a_ref_and_in_its_schema_is_combined_not_won() {
+        let graph = import_yaml(
+            r##"
+openapi: 3.1.0
+info: { title: E, version: "1" }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - { name: p, in: query, schema: { $ref: "#/components/schemas/Code", pattern: "^A" } }
+        - { name: same, in: query, schema: { $ref: "#/components/schemas/Code", pattern: "^[A-Z]{2}$" } }
+        - { name: e, in: query, schema: { $ref: "#/components/schemas/Lvl", enum: [3, 4] } }
+        - { name: both, in: query, schema: { $ref: "#/components/schemas/Lvl", enum: [2, 3] } }
+        - { name: color, in: query, schema: { $ref: "#/components/schemas/Color", enum: [red] } }
+      responses: { "204": { description: none } }
+components:
+  schemas:
+    Code: { type: string, pattern: "^[A-Z]{2}$" }
+    Lvl: { type: integer, enum: [1, 2] }
+    Color: { type: string, enum: [red, green] }
+"##,
+        );
+        let param = |name: &str| {
+            graph.operations[0]
+                .params
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+        };
+        let conflicts: Vec<&str> = graph
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "request.parameter.constraints.conflict")
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert_eq!(conflicts.len(), 2, "{conflicts:?}");
+        assert!(
+            conflicts
+                .iter()
+                .any(|message| message.contains("'^A'") && message.contains("'^[A-Z]{2}$'")),
+            "{conflicts:?}"
+        );
+        assert!(
+            conflicts
+                .iter()
+                .any(|message| message.contains("parameter 'e'") && message.contains("no member")),
+            "{conflicts:?}"
+        );
+        assert_eq!(param("p").constraints.pattern.as_deref(), Some("^A"));
+        assert_eq!(
+            param("same").constraints.pattern.as_deref(),
+            Some("^[A-Z]{2}$")
+        );
+        assert_eq!(param("e").constraints.enum_values, vec!["3", "4"]);
+        assert_eq!(param("both").constraints.enum_values, vec!["2"]);
+        assert_eq!(param("color").constraints.enum_values, vec!["red"]);
+        // The published enum is the combined one: never widened to the referenced schema's.
+        let schema = |name: &str| {
+            let yaml = to_openapi(&graph, "E", "/", &graph.security).unwrap();
+            let emitted =
+                parse_json_or_yaml(&yaml, std::path::Path::new("generated.yaml")).unwrap();
+            emitted
+                .pointer("/paths/~1items/get/parameters")
+                .and_then(Value::as_array)
+                .and_then(|params| params.iter().find(|p| p["name"] == name))
+                .map(|param| param["schema"].clone())
+                .unwrap()
+        };
+        assert_eq!(schema("e")["enum"], serde_json::json!([3, 4]));
+        assert_eq!(schema("both")["enum"], serde_json::json!([2]));
+        assert_eq!(schema("color")["enum"], serde_json::json!(["red"]));
     }
 
     /// A version 1 artifact never held the bounds of the schema a parameter names with `$ref`, so
