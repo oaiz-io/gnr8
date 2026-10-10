@@ -350,7 +350,10 @@ ApiOverrides::new()
 These overrides mutate the graph before OpenAPI or SDK targets render, so all generated surfaces agree.
 
 OpenAPI targets support narrow document presentation patches. `enum_values(...)` sorts values
-deterministically; `enum_values_in_order(...)` preserves caller order.
+deterministically; `enum_values_in_order(...)` preserves caller order. A patch edits only that
+document, not the graph. A pipeline that also declares `StaticDocs` therefore refuses a patch that
+sets anything other than `x-*` extensions
+([OpenAPI generation](openapi/generation.md#complete-example)).
 
 ```rust
 OpenApi31::new()

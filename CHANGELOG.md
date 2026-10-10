@@ -17,6 +17,15 @@ must move the minor version.
   the validator's own rule instead: `binding:"oneof=a b"` or `validate:"oneof=a b"`. Separate the
   members with spaces. That rule is the one source of an enum constraint.
 
+### Changed
+
+- **A pipeline that declares `StaticDocs` refuses an `OpenApiSchemaPatch` that changes a documented
+  field fact.** A patch edits only the OpenAPI document. Docs pages and their samples read the graph,
+  so a patched constraint, enum, description, default or example would make the docs disagree with
+  the published spec. The configuration error names the target, the field and the facts. Set them
+  in the source or with a `Transform` that edits the field. Patches that only add `x-*` extensions
+  are unaffected.
+
 ## 0.17.2 — 2026-10-10
 
 ### Added

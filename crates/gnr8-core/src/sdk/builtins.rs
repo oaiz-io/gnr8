@@ -119,8 +119,9 @@ pub trait TargetExec {
 /// The built-in target declarations of the plan being run, in plan order.
 ///
 /// A target only ever sees its own declaration, except `StaticDocs`: its code samples cover exactly
-/// the SDK targets the same pipeline declares, so it reads their declarations — never their output,
-/// which keeps every built-in a pure function of the frozen graph plus declarations.
+/// the SDK targets the same pipeline declares, and it refuses an OpenAPI schema patch that would make
+/// the published document disagree with its pages, so it reads those declarations — never their
+/// output, which keeps every built-in a pure function of the frozen graph plus declarations.
 #[derive(Debug, Clone, Copy)]
 pub struct PlanTargets<'a> {
     targets: &'a [(usize, &'a BuiltinTarget)],
@@ -187,6 +188,33 @@ impl<'a> PlanTargets<'a> {
             | BuiltinTarget::StaticFiles(_)
             | BuiltinTarget::StaticDocs(_) => None,
         })
+    }
+
+    /// Every schema patch an OpenAPI target declares, with that target's stage name, in plan
+    /// order. `StaticDocs` reads these only to refuse a patch that would make the published
+    /// document disagree with the docs pages; it never applies one.
+    pub fn openapi_schema_patches(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, &'a OpenApiSchemaPatch)> + 'a {
+        self.targets
+            .iter()
+            .flat_map(|(_, spec)| -> Box<dyn Iterator<Item = _> + 'a> {
+                match *spec {
+                    BuiltinTarget::OpenApi31(t) => {
+                        Box::new(t.schema_patches.iter().map(|patch| ("OpenApi31", patch)))
+                    }
+                    BuiltinTarget::OpenApi31Json(t) => Box::new(
+                        t.schema_patches
+                            .iter()
+                            .map(|patch| ("OpenApi31Json", patch)),
+                    ),
+                    BuiltinTarget::GoSdk(_)
+                    | BuiltinTarget::PySdk(_)
+                    | BuiltinTarget::TsSdk(_)
+                    | BuiltinTarget::StaticFiles(_)
+                    | BuiltinTarget::StaticDocs(_) => Box::new(std::iter::empty()),
+                }
+            })
     }
 }
 
@@ -8631,6 +8659,77 @@ func (s Server) create(c *gin.Context) {
         let docs = static_docs("generated/sdk-docs");
         generate_static_docs(&docs, &[(0, &go), (1, &docs)])
             .expect("a sibling directory with a shared name prefix is not inside the SDK");
+    }
+
+    /// A schema patch edits only the OpenAPI document it is declared on, while docs pages and their
+    /// samples read the graph. In one plan with `StaticDocs`, a patch that changes a fact a docs
+    /// page prints would make the two artifacts disagree, so it is refused and the user is pointed
+    /// to the one place every artifact reads: the graph.
+    #[test]
+    fn static_docs_refuses_a_schema_patch_that_changes_a_documented_field_fact() {
+        let docs = static_docs("generated/docs");
+        let mut pattern = OpenApiFieldPatch::new("title");
+        pattern.constraints.pattern = Some("^[a-z]+$".to_string());
+        let cases: [(OpenApiFieldPatch, &str); 6] = [
+            (OpenApiFieldPatch::new("title").min_length(3), "minLength"),
+            (
+                OpenApiFieldPatch::new("title").enum_values(["a", "b"]),
+                "enum",
+            ),
+            (
+                OpenApiFieldPatch::new("title").description("Shown in docs"),
+                "description",
+            ),
+            (
+                OpenApiFieldPatch::new("title").default_string("x"),
+                "default",
+            ),
+            (OpenApiFieldPatch::new("title").example_number(4), "example"),
+            (pattern, "pattern"),
+        ];
+        for (field, fact) in cases {
+            for (label, openapi) in [
+                (
+                    "OpenApi31",
+                    BuiltinTarget::OpenApi31(
+                        OpenApi31::new()
+                            .to("generated/openapi.yaml")
+                            .schema_patch(OpenApiSchemaPatch::new("Book").field(field.clone())),
+                    ),
+                ),
+                (
+                    "OpenApi31Json",
+                    BuiltinTarget::OpenApi31Json(
+                        OpenApi31Json::new()
+                            .to("generated/openapi.json")
+                            .schema_patch(OpenApiSchemaPatch::new("Book").field(field.clone())),
+                    ),
+                ),
+            ] {
+                let err = generate_static_docs(&docs, &[(0, &openapi), (1, &docs)]).unwrap_err();
+                let text = err.to_string();
+                assert!(
+                    matches!(err, crate::CoreError::Config { .. }),
+                    "{label} {fact}: {err:?}"
+                );
+                assert!(text.contains("StaticDocs"), "{text}");
+                assert!(text.contains(label), "{text}");
+                assert!(text.contains("Book.title"), "{text}");
+                assert!(text.contains(&format!("`{fact}`")), "{text}");
+                assert!(text.contains("Transform"), "{text}");
+            }
+        }
+
+        // Vendor extensions are not printed on a docs page, so a patch that only adds them leaves
+        // the two artifacts agreeing.
+        let extensions_only = BuiltinTarget::OpenApi31(
+            OpenApi31::new().to("generated/openapi.yaml").schema_patch(
+                OpenApiSchemaPatch::new("Book")
+                    .field(OpenApiFieldPatch::new("title").extension_bool("x-public", true)),
+            ),
+        );
+        generate_static_docs(&docs, &[(0, &extensions_only), (1, &docs)])
+            .expect("an extension-only patch changes nothing a docs page prints");
     }
 
     #[test]

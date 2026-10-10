@@ -183,6 +183,9 @@ OpenApi31::new()
     );
 ```
 
+A patch edits only that document. With `StaticDocs` in the same pipeline, only `x-*` extensions may
+be patched; set other field facts in the source or with a graph `Transform`.
+
 ## Generated SDKs
 
 SDK targets write `README.md` and `reference.md` in the SDK output directory. Read those files before
