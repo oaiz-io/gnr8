@@ -601,7 +601,12 @@ pub fn plan_contract_tests(graph: &ApiGraph) -> Result<ContractTestPlan, CoreErr
                 if let SuccessOutcome::Refused(reason) = &sample.reply {
                     refused.push(refuse(RefusedScope::SuccessReply, reason.clone()));
                 }
-                candidates.push(Candidate::build(op, graph, sample)?);
+                let candidate = Candidate::build(op, graph, sample)?;
+                // A sampled reply with no wire form drives no case — counted, never lost.
+                if let Some(reason) = &candidate.reply_refusal {
+                    refused.push(refuse(RefusedScope::SuccessReply, reason.clone()));
+                }
+                candidates.push(candidate);
             }
         }
     }
@@ -639,6 +644,8 @@ struct Candidate<'op> {
     reply: SuccessOutcome,
     /// That reply in its declared media type's wire form, when it has one.
     reply_wire: Option<CannedResponse>,
+    /// Why a sampled reply has no wire form, so the plan counts it.
+    reply_refusal: Option<SampleRefusal>,
     /// Whether the operation declares a body at all (even one the sampler cannot construct).
     declares_body: bool,
     /// How many request representations the operation declares.
@@ -656,9 +663,12 @@ impl<'op> Candidate<'op> {
     ) -> Result<Self, CoreError> {
         let declared = request_body_models_of(op, graph)?;
         let absolute_path = absolute_path(&graph.base_path, &op.path, &sample.params);
-        let reply_wire = match &sample.reply {
-            SuccessOutcome::Sample(success) => success_reply(op, success),
-            SuccessOutcome::NoReply | SuccessOutcome::Refused(_) => None,
+        let (reply_wire, reply_refusal) = match &sample.reply {
+            SuccessOutcome::Sample(success) => match success_reply(op, success) {
+                Ok(wire) => (Some(wire), None),
+                Err(refusal) => (None, Some(refusal)),
+            },
+            SuccessOutcome::NoReply | SuccessOutcome::Refused(_) => (None, None),
         };
         Ok(Self {
             op,
@@ -669,6 +679,7 @@ impl<'op> Candidate<'op> {
             auth: sample.auth,
             reply: sample.reply,
             reply_wire,
+            reply_refusal,
             absolute_path,
         })
     }
@@ -820,7 +831,9 @@ fn response_decode_cases(
             },
         ));
         if let SuccessOutcome::Sample(absent) = success_sample(candidate.op, graph, true)? {
-            let Some(reply) = success_reply(candidate.op, &absent) else {
+            // The present reply of the same schema and media type had a wire form, so this one has
+            // one too; the arm is unreachable rather than a lost case.
+            let Ok(reply) = success_reply(candidate.op, &absent) else {
                 continue;
             };
             cases.push(candidate.case(
@@ -1152,26 +1165,29 @@ pub(crate) fn absolute_path(base_path: &str, path: &str, params: &[SampleParam])
 
 /// A sampled success reply in the wire form of the media type its status declares, as
 /// [`MediaFamily`] rules for every consumer of a reply: the text itself for a `text/*` type, which
-/// the generated SDKs return as a string, and JSON otherwise, which they decode. `None` when the
-/// sample has no such form — a `text/*` reply whose sample is not a string — so no case relies on it,
-/// exactly as a docs page prints no body for it.
-fn success_reply(op: &Operation, success: &SuccessSample) -> Option<CannedResponse> {
+/// the generated SDKs return as a string, and JSON otherwise, which they decode. A `text/*` reply
+/// whose sample is not a string has no such form: the refusal says so, the plan counts it, and no
+/// case relies on the reply, exactly as a docs page prints the refusal instead of a body.
+fn success_reply(op: &Operation, success: &SuccessSample) -> Result<CannedResponse, SampleRefusal> {
     let media = op
         .responses
         .iter()
         .find(|response| response.status == success.status)
         .map_or("application/json", response_media_type);
     if success.body.is_empty() || media_family(media) != MediaFamily::Text {
-        return Some(CannedResponse {
+        return Ok(CannedResponse {
             status: success.status,
             headers: json_response_headers(&success.body),
             body: success.body.clone(),
         });
     }
     let Ok(Value::String(text)) = serde_json::from_str::<Value>(&success.body) else {
-        return None;
+        return Err(SampleRefusal::TextReply {
+            status: success.status,
+            content_type: media.to_string(),
+        });
     };
-    Some(CannedResponse {
+    Ok(CannedResponse {
         status: success.status,
         headers: vec![(
             "content-type".to_string(),
@@ -1595,6 +1611,22 @@ mod tests {
                 .filter(|case| case.operation_id == "getCsv")
                 .all(|case| case.response.status != 200),
             "a text reply with no string sample drives no success case"
+        );
+        // ... and the reply it cannot drive is counted, never lost silently.
+        assert_eq!(
+            plan.refused
+                .iter()
+                .filter(|refused| refused.operation_id == "getCsv")
+                .map(|refused| (&refused.scope, refused.reason.to_string()))
+                .collect::<Vec<_>>(),
+            vec![(
+                &super::RefusedScope::SuccessReply,
+                "response `200` is declared `text/csv`, whose wire form is text, but its sample \
+                 is not a string"
+                    .to_string()
+            )],
+            "{:?}",
+            plan.refused
         );
     }
 

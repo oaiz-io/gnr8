@@ -350,6 +350,14 @@ pub enum SampleRefusal {
     /// One request representation that is not JSON, beside another that is: the sampler states
     /// only JSON bodies.
     NotJson,
+    /// A success reply declared in a `text/*` media type, whose wire form is the text itself, and
+    /// whose sample is not a string: no reply can state it.
+    TextReply {
+        /// The success status.
+        status: u16,
+        /// The declared media type.
+        content_type: String,
+    },
     /// A required body none of whose JSON representations can be sampled, with the first refused
     /// representation's media type and reason. One constructible representation is enough: the
     /// call sends it.
@@ -359,6 +367,40 @@ pub enum SampleRefusal {
         /// Its refusal.
         inner: Box<SampleRefusal>,
     },
+}
+
+/// The sentence for a declared value that is valid for its input but that no sample can state.
+fn declared_limit(
+    f: &mut fmt::Formatter<'_>,
+    subject: &str,
+    value: &str,
+    limit: DeclaredLimit,
+) -> fmt::Result {
+    match limit {
+        DeclaredLimit::Null => write!(
+            f,
+            "{subject} declares `null`, which a sample call never sends"
+        ),
+        DeclaredLimit::FreeForm => write!(
+            f,
+            "{subject} declares a free-form value other than `{{}}`, which a sample call cannot \
+             state"
+        ),
+        DeclaredLimit::Integer => write!(
+            f,
+            "{subject} declares `{value}`, beyond ±(2^53 − 1), the range TypeScript carries \
+             exactly"
+        ),
+        DeclaredLimit::Float => write!(
+            f,
+            "{subject} declares `{value}`, which Go, Python and TypeScript print differently"
+        ),
+        DeclaredLimit::DateTime => write!(
+            f,
+            "{subject} declares `{value}`, a date-time Go sends in a different spelling than \
+             Python and TypeScript"
+        ),
+    }
 }
 
 impl fmt::Display for SampleRefusal {
@@ -417,41 +459,19 @@ impl fmt::Display for SampleRefusal {
                 subject,
                 value,
                 limit,
-            } => {
-                let subject = phrase(subject);
-                match limit {
-                    DeclaredLimit::Null => {
-                        write!(
-                            f,
-                            "{subject} declares `null`, which a sample call never sends"
-                        )
-                    }
-                    DeclaredLimit::FreeForm => write!(
-                        f,
-                        "{subject} declares a free-form value other than `{{}}`, which a sample \
-                         call cannot state"
-                    ),
-                    DeclaredLimit::Integer => write!(
-                        f,
-                        "{subject} declares `{value}`, beyond ±(2^53 − 1), the range TypeScript \
-                         carries exactly"
-                    ),
-                    DeclaredLimit::Float => write!(
-                        f,
-                        "{subject} declares `{value}`, which Go, Python and TypeScript print \
-                         differently"
-                    ),
-                    DeclaredLimit::DateTime => write!(
-                        f,
-                        "{subject} declares `{value}`, a date-time Go sends in a different \
-                         spelling than Python and TypeScript"
-                    ),
-                }
-            }
+            } => declared_limit(f, &phrase(subject), value, *limit),
             Self::NoJsonBody => f.write_str("the request body declares no JSON representation"),
             Self::NotJson => {
                 f.write_str("the representation is not JSON, and a sample states only JSON")
             }
+            Self::TextReply {
+                status,
+                content_type,
+            } => write!(
+                f,
+                "response `{status}` is declared `{content_type}`, whose wire form is text, but \
+                 its sample is not a string"
+            ),
             Self::BodyRefused {
                 content_type,
                 inner,

@@ -123,9 +123,7 @@ fn cookie_header(params: &[SampleParam]) -> Option<String> {
 /// that is not JSON.
 pub(crate) fn reply_doc(op: &Operation, reply: &SuccessOutcome) -> Result<ReplyDoc, CoreError> {
     Ok(match reply {
-        SuccessOutcome::Sample(reply) => {
-            wire_reply(op, reply)?.map_or(ReplyDoc::Absent, ReplyDoc::Printed)
-        }
+        SuccessOutcome::Sample(reply) => wire_reply(op, reply)?,
         SuccessOutcome::Refused(refusal) => ReplyDoc::Refused(format!("{refusal}")),
         SuccessOutcome::NoReply => ReplyDoc::Absent,
     })
@@ -151,12 +149,13 @@ fn reply_media_type(op: &Operation, status: u16) -> Result<String, CoreError> {
 /// The sampled reply in its declared media type's wire form.
 ///
 /// A JSON media type (`application/json`, `…+json`) carries the sample as JSON; a `text/*` media
-/// type carries a string sample as the text itself, never quoted. Any other media type — or a
-/// `text/*` one whose value is not a string — has no wire form a sample can state, so, like a file
-/// download, the page prints no reply (`None`) and rung 3 answers as it does for one.
-fn wire_reply(op: &Operation, reply: &SuccessSample) -> Result<Option<WireReply>, CoreError> {
+/// type carries a string sample as the text itself, never quoted, and a `text/*` reply whose sample
+/// is not a string is refused — the page prints why, and the contract plan counts the same refusal.
+/// Any other media type has no wire form a sample can state, so, like a file download, the page
+/// prints no reply and rung 3 answers as it does for one.
+fn wire_reply(op: &Operation, reply: &SuccessSample) -> Result<ReplyDoc, CoreError> {
     if reply.body.is_empty() {
-        return Ok(Some(WireReply {
+        return Ok(ReplyDoc::Printed(WireReply {
             status: reply.status,
             content_type: String::new(),
             body: String::new(),
@@ -172,13 +171,17 @@ fn wire_reply(op: &Operation, reply: &SuccessSample) -> Result<Option<WireReply>
         MediaFamily::Json => (reply.body.clone(), pretty(&value)?),
         MediaFamily::Text => {
             let serde_json::Value::String(text) = value else {
-                return Ok(None);
+                let refusal = crate::verify::SampleRefusal::TextReply {
+                    status: reply.status,
+                    content_type,
+                };
+                return Ok(ReplyDoc::Refused(format!("{refusal}")));
             };
             (text.clone(), text)
         }
-        MediaFamily::Other => return Ok(None),
+        MediaFamily::Other => return Ok(ReplyDoc::Absent),
     };
-    Ok(Some(WireReply {
+    Ok(ReplyDoc::Printed(WireReply {
         status: reply.status,
         content_type,
         body,
@@ -378,6 +381,7 @@ mod tests {
     use serde_json::json;
 
     use super::wire_reply;
+    use crate::docs::model::{ReplyDoc, WireReply};
     use crate::graph::Operation;
     use crate::verify::SuccessSample;
 
@@ -408,28 +412,37 @@ mod tests {
     /// type a sample cannot state, as for a file download.
     #[test]
     fn a_reply_takes_its_declared_media_types_wire_form() {
-        let text = wire_reply(&replying("text/plain"), &sample("\"gnr8\""))
-            .unwrap()
-            .expect("a text reply has a wire form");
+        let printed = |reply: ReplyDoc| -> WireReply {
+            match reply {
+                ReplyDoc::Printed(wire) => wire,
+                other => panic!("expected a printed reply, got {other:?}"),
+            }
+        };
+        let text = printed(wire_reply(&replying("text/plain"), &sample("\"gnr8\"")).unwrap());
         assert_eq!(text.body, "gnr8");
         assert_eq!(
             text.page_text(),
             "HTTP/1.1 200\ncontent-type: text/plain\n\ngnr8"
         );
 
-        let json_reply = wire_reply(&replying("application/hal+json"), &sample("{\"a\":1}"))
-            .unwrap()
-            .expect("a JSON reply has a wire form");
+        let json_reply =
+            printed(wire_reply(&replying("application/hal+json"), &sample("{\"a\":1}")).unwrap());
         assert_eq!(json_reply.body, "{\"a\":1}");
         assert_eq!(json_reply.printed, "{\n  \"a\": 1\n}");
 
-        assert_eq!(
+        assert!(matches!(
             wire_reply(&replying("application/octet-stream"), &sample("\"gnr8\"")).unwrap(),
-            None
-        );
-        assert_eq!(
-            wire_reply(&replying("text/csv"), &sample("{\"a\":1}")).unwrap(),
-            None
-        );
+            ReplyDoc::Absent
+        ));
+        // A text reply whose sample is not a string is refused, with the reason the contract plan
+        // counts.
+        match wire_reply(&replying("text/csv"), &sample("{\"a\":1}")).unwrap() {
+            ReplyDoc::Refused(reason) => assert_eq!(
+                reason,
+                "response `200` is declared `text/csv`, whose wire form is text, but its sample is \
+                 not a string"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 }
