@@ -184,7 +184,8 @@ fn python_docs_snippet_calls_raise_api_error_through_the_stub_opener() {
     );
     let report = String::from_utf8_lossy(&output.stderr);
     assert!(
-        report.contains(&format!("Ran {} tests", unit.entries.len())),
+        report.contains(&format!("Ran {} tests", unit.entries.len() + 1))
+            && report.contains("skipped=1"),
         "{report}"
     );
 }
@@ -315,4 +316,225 @@ fn typescript_unresolvable_import_fails_rung_two() {
         !output.status.success(),
         "a misspelled method must fail rung 2"
     );
+}
+
+use gnr8_engine::staticdocs::snippets::{check_wire, WireRecord, WIRE_ENV};
+
+/// Assert every entry's recorded request equals the HTTP exchange its page prints.
+fn assert_wire_matches_pages(run: &DocsRun, unit_entries: usize, wire: &std::path::Path) {
+    let text = std::fs::read_to_string(wire).expect("the harness wrote its records");
+    let records: Vec<WireRecord> = serde_json::from_str(&text).expect("records are JSON");
+    assert_eq!(
+        records.len(),
+        unit_entries,
+        "one request per sample:\n{text}"
+    );
+    let pages = run.pages();
+    for record in &records {
+        let page = page_of(&pages, &record.operation);
+        check_wire(page, record).unwrap_or_else(|field| panic!("{}: {field}", record.operation));
+    }
+}
+
+#[test]
+fn go_snippet_call_sends_the_page_request() {
+    let go = GoSdk::new().module("example.com/goalservice/sdk");
+    let Some(run) = docs_pipeline::goalservice(go.clone()) else {
+        return;
+    };
+    let unit = compile_unit(&run.graph, SiblingSdk::Go(&go.to(SDK_DIR)))
+        .unwrap()
+        .unwrap();
+    let dir = temp_dir("go-wire");
+    run.write_sdk(&dir);
+    std::fs::write(dir.join(&unit.file_name), &unit.text).unwrap();
+    let wire = dir.join("wire.json");
+    let output = Command::new("go")
+        .args(["test", "-run", "^TestDocsWire$", "./..."])
+        .current_dir(&dir)
+        .env(WIRE_ENV, &wire)
+        .env("GOFLAGS", "-mod=mod")
+        .env("GOWORK", "off")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_wire_matches_pages(&run, unit.entries.len(), &wire);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn pydantic_available() -> bool {
+    Command::new("python3")
+        .args(["-c", "import pydantic"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Run a Python unit's rung-3 harness and return what each sample sent.
+fn python_wire(run: &DocsRun, py: &PySdk) -> (Vec<WireRecord>, usize) {
+    let unit = compile_unit(&run.graph, SiblingSdk::Python(py))
+        .unwrap()
+        .unwrap();
+    let dir = temp_dir("python-wire");
+    run.write_dir("generated/py", &dir.join(&unit.identity));
+    std::fs::write(dir.join(&unit.file_name), &unit.text).unwrap();
+    let wire = dir.join("wire.json");
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "-v", "snippets.DocsWire"])
+        .current_dir(&dir)
+        .env(WIRE_ENV, &wire)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = serde_json::from_str(&std::fs::read_to_string(&wire).unwrap()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    (records, unit.entries.len())
+}
+
+/// The page an operation's record belongs to.
+fn page_of<'a>(pages: &'a std::collections::BTreeMap<String, String>, operation: &str) -> &'a str {
+    pages
+        .values()
+        .find(|text| text.starts_with(&format!("# `{operation}`\n")))
+        .unwrap_or_else(|| panic!("no page for {operation}"))
+}
+
+#[test]
+fn python_snippet_call_sends_the_page_request() {
+    if !python_available() {
+        return;
+    }
+    if pydantic_available() {
+        // The default model style: unset optional fields are left out of the request.
+        let py = PySdk::new()
+            .module("example.com/goalservice/sdk")
+            .to("generated/py");
+        let Some(run) = docs_pipeline::goalservice_with(|pipeline| pipeline.target(py.clone()))
+        else {
+            return;
+        };
+        let (records, entries) = python_wire(&run, &py);
+        assert_eq!(records.len(), entries);
+        let pages = run.pages();
+        for record in &records {
+            check_wire(page_of(&pages, &record.operation), record)
+                .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
+        }
+        return;
+    }
+    // Without pydantic only the dataclass style runs here, and it serializes with
+    // `dataclasses.asdict`: every unset optional field goes out as an explicit `null`. That is a
+    // real difference from the request the page prints, and rung 3 names it — on the body alone,
+    // and only as added null keys; method, path, query and headers all match.
+    let Some((run, py)) = python_run() else {
+        return;
+    };
+    let (records, entries) = python_wire(&run, &py);
+    assert_eq!(records.len(), entries);
+    let pages = run.pages();
+    let mut bodies_with_nulls = 0;
+    for record in &records {
+        let page = page_of(&pages, &record.operation);
+        match check_wire(page, record) {
+            Ok(()) => {}
+            Err(field) => {
+                assert!(field.starts_with("body:"), "{}: {field}", record.operation);
+                let mut sent: serde_json::Value =
+                    serde_json::from_str(record.body.as_deref().unwrap()).unwrap();
+                strip_nulls(&mut sent);
+                let mut without_nulls = record.clone();
+                without_nulls.body = Some(sent.to_string());
+                check_wire(page, &without_nulls).unwrap_or_else(|field| {
+                    panic!("{}: beyond the nulls: {field}", record.operation)
+                });
+                bodies_with_nulls += 1;
+            }
+        }
+    }
+    assert!(
+        bodies_with_nulls > 0,
+        "the dataclass SDK's nulls are visible to rung 3"
+    );
+}
+
+fn strip_nulls(value: &mut serde_json::Value) {
+    if let serde_json::Value::Object(map) = value {
+        map.retain(|_, entry| !entry.is_null());
+        map.values_mut().for_each(strip_nulls);
+    }
+}
+
+#[test]
+fn typescript_snippet_call_sends_the_page_request() {
+    let Some((run, ts)) = typescript_run() else {
+        return;
+    };
+    let unit = compile_unit(&run.graph, SiblingSdk::TypeScript(&ts))
+        .unwrap()
+        .unwrap();
+    let dir = temp_dir("typescript-wire");
+    run.write_dir("generated/ts", &dir.join("sdk"));
+    std::fs::write(dir.join("snippets.ts"), &unit.text).unwrap();
+    // Compile to CommonJS, then resolve the published name to the compiled SDK at run time.
+    std::fs::write(
+        dir.join("tsconfig.json"),
+        serde_json::json!({
+            "compilerOptions": {
+                "module": "commonjs", "moduleResolution": "node", "target": "es2022",
+                "lib": ["es2022", "dom"], "strict": true, "skipLibCheck": true,
+                "outDir": "out", "rootDir": ".",
+                "paths": { unit.identity.clone(): ["./sdk/index.ts"] }
+            },
+            "files": ["snippets.ts"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = Command::new("node")
+        .args([TSC, "-p", "tsconfig.json"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let shim = dir.join("out/node_modules").join(&unit.identity);
+    std::fs::create_dir_all(&shim).unwrap();
+    std::fs::write(
+        shim.join("index.js"),
+        format!(
+            "module.exports = require({:?});\n",
+            dir.join("out/sdk/index.js").to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let wire = dir.join("wire.json");
+    let output = Command::new("node")
+        .args([
+            "-e",
+            "require('./out/snippets.js').docsWire().then((r) => require('fs').writeFileSync(process.argv[1], JSON.stringify(r)))",
+            &wire.to_string_lossy(),
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_wire_matches_pages(&run, unit.entries.len(), &wire);
+    let _ = std::fs::remove_dir_all(&dir);
 }

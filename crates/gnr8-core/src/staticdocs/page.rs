@@ -11,20 +11,22 @@ use crate::graph::direction::{directions_of, SchemaDirections};
 use crate::graph::{
     ApiGraph, Field, MediaExample, Operation, OperationDocsPolicy, Param, Prim, Schema, Type,
 };
+use crate::graph::{PaginationMode, PaginationTermination};
 use crate::sdk::emit_common::{
-    join_path, operation_auth_alternatives, operation_prose, request_body_models_of,
-    ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
+    declared_auth_schemes, join_path, operation_auth_alternatives, operation_prose,
+    request_body_models_of, ApiKeyLocation, HttpAuthScheme, OperationAuthScheme,
 };
+use crate::sdk::model::SdkErrorPlan;
 use crate::CoreError;
 use gnr8::facts::{Constraints, LiteralValue};
 
 use super::links::LinkRegistry;
 use super::markdown::{
-    cell, code_block, code_span, table, AUTHENTICATION, DECLARED_REQUEST_EXAMPLES, EXAMPLE, FIELDS,
-    GROUPS, MEMBERS, OPERATIONS, PARAMETERS, PARAMETER_LOCATIONS, REQUEST_BODY, RESPONSES, SCHEMAS,
-    SERVERS, TYPE, USED_BY,
+    cell, code_block, code_span, table, AUTHENTICATION, DECLARED_REQUEST_EXAMPLES, DIAGNOSTICS,
+    ERRORS, EXAMPLE, FIELDS, GROUPS, MEMBERS, OPERATIONS, PAGINATION, PARAMETERS,
+    PARAMETER_LOCATIONS, REFERENCE, REQUEST_BODY, RESPONSES, SCHEMAS, SERVERS, TYPE, USED_BY,
 };
-use super::nav::{NavGroup, NavModel, INDEX_PAGE};
+use super::nav::{NavGroup, NavModel, AUTHENTICATION_PAGE, ERRORS_PAGE, INDEX_PAGE};
 
 /// Everything a page reads that is computed once per run.
 pub(crate) struct Site<'g> {
@@ -105,6 +107,13 @@ pub(crate) fn render_index(site: &Site<'_>, links: &mut LinkRegistry) -> String 
                     links.link(INDEX_PAGE, page, &code_span(&schema.name))
                 );
             }
+        }
+        out.push('\n');
+    }
+    if !site.nav.reference.is_empty() {
+        let _ = write!(out, "## {REFERENCE}\n\n");
+        for (label, page) in &site.nav.reference {
+            let _ = writeln!(out, "- {}", links.link(INDEX_PAGE, page, label));
         }
     }
     out
@@ -195,15 +204,22 @@ pub(crate) fn render_operation(
         let _ = write!(out, "{}\n\n", prose.description.join("\n"));
     }
 
-    out.push_str(&authentication_section(graph, op)?);
+    out.push_str(&authentication_section(graph, &page, op, links)?);
     out.push_str(&parameters_section(site, &page, op, links)?);
     out.push_str(&request_body_section(site, &page, op, policy, links)?);
     out.push_str(&responses_section(site, &page, op, policy, links)?);
     let _ = write!(out, "## {EXAMPLE}\n\n{example}");
+    out.push_str(&pagination_section(graph, op));
+    out.push_str(&diagnostics_section(graph, op));
     Ok(out)
 }
 
-fn authentication_section(graph: &ApiGraph, op: &Operation) -> Result<String, CoreError> {
+fn authentication_section(
+    graph: &ApiGraph,
+    page: &str,
+    op: &Operation,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
     let alternatives = operation_auth_alternatives(graph, op)?;
     if alternatives.is_empty() {
         return Ok(String::new());
@@ -219,7 +235,14 @@ fn authentication_section(graph: &ApiGraph, op: &Operation) -> Result<String, Co
         }
         let schemes = alternative
             .iter()
-            .map(auth_scheme_line)
+            .map(|scheme| {
+                let id = scheme_id(scheme);
+                format!(
+                    "{} ({})",
+                    links.link(page, AUTHENTICATION_PAGE, &code_span(id)),
+                    auth_scheme_kind(scheme)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" and ");
         let _ = writeln!(out, "- {schemes}");
@@ -228,28 +251,223 @@ fn authentication_section(graph: &ApiGraph, op: &Operation) -> Result<String, Co
     Ok(out)
 }
 
-fn auth_scheme_line(scheme: &OperationAuthScheme) -> String {
+fn scheme_id(scheme: &OperationAuthScheme) -> &str {
+    match scheme {
+        OperationAuthScheme::ApiKey(key) => &key.id,
+        OperationAuthScheme::Http { id, .. } => id,
+    }
+}
+
+/// What one scheme puts on the request, as the operation page and the authentication page say it.
+fn auth_scheme_kind(scheme: &OperationAuthScheme) -> String {
     match scheme {
         OperationAuthScheme::ApiKey(key) => {
             let location = match key.location {
                 ApiKeyLocation::Header => "header",
                 ApiKeyLocation::Query => "query parameter",
             };
-            format!(
-                "{} (API key in {location} {})",
-                code_span(&key.id),
-                code_span(&key.name)
-            )
+            format!("API key in {location} {}", code_span(&key.name))
         }
         OperationAuthScheme::Http {
-            id,
             scheme: HttpAuthScheme::Bearer,
-        } => format!("{} (HTTP bearer token)", code_span(id)),
+            ..
+        } => "HTTP bearer token".to_string(),
         OperationAuthScheme::Http {
-            id,
             scheme: HttpAuthScheme::Basic,
-        } => format!("{} (HTTP basic credentials)", code_span(id)),
+            ..
+        } => "HTTP basic credentials".to_string(),
     }
+}
+
+/// The pagination helper a `ConfigurePagination` transform declared for this operation.
+fn pagination_section(graph: &ApiGraph, op: &Operation) -> String {
+    let Some(policy) = graph
+        .pagination
+        .iter()
+        .find(|policy| policy.operation_id == op.id)
+    else {
+        return String::new();
+    };
+    let mode = match policy.mode {
+        PaginationMode::Cursor => "cursor",
+        PaginationMode::Page => "page",
+        PaginationMode::Offset => "offset",
+    };
+    let mut out = format!(
+        "\n## {PAGINATION}\n\n- Mode: {}\n- Items field: {}\n",
+        code_span(mode),
+        code_span(&policy.items_field)
+    );
+    for (label, value) in [
+        ("Cursor parameter", &policy.cursor_param),
+        ("Next-cursor field", &policy.next_cursor_field),
+        ("Page parameter", &policy.page_param),
+        ("Page-size parameter", &policy.page_size_param),
+        ("Offset parameter", &policy.offset_param),
+        ("Limit parameter", &policy.limit_param),
+    ] {
+        if let Some(value) = value {
+            let _ = writeln!(out, "- {label}: {}", code_span(value));
+        }
+    }
+    out.push_str(match policy.termination {
+        PaginationTermination::NoNextCursor => {
+            "- Stops when the next cursor is absent, empty or null.\n"
+        }
+        PaginationTermination::EmptyItems => "- Stops when the items field is empty.\n",
+    });
+    out
+}
+
+/// What extraction could not state about this operation, matched by its `METHOD path` identity and
+/// filtered exactly as the SDK reference filters it, so no machine-dependent location is published.
+fn diagnostics_section(graph: &ApiGraph, op: &Operation) -> String {
+    let identity = format!("{} {}", op.method, op.path);
+    let published: Vec<&crate::graph::Diagnostic> = graph
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.operation.as_deref() == Some(identity.as_str()))
+        .filter(|diagnostic| crate::sdk::docs::is_publishable(diagnostic))
+        .collect();
+    if published.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n## {DIAGNOSTICS}\n\n");
+    for diagnostic in published {
+        let _ = writeln!(
+            out,
+            "- {}: {} ({}:{})",
+            diagnostic.severity,
+            one_line(&diagnostic.message),
+            diagnostic.file,
+            diagnostic.line
+        );
+    }
+    out
+}
+
+/// Render `errors.md`: one row per (status × schema), each with every operation that declares it.
+pub(crate) fn render_errors(
+    site: &Site<'_>,
+    plan: &SdkErrorPlan,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
+    let mut rows: BTreeMap<(u16, Option<&str>), Vec<&str>> = BTreeMap::new();
+    for response in &plan.responses {
+        rows.entry((response.status, response.body_schema.as_deref()))
+            .or_default()
+            .push(response.operation_id.as_str());
+    }
+    let mut table_rows = Vec::new();
+    for ((status, schema), operations) in rows {
+        let body = match schema {
+            Some(name) => {
+                let schema = site
+                    .graph
+                    .schemas
+                    .iter()
+                    .find(|schema| schema.name == name)
+                    .ok_or_else(|| CoreError::SdkGen {
+                        message: format!("StaticDocs error catalog names unknown schema '{name}'"),
+                    })?;
+                let target = site.nav.schema_page(&schema.id)?;
+                links.link(ERRORS_PAGE, target, &code_span(name))
+            }
+            None => "none".to_string(),
+        };
+        let mut cells = Vec::new();
+        for operation_id in operations {
+            let target = site.nav.operation_page(operation_id)?;
+            let mut cell_text = links.link(ERRORS_PAGE, target, &code_span(operation_id));
+            let description = site
+                .graph
+                .operation_docs
+                .iter()
+                .find(|policy| policy.operation_id == operation_id)
+                .and_then(|policy| {
+                    policy
+                        .responses
+                        .iter()
+                        .find(|response| response.status == status)
+                })
+                .and_then(|response| nonblank(response.description.as_deref()));
+            if let Some(description) = description {
+                let _ = write!(cell_text, " — {}", cell(description));
+            }
+            cells.push(cell_text);
+        }
+        table_rows.push(vec![code_span(&status.to_string()), body, cells.join("; ")]);
+    }
+    Ok(format!(
+        "# {ERRORS}\n\n{UNDECLARED_STATUS_GUARANTEE}\n\n{}",
+        table(&["Status", "Body", "Operations"], &table_rows)
+    ))
+}
+
+/// The one guarantee the error catalog states, once.
+const UNDECLARED_STATUS_GUARANTEE: &str = "Every generated client surfaces a non-success status \
+as its typed error — Go `*APIError`, Python and TypeScript `ApiError` — including a status the API \
+does not declare.";
+
+/// One credential option per sibling SDK, as that SDK's own call-site renderer spells it.
+pub(crate) struct CredentialOption {
+    /// The SDK's label, language then module, as the operation pages head the SDK's section.
+    pub(crate) label: String,
+    /// The option, spelled in the SDK's language.
+    pub(crate) option: String,
+}
+
+/// Render `authentication.md`: every declared scheme, what it puts on the request, how each sibling
+/// SDK configures it, and the operations that require it.
+pub(crate) fn render_authentication(
+    site: &Site<'_>,
+    options: &dyn Fn(&crate::verify::SampleAuth) -> Result<Vec<CredentialOption>, CoreError>,
+    links: &mut LinkRegistry,
+) -> Result<String, CoreError> {
+    let graph = site.graph;
+    let mut required_by: BTreeMap<String, Vec<&Operation>> = BTreeMap::new();
+    for op in &graph.operations {
+        for alternative in operation_auth_alternatives(graph, op)? {
+            for scheme in &alternative {
+                let users = required_by
+                    .entry(scheme_id(scheme).to_string())
+                    .or_default();
+                if !users.iter().any(|user| user.id == op.id) {
+                    users.push(op);
+                }
+            }
+        }
+    }
+    let mut out = format!("# {AUTHENTICATION}\n");
+    for scheme in declared_auth_schemes(graph)? {
+        let id = scheme_id(&scheme);
+        let _ = write!(
+            out,
+            "\n## {}\n\n{}.\n",
+            code_span(id),
+            auth_scheme_kind(&scheme)
+        );
+        let rows: Vec<Vec<String>> = options(&crate::verify::credential_of(&scheme))?
+            .into_iter()
+            .map(|option| vec![option.label, code_span(&option.option)])
+            .collect();
+        if !rows.is_empty() {
+            out.push('\n');
+            out.push_str(&table(&["SDK", "Credential option"], &rows));
+        }
+        if let Some(users) = required_by.get(id) {
+            out.push_str("\nRequired by:\n\n");
+            for op in users {
+                let target = site.nav.operation_page(&op.id)?;
+                let _ = writeln!(
+                    out,
+                    "- {}",
+                    links.link(AUTHENTICATION_PAGE, target, &code_span(&op.id))
+                );
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn parameters_section(

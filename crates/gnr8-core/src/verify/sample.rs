@@ -498,9 +498,13 @@ fn sample_auth(op: &Operation, graph: &ApiGraph) -> Result<Vec<SampleAuth>, Core
     let Some(alternative) = alternatives.first() else {
         return Ok(Vec::new());
     };
-    Ok(alternative
-        .iter()
-        .map(|scheme| {
+    Ok(alternative.iter().map(credential_of).collect())
+}
+
+/// The credential one resolved scheme configures on a call.
+pub(crate) fn credential_of(scheme: &OperationAuthScheme) -> SampleAuth {
+    {
+        {
             let (scheme_id, credential) = match scheme {
                 OperationAuthScheme::ApiKey(scheme) => (
                     scheme.id.clone(),
@@ -526,8 +530,8 @@ fn sample_auth(op: &Operation, graph: &ApiGraph) -> Result<Vec<SampleAuth>, Core
                 scheme_id,
                 credential,
             }
-        })
-        .collect())
+        }
+    }
 }
 
 /// The canned success reply: status, model, the JSON it decodes, and the field a case asserts.

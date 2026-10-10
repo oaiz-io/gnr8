@@ -8,7 +8,7 @@ Fields omitted from the payload keep their current values.
 
 ## Authentication
 
-- `ApiKeyAuth` (API key in header `X-API-Key`)
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
 
 ## Parameters
 

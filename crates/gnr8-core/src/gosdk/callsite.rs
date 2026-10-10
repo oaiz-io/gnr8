@@ -79,6 +79,49 @@ pub(crate) fn render_call(
     })
 }
 
+/// The client options that configure `auth`, each prefixed by `separator`.
+///
+/// In-package they carry the contract constants; from a consumer's code they are the variables
+/// `apiKey`, `token`, `username` and `password`, and every option is spelled `{qualifier}With…`.
+pub(crate) fn credential_options(
+    auth: &[SampleAuth],
+    qualifier: &str,
+    consumer: bool,
+    separator: &str,
+) -> String {
+    let credential = |constant: &str, variable: &str| {
+        if consumer {
+            variable.to_string()
+        } else {
+            quoted_string_literal(constant)
+        }
+    };
+    let mut out = String::new();
+    for auth in auth {
+        let option = match &auth.credential {
+            SampleCredential::ApiKeyHeader { .. } | SampleCredential::ApiKeyQuery { .. } => {
+                format!(
+                    "{qualifier}WithAPIKeyHeader({}, {})",
+                    quoted_string_literal(&auth.scheme_id),
+                    credential(CONTRACT_TEST_CREDENTIAL, "apiKey")
+                )
+            }
+            SampleCredential::Bearer => format!(
+                "{qualifier}WithBearerToken({})",
+                credential(CONTRACT_TEST_BEARER, "token")
+            ),
+            SampleCredential::Basic => format!(
+                "{qualifier}WithBasicAuth({}, {})",
+                credential(CONTRACT_TEST_BASIC_USER, "username"),
+                credential(CONTRACT_TEST_BASIC_PASSWORD, "password")
+            ),
+        };
+        out.push_str(separator);
+        out.push_str(&option);
+    }
+    out
+}
+
 /// The state one rendering carries: who it renders for, and whether it reached a date-time.
 struct Speller<'a> {
     graph: &'a ApiGraph,
@@ -103,46 +146,8 @@ impl<'a> Speller<'a> {
     }
 
     /// The credential options one call configures, each prefixed by `separator`.
-    ///
-    /// In-package they carry the contract constants; from a consumer's code they are the variables
-    /// `apiKey`, `token`, `username` and `password`.
     fn client_options(&self, auth: &[SampleAuth], separator: &str) -> String {
-        let q = &self.qualifier;
-        let mut options = Vec::new();
-        for auth in auth {
-            let option = match &auth.credential {
-                SampleCredential::ApiKeyHeader { .. } | SampleCredential::ApiKeyQuery { .. } => {
-                    format!(
-                        "{q}WithAPIKeyHeader({}, {})",
-                        quoted_string_literal(&auth.scheme_id),
-                        self.credential(CONTRACT_TEST_CREDENTIAL, "apiKey")
-                    )
-                }
-                SampleCredential::Bearer => format!(
-                    "{q}WithBearerToken({})",
-                    self.credential(CONTRACT_TEST_BEARER, "token")
-                ),
-                SampleCredential::Basic => format!(
-                    "{q}WithBasicAuth({}, {})",
-                    self.credential(CONTRACT_TEST_BASIC_USER, "username"),
-                    self.credential(CONTRACT_TEST_BASIC_PASSWORD, "password")
-                ),
-            };
-            options.push(option);
-        }
-        options.iter().fold(String::new(), |mut out, option| {
-            out.push_str(separator);
-            out.push_str(option);
-            out
-        })
-    }
-
-    fn credential(&self, constant: &str, variable: &str) -> String {
-        if self.consumer {
-            variable.to_string()
-        } else {
-            quoted_string_literal(constant)
-        }
+        credential_options(auth, &self.qualifier, self.consumer, separator)
     }
 
     /// Build the positional argument list for one operation call.

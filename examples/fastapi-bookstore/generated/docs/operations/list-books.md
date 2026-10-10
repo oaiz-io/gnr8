@@ -76,3 +76,11 @@ print(result)
 ```sh
 bookstore books list --genre fiction
 ```
+
+## Pagination
+
+- Mode: `cursor`
+- Items field: `books`
+- Cursor parameter: `cursor`
+- Next-cursor field: `next_cursor`
+- Stops when the next cursor is absent, empty or null.

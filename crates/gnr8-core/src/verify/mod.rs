@@ -25,6 +25,7 @@ use crate::CoreError;
 
 mod sample;
 
+pub(crate) use sample::credential_of;
 use sample::{error_payload, success_sample};
 pub use sample::{
     sample_operation, satisfies, OperationSample, SampleRefusal, Sampled, SuccessOutcome,

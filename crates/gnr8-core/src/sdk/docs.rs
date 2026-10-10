@@ -197,7 +197,7 @@ const SOURCE_LOAD_FAILED: &str = "source.load.failed";
 /// Nothing is lost. Every diagnostic still travels with the graph and still reaches
 /// `gnr8 inspect graph`, `gnr8 doctor` (which exits non-zero on error severity), and `-v` output —
 /// reports, rather than committed artifacts.
-fn is_publishable(diagnostic: &crate::graph::Diagnostic) -> bool {
+pub(crate) fn is_publishable(diagnostic: &crate::graph::Diagnostic) -> bool {
     crate::graph::is_module_relative(&diagnostic.file) && diagnostic.code != SOURCE_LOAD_FAILED
 }
 

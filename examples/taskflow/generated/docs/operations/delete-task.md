@@ -1,8 +1,8 @@
-# `getBook`
+# `deleteTask`
 
-`GET /books/{id}` · Group: [books](../groups/books.md) · Tags: `books`
+`DELETE /tasks/{id}` · Group: [tasks](../groups/tasks.md) · Tags: `tasks`
 
-Returns one book by its identifier.
+Permanently removes one task.
 
 ## Authentication
 
@@ -20,8 +20,7 @@ Returns one book by its identifier.
 
 | Status | Body | Media types | Headers | Description |
 | --- | --- | --- | --- | --- |
-| `200` | [`Book`](../schemas/book.md) | `application/json` |  |  |
-| `404` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
+| `200` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
 
 ## Example
 
@@ -30,7 +29,7 @@ Values are sampled from the schema and satisfy its declared constraints. Credent
 ### HTTP
 
 ```http
-GET /books/gnr8 HTTP/1.1
+DELETE /tasks/gnr8 HTTP/1.1
 x-api-key: {apiKey}
 ```
 
@@ -39,44 +38,24 @@ HTTP/1.1 200
 content-type: application/json
 
 {
-  "author": "gnr8",
-  "genre": "fiction",
-  "id": "gnr8",
-  "price": 1.5,
-  "publishedAt": "2024-01-02T03:04:05Z",
-  "publisher": {
-    "country": "gnr8",
-    "name": "gnr8"
-  },
-  "subtitle": "gnr8",
-  "tags": [
-    "gnr8"
-  ],
-  "title": "gnr8"
+  "code": "gnr8",
+  "message": "gnr8"
 }
 ```
 
-### Go — `example.com/bookstore/sdk`
+### Go — `example.com/taskflow/sdk`
 
 ```go
 import (
 	"fmt"
 
-	"example.com/bookstore/sdk"
+	"example.com/taskflow/sdk"
 )
 
 client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
-result, err := client.GetBook(ctx, "gnr8")
+result, err := client.DeleteTask(ctx, "gnr8")
 if err != nil {
 	return err
 }
 fmt.Printf("%+v\n", result)
-```
-
-### CLI — `bookstore`
-
-`bookstore books get`
-
-```sh
-bookstore books get 1
 ```

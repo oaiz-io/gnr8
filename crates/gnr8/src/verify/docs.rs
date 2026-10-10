@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use gnr8_engine::sdk::Artifact;
-use gnr8_engine::staticdocs::snippets::CompileUnit;
+use gnr8_engine::staticdocs::snippets::{check_wire, CompileUnit, WireRecord, WIRE_ENV};
 use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite};
 
 use super::cli_help::{NativeRunner, ProcessRunner};
@@ -56,6 +56,8 @@ pub(crate) enum DocsFailure {
     Materialization,
     /// The language's tool rejected a sample.
     Rejected,
+    /// A sample's call did not send the request its page prints.
+    WireMismatch,
 }
 
 impl DocsFailure {
@@ -67,6 +69,7 @@ impl DocsFailure {
             Self::SnippetNotInPage => "snippet_not_in_page",
             Self::Materialization => "materialization",
             Self::Rejected => "rejected",
+            Self::WireMismatch => "wire_mismatch",
         }
     }
 }
@@ -261,7 +264,13 @@ fn probe_tool(
     }
 }
 
-/// Write the unit beside a temp copy of the SDK and run the language's tool over it.
+/// Write the unit beside a temp copy of the SDK and run the language's tool over it — rung 2 —
+/// then run every sample's call against the unit's recording transport and compare each request
+/// with its page's HTTP exchange — rung 3.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one temp tree per language, built and run in sequence; splitting it would hide the order"
+)]
 fn run_unit(
     root: &Path,
     suite: &DocsSnippetSuite,
@@ -275,7 +284,7 @@ fn run_unit(
         std::fs::write(path, text)
             .map_err(|err| materialization(format!("cannot write {}: {err}", path.display())))
     };
-    let output = match suite.language {
+    let records = match suite.language {
         ContractTestLanguage::Go => {
             let verification = suite.go_verification.as_ref().ok_or_else(|| {
                 materialization("Go docs suite is missing its declared Go module facts".into())
@@ -284,14 +293,22 @@ fn run_unit(
                 super::materialize_go_target(root, &suite.sdk_output_path, &owned, verification)
                     .map_err(materialization)?;
             write(&tree.target_dir.join(&unit.file_name), &unit.text)?;
-            let mut command = Command::new("go");
-            command
-                .args(["vet", "./..."])
-                .current_dir(&tree.target_dir)
-                .env("GOPROXY", "off")
-                .env("GOFLAGS", "-mod=mod")
-                .env("GOWORK", "off");
-            spawn(runner, &mut command)?
+            let go = |args: &[&str]| {
+                let mut command = Command::new("go");
+                command
+                    .args(args)
+                    .current_dir(&tree.target_dir)
+                    .env("GOPROXY", "off")
+                    .env("GOFLAGS", "-mod=mod")
+                    .env("GOWORK", "off");
+                command
+            };
+            accepted(suite, unit, &spawn(runner, &mut go(&["vet", "./..."]))?)?;
+            let wire = tree.root.join(WIRE_FILE);
+            let mut record = go(&["test", "-count=1", "-run", "^TestDocsWire$", "./..."]);
+            record.env(WIRE_ENV, &wire);
+            accepted(suite, unit, &spawn(runner, &mut record)?)?;
+            read_records(&wire)?
         }
         ContractTestLanguage::Python => {
             let seed = crate::safe_temp_artifact_path(root, &suite.sdk_output_path).ok();
@@ -310,12 +327,20 @@ fn run_unit(
                 .map_err(materialization)?;
             write(&importable.join(&unit.file_name), &unit.text)?;
             let module = unit.file_name.trim_end_matches(".py");
-            let mut command = Command::new("python3");
-            command
-                .args(["-m", "unittest", "-v", module])
-                .current_dir(&importable)
-                .env("PYTHONDONTWRITEBYTECODE", "1");
-            spawn(runner, &mut command)?
+            let python = |target: &str| {
+                let mut command = Command::new("python3");
+                command
+                    .args(["-m", "unittest", "-v", target])
+                    .current_dir(&importable)
+                    .env("PYTHONDONTWRITEBYTECODE", "1");
+                command
+            };
+            accepted(suite, unit, &spawn(runner, &mut python(module))?)?;
+            let wire = tree.root.join(WIRE_FILE);
+            let mut record = python(&format!("{module}.DocsWire"));
+            record.env(WIRE_ENV, &wire);
+            accepted(suite, unit, &spawn(runner, &mut record)?)?;
+            read_records(&wire)?
         }
         ContractTestLanguage::TypeScript => {
             let compiler =
@@ -339,25 +364,86 @@ fn run_unit(
                 &tree.root.join("tsconfig.json"),
                 &tsconfig(&unit.identity, &suite.sdk_output_path, &unit.file_name),
             )?;
-            let mut command = match &compiler {
-                crate::TypeScriptCompiler::NodeScript(path) => {
-                    let mut command = Command::new("node");
-                    command.arg(path);
-                    command
-                }
-                crate::TypeScriptCompiler::Executable(program) => Command::new(program),
+            write(
+                &tree.root.join("tsconfig.wire.json"),
+                &wire_tsconfig(&unit.identity, &suite.sdk_output_path, &unit.file_name),
+            )?;
+            let tsc = |config: &str| {
+                let mut command = match &compiler {
+                    crate::TypeScriptCompiler::NodeScript(path) => {
+                        let mut command = Command::new("node");
+                        command.arg(path);
+                        command
+                    }
+                    crate::TypeScriptCompiler::Executable(program) => Command::new(program),
+                };
+                command.args(["-p", config]).current_dir(&tree.root);
+                command
             };
-            command
-                .args(["-p", "tsconfig.json"])
-                .current_dir(&tree.root);
-            spawn(runner, &mut command)?
+            accepted(suite, unit, &spawn(runner, &mut tsc("tsconfig.json"))?)?;
+            // Rung 3 runs the compiled unit, so the published name has to resolve at run time too:
+            // a one-line shim maps it onto the SDK compiled beside the unit.
+            accepted(suite, unit, &spawn(runner, &mut tsc("tsconfig.wire.json"))?)?;
+            let shim = tree
+                .root
+                .join(WIRE_OUT)
+                .join("node_modules")
+                .join(&unit.identity);
+            std::fs::create_dir_all(&shim)
+                .map_err(|err| materialization(format!("cannot create the module shim: {err}")))?;
+            let compiled_sdk = tree
+                .root
+                .join(WIRE_OUT)
+                .join(suite.sdk_output_path.trim_end_matches('/'))
+                .join("index.js");
+            write(
+                &shim.join("index.js"),
+                &format!(
+                    "module.exports = require({});\n",
+                    serde_json::to_string(&compiled_sdk.to_string_lossy())
+                        .map_err(|err| materialization(err.to_string()))?
+                ),
+            )?;
+            let wire = tree.root.join(WIRE_FILE);
+            let unit_js = format!(
+                "./{WIRE_OUT}/{}",
+                unit.file_name.trim_end_matches(".ts").to_string() + ".js"
+            );
+            let mut record = Command::new("node");
+            record
+                .args([
+                    "-e",
+                    &format!(
+                        "require({}).docsWire().then((records) => require('fs').writeFileSync(process.env.{WIRE_ENV}, JSON.stringify(records)), (error) => {{ console.error(error); process.exit(1); }})",
+                        serde_json::to_string(&unit_js).map_err(|err| materialization(err.to_string()))?
+                    ),
+                ])
+                .current_dir(&tree.root)
+                .env(WIRE_ENV, &wire);
+            accepted(suite, unit, &spawn(runner, &mut record)?)?;
+            read_records(&wire)?
         }
     };
+    compare_wire(suite, unit, artifacts, &records)
+}
+
+/// The file a unit's rung-3 harness writes its records to, inside the temp tree.
+const WIRE_FILE: &str = "gnr8-docs-wire.json";
+
+/// Where the TypeScript rung-3 build lands, inside the temp tree.
+const WIRE_OUT: &str = "gnr8-docs-wire";
+
+/// A tool's exit, as a pass or a rejection that names the sample its complaint points into.
+fn accepted(
+    suite: &DocsSnippetSuite,
+    unit: &CompileUnit,
+    output: &Output,
+) -> Result<(), DocsReason> {
     if output.status.success() {
         return Ok(());
     }
     let mut reason = DocsReason::new(DocsFailure::Rejected, "the tool rejected a sample");
-    if let Some(index) = failing_entry(unit, &output) {
+    if let Some(index) = failing_entry(unit, output) {
         let entry = &unit.entries[index];
         reason.operation = Some(entry.operation_id.clone());
         reason.page = Some(format!(
@@ -366,8 +452,78 @@ fn run_unit(
             entry.page
         ));
     }
-    reason.output = Some(crate::command_output_excerpt(&output));
+    reason.output = Some(crate::command_output_excerpt(output));
     Err(reason)
+}
+
+fn read_records(path: &Path) -> Result<Vec<WireRecord>, DocsReason> {
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        DocsReason::new(
+            DocsFailure::WireMismatch,
+            format!("the samples' calls recorded no requests: {err}"),
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|err| {
+        DocsReason::new(
+            DocsFailure::WireMismatch,
+            format!("the recorded requests are not readable: {err}"),
+        )
+    })
+}
+
+/// Rung 3: each sample's recorded request equals the HTTP exchange its page prints, after the
+/// placeholders are replaced by the contract credentials the harness configured.
+fn compare_wire(
+    suite: &DocsSnippetSuite,
+    unit: &CompileUnit,
+    artifacts: &[Artifact],
+    records: &[WireRecord],
+) -> Result<(), DocsReason> {
+    for entry in &unit.entries {
+        let path = format!("{}/{}", suite.docs_dir.trim_end_matches('/'), entry.page);
+        let page = artifacts
+            .iter()
+            .find(|artifact| artifact.path == path)
+            .map_or("", |artifact| artifact.text.as_str());
+        let outcome = records
+            .iter()
+            .find(|record| record.operation == entry.operation_id)
+            .map_or_else(
+                || Err("the sample's call sent no request".to_string()),
+                |record| check_wire(page, record),
+            );
+        if let Err(field) = outcome {
+            let mut reason = DocsReason::new(
+                DocsFailure::WireMismatch,
+                format!("the sample does not send the page's request: {field}"),
+            );
+            reason.operation = Some(entry.operation_id.clone());
+            reason.page = Some(path);
+            return Err(reason);
+        }
+    }
+    Ok(())
+}
+
+/// The `tsconfig.json` rung 3 builds the unit and the SDK with: `CommonJS`, so Node runs the output,
+/// and the same `paths` entry rung 2 resolves the published name with.
+fn wire_tsconfig(package: &str, sdk_output_path: &str, unit_file: &str) -> String {
+    let index = format!("./{}/index.ts", sdk_output_path.trim_end_matches('/'));
+    serde_json::json!({
+        "compilerOptions": {
+            "module": "commonjs",
+            "moduleResolution": "node",
+            "target": "es2022",
+            "lib": ["es2022", "dom"],
+            "strict": true,
+            "skipLibCheck": true,
+            "outDir": WIRE_OUT,
+            "rootDir": ".",
+            "paths": { package: [index] }
+        },
+        "files": [unit_file]
+    })
+    .to_string()
 }
 
 fn spawn(runner: &mut impl ProcessRunner, command: &mut Command) -> Result<Output, DocsReason> {
@@ -497,17 +653,26 @@ mod tests {
         }
     }
 
-    /// Answers queued outputs in order and records each program it was asked to run.
+    /// Answers queued outputs in order and records each program it was asked to run. A command
+    /// that names a wire file gets `wire` written there, as a unit's rung-3 harness would.
     #[derive(Default)]
     struct FakeRunner {
         responses: VecDeque<io::Result<Output>>,
         programs: Vec<String>,
+        wire: Option<String>,
     }
 
     impl ProcessRunner for FakeRunner {
         fn output(&mut self, command: &mut Command) -> io::Result<Output> {
             self.programs
                 .push(command.get_program().to_string_lossy().into_owned());
+            let wire_path = command
+                .get_envs()
+                .find(|(name, _)| *name == gnr8_engine::staticdocs::snippets::WIRE_ENV)
+                .and_then(|(_, value)| value.map(std::path::PathBuf::from));
+            if let (Some(path), Some(wire)) = (wire_path, &self.wire) {
+                std::fs::write(path, wire).unwrap();
+            }
             self.responses
                 .pop_front()
                 .unwrap_or_else(|| Ok(output(0, "")))
@@ -567,7 +732,25 @@ mod tests {
     }
 
     fn page(snippet: &str) -> String {
-        format!("# `op`\n\n## Example\n\n```go\nimport (\n)\n\n{snippet}\n```\n")
+        format!(
+            "# `op`\n\n## Example\n\n### HTTP\n\n```http\nGET /books?limit=7 HTTP/1.1\nx-api-key: {{apiKey}}\n```\n\n```go\nimport (\n)\n\n{snippet}\n```\n"
+        )
+    }
+
+    /// What the two samples sent: the page's request, with the contract credential where the page
+    /// prints its placeholder, from a base URL with no path.
+    fn wire(limit: &str) -> String {
+        serde_json::json!([
+            {"operation": "createBook", "method": "GET", "path": "/books",
+             "query": {"limit": [limit]},
+             "headers": {"x-api-key": "gnr8-contract-key", "user-agent": "gnr8-sdk"},
+             "body": null},
+            {"operation": "listBooks", "method": "GET", "path": "/books",
+             "query": {"limit": ["7"]},
+             "headers": {"x-api-key": "gnr8-contract-key"},
+             "body": null}
+        ])
+        .to_string()
     }
 
     fn artifacts() -> Vec<Artifact> {
@@ -692,6 +875,36 @@ mod tests {
             reason.explain()
         );
         assert_eq!(runner.programs, vec!["go", "go"]);
+    }
+
+    #[test]
+    fn rung_three_compares_after_substituting_credentials_and_base_url() {
+        let mut runner = FakeRunner {
+            wire: Some(wire("7")),
+            ..FakeRunner::default()
+        };
+        let report = run(&suite(Some(unit())), &artifacts(), &mut runner);
+        assert_eq!(report.status, DocsStatus::Passed, "{:?}", report.reason);
+        assert_eq!(runner.programs, vec!["go", "go", "go"], "probe, vet, wire");
+    }
+
+    #[test]
+    fn planted_wire_mismatch_fails_rung_three_naming_the_field() {
+        let mut runner = FakeRunner {
+            wire: Some(wire("8")),
+            ..FakeRunner::default()
+        };
+        let report = run(&suite(Some(unit())), &artifacts(), &mut runner);
+        assert_eq!(report.status, DocsStatus::Failed);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::WireMismatch);
+        assert_eq!(reason.operation.as_deref(), Some("createBook"));
+        assert_eq!(
+            reason.page.as_deref(),
+            Some("docs/operations/create-book.md")
+        );
+        assert!(reason.message.contains("query.limit"), "{}", reason.message);
+        assert!(reason.message.contains('8'), "{}", reason.message);
     }
 
     #[test]

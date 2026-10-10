@@ -80,7 +80,7 @@ pub(crate) fn ts_key(name: &str) -> String {
 ///
 /// In-package they carry the contract constants; from a consumer's code they are the variables
 /// `apiKey`, `token`, `username` and `password`.
-fn client_credentials(auth: &[SampleAuth], consumer: bool) -> String {
+pub(crate) fn client_credentials(auth: &[SampleAuth], consumer: bool) -> String {
     let value = |constant: &str, variable: &str| {
         if consumer {
             variable.to_string()

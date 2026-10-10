@@ -28,7 +28,7 @@ code samples take them and the base URL as variables. Paths start at the server 
 with a path prefix prepends it to every path.";
 
 /// The placeholders the HTTP exchange prints where a contract case sends its constants.
-fn placeholders() -> WireCredentials {
+pub(crate) fn placeholders() -> WireCredentials {
     WireCredentials {
         api_key: "{apiKey}".to_string(),
         bearer: "{token}".to_string(),
@@ -142,7 +142,7 @@ fn cli_sections(
     Ok(out)
 }
 
-fn language_name(language: ContractTestLanguage) -> &'static str {
+pub(crate) fn language_name(language: ContractTestLanguage) -> &'static str {
     match language {
         ContractTestLanguage::Go => "Go",
         ContractTestLanguage::Python => "Python",

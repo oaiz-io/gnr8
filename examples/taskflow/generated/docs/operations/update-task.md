@@ -1,8 +1,10 @@
-# `getBook`
+# `updateTask`
 
-`GET /books/{id}` · Group: [books](../groups/books.md) · Tags: `books`
+`PUT /tasks/{id}` · Group: [tasks](../groups/tasks.md) · Tags: `tasks`
 
-Returns one book by its identifier.
+Replaces the mutable fields of one task.
+
+Fields omitted from the payload keep their current values.
 
 ## Authentication
 
@@ -16,11 +18,19 @@ Returns one book by its identifier.
 | --- | --- | --- | --- | --- | --- |
 | `id` | `string` | yes |  |  |  |
 
+## Request body
+
+Required: yes
+
+| Media type | Schema |
+| --- | --- |
+| `application/json` | [`UpdateTaskRequest`](../schemas/update-task-request.md) |
+
 ## Responses
 
 | Status | Body | Media types | Headers | Description |
 | --- | --- | --- | --- | --- |
-| `200` | [`Book`](../schemas/book.md) | `application/json` |  |  |
+| `200` | [`Task`](../schemas/task.md) | `application/json` |  |  |
 | `404` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
 
 ## Example
@@ -30,8 +40,11 @@ Values are sampled from the schema and satisfy its declared constraints. Credent
 ### HTTP
 
 ```http
-GET /books/gnr8 HTTP/1.1
+PUT /tasks/gnr8 HTTP/1.1
+content-type: application/json
 x-api-key: {apiKey}
+
+{}
 ```
 
 ```http
@@ -39,44 +52,36 @@ HTTP/1.1 200
 content-type: application/json
 
 {
-  "author": "gnr8",
-  "genre": "fiction",
-  "id": "gnr8",
-  "price": 1.5,
-  "publishedAt": "2024-01-02T03:04:05Z",
-  "publisher": {
-    "country": "gnr8",
+  "assignee": {
+    "email": "gnr8",
+    "id": "gnr8",
     "name": "gnr8"
   },
-  "subtitle": "gnr8",
-  "tags": [
+  "dueAt": "2024-01-02T03:04:05Z",
+  "id": "gnr8",
+  "labels": [
     "gnr8"
   ],
+  "notes": "gnr8",
+  "priority": 7,
+  "status": "done",
   "title": "gnr8"
 }
 ```
 
-### Go — `example.com/bookstore/sdk`
+### Go — `example.com/taskflow/sdk`
 
 ```go
 import (
 	"fmt"
 
-	"example.com/bookstore/sdk"
+	"example.com/taskflow/sdk"
 )
 
 client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
-result, err := client.GetBook(ctx, "gnr8")
+result, err := client.UpdateTask(ctx, "gnr8", sdk.UpdateTaskRequest{})
 if err != nil {
 	return err
 }
 fmt.Printf("%+v\n", result)
-```
-
-### CLI — `bookstore`
-
-`bookstore books get`
-
-```sh
-bookstore books get 1
 ```

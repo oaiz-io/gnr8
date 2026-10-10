@@ -2,6 +2,31 @@
 source: crates/gnr8-core/tests/snapshot_docs.rs
 expression: tree
 ---
+--- authentication.md ---
+# Authentication
+
+## `ApiKeyAuth`
+
+API key in header `X-API-Key`.
+
+| SDK | Credential option |
+| --- | --- |
+| Go — `example.com/goalservice/sdk` | `sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey)` |
+
+Required by:
+
+- [`createGoal`](operations/create-goal.md)
+- [`listGoals`](operations/list-goals.md)
+- [`deleteGoal`](operations/delete-goal.md)
+- [`updateGoal`](operations/update-goal.md)
+--- errors.md ---
+# Errors
+
+Every generated client surfaces a non-success status as its typed error — Go `*APIError`, Python and TypeScript `ApiError` — including a status the API does not declare.
+
+| Status | Body | Operations |
+| --- | --- | --- |
+| `400` | [`HttpError`](schemas/http-error.md) | [`createGoal`](operations/create-goal.md); [`deleteGoal`](operations/delete-goal.md); [`updateGoal`](operations/update-goal.md) |
 --- index.md ---
 # goalservice
 
@@ -26,6 +51,11 @@ expression: tree
 - [`ListGoalsOutput`](schemas/list-goals-output.md)
 - [`TargetDirection`](schemas/target-direction.md)
 - [`UpdateGoalInput`](schemas/update-goal-input.md)
+
+## Reference
+
+- [Errors](errors.md)
+- [Authentication](authentication.md)
 --- llms.txt ---
 # goalservice
 
@@ -48,6 +78,11 @@ expression: tree
 - [ListGoalsOutput](schemas/list-goals-output.md)
 - [TargetDirection](schemas/target-direction.md)
 - [UpdateGoalInput](schemas/update-goal-input.md)
+
+## Reference
+
+- [Errors](errors.md)
+- [Authentication](authentication.md)
 --- operations/create-goal.md ---
 # `createGoal`
 
@@ -60,7 +95,7 @@ identifier, which is returned in the response.
 
 ## Authentication
 
-- `ApiKeyAuth` (API key in header `X-API-Key`)
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
 
 ## Request body
 
@@ -131,7 +166,7 @@ Permanently removes one goal.
 
 ## Authentication
 
-- `ApiKeyAuth` (API key in header `X-API-Key`)
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
 
 ## Parameters
 
@@ -196,7 +231,7 @@ cursor from the previous page to continue; omit it to start from the beginning.
 
 ## Authentication
 
-- `ApiKeyAuth` (API key in header `X-API-Key`)
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
 
 ## Parameters
 
@@ -268,6 +303,12 @@ if err != nil {
 }
 fmt.Printf("%+v\n", result)
 ```
+
+## Diagnostics
+
+- WARN: untyped query param 'cursor' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:46)
+- WARN: untyped query param 'page_size' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:47)
+- WARN: untyped query param 'aggregation' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:48)
 --- operations/update-goal.md ---
 # `updateGoal`
 
@@ -280,7 +321,7 @@ unchanged; the goal's identifier and creation time are never modified.
 
 ## Authentication
 
-- `ApiKeyAuth` (API key in header `X-API-Key`)
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
 
 ## Parameters
 

@@ -1,10 +1,10 @@
-# `listBooks`
+# `listTasks`
 
-`GET /books` · Group: [books](../groups/books.md) · Tags: `books`
+`GET /tasks` · Group: [tasks](../groups/tasks.md) · Tags: `tasks`
 
-Returns every book in the catalogue.
+Returns every task.
 
-Pass a genre to narrow the results to one genre; omit it to list everything.
+Pass a status to narrow the results to one status; omit it to list everything.
 
 ## Authentication
 
@@ -16,13 +16,13 @@ Pass a genre to narrow the results to one genre; omit it to list everything.
 
 | Name | Type | Required | Default | Constraints | Description |
 | --- | --- | --- | --- | --- | --- |
-| `genre` | `string` | no |  |  |  |
+| `status` | `string` | no |  |  |  |
 
 ## Responses
 
 | Status | Body | Media types | Headers | Description |
 | --- | --- | --- | --- | --- |
-| `200` | [`BookList`](../schemas/book-list.md) | `application/json` |  |  |
+| `200` | [`TaskList`](../schemas/task-list.md) | `application/json` |  |  |
 
 ## Example
 
@@ -31,7 +31,7 @@ Values are sampled from the schema and satisfy its declared constraints. Credent
 ### HTTP
 
 ```http
-GET /books?genre=gnr8 HTTP/1.1
+GET /tasks?status=gnr8 HTTP/1.1
 x-api-key: {apiKey}
 ```
 
@@ -40,52 +40,44 @@ HTTP/1.1 200
 content-type: application/json
 
 {
-  "books": [
+  "tasks": [
     {
-      "author": "gnr8",
-      "genre": "fiction",
-      "id": "gnr8",
-      "price": 1.5,
-      "publishedAt": "2024-01-02T03:04:05Z",
-      "publisher": {
-        "country": "gnr8",
+      "assignee": {
+        "email": "gnr8",
+        "id": "gnr8",
         "name": "gnr8"
       },
-      "subtitle": "gnr8",
-      "tags": [
+      "dueAt": "2024-01-02T03:04:05Z",
+      "id": "gnr8",
+      "labels": [
         "gnr8"
       ],
+      "notes": "gnr8",
+      "priority": 7,
+      "status": "done",
       "title": "gnr8"
     }
   ]
 }
 ```
 
-### Go — `example.com/bookstore/sdk`
+### Go — `example.com/taskflow/sdk`
 
 ```go
 import (
 	"fmt"
 
-	"example.com/bookstore/sdk"
+	"example.com/taskflow/sdk"
 )
 
 client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
-result, err := client.ListBooks(ctx, sdk.ListBooksParams{Genre: sdk.Ptr[string]("gnr8")})
+result, err := client.ListTasks(ctx, sdk.ListTasksParams{Status: sdk.Ptr[string]("gnr8")})
 if err != nil {
 	return err
 }
 fmt.Printf("%+v\n", result)
 ```
 
-### CLI — `bookstore`
-
-`bookstore books list`
-
-```sh
-bookstore books list
-```
-
 ## Diagnostics
 
-- WARN: untyped query param 'genre' on GET /books: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (main.go:49)
+- WARN: untyped query param 'status' on GET /tasks: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (main.go:57)

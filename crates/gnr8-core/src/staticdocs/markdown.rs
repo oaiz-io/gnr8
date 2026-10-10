@@ -32,6 +32,14 @@ pub(crate) const FIELDS: &str = "Fields";
 pub(crate) const MEMBERS: &str = "Members";
 /// `## Type` on an alias schema page.
 pub(crate) const TYPE: &str = "Type";
+/// `# Errors`, and its link label in the reference lists.
+pub(crate) const ERRORS: &str = "Errors";
+/// `## Reference` on the index and in `llms.txt`: the errors and authentication pages.
+pub(crate) const REFERENCE: &str = "Reference";
+/// `## Pagination` on an operation page.
+pub(crate) const PAGINATION: &str = "Pagination";
+/// `## Diagnostics` on an operation page.
+pub(crate) const DIAGNOSTICS: &str = "Diagnostics";
 /// `### Declared request examples` under the request body.
 pub(crate) const DECLARED_REQUEST_EXAMPLES: &str = "Declared request examples";
 
@@ -61,6 +69,10 @@ pub(crate) const FIXED_HEADINGS: &[&str] = &[
     MEMBERS,
     TYPE,
     DECLARED_REQUEST_EXAMPLES,
+    ERRORS,
+    REFERENCE,
+    PAGINATION,
+    DIAGNOSTICS,
     "Path",
     "Query",
     "Header",

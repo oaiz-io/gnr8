@@ -1,26 +1,21 @@
-# `deleteBook`
+# `debugTasks`
 
-`DELETE /books/{id}` · Group: [books](../groups/books.md) · Tags: `books`
+`GET /tasks/_debug` · Group: [tasks](../groups/tasks.md) · Tags: `internal`, `tasks`
 
-Permanently removes one book from the catalogue.
+Handles the internal GET /tasks/_debug endpoint.
+
+The .gnr8/ pipeline
+keeps this route generated so change reporting can apply explicit tag-based gate policy.
 
 ## Authentication
 
 - [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
 
-## Parameters
-
-### Path
-
-| Name | Type | Required | Default | Constraints | Description |
-| --- | --- | --- | --- | --- | --- |
-| `id` | `string` | yes |  |  |  |
-
 ## Responses
 
 | Status | Body | Media types | Headers | Description |
 | --- | --- | --- | --- | --- |
-| `200` | [`ErrorResponse`](../schemas/error-response.md) | `application/json` |  |  |
+| `200` | [`TaskList`](../schemas/task-list.md) | `application/json` |  |  |
 
 ## Example
 
@@ -29,7 +24,7 @@ Values are sampled from the schema and satisfy its declared constraints. Credent
 ### HTTP
 
 ```http
-DELETE /books/gnr8 HTTP/1.1
+GET /tasks/_debug HTTP/1.1
 x-api-key: {apiKey}
 ```
 
@@ -38,32 +33,40 @@ HTTP/1.1 200
 content-type: application/json
 
 {
-  "code": "gnr8",
-  "message": "gnr8"
+  "tasks": [
+    {
+      "assignee": {
+        "email": "gnr8",
+        "id": "gnr8",
+        "name": "gnr8"
+      },
+      "dueAt": "2024-01-02T03:04:05Z",
+      "id": "gnr8",
+      "labels": [
+        "gnr8"
+      ],
+      "notes": "gnr8",
+      "priority": 7,
+      "status": "done",
+      "title": "gnr8"
+    }
+  ]
 }
 ```
 
-### Go — `example.com/bookstore/sdk`
+### Go — `example.com/taskflow/sdk`
 
 ```go
 import (
 	"fmt"
 
-	"example.com/bookstore/sdk"
+	"example.com/taskflow/sdk"
 )
 
 client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
-result, err := client.DeleteBook(ctx, "gnr8")
+result, err := client.DebugTasks(ctx)
 if err != nil {
 	return err
 }
 fmt.Printf("%+v\n", result)
-```
-
-### CLI — `bookstore`
-
-`bookstore books delete`
-
-```sh
-bookstore books delete 1 --yes
 ```

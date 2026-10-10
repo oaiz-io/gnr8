@@ -59,7 +59,7 @@ pub(crate) fn render_call(
 ///
 /// In-package they carry the contract constants; from a consumer's code they are the variables
 /// `api_key`, `token`, `username` and `password`.
-fn client_credentials(auth: &[SampleAuth], consumer: bool) -> String {
+pub(crate) fn client_credentials(auth: &[SampleAuth], consumer: bool) -> String {
     let value = |constant: &str, variable: &str| {
         if consumer {
             variable.to_string()

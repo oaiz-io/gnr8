@@ -30,6 +30,9 @@ must move the minor version.
 - `gnr8 verify` checks every docs code sample against the SDK it documents. Go and TypeScript
   samples are compiled, and Python samples are executed against a stub transport. It also checks
   that each sample appears unchanged in its page, and it reports skipped toolchains explicitly.
+- `errors.md`, `authentication.md`, per-page diagnostics and pagination sections. `gnr8 verify` runs
+  each sample's call against a fake transport and asserts it sends the request printed on the page,
+  with credentials and base URL substituted.
 
 ### Fixed
 

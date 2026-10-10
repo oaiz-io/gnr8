@@ -69,7 +69,16 @@ pub(crate) fn generate(
 
 /// Render every page, keyed by docs-relative path, and run rung 0 over the result.
 fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, String>, CoreError> {
-    let nav = NavModel::build(graph)?;
+    // The error catalog is the SDK model's own error plan, so the page lists exactly the error
+    // responses every generated client models. The package name plays no part in that plan.
+    let errors = crate::sdk::model::SdkModel::build(
+        graph,
+        "docs",
+        graph.base_path.clone(),
+        &crate::sdk::layout::SdkFileLayout::default(),
+    )?
+    .errors;
+    let nav = NavModel::build(graph, !errors.responses.is_empty())?;
     let consumers = schema_consumers(graph)
         .operations
         .into_iter()
@@ -108,6 +117,18 @@ fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, Str
         let path = nav.schema_page(&schema.id)?.to_string();
         pages.insert(path, page::render_schema(&site, schema, &mut links)?);
     }
+    for (_, reference) in &nav.reference {
+        let text = if *reference == nav::ERRORS_PAGE {
+            page::render_errors(&site, &errors, &mut links)?
+        } else {
+            page::render_authentication(
+                &site,
+                &|auth| Ok(credential_options(sdks, auth)),
+                &mut links,
+            )?
+        };
+        pages.insert((*reference).to_string(), text);
+    }
 
     // Rung 0. Each failure is a renderer defect, so generation fails closed.
     if operation_pages != graph.operations.len()
@@ -131,6 +152,44 @@ fn render(graph: &ApiGraph, sdks: &[DocsSdk<'_>]) -> Result<BTreeMap<String, Str
         }
     }
     Ok(pages)
+}
+
+/// How each sibling SDK with a consumer identity configures one credential, spelled by that SDK's
+/// own call-site renderer — the same spelling its code samples print.
+fn credential_options(
+    sdks: &[DocsSdk<'_>],
+    auth: &crate::verify::SampleAuth,
+) -> Vec<page::CredentialOption> {
+    let mut options = Vec::new();
+    for docs in sdks {
+        let Some(identity) = &docs.identity else {
+            continue;
+        };
+        let auth = std::slice::from_ref(auth);
+        let option = match docs.sdk {
+            crate::sdk::builtins::SiblingSdk::Go(_) => crate::gosdk::callsite::credential_options(
+                auth,
+                &format!("{}.", identity.qualifier),
+                true,
+                "",
+            ),
+            crate::sdk::builtins::SiblingSdk::Python(_) => {
+                crate::pysdk::callsite::client_credentials(auth, true)
+            }
+            crate::sdk::builtins::SiblingSdk::TypeScript(_) => {
+                crate::tssdk::callsite::client_credentials(auth, true)
+            }
+        };
+        options.push(page::CredentialOption {
+            label: format!(
+                "{} — {}",
+                example::language_name(docs.sdk.language()),
+                markdown::code_span(snippets::sdk_label(docs.sdk))
+            ),
+            option: option.trim_start_matches(", ").to_string(),
+        });
+    }
+    options
 }
 
 /// The loop-safety anchor: the one directory this target writes.

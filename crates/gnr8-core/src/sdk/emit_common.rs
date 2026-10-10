@@ -1102,6 +1102,37 @@ fn api_key_security_schemes(graph: &ApiGraph) -> Result<BTreeMap<String, ApiKeyS
     Ok(schemes)
 }
 
+/// Every declared security scheme, in declaration order, as the credential an operation that
+/// requires it configures — the same resolution [`operation_auth_alternatives`] uses.
+///
+/// # Errors
+///
+/// Returns the SDK targets' own error for a scheme kind generated clients do not support.
+pub(crate) fn declared_auth_schemes(
+    graph: &ApiGraph,
+) -> Result<Vec<OperationAuthScheme>, CoreError> {
+    let mut schemes = supported_security_schemes(graph)?;
+    Ok(graph
+        .security
+        .iter()
+        .filter_map(|scheme| {
+            schemes.remove(&scheme.id).map(|supported| match supported {
+                SupportedAuthScheme::ApiKey(key) => {
+                    OperationAuthScheme::ApiKey(OperationApiKeyScheme {
+                        id: scheme.id.clone(),
+                        name: key.name,
+                        location: key.location,
+                    })
+                }
+                SupportedAuthScheme::Http(http) => OperationAuthScheme::Http {
+                    id: scheme.id.clone(),
+                    scheme: http,
+                },
+            })
+        })
+        .collect())
+}
+
 fn supported_security_schemes(
     graph: &ApiGraph,
 ) -> Result<BTreeMap<String, SupportedAuthScheme>, CoreError> {

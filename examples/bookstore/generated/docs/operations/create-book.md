@@ -8,7 +8,7 @@ The book is stored immediately and returned with its generated identifier.
 
 ## Authentication
 
-- `ApiKeyAuth` (API key in header `X-API-Key`)
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
 
 ## Request body
 

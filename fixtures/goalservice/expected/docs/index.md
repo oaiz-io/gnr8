@@ -21,3 +21,8 @@
 - [`ListGoalsOutput`](schemas/list-goals-output.md)
 - [`TargetDirection`](schemas/target-direction.md)
 - [`UpdateGoalInput`](schemas/update-goal-input.md)
+
+## Reference
+
+- [Errors](errors.md)
+- [Authentication](authentication.md)

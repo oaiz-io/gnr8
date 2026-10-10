@@ -311,6 +311,8 @@ fn every_operation_has_exactly_one_page() {
     assert_eq!(
         names,
         vec![
+            "authentication.md",
+            "errors.md",
             "groups/books.md",
             "index.md",
             "llms.txt",
@@ -625,6 +627,8 @@ fn llms_txt_and_index_list_pages_in_one_order() {
             "schemas/create-book-request.md",
             "schemas/error-response.md",
             "schemas/genre.md",
+            "errors.md",
+            "authentication.md",
         ]
     );
 }
@@ -805,5 +809,184 @@ fn typescript_sdk_has_no_cli_section() {
     let pages = render(&bookstore(), &[ts_sdk(true)]);
     for (path, text) in &pages {
         assert!(!text.contains("### CLI"), "{path}");
+    }
+}
+
+fn diagnostic(operation: &str, file: &str, code: &str, message: &str) -> Value {
+    json!({
+        "code": code, "severity": "WARN", "category": "request_parameter",
+        "message": message, "file": file, "line": 49,
+        "span": {"file": file, "start_line": 49, "end_line": 49},
+        "operation": operation
+    })
+}
+
+#[test]
+fn error_catalog_keys_by_status_and_schema() {
+    let pages = render(&bookstore(), &[go_sdk()]);
+    let errors = page(&pages, "errors.md");
+    assert!(errors.starts_with("# Errors\n"), "{errors}");
+    assert!(
+        errors.contains("| Status | Body | Operations |"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains(
+            "| `400` | [`ErrorResponse`](schemas/error-response.md) | [`createBook`](operations/create-book.md) |"
+        ),
+        "{errors}"
+    );
+    assert!(
+        errors.contains(
+            "| `404` | [`ErrorResponse`](schemas/error-response.md) | [`getBook`](operations/get-book.md) |"
+        ),
+        "{errors}"
+    );
+    assert!(
+        errors.find("| `400` |").unwrap() < errors.find("| `404` |").unwrap(),
+        "rows follow status order"
+    );
+
+    // An API that declares no error response has no catalog to link to.
+    let mut value = bookstore_json();
+    for op in value["operations"].as_array_mut().unwrap() {
+        op["responses"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|response| response["status"].as_u64().unwrap() < 400);
+    }
+    let pages = render(&graph_of(value), &[]);
+    assert!(!pages.contains_key("errors.md"));
+    assert!(!page(&pages, "index.md").contains("errors.md"));
+}
+
+#[test]
+fn undeclared_status_guarantee_is_stated_once() {
+    let pages = render(&bookstore(), &[go_sdk()]);
+    let guarantee = "including a status the API does not declare";
+    let stated: Vec<&String> = pages
+        .iter()
+        .filter(|(_, text)| text.contains(guarantee))
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(stated, vec!["errors.md"]);
+    assert_eq!(page(&pages, "errors.md").matches(guarantee).count(), 1);
+}
+
+#[test]
+fn authentication_page_only_when_security_is_declared() {
+    let pages = render(&bookstore(), &[go_sdk(), py_sdk(), ts_sdk(true)]);
+    let auth = page(&pages, "authentication.md");
+    assert!(auth.starts_with("# Authentication\n"), "{auth}");
+    assert!(
+        auth.contains("## `ApiKeyAuth`\n\nAPI key in header `X-API-Key`.\n"),
+        "{auth}"
+    );
+    for option in [
+        "sdk.WithAPIKeyHeader(\"ApiKeyAuth\", apiKey)",
+        "api_keys={\"ApiKeyAuth\": api_key}",
+        "apiKeys: { \"ApiKeyAuth\": apiKey }",
+    ] {
+        assert!(auth.contains(option), "{option} in:\n{auth}");
+    }
+    assert!(
+        auth.contains("[`createBook`](operations/create-book.md)"),
+        "{auth}"
+    );
+    let operation = page(&pages, "operations/create-book.md");
+    assert!(
+        operation
+            .contains("- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)"),
+        "{operation}"
+    );
+    let index = page(&pages, "index.md");
+    assert!(
+        index.contains("[Authentication](authentication.md)"),
+        "{index}"
+    );
+    assert!(
+        page(&pages, "llms.txt").contains(
+            "## Reference\n\n- [Errors](errors.md)\n- [Authentication](authentication.md)\n"
+        ),
+        "{}",
+        page(&pages, "llms.txt")
+    );
+
+    let mut value = bookstore_json();
+    value["security"] = json!([]);
+    let pages = render(&graph_of(value), &[go_sdk()]);
+    assert!(!pages.contains_key("authentication.md"));
+    for (path, text) in &pages {
+        assert!(!text.contains("authentication.md"), "{path}");
+    }
+}
+
+#[test]
+fn diagnostic_attaches_to_its_operation_page() {
+    let mut value = bookstore_json();
+    value["diagnostics"] = json!([diagnostic(
+        "GET /books",
+        "main.go",
+        "request.parameter.unresolved",
+        "untyped query param 'genre' on GET /books"
+    )]);
+    let pages = render(&graph_of(value), &[]);
+    let listed = page(&pages, "operations/list-books.md");
+    assert!(
+        listed.ends_with(
+            "## Diagnostics\n\n- WARN: untyped query param 'genre' on GET /books (main.go:49)\n"
+        ),
+        "{listed}"
+    );
+    for (path, text) in &pages {
+        if path != "operations/list-books.md" {
+            assert!(!text.contains("## Diagnostics"), "{path}");
+        }
+    }
+}
+
+#[test]
+fn unpublishable_diagnostic_is_omitted() {
+    let mut value = bookstore_json();
+    value["diagnostics"] = json!([
+        diagnostic(
+            "GET /books",
+            "/home/dev/go/pkg/mod/github.com/x/y.go",
+            "request.parameter.unresolved",
+            "outside the module"
+        ),
+        diagnostic(
+            "GET /books",
+            "main.go",
+            "source.load.failed",
+            "the loader failed"
+        )
+    ]);
+    let pages = render(&graph_of(value), &[]);
+    let listed = page(&pages, "operations/list-books.md");
+    assert!(!listed.contains("## Diagnostics"), "{listed}");
+    assert!(!listed.contains("outside the module"), "{listed}");
+}
+
+#[test]
+fn pagination_section_only_with_a_policy() {
+    let mut value = bookstore_json();
+    value["pagination"] = json!([{
+        "operation_id": "listBooks", "mode": "cursor", "items_field": "books",
+        "cursor_param": "cursor", "next_cursor_field": "next_cursor",
+        "termination": "no_next_cursor"
+    }]);
+    let pages = render(&graph_of(value), &[]);
+    let listed = page(&pages, "operations/list-books.md");
+    assert!(
+        listed.contains(
+            "## Pagination\n\n- Mode: `cursor`\n- Items field: `books`\n- Cursor parameter: `cursor`\n- Next-cursor field: `next_cursor`\n- Stops when the next cursor is absent, empty or null.\n"
+        ),
+        "{listed}"
+    );
+    for (path, text) in &pages {
+        if path != "operations/list-books.md" {
+            assert!(!text.contains("## Pagination"), "{path}");
+        }
     }
 }

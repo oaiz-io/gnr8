@@ -10,12 +10,16 @@ use crate::graph::{ApiGraph, Operation, Schema};
 use crate::sdk::emit_common::kebab;
 use crate::CoreError;
 
-use super::markdown::{OPERATIONS, SCHEMAS};
+use super::markdown::{AUTHENTICATION, ERRORS, OPERATIONS, REFERENCE, SCHEMAS};
 
 /// The docs-relative path of the index page.
 pub(crate) const INDEX_PAGE: &str = "index.md";
 /// The docs-relative path of the agent index.
 pub(crate) const LLMS_TXT: &str = "llms.txt";
+/// The docs-relative path of the error catalog, emitted when an operation declares an error.
+pub(crate) const ERRORS_PAGE: &str = "errors.md";
+/// The docs-relative path of the authentication page, emitted when the graph declares security.
+pub(crate) const AUTHENTICATION_PAGE: &str = "authentication.md";
 
 /// One navigation group: an `op.group` value and its operations, in graph order.
 pub(crate) struct NavGroup<'g> {
@@ -37,6 +41,8 @@ pub(crate) struct NavModel<'g> {
     pub(crate) ungrouped: Vec<&'g Operation>,
     /// Every projected schema, in graph order.
     pub(crate) schemas: Vec<&'g Schema>,
+    /// The reference pages this run emits, as `(label, page)`, in index order.
+    pub(crate) reference: Vec<(&'static str, &'static str)>,
     operation_pages: BTreeMap<&'g str, String>,
     schema_pages: BTreeMap<&'g str, String>,
 }
@@ -48,7 +54,7 @@ impl<'g> NavModel<'g> {
     ///
     /// Returns [`CoreError::SdkGen`] naming both subjects when two operations, two schemas or two
     /// groups slug to one file, and naming the subject when one slugs to nothing.
-    pub(crate) fn build(graph: &'g ApiGraph) -> Result<Self, CoreError> {
+    pub(crate) fn build(graph: &'g ApiGraph, errors: bool) -> Result<Self, CoreError> {
         let mut operation_pages = BTreeMap::new();
         let mut operation_files: BTreeMap<String, &str> = BTreeMap::new();
         for op in &graph.operations {
@@ -87,10 +93,18 @@ impl<'g> NavModel<'g> {
                 operations,
             });
         }
+        let mut reference = Vec::new();
+        if errors {
+            reference.push((ERRORS, ERRORS_PAGE));
+        }
+        if !graph.security.is_empty() {
+            reference.push((AUTHENTICATION, AUTHENTICATION_PAGE));
+        }
         Ok(Self {
             groups,
             ungrouped,
             schemas: graph.schemas.iter().collect(),
+            reference,
             operation_pages,
             schema_pages,
         })
@@ -202,6 +216,12 @@ pub(crate) fn render_llms_txt(nav: &NavModel<'_>, graph: &ApiGraph) -> String {
             if let Ok(page) = nav.schema_page(&schema.id) {
                 let _ = writeln!(out, "{}", llms_line(&schema.name, page, None));
             }
+        }
+    }
+    if !nav.reference.is_empty() {
+        let _ = writeln!(out, "\n## {REFERENCE}\n");
+        for (label, page) in &nav.reference {
+            let _ = writeln!(out, "{}", llms_line(label, page, None));
         }
     }
     out

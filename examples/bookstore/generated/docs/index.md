@@ -22,3 +22,8 @@ Browse and manage the catalogue
 - [`PublisherInput`](schemas/publisher-input.md)
 - [`PublisherOutput`](schemas/publisher-output.md)
 - [`UpdateBookRequest`](schemas/update-book-request.md)
+
+## Reference
+
+- [Errors](errors.md)
+- [Authentication](authentication.md)
