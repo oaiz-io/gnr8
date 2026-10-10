@@ -318,29 +318,47 @@ fn typescript_unresolvable_import_fails_rung_two() {
     );
 }
 
-use gnr8_engine::docs::verify::{check_wire, WireRecord, WIRE_ENV};
+use gnr8_engine::docs::verify::{check_operation_wire, embeds, CompileUnit, WireRecord, WIRE_ENV};
 use gnr8_engine::verify::ContractTestLanguage;
 
-/// Assert every entry's recorded request equals the HTTP exchange its page prints.
+/// Assert every block the unit relies on is printed on its page as whole lines (rung 2's page
+/// predicate), and every entry's recorded request equals the request the model says its page
+/// prints (rung 3) — exactly one per sample.
+fn assert_records_match(
+    run: &DocsRun,
+    unit: &CompileUnit,
+    records: &[WireRecord],
+    language: ContractTestLanguage,
+) {
+    assert_eq!(records.len(), unit.entries.len(), "one request per sample");
+    let pages = run.pages();
+    for entry in &unit.entries {
+        for embed in &entry.embeds {
+            let page = pages
+                .get(&embed.page)
+                .unwrap_or_else(|| panic!("no page {}", embed.page));
+            assert!(
+                embeds(page, &embed.block),
+                "{} does not print:\n{}",
+                embed.page,
+                embed.block
+            );
+        }
+        check_operation_wire(&entry.request, records, &entry.operation_id, language)
+            .unwrap_or_else(|field| panic!("{}: {field}", entry.operation_id));
+    }
+}
+
+/// [`assert_records_match`] over the records a harness wrote to `wire`.
 fn assert_wire_matches_pages(
     run: &DocsRun,
-    unit_entries: usize,
+    unit: &CompileUnit,
     wire: &std::path::Path,
     language: ContractTestLanguage,
 ) {
     let text = std::fs::read_to_string(wire).expect("the harness wrote its records");
     let records: Vec<WireRecord> = serde_json::from_str(&text).expect("records are JSON");
-    assert_eq!(
-        records.len(),
-        unit_entries,
-        "one request per sample:\n{text}"
-    );
-    let pages = run.pages();
-    for record in &records {
-        let page = page_of(&pages, &record.operation);
-        check_wire(page, record, language)
-            .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
-    }
+    assert_records_match(run, unit, &records, language);
 }
 
 #[test]
@@ -370,7 +388,7 @@ fn go_snippet_call_sends_the_page_request() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_wire_matches_pages(&run, unit.entries.len(), &wire, ContractTestLanguage::Go);
+    assert_wire_matches_pages(&run, &unit, &wire, ContractTestLanguage::Go);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -382,7 +400,7 @@ fn pydantic_available() -> bool {
 }
 
 /// Run a Python unit's rung-3 harness and return what each sample sent.
-fn python_wire(run: &DocsRun, py: &PySdk) -> (Vec<WireRecord>, usize) {
+fn python_wire(run: &DocsRun, py: &PySdk) -> (Vec<WireRecord>, CompileUnit) {
     let unit = compile_unit(&run.graph, SiblingSdk::Python(py))
         .unwrap()
         .unwrap();
@@ -410,17 +428,10 @@ fn python_wire(run: &DocsRun, py: &PySdk) -> (Vec<WireRecord>, usize) {
     );
     let records = serde_json::from_str(&std::fs::read_to_string(&wire).unwrap()).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    (records, unit.entries.len())
+    (records, unit)
 }
 
 /// The page an operation's record belongs to.
-fn page_of<'a>(pages: &'a std::collections::BTreeMap<String, String>, operation: &str) -> &'a str {
-    pages
-        .values()
-        .find(|text| text.starts_with(&format!("# `{operation}`\n")))
-        .unwrap_or_else(|| panic!("no page for {operation}"))
-}
-
 /// Rung 3 for the default (pydantic) Python SDK: every sample's call sends exactly the request its
 /// page prints. pydantic is a third-party package the SDK depends on, so without it this test has
 /// nothing to run and says so.
@@ -436,17 +447,8 @@ fn python_snippet_call_sends_the_page_request() {
     let Some(run) = docs_pipeline::goalservice_with(|pipeline| pipeline.target(py.clone())) else {
         return;
     };
-    let (records, entries) = python_wire(&run, &py);
-    assert_eq!(records.len(), entries);
-    let pages = run.pages();
-    for record in &records {
-        check_wire(
-            page_of(&pages, &record.operation),
-            record,
-            ContractTestLanguage::Python,
-        )
-        .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
-    }
+    let (records, unit) = python_wire(&run, &py);
+    assert_records_match(&run, &unit, &records, ContractTestLanguage::Python);
 }
 
 /// Rung 3 for the dataclass-style Python SDK: its models serialize through their own `to_dict`, so an
@@ -527,12 +529,7 @@ fn typescript_rung_three(run: &DocsRun, ts: &TsSdk) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_wire_matches_pages(
-        run,
-        unit.entries.len(),
-        &wire,
-        ContractTestLanguage::TypeScript,
-    );
+    assert_wire_matches_pages(run, &unit, &wire, ContractTestLanguage::TypeScript);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -541,17 +538,11 @@ fn go_rungs_two_and_three(run: &DocsRun, go: &GoSdk, label: &str) {
     let unit = compile_unit(&run.graph, SiblingSdk::Go(go))
         .unwrap()
         .expect("a Go SDK with package metadata has a consumer identity");
-    go_unit_rungs(run, go, label, &unit.text, unit.entries.len());
+    go_unit_rungs(run, go, label, &unit);
 }
 
 /// Run one (possibly planted) Go unit's rungs 2 and 3 and compare every record with its page.
-fn go_unit_rungs(run: &DocsRun, go: &GoSdk, label: &str, text: &str, entries: usize) {
-    let unit = gnr8_engine::docs::verify::CompileUnit {
-        file_name: "docs_snippets_test.go".to_string(),
-        identity: go.module.clone(),
-        text: text.to_string(),
-        entries: Vec::new(),
-    };
+fn go_unit_rungs(run: &DocsRun, go: &GoSdk, label: &str, unit: &CompileUnit) {
     let dir = temp_dir(label);
     run.write_dir(&go.dir, &dir);
     std::fs::write(dir.join(&unit.file_name), &unit.text).unwrap();
@@ -583,7 +574,7 @@ fn go_unit_rungs(run: &DocsRun, go: &GoSdk, label: &str, text: &str, entries: us
         String::from_utf8_lossy(&recorded.stdout),
         String::from_utf8_lossy(&recorded.stderr)
     );
-    assert_wire_matches_pages(run, entries, &wire, ContractTestLanguage::Go);
+    assert_wire_matches_pages(run, unit, &wire, ContractTestLanguage::Go);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -656,9 +647,12 @@ fn rung_three_asserts_success_on_the_page_reply_and_the_typed_error_otherwise() 
             "failed on the page's reply",
         ),
     ] {
-        let planted = unit.text.replacen(from, to, 1);
+        let planted = CompileUnit {
+            text: unit.text.replacen(from, to, 1),
+            ..unit.clone()
+        };
         let outcome = std::panic::catch_unwind(|| {
-            go_unit_rungs(&run, &go, "edge-planted", &planted, unit.entries.len());
+            go_unit_rungs(&run, &go, "edge-planted", &planted);
         });
         let message = outcome
             .err()
@@ -683,17 +677,8 @@ fn docs_edge_samples_send_the_page_request_in_python() {
         .module("example.com/edge/sdk")
         .to("generated/py");
     let run = docs_pipeline::docs_edge(|pipeline| pipeline.target(py.clone()));
-    let (records, entries) = python_wire(&run, &py);
-    assert_eq!(records.len(), entries);
-    let pages = run.pages();
-    for record in &records {
-        check_wire(
-            page_of(&pages, &record.operation),
-            record,
-            ContractTestLanguage::Python,
-        )
-        .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
-    }
+    let (records, unit) = python_wire(&run, &py);
+    assert_records_match(&run, &unit, &records, ContractTestLanguage::Python);
 }
 
 /// The docs-wire fixture through Go: every value a page prints — reserved characters, an enum, a
@@ -840,17 +825,8 @@ fn run_python_contract_test(run: &DocsRun, py: &PySdk, package: &str) {
 
 /// Every record of a Python rung-3 run equals its page.
 fn assert_python_records_match(run: &DocsRun, py: &PySdk) {
-    let (records, entries) = python_wire(run, py);
-    assert_eq!(records.len(), entries);
-    let pages = run.pages();
-    for record in &records {
-        check_wire(
-            page_of(&pages, &record.operation),
-            record,
-            ContractTestLanguage::Python,
-        )
-        .unwrap_or_else(|field| panic!("{}: {field}", record.operation));
-    }
+    let (records, unit) = python_wire(run, py);
+    assert_records_match(run, &unit, &records, ContractTestLanguage::Python);
 }
 
 /// The docs-wire fixture through the dataclass-style Python SDK: an enum path parameter goes out as

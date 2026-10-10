@@ -295,17 +295,17 @@ pub(crate) enum ExampleDoc {
 
 /// The request a sample sends, exactly as its page prints it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HttpRequest {
+pub struct HttpRequest {
     /// The method, upper case.
-    pub(crate) method: String,
+    pub method: String,
     /// The path from the server root, already encoded as sent.
-    pub(crate) path: String,
+    pub path: String,
     /// Query pairs in print order: names and literal values unencoded.
-    pub(crate) query: Vec<(String, WireValue)>,
+    pub query: Vec<(String, WireValue)>,
     /// Header lines in print order, lowercase names.
-    pub(crate) headers: Vec<(String, WireValue)>,
+    pub headers: Vec<(String, WireValue)>,
     /// The JSON body, when one is sent.
-    pub(crate) body: Option<serde_json::Value>,
+    pub body: Option<serde_json::Value>,
 }
 
 /// The reply an exchange prints after its request.

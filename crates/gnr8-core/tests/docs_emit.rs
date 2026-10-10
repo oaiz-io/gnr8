@@ -1068,13 +1068,40 @@ fn pagination_section_only_with_a_policy() {
     }
 }
 
+/// A request the docs model says a sample sends.
+fn request(
+    method: &str,
+    query: &[(&str, gnr8_engine::docs::verify::WireValue)],
+    body: Option<Value>,
+) -> gnr8_engine::docs::verify::HttpRequest {
+    use gnr8_engine::docs::verify::WireValue;
+    gnr8_engine::docs::verify::HttpRequest {
+        method: method.to_string(),
+        path: "/m".to_string(),
+        query: query
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect(),
+        headers: body
+            .iter()
+            .map(|_| {
+                (
+                    "content-type".to_string(),
+                    WireValue::Literal("application/json".to_string()),
+                )
+            })
+            .collect(),
+        body,
+    }
+}
+
 /// Rung 3 compares bodies the way the contract assertions do: as JSON, numbers by value, so a
 /// page's `0.5` and a client's `0.50` (or `1.0` and `1`) are the same number.
 #[test]
 fn check_wire_compares_json_numbers_by_value() {
     use gnr8_engine::docs::verify::{check_wire, WireRecord};
     use gnr8_engine::verify::ContractTestLanguage;
-    let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nPOST /m HTTP/1.1\ncontent-type: application/json\n\n{\n  \"ratio\": 1.0,\n  \"n\": [2, 0.5]\n}\n```\n";
+    let sent = request("POST", &[], Some(json!({"ratio": 1.0, "n": [2, 0.5]})));
     let record = |body: &str| WireRecord {
         operation: "m".to_string(),
         method: "POST".to_string(),
@@ -1087,13 +1114,13 @@ fn check_wire_compares_json_numbers_by_value() {
         outcome: String::new(),
     };
     check_wire(
-        page,
+        &sent,
         &record("{\"n\":[2.0,0.50],\"ratio\":1}"),
         ContractTestLanguage::Go,
     )
     .expect("equal numbers");
     let err = check_wire(
-        page,
+        &sent,
         &record("{\"n\":[2,0.5],\"ratio\":0.9}"),
         ContractTestLanguage::Go,
     )
@@ -1103,12 +1130,28 @@ fn check_wire_compares_json_numbers_by_value() {
 
 /// Rung 3 compares the query string as sent, still encoded: a space a client writes as `+` is not
 /// the `%20` the page prints, and the values of one name keep their order. Only the order between
-/// different names is free.
+/// different names is free. A credential slot carries the contract credential.
 #[test]
 fn check_wire_compares_the_raw_query_string() {
-    use gnr8_engine::docs::verify::{check_wire, WireRecord};
+    use gnr8_engine::docs::verify::{check_wire, CredentialSlot, WireRecord, WireValue};
     use gnr8_engine::verify::ContractTestLanguage;
-    let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nGET /m?a=1&a=2&b=x%20y&key={apiKey} HTTP/1.1\n```\n";
+    let literal = |value: &str| WireValue::Literal(value.to_string());
+    let sent = request(
+        "GET",
+        &[
+            ("a", literal("1")),
+            ("a", literal("2")),
+            ("b", literal("x y")),
+            (
+                "key",
+                WireValue::Credential {
+                    prefix: "",
+                    slot: CredentialSlot::ApiKey,
+                },
+            ),
+        ],
+        None,
+    );
     let record = |query: &str| WireRecord {
         operation: "m".to_string(),
         method: "GET".to_string(),
@@ -1118,20 +1161,20 @@ fn check_wire_compares_the_raw_query_string() {
         body: None,
         outcome: String::new(),
     };
-    for sent in [
+    for query in [
         "a=1&a=2&b=x%20y&key=gnr8-contract-key",
         "key=gnr8-contract-key&b=x%20y&a=1&a=2",
     ] {
-        check_wire(page, &record(sent), ContractTestLanguage::Go)
-            .unwrap_or_else(|err| panic!("{sent}: {err}"));
+        check_wire(&sent, &record(query), ContractTestLanguage::Go)
+            .unwrap_or_else(|err| panic!("{query}: {err}"));
     }
-    for sent in [
+    for query in [
         "a=1&a=2&b=x+y&key=gnr8-contract-key",
         "a=2&a=1&b=x%20y&key=gnr8-contract-key",
         "a=1&a=2&b=x%20y",
     ] {
-        let err = check_wire(page, &record(sent), ContractTestLanguage::Go).unwrap_err();
-        assert!(err.starts_with("query:"), "{sent}: {err}");
+        let err = check_wire(&sent, &record(query), ContractTestLanguage::Go).unwrap_err();
+        assert!(err.starts_with("query:"), "{query}: {err}");
     }
 }
 
@@ -1141,7 +1184,7 @@ fn check_wire_compares_the_raw_query_string() {
 fn check_operation_wire_asserts_exactly_one_request() {
     use gnr8_engine::docs::verify::{check_operation_wire, WireRecord};
     use gnr8_engine::verify::ContractTestLanguage;
-    let page = "# `m`\n\n## Example\n\n### HTTP\n\n```http\nGET /m HTTP/1.1\n```\n";
+    let sent = request("GET", &[], None);
     let record = |operation: &str| WireRecord {
         operation: operation.to_string(),
         method: "GET".to_string(),
@@ -1152,10 +1195,10 @@ fn check_operation_wire_asserts_exactly_one_request() {
         outcome: String::new(),
     };
     let go = ContractTestLanguage::Go;
-    check_operation_wire(page, &[record("other"), record("m")], "m", go).expect("one request");
-    let none = check_operation_wire(page, &[record("other")], "m", go).unwrap_err();
+    check_operation_wire(&sent, &[record("other"), record("m")], "m", go).expect("one request");
+    let none = check_operation_wire(&sent, &[record("other")], "m", go).unwrap_err();
     assert!(none.contains("sent no request"), "{none}");
-    let two = check_operation_wire(page, &[record("m"), record("m")], "m", go).unwrap_err();
+    let two = check_operation_wire(&sent, &[record("m"), record("m")], "m", go).unwrap_err();
     assert!(two.contains("sent 2 requests"), "{two}");
 }
 
@@ -1427,21 +1470,34 @@ fn schema_pages_follow_every_root_and_print_every_published_format() {
     );
 }
 
-/// Rung 3 reads the request from the page's Example section, never from a `### HTTP` heading a
-/// description happens to contain.
+/// Rung 2's page predicate holds on real output: every block a unit relies on — each sample's code
+/// block and the HTTP request block rung 3 compares against — is on its page as whole lines, and a
+/// description that happens to print an HTTP block of its own is never mistaken for one.
 #[test]
-fn check_wire_reads_the_example_section_only() {
-    use gnr8_engine::docs::verify::{check_wire, WireRecord};
-    use gnr8_engine::verify::ContractTestLanguage;
-    let page = "# `m`\n\n### HTTP\n\n```http\nDELETE /decoy HTTP/1.1\n```\n\n## Example\n\n### HTTP\n\n```http\nGET /m HTTP/1.1\n```\n";
-    let record = WireRecord {
-        operation: "m".to_string(),
-        method: "GET".to_string(),
-        path: "/m".to_string(),
-        query: String::new(),
-        headers: BTreeMap::new(),
-        body: None,
-        outcome: String::new(),
-    };
-    check_wire(page, &record, ContractTestLanguage::Go).expect("the Example section's request");
+fn every_unit_block_is_on_its_page_as_whole_lines() {
+    use gnr8_engine::docs::verify::{compile_unit, embeds};
+    use gnr8_engine::sdk::builtins::SiblingSdk;
+    let mut value = bookstore_json();
+    value["operations"][0]["description"] =
+        json!("Decoy.\n\n### HTTP\n\n```http\nDELETE /decoy HTTP/1.1\n```");
+    let graph = graph_of(value);
+    let pages = render(&graph, &[go_sdk()]);
+    let go = GoSdk::new()
+        .module("example.com/bookstore/sdk")
+        .to("generated/sdk");
+    let unit = compile_unit(&graph, SiblingSdk::Go(&go)).unwrap().unwrap();
+    assert!(!unit.entries.is_empty());
+    for entry in &unit.entries {
+        assert_eq!(entry.embeds.len(), 2, "{}", entry.operation_id);
+        for embed in &entry.embeds {
+            assert!(
+                embeds(page(&pages, &embed.page), &embed.block),
+                "{}:\n{}",
+                embed.page,
+                embed.block
+            );
+        }
+        assert!(entry.embeds[0].block.starts_with("```http\n"));
+        assert!(!entry.embeds[0].block.contains("/decoy"));
+    }
 }

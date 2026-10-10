@@ -19,6 +19,11 @@ use crate::verify::ContractTestLanguage;
 use crate::CoreError;
 
 use super::markdown::escape::json_string;
+use super::markdown::render;
+
+pub use super::markdown::embed::embeds;
+pub use super::model::HttpRequest;
+pub use crate::verify::{CredentialSlot, WireValue};
 
 /// One language's snippets for one sibling SDK, as gnr8 compiles and checks them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,15 +38,31 @@ pub struct CompileUnit {
     pub entries: Vec<CompileEntry>,
 }
 
-/// One snippet: where it is printed, and the exact text printed there.
+/// One sample in a unit: where it is printed, every block of that page the unit relies on, and
+/// the request its call must send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileEntry {
     /// The graph operation id.
     pub operation_id: String,
-    /// Docs-relative page path, e.g. `operations/create-book.md`.
+    /// Docs-relative path of the page the sample is printed on, e.g. `operations/create-book.md`.
     pub page: String,
-    /// The snippet text exactly as the page prints it (construction + call + result use).
+    /// The sample's body exactly as the unit wraps it (construction + call + result use), which
+    /// names the entry a tool's complaint points into.
     pub snippet: String,
+    /// Every block rung 2 requires the finished pages to print as whole lines: the sample's code
+    /// block and the HTTP request block rung 3 compares against.
+    pub embeds: Vec<PageEmbed>,
+    /// The request the sample's call must send — the one the embedded HTTP block prints.
+    pub request: HttpRequest,
+}
+
+/// One block a page must print, byte for byte, as a contiguous run of whole lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageEmbed {
+    /// Docs-relative page path.
+    pub page: String,
+    /// The block, fences included.
+    pub block: String,
 }
 
 /// The Go file a compile unit is written to, beside the SDK's own sources.
@@ -60,7 +81,7 @@ pub const WIRE_ENV: &str = "GNR8_DOCS_WIRE";
 /// # Errors
 ///
 /// Returns the SDK's own configuration error for a module name it would reject.
-pub(crate) fn unit_of(
+fn unit_of(
     model: &DocsModel,
     index: usize,
     sdk: SiblingSdk<'_>,
@@ -71,16 +92,31 @@ pub(crate) fn unit_of(
     let mut entries = Vec::new();
     let mut samples: Vec<(&str, &CodeSample)> = Vec::new();
     for op in &model.operations {
-        let ExampleDoc::Sampled { per_sdk, .. } = &op.example else {
+        let ExampleDoc::Sampled {
+            request, per_sdk, ..
+        } = &op.example
+        else {
             continue;
         };
         let Some(SdkSamples::Code { call }) = per_sdk.get(index) else {
             continue;
         };
+        let page = op.page.path();
         entries.push(CompileEntry {
             operation_id: op.id.clone(),
-            page: op.page.path(),
+            embeds: vec![
+                PageEmbed {
+                    page: page.clone(),
+                    block: render::request_block(request)?,
+                },
+                PageEmbed {
+                    page: page.clone(),
+                    block: render::sample_block(call),
+                },
+            ],
+            page,
             snippet: call.body.clone(),
+            request: (**request).clone(),
         });
         samples.push((op.id.as_str(), call));
     }
@@ -98,6 +134,41 @@ pub(crate) fn unit_of(
         text,
         entries,
     }))
+}
+
+/// What one `StaticDocs` target's docs model gives `gnr8 verify`: how many operations have a
+/// sample, how many are refused, and one compile unit per sibling SDK in plan order.
+pub(crate) struct PlanUnits {
+    pub(crate) cases: usize,
+    pub(crate) refused: usize,
+    pub(crate) units: Vec<Option<CompileUnit>>,
+}
+
+/// Build the docs model for `ir` once, exactly as the `StaticDocs` target builds it for its pages,
+/// and read every sibling's compile unit from it.
+///
+/// # Errors
+///
+/// Returns the sampler's or the call-site renderer's graph error, or a sibling's configuration
+/// error.
+pub(crate) fn plan_units(ir: &ApiGraph, sdks: &[SiblingSdk<'_>]) -> Result<PlanUnits, CoreError> {
+    let projected = crate::graph::projection::for_generation(ir)?;
+    let model = DocsModel::build(&projected, sdks)?;
+    let cases = model
+        .operations
+        .iter()
+        .filter(|op| matches!(op.example, ExampleDoc::Sampled { .. }))
+        .count();
+    let units = sdks
+        .iter()
+        .enumerate()
+        .map(|(index, sdk)| unit_of(&model, index, *sdk))
+        .collect::<Result<Vec<_>, CoreError>>()?;
+    Ok(PlanUnits {
+        cases,
+        refused: model.operations.len() - cases,
+        units,
+    })
 }
 
 /// The snippets of every sampled operation for one sibling SDK, as one compilable file: the docs
@@ -615,13 +686,14 @@ pub struct WireRecord {
     pub outcome: String,
 }
 
-/// Rung 3: the request a sample sent equals the HTTP exchange its page prints, after the page's
-/// placeholders are replaced by the contract credentials the harness configured. The harness's base
-/// URL carries no path, so a printed path compares as is.
+/// Rung 3: the request a sample sent equals the one the model says it sends — the request its page
+/// prints, which rung 2 proved is on the page byte for byte — with the contract credentials the
+/// harness configured in place of the page's placeholders. The harness's base URL carries no path,
+/// so the path compares as is.
 ///
-/// Compares the method, the path, the query string, every header the page prints (the client may
-/// send more, such as a user agent), the body as JSON with numbers compared by value, and what the
-/// call made of the canned reply ([`WireRecord::outcome`]).
+/// Compares the method, the path, the query string, every header the request carries (the client
+/// may send more, such as a user agent), the body as JSON with numbers compared by value, and what
+/// the call made of the canned reply ([`WireRecord::outcome`]).
 ///
 /// The path and the query compare as encoded text, never decoded: every generated client encodes a
 /// path segment, a query name and a query value with the one rule the page prints them with
@@ -629,51 +701,39 @@ pub struct WireRecord {
 /// `name=value` pairs compare in order within one name; the order between different names is not a
 /// fact the page states, so each side is ordered by name first.
 ///
-/// The page's `cookie` line is compared too, except for TypeScript: its generated client leaves
-/// cookies to the `fetch` transport by design (a browser owns them), so the harness never sees one.
+/// The `cookie` header is compared too, except for TypeScript: its generated client leaves cookies
+/// to the `fetch` transport by design (a browser owns them), so the harness never sees one.
 ///
 /// # Errors
 ///
 /// Returns the first field that differs, as `field: page …, sent …`.
 pub fn check_wire(
-    page: &str,
+    request: &HttpRequest,
     record: &WireRecord,
     language: ContractTestLanguage,
 ) -> Result<(), String> {
     if !record.outcome.is_empty() {
         return Err(format!("call: {}", record.outcome));
     }
-    let exchange =
-        page_request(page).ok_or_else(|| "the page prints no HTTP request".to_string())?;
-    let substitute = |text: &str| {
-        let mut out = text.to_string();
-        for (placeholder, value) in wire_substitutions() {
-            out = out.replace(&placeholder, &value);
-        }
-        out
-    };
+    let contract = crate::verify::WireCredentials::contract();
     let differ =
         |field: &str, page: &str, sent: &str| Err(format!("{field}: page {page:?}, sent {sent:?}"));
-    if exchange.method != record.method {
-        return differ("method", &exchange.method, &record.method);
+    if request.method != record.method {
+        return differ("method", &request.method, &record.method);
     }
-    let (path, query) = exchange
-        .target
-        .split_once('?')
-        .unwrap_or((exchange.target.as_str(), ""));
-    if path != record.path {
-        return differ("path", path, &record.path);
+    if request.path != record.path {
+        return differ("path", &request.path, &record.path);
     }
-    let printed = substitute(query);
-    let (want, got) = (query_pairs(&printed), query_pairs(&record.query));
+    let query = request.query_text(&contract, false);
+    let (want, got) = (query_pairs(&query), query_pairs(&record.query));
     if want != got {
         return differ("query", &want.join("&"), &got.join("&"));
     }
-    for (name, value) in &exchange.headers {
+    for (name, value) in &request.headers {
         if language == ContractTestLanguage::TypeScript && name.eq_ignore_ascii_case("cookie") {
             continue;
         }
-        let want = substitute(value);
+        let want = contract.resolve(value);
         match record.headers.get(&name.to_ascii_lowercase()) {
             Some(got) if *got == want => {}
             got => {
@@ -686,17 +746,13 @@ pub fn check_wire(
         }
     }
     let sent_body = record.body.as_deref().unwrap_or("");
-    match exchange.body.as_deref() {
+    match &request.body {
         None if sent_body.is_empty() => Ok(()),
         None => differ("body", "", sent_body),
-        Some(want) => {
-            let want_value: serde_json::Value = serde_json::from_str(want)
-                .map_err(|error| format!("body: the page prints no JSON body: {error}"))?;
-            match serde_json::from_str::<serde_json::Value>(sent_body) {
-                Ok(got) if json_equivalent(&got, &want_value) => Ok(()),
-                _ => differ("body", want, sent_body),
-            }
-        }
+        Some(want) => match serde_json::from_str::<serde_json::Value>(sent_body) {
+            Ok(got) if json_equivalent(&got, want) => Ok(()),
+            _ => differ("body", &want.to_string(), sent_body),
+        },
     }
 }
 
@@ -711,7 +767,7 @@ pub fn check_wire(
 ///
 /// Returns what [`check_wire`] returns for the first request, else names the request count.
 pub fn check_operation_wire(
-    page: &str,
+    request: &HttpRequest,
     records: &[WireRecord],
     operation: &str,
     language: ContractTestLanguage,
@@ -723,7 +779,7 @@ pub fn check_operation_wire(
     let first = sent
         .first()
         .ok_or_else(|| "the sample's call sent no request".to_string())?;
-    check_wire(page, first, language)?;
+    check_wire(request, first, language)?;
     if sent.len() == 1 {
         Ok(())
     } else {
@@ -755,55 +811,6 @@ fn json_equivalent(left: &serde_json::Value, right: &serde_json::Value) -> bool 
         }
         _ => left == right,
     }
-}
-
-/// The placeholders a page's HTTP exchange prints, each with the contract value a rung-3 harness
-/// sends in its place.
-#[must_use]
-pub fn wire_substitutions() -> Vec<(String, String)> {
-    let placeholders = crate::docs::sample::placeholders();
-    let contract = crate::verify::WireCredentials::contract();
-    vec![
-        (placeholders.api_key, contract.api_key),
-        (placeholders.bearer, contract.bearer),
-        (placeholders.basic, contract.basic),
-    ]
-}
-
-/// The request half of a page's HTTP exchange.
-struct PageRequest {
-    method: String,
-    target: String,
-    headers: Vec<(String, String)>,
-    body: Option<String>,
-}
-
-/// The first fenced `http` block after the `### HTTP` heading of the page's `## Example` section,
-/// as a request — never a heading a description happens to contain above it.
-fn page_request(page: &str) -> Option<PageRequest> {
-    let example = page.find("\n## Example\n")?;
-    let start = page[example..].find("\n### HTTP\n")? + example;
-    let fence = page[start..].find("```http\n")? + start + "```http\n".len();
-    let end = page[fence..].find("\n```")? + fence;
-    let block = &page[fence..end];
-    let (head, body) = match block.split_once("\n\n") {
-        Some((head, body)) => (head, Some(body.to_string())),
-        None => (block, None),
-    };
-    let mut lines = head.lines();
-    let mut request_line = lines.next()?.split(' ');
-    let method = request_line.next()?.to_string();
-    let target = request_line.next()?.to_string();
-    let headers = lines
-        .filter_map(|line| line.split_once(": "))
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect();
-    Some(PageRequest {
-        method,
-        target,
-        headers,
-        body,
-    })
 }
 
 /// A raw query string's `name=value` pairs, still encoded, stably ordered by name so the pairs of

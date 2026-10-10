@@ -4589,18 +4589,16 @@ pub fn target_docs_suites(
     let BuiltinTarget::StaticDocs(docs) = spec else {
         return Ok(Vec::new());
     };
-    let projected = crate::graph::projection::for_generation(ir)?;
-    let graph = &*projected;
-    let mut cases = 0;
-    let mut refused = 0;
-    for op in &graph.operations {
-        match crate::verify::sample_operation(op, graph)?.for_docs() {
-            crate::verify::Sampled::Sample(_) => cases += 1,
-            crate::verify::Sampled::Refused(_) => refused += 1,
-        }
-    }
-    plan.sdks()
-        .map(|sdk| {
+    // One docs model for the target, built exactly as its pages were: every unit reads it.
+    let sdks: Vec<SiblingSdk<'_>> = plan.sdks().collect();
+    let crate::docs::verify::PlanUnits {
+        cases,
+        refused,
+        units,
+    } = crate::docs::verify::plan_units(ir, &sdks)?;
+    sdks.into_iter()
+        .zip(units)
+        .map(|(sdk, compile_unit)| {
             let (dir, module, go_verification) = match sdk {
                 SiblingSdk::Go(t) => (
                     &t.dir,
@@ -4619,7 +4617,7 @@ pub fn target_docs_suites(
                 docs_dir: docs.dir().trim_end_matches('/').to_string(),
                 sdk_output_path: dir.trim_end_matches('/').to_string(),
                 package: sdk_package(module)?,
-                compile_unit: crate::docs::verify::compile_unit(graph, sdk)?,
+                compile_unit,
                 cases,
                 refused,
                 go_verification,

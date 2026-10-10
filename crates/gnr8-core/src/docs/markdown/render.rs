@@ -11,8 +11,8 @@ use std::fmt::Write as _;
 use crate::docs::build::language_name;
 use crate::docs::identity::NO_IDENTITY_NOTE;
 use crate::docs::model::{
-    DeclaredExample, DocsModel, ExampleDoc, ExampleValue, Inline, OperationDoc, PageRef, ReplyDoc,
-    SchemaBody, SchemaDoc, SdkSamples, Table,
+    CodeSample, DeclaredExample, DocsModel, ExampleDoc, ExampleValue, HttpRequest, Inline,
+    OperationDoc, PageRef, ReplyDoc, SchemaBody, SchemaDoc, SdkSamples, Table,
 };
 use crate::verify::ContractTestLanguage;
 use crate::CoreError;
@@ -457,7 +457,7 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
         } => {
             w.paragraph(&Inline::text(EXAMPLE_NOTE));
             w.heading(3, &Inline::text(HTTP));
-            w.code("http", &request.page_text()?);
+            w.block(&request_block(request)?);
             match reply {
                 ReplyDoc::Printed(reply) => w.code("http", &reply.page_text()),
                 ReplyDoc::Refused(refusal) => w.paragraph(&Inline::text(format!(
@@ -476,7 +476,7 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
                 match samples {
                     SdkSamples::NoIdentity => w.paragraph(&Inline::text(NO_IDENTITY_NOTE)),
                     SdkSamples::Code { call } => {
-                        w.code(language_fence(call.language), &call.text);
+                        w.block(&sample_block(call));
                     }
                 }
             }
@@ -496,6 +496,21 @@ fn example(w: &mut Writer<'_>, model: &DocsModel, op: &OperationDoc) -> Result<(
         }
     }
     Ok(())
+}
+
+/// The HTTP request block an operation page prints: the block rung 2 requires on the page and rung 3
+/// compares the sent request against.
+///
+/// # Errors
+///
+/// Returns [`CoreError::DocsGen`] for a body that is not serializable.
+pub(crate) fn request_block(request: &HttpRequest) -> Result<String, CoreError> {
+    Ok(code_block("http", &request.page_text()?))
+}
+
+/// The code block one sample is printed in.
+pub(crate) fn sample_block(sample: &CodeSample) -> String {
+    code_block(language_fence(sample.language), &sample.text)
 }
 
 /// The info string a language's code blocks carry.
@@ -676,6 +691,11 @@ impl<'a> Writer<'a> {
             out.push_str(&table_row(&cells));
         }
         self.blocks.push(out.trim_end_matches('\n').to_string());
+    }
+
+    /// A block printed exactly as given, as its own run of lines.
+    fn block(&mut self, text: &str) {
+        self.blocks.push(text.trim_end_matches('\n').to_string());
     }
 
     fn code(&mut self, language: &str, body: &str) {

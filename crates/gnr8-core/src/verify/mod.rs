@@ -949,19 +949,21 @@ fn redirect_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
 /// so the request a page prints and the request a contract case asserts are one derivation with two
 /// sets of credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WireValue {
+pub enum WireValue {
     /// A value exactly as derived from the sample, before any encoding.
     Literal(String),
     /// A credential, after a fixed scheme prefix (`Bearer `, `Basic `, or none).
     Credential {
+        /// The scheme prefix printed before the credential.
         prefix: &'static str,
+        /// Which credential it is.
         slot: CredentialSlot,
     },
 }
 
 /// Which credential a [`WireValue::Credential`] stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CredentialSlot {
+pub enum CredentialSlot {
     /// The API key, in whichever header or query parameter the scheme names.
     ApiKey,
     /// The bearer token after `Bearer `.

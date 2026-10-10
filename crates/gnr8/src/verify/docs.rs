@@ -15,7 +15,7 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use gnr8_engine::docs::verify::{check_operation_wire, CompileUnit, WireRecord, WIRE_ENV};
+use gnr8_engine::docs::verify::{check_operation_wire, embeds, CompileUnit, WireRecord, WIRE_ENV};
 use gnr8_engine::sdk::Artifact;
 use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite};
 
@@ -239,32 +239,39 @@ fn run_with_runner(
     report
 }
 
-/// Every page a sample belongs to is among this run's fresh artifacts, and prints the sample
-/// verbatim — after post-processors, so a formatter that rewrites a page is caught here.
+/// Every block a unit relies on — each sample's code block and the HTTP request block rung 3
+/// compares against — is printed on its page byte for byte, as whole lines, among this run's fresh
+/// artifacts: after post-processors, so a formatter that rewrites a page is caught here.
 fn check_pages(
     suite: &DocsSnippetSuite,
     unit: &CompileUnit,
     artifacts: &[Artifact],
 ) -> Result<(), DocsReason> {
     for entry in &unit.entries {
-        let path = format!("{}/{}", suite.docs_dir.trim_end_matches('/'), entry.page);
-        let Some(page) = artifacts.iter().find(|artifact| artifact.path == path) else {
-            let mut reason = DocsReason::new(
-                DocsFailure::MissingPage,
-                "the page is not among this run's fresh artifacts",
-            );
-            reason.operation = Some(entry.operation_id.clone());
-            reason.page = Some(path);
-            return Err(reason);
-        };
-        if !page.text.contains(&entry.snippet) {
-            let mut reason = DocsReason::new(
-                DocsFailure::SnippetNotInPage,
-                "the page does not print the sample verbatim; a post-processor rewrote it",
-            );
-            reason.operation = Some(entry.operation_id.clone());
-            reason.page = Some(path);
-            return Err(reason);
+        for embed in &entry.embeds {
+            let path = format!("{}/{}", suite.docs_dir.trim_end_matches('/'), embed.page);
+            let Some(page) = artifacts.iter().find(|artifact| artifact.path == path) else {
+                let mut reason = DocsReason::new(
+                    DocsFailure::MissingPage,
+                    "the page is not among this run's fresh artifacts",
+                );
+                reason.operation = Some(entry.operation_id.clone());
+                reason.page = Some(path);
+                return Err(reason);
+            };
+            if !embeds(&page.text, &embed.block) {
+                let first = embed.block.lines().next().unwrap_or_default();
+                let mut reason = DocsReason::new(
+                    DocsFailure::SnippetNotInPage,
+                    format!(
+                        "the page does not print the `{first}` block verbatim, as whole lines; a \
+                         post-processor rewrote it"
+                    ),
+                );
+                reason.operation = Some(entry.operation_id.clone());
+                reason.page = Some(path);
+                return Err(reason);
+            }
         }
     }
     Ok(())
@@ -461,7 +468,7 @@ fn run_unit(
             read_records(&wire)?
         }
     };
-    compare_wire(suite, unit, artifacts, &records)
+    compare_wire(suite, unit, &records)
 }
 
 /// The file a unit's rung-3 harness writes its records to, inside the temp tree.
@@ -534,21 +541,18 @@ fn read_records(path: &Path) -> Result<Vec<WireRecord>, DocsReason> {
     })
 }
 
-/// Rung 3: each sample's call sent exactly one request, and it equals the HTTP exchange its page
-/// prints, after the placeholders are replaced by the contract credentials the harness configured.
+/// Rung 3: each sample's call sent exactly one request, and it equals the request the docs model
+/// says it sends — the one its page prints, which [`check_pages`] proved is on the page — with the
+/// contract credentials the harness configured.
 fn compare_wire(
     suite: &DocsSnippetSuite,
     unit: &CompileUnit,
-    artifacts: &[Artifact],
     records: &[WireRecord],
 ) -> Result<(), DocsReason> {
     for entry in &unit.entries {
         let path = format!("{}/{}", suite.docs_dir.trim_end_matches('/'), entry.page);
-        let page = artifacts
-            .iter()
-            .find(|artifact| artifact.path == path)
-            .map_or("", |artifact| artifact.text.as_str());
-        let outcome = check_operation_wire(page, records, &entry.operation_id, suite.language);
+        let outcome =
+            check_operation_wire(&entry.request, records, &entry.operation_id, suite.language);
         if let Err(field) = outcome {
             let mut reason = DocsReason::new(
                 DocsFailure::WireMismatch,
@@ -685,7 +689,9 @@ mod tests {
 
     use super::{run_with_runner, DocsFailure, DocsStatus};
     use crate::verify::cli_help::ProcessRunner;
-    use gnr8_engine::docs::verify::{CompileEntry, CompileUnit};
+    use gnr8_engine::docs::verify::{
+        CompileEntry, CompileUnit, CredentialSlot, HttpRequest, PageEmbed, WireValue,
+    };
     use gnr8_engine::sdk::Artifact;
     use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite, GoVerificationModule};
     use std::collections::VecDeque;
@@ -757,17 +763,51 @@ mod tests {
             identity: "example.com/bookstore/sdk".to_string(),
             text,
             entries: vec![
-                CompileEntry {
-                    operation_id: "createBook".to_string(),
-                    page: "operations/create-book.md".to_string(),
-                    snippet: CREATE.to_string(),
+                entry("createBook", "operations/create-book.md", CREATE),
+                entry("listBooks", "operations/list-books.md", LIST),
+            ],
+        }
+    }
+
+    /// The request both samples send, as the docs model states it.
+    fn request() -> HttpRequest {
+        HttpRequest {
+            method: "GET".to_string(),
+            path: "/books".to_string(),
+            query: vec![("limit".to_string(), WireValue::Literal("7".to_string()))],
+            headers: vec![(
+                "x-api-key".to_string(),
+                WireValue::Credential {
+                    prefix: "",
+                    slot: CredentialSlot::ApiKey,
                 },
-                CompileEntry {
-                    operation_id: "listBooks".to_string(),
-                    page: "operations/list-books.md".to_string(),
-                    snippet: LIST.to_string(),
+            )],
+            body: None,
+        }
+    }
+
+    const REQUEST_BLOCK: &str = "```http\nGET /books?limit=7 HTTP/1.1\nx-api-key: {apiKey}\n```\n";
+
+    fn sample_block(snippet: &str) -> String {
+        format!("```go\nimport (\n)\n\n{snippet}\n```\n")
+    }
+
+    fn entry(operation: &str, page: &str, snippet: &str) -> CompileEntry {
+        CompileEntry {
+            operation_id: operation.to_string(),
+            page: page.to_string(),
+            snippet: snippet.to_string(),
+            embeds: vec![
+                PageEmbed {
+                    page: page.to_string(),
+                    block: REQUEST_BLOCK.to_string(),
+                },
+                PageEmbed {
+                    page: page.to_string(),
+                    block: sample_block(snippet),
                 },
             ],
+            request: request(),
         }
     }
 
@@ -790,7 +830,8 @@ mod tests {
 
     fn page(snippet: &str) -> String {
         format!(
-            "# `op`\n\n## Example\n\n### HTTP\n\n```http\nGET /books?limit=7 HTTP/1.1\nx-api-key: {{apiKey}}\n```\n\n```go\nimport (\n)\n\n{snippet}\n```\n"
+            "# `op`\n\n## Example\n\n### HTTP\n\n{REQUEST_BLOCK}\n{}",
+            sample_block(snippet)
         )
     }
 
@@ -914,6 +955,41 @@ mod tests {
         );
         assert_eq!(reason.operation.as_deref(), Some("createBook"));
         assert!(reason.explain().contains("docs/operations/create-book.md"));
+    }
+
+    /// Rung 2 holds the whole printed sample, imports included: a post-processor that rewrites an
+    /// import line fails it, though the call's body is untouched.
+    #[test]
+    fn post_process_rewriting_a_sample_import_fails_naming_the_page() {
+        let mut runner = FakeRunner::default();
+        let mut artifacts = artifacts();
+        artifacts[1].text = artifacts[1]
+            .text
+            .replace("import (\n)", "import (\n\t\"os\"\n)");
+        let report = run(&suite(Some(unit())), &artifacts, &mut runner);
+        assert_eq!(report.status, DocsStatus::Failed);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::SnippetNotInPage);
+        assert_eq!(reason.operation.as_deref(), Some("listBooks"));
+        assert!(runner.programs.is_empty(), "{:?}", runner.programs);
+    }
+
+    /// A block is on its page only as whole lines: a page that still contains the block's text, but
+    /// with a line prefixed, does not print it.
+    #[test]
+    fn a_block_that_is_not_line_aligned_fails_rung_two() {
+        let mut runner = FakeRunner::default();
+        let mut artifacts = artifacts();
+        artifacts[0].text = artifacts[0].text.replace("```http\nGET", "```http\n> GET");
+        assert!(artifacts[0]
+            .text
+            .contains("GET /books?limit=7 HTTP/1.1\nx-api-key"));
+        let report = run(&suite(Some(unit())), &artifacts, &mut runner);
+        assert_eq!(report.status, DocsStatus::Failed);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::SnippetNotInPage);
+        assert_eq!(reason.operation.as_deref(), Some("createBook"));
+        assert!(reason.message.contains("```http"), "{}", reason.message);
     }
 
     #[test]
@@ -1123,9 +1199,10 @@ mod tests {
         assert_eq!(message, "the tool rejected a sample");
     }
 
-    /// Rung 3 has teeth against the real Go tools: the docs-edge suite passes, and after one page is
-    /// rewritten to print another request than its sample sends (as a post-processor could), the
-    /// suite fails naming the operation and the differing field.
+    /// The ladder has teeth against the real Go tools: the docs-edge suite passes; after one page is
+    /// rewritten to print another request than its sample sends (as a post-processor could), rung 2
+    /// fails naming the operation; and when the sample sends another request than the model says
+    /// its page prints, rung 3 fails naming the differing field.
     #[test]
     fn host_runner_go_suite_fails_on_a_page_that_prints_another_request() {
         use gnr8_engine::sdk::prelude::*;
@@ -1169,6 +1246,20 @@ mod tests {
             .text
             .replace("POST /measures HTTP/1.1", "POST /measurez HTTP/1.1");
         let report = super::run(&root, suite, &planted, "docs".into());
+        assert_eq!(report.status, DocsStatus::Failed);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::SnippetNotInPage);
+        assert_eq!(reason.operation.as_deref(), Some("createMeasure"));
+
+        let mut other = suite.clone();
+        let unit = other.compile_unit.as_mut().unwrap();
+        let entry = unit
+            .entries
+            .iter_mut()
+            .find(|entry| entry.operation_id == "createMeasure")
+            .unwrap();
+        entry.request.path = "/measurez".to_string();
+        let report = super::run(&root, &other, &outcome.artifacts, "docs".into());
         assert_eq!(report.status, DocsStatus::Failed);
         let reason = report.reason.unwrap();
         assert_eq!(reason.code, DocsFailure::WireMismatch);
