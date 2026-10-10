@@ -65,15 +65,10 @@ pub(crate) fn reply_media(op: &Operation, status: u16) -> Option<String> {
         .cloned()
 }
 
-/// Whether a media type carries its value as JSON: `application/json`, or any `…+json` type.
+/// Whether a media type carries its value as JSON, as the one media classifier says.
 fn is_json_media(content_type: &str) -> bool {
-    let essence = content_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    essence == "application/json" || essence.ends_with("+json")
+    crate::sdk::emit_common::media_family(content_type)
+        == crate::sdk::emit_common::MediaFamily::Json
 }
 
 /// The response example the reply of `status` is: the first one the operation declares for that
