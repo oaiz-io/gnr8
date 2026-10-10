@@ -490,7 +490,10 @@ fn fit(
         {
             Ok(declared(DeclaredLimit::Integer))
         }
-        (Type::Primitive(Prim::Float { .. }), _) if !value.as_f64().is_some_and(prints_alike) => {
+        // A call spells a request float in each language; a reply is decoded, never printed.
+        (Type::Primitive(Prim::Float { bits }), _)
+            if side == Side::Request && !value.as_f64().is_some_and(|x| prints_alike(x, *bits)) =>
+        {
             Ok(declared(DeclaredLimit::Float))
         }
         // Every generated call spells a free-form value as `{}`.

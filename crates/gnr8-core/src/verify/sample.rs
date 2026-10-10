@@ -1491,7 +1491,9 @@ impl<'g> Sampler<'g> {
             }
             Type::Primitive(Prim::Bool) => Ok(checked(Value::Bool(true), constraints, subject)),
             Type::Primitive(Prim::Int { .. }) => Ok(integer_candidate(constraints, subject)),
-            Type::Primitive(Prim::Float { .. }) => Ok(float_candidate(constraints, subject)),
+            Type::Primitive(Prim::Float { bits }) => {
+                Ok(float_candidate(constraints, *bits, subject))
+            }
             // A byte string has a different literal in every target and a base64 wire form on
             // top; a request stays out of that, and a reply carries one as the wire does.
             Type::Primitive(Prim::Bytes) => Ok(match self.side {
@@ -1768,8 +1770,8 @@ fn enum_candidate(
         // A float member is printed by every writer too, so it takes the float rule; an integer
         // member takes the integer range rule.
         let wire_refusal = match ty {
-            Type::Primitive(Prim::Float { .. })
-                if !candidate.as_f64().is_some_and(prints_alike) =>
+            Type::Primitive(Prim::Float { bits })
+                if !candidate.as_f64().is_some_and(|x| prints_alike(x, *bits)) =>
             {
                 Some(SampleRefusal::FloatWire {
                     subject: subject.to_string(),
@@ -2100,9 +2102,10 @@ fn integer_bound(text: &str, lower: bool) -> Option<i128> {
 /// and JavaScript (`Number#toString`).
 ///
 /// They agree on a finite decimal that is not a whole number (Go and JavaScript print `2`, Python
-/// and `serde_json` print `2.0`), lies in `[1e-4, 1e6)` (a conservative range inside which no writer
-/// uses an exponent), and survives a `float32` field unchanged.
-fn prints_alike(value: f64) -> bool {
+/// and `serde_json` print `2.0`) and lies in `[1e-4, 1e6)` (a conservative range inside which no
+/// writer uses an exponent). In a field of `bits == 32` it must also survive the narrowing to
+/// `float32` unchanged, since Go holds it as one.
+fn prints_alike(value: f64, bits: u16) -> bool {
     let magnitude = value.abs();
     #[expect(
         clippy::cast_possible_truncation,
@@ -2112,7 +2115,7 @@ fn prints_alike(value: f64) -> bool {
     value.is_finite()
         && value.fract() != 0.0
         && (1e-4..1e6).contains(&magnitude)
-        && format!("{narrowed}") == format!("{value}")
+        && (bits != 32 || format!("{narrowed}") == format!("{value}"))
 }
 
 /// How many digits a decimal text has after its point: `2` for `0.25`, `0` for `5`. An exponent
@@ -2146,7 +2149,11 @@ fn round_to(value: f64, places: i32) -> f64 {
 /// The candidates, in order: the base `1.5`; the nearest inclusive bound, or for an exclusive bound
 /// the midpoint of the interval (an unbounded side taken as the bound ± 1); then points inside the
 /// interval half and a quarter away from each bound, and its midpoint.
-fn float_candidate(constraints: &Constraints, subject: &str) -> Result<Value, SampleRefusal> {
+fn float_candidate(
+    constraints: &Constraints,
+    bits: u16,
+    subject: &str,
+) -> Result<Value, SampleRefusal> {
     const BASE: f64 = 1.5;
     let (low, high) = match numeric_interval(constraints) {
         Ok(interval) => interval,
@@ -2236,7 +2243,7 @@ fn float_candidate(constraints: &Constraints, subject: &str) -> Result<Value, Sa
     } else {
         first_numeric_bound(constraints)
     };
-    match admissible.iter().find(|x| prints_alike(**x)) {
+    match admissible.iter().find(|x| prints_alike(**x, bits)) {
         Some(&chosen) => match Number::from_f64(chosen) {
             Some(number) => checked(Value::Number(number), constraints, subject),
             None => unsatisfiable(subject, bound),

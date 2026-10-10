@@ -2170,6 +2170,36 @@ fn a_declared_value_no_call_can_state_is_a_refusal_not_an_error() {
     ));
 }
 
+/// The float-print rule is about what a call sends: a reply is decoded, never printed by a
+/// generated language, so a declared reply float is the reply whatever its spelling. A request float
+/// is narrowed to 32 bits only when its field is a `float32`.
+#[test]
+fn only_a_request_float_must_print_alike_and_only_a_float32_narrows() {
+    let body = object(&[fld("price", &float(), true)]);
+    let whole_reply = documented(
+        probe(&[], None, Some(&body), &[]),
+        &json!({"responses": [{"status": 200, "examples": [
+            media_example("whole", "application/json", &json!({"price": 20}))
+        ]}]}),
+    );
+    assert_eq!(reply_json(&whole_reply), json!({"price": 20}));
+
+    let float32 = json!({"type": "primitive", "of": {"prim": "float", "bits": 32}});
+    let precise = |schema: &Value| {
+        let mut param = query("q", schema, true, &json!({}));
+        param["example"] = json!("3.14159265");
+        probe(&[param], None, None, &[])
+    };
+    assert_eq!(
+        sample(&precise(&float())).params[0].value,
+        json!(3.14159265)
+    );
+    assert!(matches!(
+        refusal(&precise(&float32)),
+        SampleRefusal::Declared { .. }
+    ));
+}
+
 /// A declared request date-time has to be spelled the way Go sends one, or Go's bytes differ from
 /// the string Python and TypeScript send as written. A canonical one is the sample as declared.
 #[test]

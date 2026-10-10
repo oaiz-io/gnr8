@@ -323,6 +323,10 @@ must move the minor version.
   `$ref` is the one carried. A parameter whose schema is a `$ref` to an array or map keeps the
   referenced items' constraints too, and `openapi.yaml` publishes them beside the `$ref`
   (`{$ref: IdList, maxItems: 4, items: {minimum: 0}}`).
+- A declared reply example is the reply however its numbers print: a reply is decoded, never
+  spelled by a generated language, so only a request float has to print alike in Go, Python and
+  TypeScript. A float is held to the 32-bit narrowing only in a `float32` field, so a `float64`
+  sample or example such as `3.14159265` is no longer refused.
 
 ## 0.18.0 — 2026-10-10
 
