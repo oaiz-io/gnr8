@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::graph::{ApiGraph, Operation, Type};
 use crate::sdk::emit_common::{
-    media_family, request_body_models_of, response_media_type, MediaFamily,
+    media_family, reply_wire_media_type, request_body_models_of, response_media_type, MediaFamily,
 };
 use crate::CoreError;
 
@@ -1151,7 +1151,10 @@ fn success_reply(op: &Operation, success: &SuccessSample) -> Option<CannedRespon
     };
     Some(CannedResponse {
         status: success.status,
-        headers: vec![("content-type".to_string(), media.to_string())],
+        headers: vec![(
+            "content-type".to_string(),
+            reply_wire_media_type(media).to_string(),
+        )],
         body: text,
     })
 }

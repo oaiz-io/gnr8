@@ -2850,6 +2850,28 @@ pub(crate) fn media_family(media_type: &str) -> MediaFamily {
     }
 }
 
+/// The concrete media type a reply declared under `media` is sent with.
+///
+/// A sent reply names one type, so a range answers in the type its [`MediaFamily`] reads the body
+/// as: `application/json` for a range that admits it (`*/*`, `application/*`), `text/plain` for
+/// `text/*`. A concrete type, and any other range, is sent as declared.
+pub(crate) fn reply_wire_media_type(media: &str) -> &str {
+    let essence = media
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !essence.ends_with("/*") {
+        return media;
+    }
+    match media_family(media) {
+        MediaFamily::Json => "application/json",
+        MediaFamily::Text => "text/plain",
+        MediaFamily::Other => media,
+    }
+}
+
 /// The media type a schema-backed response answers in: the first of its declared media types in
 /// sorted order, or `application/json`, which a schema-backed response that declares none means.
 ///
@@ -3976,6 +3998,34 @@ mod tests {
         assert_eq!(
             super::response_media_type(&op.responses[1]),
             "application/json"
+        );
+    }
+
+    /// A reply declared under a range is sent as the concrete type its family reads the body as,
+    /// so a client that checks the reply's `content-type` accepts the reply a page replays.
+    #[test]
+    fn a_reply_under_a_range_is_sent_as_a_concrete_type() {
+        for (declared, sent) in [
+            ("*/*", "application/json"),
+            ("application/*", "application/json"),
+            ("text/*", "text/plain"),
+            ("image/*", "image/*"),
+            ("application/json", "application/json"),
+            ("text/csv; charset=utf-8", "text/csv; charset=utf-8"),
+        ] {
+            assert_eq!(super::reply_wire_media_type(declared), sent, "{declared}");
+        }
+        let op: Operation = serde_json::from_value(serde_json::json!({
+            "id": "probe", "method": "GET", "path": "/probe", "handler": "probe",
+            "params": [], "request_body": null,
+            "responses": [{"status": 200, "body": {"ref_id": "t.Widget"},
+                           "content_type": "*/*", "content_types": ["*/*"]}],
+            "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}
+        }))
+        .unwrap();
+        assert_eq!(
+            crate::verify::reply_media(&op, 200).as_deref(),
+            Some("application/json")
         );
     }
 

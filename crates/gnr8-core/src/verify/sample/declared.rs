@@ -13,7 +13,8 @@ use crate::graph::{
     ApiGraph, Field, MediaExample, Operation, OperationDocsPolicy, Prim, Schema, Type, WellKnown,
 };
 use crate::sdk::emit_common::{
-    media_family, request_body_models_of, response_media_type, MediaFamily, RequestBodyEncoding,
+    media_family, reply_wire_media_type, request_body_models_of, response_media_type, MediaFamily,
+    RequestBodyEncoding,
 };
 use crate::CoreError;
 
@@ -51,13 +52,20 @@ pub(super) fn examples_for<'e>(
         .filter(move |example| example.content_type.eq_ignore_ascii_case(content_type))
 }
 
-/// The media type a status's body is sent in, by the one rule every consumer of a response shares
-/// ([`response_media_type`]). `None` when the operation declares no response with that status.
+/// The media type a status's body is sent in: the declared one ([`declared_reply_media`]), or the
+/// concrete type a declared range answers in ([`reply_wire_media_type`]), since a sent reply names
+/// one type. `None` when the operation declares no response with that status.
 pub(crate) fn reply_media(op: &Operation, status: u16) -> Option<String> {
+    declared_reply_media(op, status).map(|media| reply_wire_media_type(media).to_string())
+}
+
+/// The media type a status's response declares, by the one rule every consumer of a response
+/// shares ([`response_media_type`]). Declared examples are keyed by it.
+fn declared_reply_media(op: &Operation, status: u16) -> Option<&str> {
     op.responses
         .iter()
         .find(|response| response.status == status)
-        .map(|response| response_media_type(response).to_string())
+        .map(response_media_type)
 }
 
 /// Whether a media type carries its value as JSON, by the one classification every consumer of a
@@ -73,14 +81,14 @@ pub(super) fn reply_example<'g>(
     graph: &'g ApiGraph,
     status: u16,
 ) -> Option<&'g MediaExample> {
-    let media = reply_media(op, status).filter(|media| is_json_media(media))?;
+    let media = declared_reply_media(op, status).filter(|media| is_json_media(media))?;
     let docs = docs_policy(op, graph)?
         .responses
         .iter()
         .find(|docs| docs.status == status)?;
     docs.examples
         .iter()
-        .find(|example| example.content_type.eq_ignore_ascii_case(&media))
+        .find(|example| example.content_type.eq_ignore_ascii_case(media))
 }
 
 pub(super) fn request_origin(op: &Operation, example: &MediaExample) -> String {

@@ -344,7 +344,9 @@ in sorted order — with one classification shared by the SDKs, the contract tes
 
 A media range is classified by the types it admits, because the declared schema describes the body
 whichever admitted type the server picks. A range that admits `application/json` (`*/*`,
-`application/*`) is JSON, `text/*` is text, and any other range (`image/*`) is bytes.
+`application/*`) is JSON, `text/*` is text, and any other range (`image/*`) is bytes. A reply the
+contract tests or a docs page send under a JSON range carries `content-type: application/json`, and
+one under `text/*` carries `text/plain`, because a sent reply names one type.
 
 Only when no JSON success model is declared does another success become the return type: a `text/*`
 reply first, then opaque bytes. A `text/*` reply is returned as a string whatever schema describes
