@@ -11,7 +11,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -423,6 +426,37 @@ func sleepRetry(ctx context.Context, d time.Duration) error {
 		return nil
 	}
 }
+
+// wireEscape percent-encodes one path segment, query name or value, or cookie name or value:
+// every byte but an unreserved one (A-Z a-z 0-9 - . _ ~) becomes %XX, so a space is %20.
+func wireEscape(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+}
+
+// encodeWireQuery writes a query string with wireEscape: names sorted, each name's values in
+// order. A value allowReserved marks keeps the reserved characters RFC 3986 lets it carry.
+func encodeWireQuery(values url.Values, allowReserved map[string]map[int]bool) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0)
+	for _, key := range keys {
+		for index, value := range values[key] {
+			encoded := wireEscape(value)
+			if allowReserved[key][index] {
+				encoded = strings.NewReplacer(
+					"%3A", ":", "%2F", "/", "%3F", "?", "%23", "#", "%5B", "[", "%5D", "]",
+					"%40", "@", "%21", "!", "%24", "$", "%26", "&", "%27", "'", "%28", "(",
+					"%29", ")", "%2A", "*", "%2B", "+", "%2C", ",", "%3B", ";", "%3D", "=",
+				).Replace(encoded)
+			}
+			parts = append(parts, wireEscape(key)+"="+encoded)
+		}
+	}
+	return strings.Join(parts, "&")
+}
 // ==== gnr8:file errors.go ====
 package goalservice
 
@@ -615,7 +649,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 )
 
 // CreateGoal Creates a goal for the calling actor.
@@ -720,7 +753,7 @@ func (c *Client) ListGoals(ctx context.Context, params ListGoalsParams, opts ...
 	if params.PageSize != nil {
 		q.Set("page_size", *params.PageSize)
 	}
-	req.URL.RawQuery = q.Encode()
+	req.URL.RawQuery = encodeWireQuery(q, nil)
 	resp, err := c.do(req, runtimeRequestOptions{
 		OperationID:          "listGoals",
 		PathTemplate:         "/list",
@@ -771,7 +804,7 @@ func (c *Client) ListGoals(ctx context.Context, params ListGoalsParams, opts ...
 // DELETE /goal/{uuid}
 func (c *Client) DeleteGoal(ctx context.Context, uuid string, opts ...RequestOption) (CommandMessage, error) {
 	var out CommandMessage
-	reqURL := c.baseURL + fmt.Sprintf("/goal/%s", url.PathEscape(fmt.Sprint(uuid)))
+	reqURL := c.baseURL + fmt.Sprintf("/goal/%s", wireEscape(fmt.Sprint(uuid)))
 	req, err := http.NewRequestWithContext(ctx, "DELETE", reqURL, nil)
 	if err != nil {
 		return out, err
@@ -842,7 +875,7 @@ func (c *Client) UpdateGoal(ctx context.Context, uuid string, in UpdateGoalInput
 		return out, err
 	}
 	reqBody := bytes.NewReader(payload)
-	reqURL := c.baseURL + fmt.Sprintf("/goal/%s", url.PathEscape(fmt.Sprint(uuid)))
+	reqURL := c.baseURL + fmt.Sprintf("/goal/%s", wireEscape(fmt.Sprint(uuid)))
 	req, err := http.NewRequestWithContext(ctx, "PUT", reqURL, reqBody)
 	if err != nil {
 		return out, err

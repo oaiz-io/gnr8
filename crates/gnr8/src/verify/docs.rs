@@ -799,11 +799,11 @@ mod tests {
     fn wire(limit: &str) -> String {
         serde_json::json!([
             {"operation": "createBook", "method": "GET", "path": "/books",
-             "query": {"limit": [limit]},
+             "query": format!("limit={limit}"),
              "headers": {"x-api-key": "gnr8-contract-key", "user-agent": "gnr8-sdk"},
              "body": null},
             {"operation": "listBooks", "method": "GET", "path": "/books",
-             "query": {"limit": ["7"]},
+             "query": "limit=7",
              "headers": {"x-api-key": "gnr8-contract-key"},
              "body": null}
         ])
@@ -1003,8 +1003,30 @@ mod tests {
             reason.page.as_deref(),
             Some("docs/operations/create-book.md")
         );
-        assert!(reason.message.contains("query.limit"), "{}", reason.message);
-        assert!(reason.message.contains('8'), "{}", reason.message);
+        assert!(reason.message.contains("query:"), "{}", reason.message);
+        assert!(reason.message.contains("limit=8"), "{}", reason.message);
+    }
+
+    /// Rung 3 holds each sample to one request: a second one recorded for an operation fails it,
+    /// even when both match the page.
+    #[test]
+    fn a_second_request_fails_rung_three_naming_the_count() {
+        let mut records: Vec<serde_json::Value> = serde_json::from_str(&wire("7")).unwrap();
+        records.push(records[0].clone());
+        let mut runner = FakeRunner {
+            wire: Some(serde_json::Value::Array(records).to_string()),
+            ..FakeRunner::default()
+        };
+        let report = run(&suite(Some(unit())), &artifacts(), &mut runner);
+        assert_eq!(report.status, DocsStatus::Failed);
+        let reason = report.reason.unwrap();
+        assert_eq!(reason.code, DocsFailure::WireMismatch);
+        assert_eq!(reason.operation.as_deref(), Some("createBook"));
+        assert!(
+            reason.message.contains("sent 2 requests"),
+            "{}",
+            reason.message
+        );
     }
 
     #[test]

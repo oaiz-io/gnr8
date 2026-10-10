@@ -554,11 +554,11 @@ fn assert_typescript_client(ts_client: &str) {
     assert!(ts_client.contains("get files(): FilesApi"), "{ts_client}");
     assert!(ts_client.contains("get items(): ItemsApi"), "{ts_client}");
     assert!(
-        ts_client.contains("encodeURIComponent(String(itemId))"),
+        ts_client.contains("wireEscape(String(itemId))"),
         "{ts_client}"
     );
     assert!(
-        ts_client.contains("encodeURIComponent(String(childId))"),
+        ts_client.contains("wireEscape(String(childId))"),
         "{ts_client}"
     );
     assert!(
