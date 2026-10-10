@@ -77,9 +77,13 @@ sampled from the schema, and satisfies every declared constraint. Credentials ar
 code samples take them and the base URL as variables. Paths start at the server root; a server URL \
 with a path prefix prepends it to every path.";
 
-/// The one guarantee the error catalog states, once, before the declared SDKs' error types.
+/// The one guarantee the error catalog states, once, before the declared SDKs' error types: for
+/// several SDKs, and for the one SDK a `reference.md` documents.
 const UNDECLARED_STATUS_GUARANTEE: &str =
     "Each generated SDK surfaces a non-success status as its typed error, including a status the \
+     API does not declare: ";
+const UNDECLARED_STATUS_GUARANTEE_ONE: &str =
+    "The generated SDK surfaces a non-success status as its typed error, including a status the \
      API does not declare: ";
 
 /// Render every `StaticDocs` page, keyed by docs-relative path.
@@ -209,8 +213,13 @@ fn errors_page(w: &mut Writer<'_>, errors: &ErrorCatalog) {
                 ])
             })
             .collect();
+        let guarantee = if errors.error_types.len() == 1 {
+            UNDECLARED_STATUS_GUARANTEE_ONE
+        } else {
+            UNDECLARED_STATUS_GUARANTEE
+        };
         w.paragraph(&Inline::Seq(vec![
-            Inline::text(UNDECLARED_STATUS_GUARANTEE),
+            Inline::text(guarantee),
             Inline::join(types, ", "),
             Inline::text("."),
         ]));
@@ -304,9 +313,10 @@ fn index(w: &mut Writer<'_>, model: &DocsModel) {
             .collect();
         w.list(&schemas);
     }
-    // A single file holds those pages as sections of its own, so it lists no page.
+    // A single file holds those pages as sections of its own, and lists them by name as it lists
+    // every operation and schema.
     let reference = reference_pages(model);
-    if !reference.is_empty() && w.links.is_some() {
+    if !reference.is_empty() {
         w.heading(2, &Inline::text(REFERENCE));
         let items: Vec<Inline> = reference
             .into_iter()

@@ -27,6 +27,11 @@ Browse and manage the catalogue
 - `PublisherOutput`
 - `UpdateBookRequest`
 
+### Reference
+
+- Errors
+- Authentication
+
 ## `listBooks`
 
 `GET /books` · Group: books · Tags: `books`
@@ -718,7 +723,7 @@ Kind: object
 
 ## Errors
 
-Each generated SDK surfaces a non-success status as its typed error, including a status the API does not declare: Go `*APIError`.
+The generated SDK surfaces a non-success status as its typed error, including a status the API does not declare: Go `*APIError`.
 
 | Status | Body | Operations |
 | --- | --- | --- |

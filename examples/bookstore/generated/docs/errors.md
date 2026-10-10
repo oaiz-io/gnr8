@@ -1,6 +1,6 @@
 # Errors
 
-Each generated SDK surfaces a non-success status as its typed error, including a status the API does not declare: Go `*APIError`.
+The generated SDK surfaces a non-success status as its typed error, including a status the API does not declare: Go `*APIError`.
 
 | Status | Body | Operations |
 | --- | --- | --- |

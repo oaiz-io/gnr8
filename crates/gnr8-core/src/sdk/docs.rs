@@ -579,7 +579,17 @@ mod tests {
             assert!(reference.contains(section), "{section} in:\n{reference}");
         }
         assert!(
-            reference.contains("including a status the API does not declare: Go `*APIError`.\n"),
+            reference.contains(
+                "\n\nThe generated SDK surfaces a non-success status as its typed error, including \
+                 a status the API does not declare: Go `*APIError`.\n"
+            ),
+            "{reference}"
+        );
+        assert!(!reference.contains("Each generated SDK"), "{reference}");
+        // The index section lists every section of the file, the error catalog and authentication
+        // included, by name.
+        assert!(
+            reference.contains("\n### Reference\n\n- Errors\n- Authentication\n"),
             "{reference}"
         );
         assert!(!reference.contains("Python"), "{reference}");

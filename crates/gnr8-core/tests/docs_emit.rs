@@ -1019,7 +1019,7 @@ fn undeclared_status_guarantee_names_only_the_declared_sdks_error_types() {
     let errors = page(&pages, "errors.md");
     assert!(
         errors.contains(
-            "# Errors\n\nEach generated SDK surfaces a non-success status as its typed error, \
+            "# Errors\n\nThe generated SDK surfaces a non-success status as its typed error, \
              including a status the API does not declare: Go `*APIError`.\n"
         ),
         "{errors}"
