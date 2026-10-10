@@ -553,7 +553,7 @@ export class AuthConfigurationError extends Error {{
 }}
 
 export type ResponseDecodeFailure =
-  \"empty_body\" | \"unexpected_content_type\" | \"invalid_json\";
+  \"empty_body\" | \"unexpected_content_type\" | \"invalid_json\" | \"invalid_text\";
 
 export interface ResponseDecodeErrorInit {{
   headers?: Headers | undefined;
@@ -859,6 +859,23 @@ export class Client {{
     }} catch (cause) {{
       throw new ResponseDecodeError(\"invalid_json\", response.status, {{
         ...errorInit,
+        cause,
+      }});
+    }}
+  }}
+
+  async _decodeText(response: Response): Promise<string> {{
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    try {{
+      return new TextDecoder(\"utf-8\", {{ fatal: true, ignoreBOM: true }}).decode(
+        bytes,
+      );
+    }} catch (cause) {{
+      throw new ResponseDecodeError(\"invalid_text\", response.status, {{
+        headers: response.headers,
+        requestId: response.headers.get(\"x-request-id\") ?? undefined,
+        expectedContentType: \"text/*\",
+        actualContentType: response.headers.get(\"content-type\") ?? undefined,
         cause,
       }});
     }}
@@ -3645,8 +3662,8 @@ fn emit_op_dispatch(
         )
         .map_err(sink)?;
         if success.text_body {
-            // `Response.text()` decodes the body as UTF-8.
-            writeln!(out, "      return await res.text();").map_err(sink)?;
+            // Strict UTF-8: `Response.text()` would replace a malformed byte instead of failing.
+            writeln!(out, "      return await this._decodeText(res);").map_err(sink)?;
         } else {
             writeln!(
                 out,

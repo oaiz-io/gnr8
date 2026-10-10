@@ -662,3 +662,91 @@ fn go_contract_test_text_is_unchanged_by_the_callsite_lift() {
         .expect("the Go contract test is emitted");
     insta::assert_snapshot!("go_contract_test_shapes_spec", text);
 }
+
+/// Run all three SDK targets over `spec`, returning the artifacts or the generation error.
+fn generate_spec(
+    label: &str,
+    spec: &str,
+) -> Result<BTreeMap<String, String>, gnr8_engine::CoreError> {
+    let root = temp_dir(label);
+    std::fs::write(root.join("openapi.yaml"), spec).expect("write the spec");
+    let pipeline = Pipeline::new()
+        .source(OpenApi::new().input("openapi.yaml"))
+        .target(GoSdk::new().module("example.com/text/sdk").to("go"))
+        .target(PySdk::new().module("example.com/text/sdk").to("python"))
+        .target(TsSdk::new().module("@text/sdk").to("ts"));
+    let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), None);
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(outcome?
+        .artifacts
+        .iter()
+        .map(|artifact| (artifact.path.clone(), artifact.text.clone()))
+        .collect())
+}
+
+fn text_spec(media: &str) -> String {
+    format!(
+        r#"openapi: 3.1.0
+info: {{ title: Text, version: 1.0.0 }}
+paths:
+  /text:
+    get:
+      operationId: getText
+      responses:
+        "200":
+          description: text
+          content:
+            "{media}":
+              schema: {{ type: string }}
+"#
+    )
+}
+
+/// A text reply is decoded as strict UTF-8 in all three SDKs: bytes that are not UTF-8 fail the
+/// call with the SDK's decode error, the error a malformed JSON reply raises.
+#[test]
+fn every_sdk_decodes_a_text_reply_as_strict_utf8() {
+    let files = generate_spec("text-utf8", &text_spec("text/plain; charset=UTF-8"))
+        .expect("a UTF-8 text reply generates");
+    let go = file(&files, "go/operations.go");
+    assert_contains(go, "if !utf8.Valid(data) {", "Go validates the text");
+    assert_contains(go, "(invalid_text)", "Go names the decode failure");
+    assert_contains(go, "\"unicode/utf8\"", "Go imports the validator");
+    // `bytes.decode("utf-8")` is strict: a malformed byte raises `UnicodeDecodeError`.
+    assert_contains(
+        file(&files, "python/client.py"),
+        "return _raw.decode(\"utf-8\")",
+        "Python decodes strictly",
+    );
+    let ts = file(&files, "ts/client.ts");
+    assert_contains(
+        ts,
+        "return await this._decodeText(res);",
+        "TypeScript decodes strictly",
+    );
+    assert_contains(
+        ts,
+        "new TextDecoder(\"utf-8\", { fatal: true, ignoreBOM: true })",
+        "TypeScript fails on a malformed byte and keeps a BOM, as Go and Python do",
+    );
+    assert_contains(
+        file(&files, "ts/errors.ts"),
+        "\"invalid_text\"",
+        "TypeScript names the decode failure",
+    );
+}
+
+/// A returned text reply whose declared charset is not UTF-8 is refused at generation: every SDK
+/// would decode it as UTF-8, so all three would read it wrong.
+#[test]
+fn a_text_reply_declaring_a_foreign_charset_is_refused() {
+    let error = generate_spec("text-latin1", &text_spec("text/plain; charset=iso-8859-1"))
+        .expect_err("a non-UTF-8 text reply is refused");
+    let message = error.to_string();
+    assert!(
+        message.contains("operation 'getText' response 200 declares charset 'iso-8859-1'"),
+        "{message}"
+    );
+    generate_spec("text-quoted", &text_spec("text/csv; charset=\\\"utf-8\\\""))
+        .expect("a quoted UTF-8 charset generates");
+}

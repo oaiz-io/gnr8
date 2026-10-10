@@ -2850,6 +2850,20 @@ pub(crate) fn media_family(media_type: &str) -> MediaFamily {
     }
 }
 
+/// The `charset` a media type declares when it is not UTF-8, or `None` for UTF-8 or no charset.
+///
+/// A text reply is decoded as UTF-8 by every generated SDK, which is what `text/*` means when no
+/// charset is stated; a declared charset is the parameter's value, case-insensitive and unquoted.
+pub(crate) fn non_utf8_charset(media: &str) -> Option<String> {
+    media
+        .split(';')
+        .skip(1)
+        .filter_map(|parameter| parameter.split_once('='))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("charset"))
+        .map(|(_, value)| value.trim().trim_matches('"').to_string())
+        .filter(|charset| !charset.eq_ignore_ascii_case("utf-8"))
+}
+
 /// The concrete media type a reply declared under `media` is sent with.
 ///
 /// A sent reply names one type, so a range answers in the type its [`MediaFamily`] reads the body
@@ -2912,6 +2926,25 @@ fn reject_opaque_success_schema(
     Ok(())
 }
 
+/// Refuse a returned text reply whose declared charset is not UTF-8: every SDK decodes a text
+/// reply as UTF-8, so all three would read it wrong.
+fn refuse_foreign_text_charset(
+    op: &Operation,
+    foreign_charsets: &[(u16, String)],
+) -> Result<(), CoreError> {
+    let Some((status, charset)) = foreign_charsets.first() else {
+        return Ok(());
+    };
+    Err(CoreError::SdkGen {
+        message: format!(
+            "operation '{}' response {status} declares charset '{charset}'; generated SDKs return \
+             a text reply decoded as UTF-8, so declare `charset=utf-8` or none, or answer in \
+             another media type",
+            op.id
+        ),
+    })
+}
+
 /// Resolve every declared successful response for one operation.
 ///
 /// SDK methods have one return type, so one rule decides it: **an operation that declares a JSON
@@ -2939,6 +2972,7 @@ pub(crate) fn success_responses_of(
     let mut binary_statuses = Vec::new();
     let mut body_model: Option<String> = None;
     let mut text_statuses = Vec::new();
+    let mut foreign_charsets: Vec<(u16, String)> = Vec::new();
     let mut text_model: Option<String> = None;
     for resp in &op.responses {
         if (200..300).contains(&resp.status) || (300..400).contains(&resp.status) {
@@ -2966,6 +3000,9 @@ pub(crate) fn success_responses_of(
                             MediaFamily::Text => {
                                 text_statuses.push(resp.status);
                                 text_model.get_or_insert_with(|| model.name.clone());
+                                if let Some(charset) = non_utf8_charset(media) {
+                                    foreign_charsets.push((resp.status, charset));
+                                }
                                 continue;
                             }
                             // A schema describes the content, but no generated client decodes
@@ -3016,6 +3053,7 @@ pub(crate) fn success_responses_of(
     if body_model.is_some() {
         unreturned_statuses.append(&mut text_statuses);
     } else if text_model.is_some() {
+        refuse_foreign_text_charset(op, &foreign_charsets)?;
         body_model = text_model;
         body_statuses = text_statuses;
         text_body = true;

@@ -1418,9 +1418,13 @@ fn emit_operations_inner(
         .iter()
         .any(|op| op.request_body.is_some() && !op.request_body_required);
     for op in ops {
-        if success_responses_of(op, graph)?.has_binary_body() {
+        let success = success_responses_of(op, graph)?;
+        if success.has_binary_body() {
             needs_io = true;
-            break;
+        }
+        // A text reply is checked to be UTF-8 before it is returned as a string.
+        if success.text_body && !success.has_binary_body() {
+            imports.extend(["fmt", "unicode/utf8"]);
         }
     }
     if needs_io {
@@ -2780,6 +2784,15 @@ fn emit_request_dispatch(
             writeln!(body, "data, err := io.ReadAll(resp.Body)").map_err(sink)?;
             writeln!(body, "if err != nil {{").map_err(sink)?;
             writeln!(body, "return out, err").map_err(sink)?;
+            writeln!(body, "}}").map_err(sink)?;
+            // The reply is UTF-8 text by declaration; bytes that are not fail the call, as a
+            // malformed JSON reply does, rather than coming back as a string no other SDK returns.
+            writeln!(body, "if !utf8.Valid(data) {{").map_err(sink)?;
+            writeln!(
+                body,
+                "return out, fmt.Errorf(\"HTTP %d: response decode failed (invalid_text)\", resp.StatusCode)"
+            )
+            .map_err(sink)?;
             writeln!(body, "}}").map_err(sink)?;
             writeln!(body, "return string(data), nil").map_err(sink)?;
         } else {

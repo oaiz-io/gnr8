@@ -355,6 +355,14 @@ whichever admitted type the server picks. A range that admits `application/json`
 contract tests or a docs page send under a JSON range carries `content-type: application/json`, and
 one under `text/*` carries `text/plain`, because a sent reply names one type.
 
+A text reply is decoded as strict UTF-8 in every SDK, the encoding `text/*` means when no charset is
+stated. A returned text reply whose media type declares another charset
+(`text/plain; charset=iso-8859-1`) is a generation error. All three SDKs would read it as UTF-8, so
+none would read it right. A body that is not valid UTF-8 fails the call with the SDK's decode error,
+the one a malformed JSON reply raises: a Go `error`, a Python `ValueError` (`UnicodeDecodeError`),
+and a TypeScript `ResponseDecodeError` whose `failure` is `"invalid_text"`. A byte-order mark is
+kept as text in all three.
+
 Only when no JSON success model is declared does another success become the return type: a `text/*`
 reply first, then opaque bytes. A `text/*` reply is returned as a string whatever schema describes
 its content. Two body-bearing successes pointing at *different* JSON models remain a generation

@@ -86,6 +86,10 @@ must move the minor version.
   `sort` and `strings`. The shared wire helpers no longer define `encodeWireQuery` or
   `wireCookieEscape`. Generated TypeScript operation files define `wireEscape` and
   `wireQueryString` whenever an operation has a path or query parameter.
+- **Generated TypeScript `client.ts` carries `_decodeText`**, and `ResponseDecodeFailure` gains
+  `"invalid_text"`. A `switch` over `ResponseDecodeFailure` that is checked for exhaustiveness
+  needs the new case. Generated Go operation files that return a text reply import `fmt` and
+  `unicode/utf8`.
 - **The Python docs compile unit is `docs_snippets.py`** (was `snippets.py`), and imports each
   sample's models inside the function that runs it.
 
@@ -157,7 +161,10 @@ must move the minor version.
   decoded it as JSON, so a `text/plain` reply of `gnr8` failed the call (TypeScript refused the
   media type outright). The method now reads the body as UTF-8 text and returns `string` (Go,
   TypeScript) or `str` (Python), whatever schema describes the content; Python's `client.py` no
-  longer imports that schema. A schema-backed reply in a media type that is neither JSON nor text
+  longer imports that schema. The decode is strict in all three: a body that is not valid UTF-8
+  fails the call with the SDK's decode error (a Go `error`, a Python `UnicodeDecodeError`, a
+  TypeScript `ResponseDecodeError` with `failure: "invalid_text"`), and a returned text reply whose
+  media type declares a charset other than UTF-8 is a generation error. A schema-backed reply in a media type that is neither JSON nor text
   (`application/xml`, say) was decoded as JSON too; it is now returned as bytes (`[]byte`, `bytes`,
   `Blob`), as a download is. One classification of a media type — JSON for `application/json`,
   `+json` and a range that admits JSON (`*/*`, `application/*`), text for `text/*`, anything else
