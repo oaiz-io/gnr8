@@ -3528,23 +3528,23 @@ fn go_body_help_lists_fields_one_level_deep_after_flags() {
     let go = generate_go_cli_with(&rows_select_graph(), rows_cli(rows_select_command()));
     let handler = go_func(&go, "cmdSelectRows");
     let rows = [
-        "  count               string  optional  one of: exact  exact also returns the number of rows the filters match, beyond the page.",
-        "  filters             array of object  optional  Conditions every returned row meets.",
-        "  filters[].and       array of object  optional  same shape as filters[]  Group that matches when every one of its filters matches.",
-        "  filters[].column    string  optional  Column the condition tests.",
-        "  filters[].not       boolean  optional  Negates the condition or the group.",
-        "  filters[].operator  string  optional  one of: eq|gt|gte|ilike|in|is|like|lt|lte|neq  Comparison of the column with value.",
-        "  filters[].or        array of object  optional  same shape as filters[]  Group that matches when any of its filters matches.",
-        "  filters[].value     string  optional  Operand as text.",
-        "  filters[].values    array of string  optional",
-        "  limit               integer  optional  Most rows returned.",
-        "  offset              integer  optional  Rows skipped before the first returned row.",
-        "  order               array of object  optional  Sort order.",
-        "  order[].ascending   boolean  optional  Sorts from low to high.",
+        "  count               string or null  optional  one of: exact  exact also returns the number of rows the filters match, beyond the page.",
+        "  filters             array of object or null  optional  Conditions every returned row meets.",
+        "  filters[].and       array of object or null  optional  same shape as filters[]  Group that matches when every one of its filters matches.",
+        "  filters[].column    string or null  optional  Column the condition tests.",
+        "  filters[].not       boolean or null  optional  Negates the condition or the group.",
+        "  filters[].operator  string or null  optional  one of: eq|gt|gte|ilike|in|is|like|lt|lte|neq  Comparison of the column with value.",
+        "  filters[].or        array of object or null  optional  same shape as filters[]  Group that matches when any of its filters matches.",
+        "  filters[].value     string or null  optional  Operand as text.",
+        "  filters[].values    array of string or null  optional",
+        "  limit               integer or null  optional  Most rows returned.",
+        "  offset              integer or null  optional  Rows skipped before the first returned row.",
+        "  order               array of object or null  optional  Sort order.",
+        "  order[].ascending   boolean or null  optional  Sorts from low to high.",
         "  order[].column      string  required  Column of the table to sort by.",
-        "  order[].nullsFirst  boolean  optional  Puts null values first.",
-        "  select              string  optional  One of: * for every column; column names; alias:column to rename a column; rela\u{2026}",
-        "  single              boolean  optional  Requires exactly one row.",
+        "  order[].nullsFirst  boolean or null  optional  Puts null values first.",
+        "  select              string or null  optional  One of: * for every column; column names; alias:column to rename a column; rela\u{2026}",
+        "  single              boolean or null  optional  Requires exactly one row.",
         "  table               string  required  Table of the database.",
     ];
     let lines: Vec<&str> = handler.lines().map(str::trim).collect();
@@ -3677,7 +3677,7 @@ fn go_help_json_carries_each_body_command_s_body() {
         field("filters[].operator"),
         &serde_json::json!({
             "name": "filters[].operator",
-            "type": "string",
+            "type": "string or null",
             "required": false,
             "enum": ["eq", "gt", "gte", "ilike", "in", "is", "like", "lt", "lte", "neq"],
             "help": "Comparison of the column with value."
@@ -3688,7 +3688,7 @@ fn go_help_json_carries_each_body_command_s_body() {
     assert_eq!(
         field("filters[].values"),
         &serde_json::json!({
-            "name": "filters[].values", "type": "array of string", "required": false
+            "name": "filters[].values", "type": "array of string or null", "required": false
         })
     );
     assert_eq!(
@@ -3736,7 +3736,7 @@ fn go_body_help_names_a_repeated_shape_by_its_first_path() {
     let handler = go_func(&go, "cmdSelectRows");
     assert!(
         handler.contains(
-            "\"  having              array of object  optional  same shape as filters[]\""
+            "\"  having              array of object or null  optional  same shape as filters[]\""
         ),
         "{handler}"
     );

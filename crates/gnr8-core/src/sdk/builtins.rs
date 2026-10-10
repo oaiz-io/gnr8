@@ -2838,7 +2838,7 @@ fn apply_openapi_field_patch(
         prop.description = Some(value.clone());
     }
     if !patch.constraints.enum_values.is_empty() {
-        prop.enum_values.clone_from(&patch.constraints.enum_values);
+        prop.enum_values = Some(patch.constraints.enum_values.clone());
     }
     if let Some(value) = &patch.default {
         prop.default_value = Some(value.clone());

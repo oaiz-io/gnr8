@@ -453,8 +453,12 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
     if let Some(description) = &schema.description {
         let _ = writeln!(out, "{pad}description: {}", scalar(description));
     }
-    if !schema.enum_values.is_empty() {
-        let _ = writeln!(out, "{pad}enum: {}", flow_seq(&schema.enum_values));
+    if let Some(members) = &schema.enum_values {
+        let mut values: Vec<String> = members.iter().map(|member| scalar(member)).collect();
+        if schema.nullable {
+            values.push("null".to_string());
+        }
+        let _ = writeln!(out, "{pad}enum: [{}]", values.join(", "));
     }
     write_schema_constraints(out, schema, &pad);
     if let Some(default_value) = &schema.default_value {
@@ -1092,7 +1096,7 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
         ];
         let mut doc = sample_doc();
         let schema = &mut doc.components.schemas[0].1;
-        schema.enum_values = ambiguous.iter().map(|value| (*value).to_string()).collect();
+        schema.enum_values = Some(ambiguous.iter().map(|value| (*value).to_string()).collect());
         schema.example = Some(LiteralValue::String("=".to_string()));
         let yaml = write(&doc);
 

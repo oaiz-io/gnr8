@@ -238,12 +238,17 @@ values argparse/`flag` already list, then Examples, Output, See also, and Docs w
 them.
 
 A Go command that takes `--body` also prints Body after Flags: one row per request-body field with
-its name, JSON type, `required` or `optional`, `one of: a|b` for an enum, and the field's description
+its name, JSON type (including `or null` for a nullable value), `required` or `optional`,
+`one of: a|b` for the effective enum values, and the field's description
 cut to 80 characters. The fields of a top-level object, or of each item of an array of objects, follow
 it one level deep as `parent.child` or `parent[].child`. A field whose named object shape is already
 listed — a filter's `or` holding more filters, or a second field of the same type — says
 `same shape as filters[]` instead of listing it again. Fields bound as flags through
 `CliCommand::body_fields` are listed under Flags, not Body, and a `fixed_body` command has no Body.
+The enum column lists non-null members (or an array's element members); null is stated in the JSON
+type separately. A field constraint narrows the enum's members, and an empty intersection prints
+`no enum members`. Values containing whitespace, quotes, or `|` are quoted and escaped so each row
+stays on one line. Machine help retains the original member strings and an explicit empty enum.
 
 ```text
 Body:
@@ -251,7 +256,9 @@ Body:
   filters[].operator  string  optional  one of: eq|gt|gte|lt|lte|neq  Comparison of the column with value.
   filters[].or        array of object  optional  same shape as filters[]  Group that matches when any matches.
   table               string  required  Table of the database.
-``` `CliCommand::example` is required once a spec is declared: generation fails rather than emit a
+```
+
+`CliCommand::example` is required once a spec is declared: generation fails rather than emit a
 command that cannot show how to invoke it. Output is generated from the success schema and `view`
 when the command does not override it.
 

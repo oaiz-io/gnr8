@@ -878,12 +878,16 @@ mod tests {
     }
 
     pub(super) fn temp_root(name: &str) -> PathBuf {
+        // Parallel help/contract tests share fixture names, and wall-clock precision does not
+        // guarantee distinct timestamps. Give every fixture its own process-local identity.
+        static NEXT_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT_ROOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "gnr8-verify-test-{name}-{}-{nanos}",
+            "gnr8-verify-test-{name}-{}-{sequence}-{nanos}",
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();

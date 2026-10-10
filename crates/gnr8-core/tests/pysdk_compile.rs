@@ -2061,7 +2061,7 @@ os.environ["BOOKSTORE_API_KEY_AUTH"] = "env-credential"
 os.environ["BOOKSTORE_BEARER_AUTH"] = "env-credential"
 
 for helper, expected in [
-    ("/bin/false", "credential helper failed (exit 1)"),
+    ("false", "credential helper failed (exit 1)"),
     ('/bin/echo "unterminated', "cannot parse BOOKSTORE_CREDENTIAL_HELPER"),
     ("   ", "BOOKSTORE_CREDENTIAL_HELPER is empty"),
 ]:
@@ -2220,7 +2220,7 @@ fn generated_cli_helper_failure_is_exit_1_without_traceback() {
     let result = run_python(&[driver_str], &dir);
     assert!(
         result.is_ok(),
-        "BOOKSTORE_CREDENTIAL_HELPER=/bin/false must be exit 1, one stderr line, no Traceback: {result:?}"
+        "BOOKSTORE_CREDENTIAL_HELPER=false must be exit 1, one stderr line, no Traceback: {result:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -9,6 +9,15 @@ must move the minor version.
 
 ## Unreleased
 
+### Fixed
+
+- Generated CLI body help preserves field-level enum restrictions and request nullability, quotes
+  ambiguous enum labels, and distinguishes container element unions from nullable containers.
+  Body help no longer recalculates whole-graph directions for every command.
+- OpenAPI output intersects inline enums with field constraints, retains empty enum sets, and
+  includes null in nullable enums.
+- Fixed the generated CLI documentation's Body example closing fence.
+
 ## 0.17.2 — 2026-10-10
 
 ### Added
