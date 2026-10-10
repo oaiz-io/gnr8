@@ -275,6 +275,17 @@ pub(crate) fn run_docs_suites(
     suites: &[gnr8_engine::verify::DocsSnippetSuite],
     artifacts: &[Artifact],
 ) -> Vec<docs::DocsReport> {
+    suites
+        .iter()
+        .zip(docs_suite_labels(suites))
+        .map(|(suite, label)| docs::run(root, suite, artifacts, label))
+        .collect()
+}
+
+/// One distinct label per docs suite: `<Language> docs samples`, then the SDK directory when two
+/// suites share a language, then the docs directory too when they share the SDK — one SDK checked
+/// against the pages of two `StaticDocs` targets.
+fn docs_suite_labels(suites: &[gnr8_engine::verify::DocsSnippetSuite]) -> Vec<String> {
     let base: Vec<String> = suites
         .iter()
         .map(|suite| {
@@ -288,20 +299,31 @@ pub(crate) fn run_docs_suites(
             )
         })
         .collect();
-    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for label in &base {
-        *counts.entry(label).or_default() += 1;
-    }
-    suites
+    let shared = |labels: &[String], label: &str| labels.iter().filter(|l| *l == label).count() > 1;
+    let with_sdk: Vec<String> = suites
         .iter()
         .zip(&base)
         .map(|(suite, label)| {
-            let label = if counts.get(label.as_str()).copied().unwrap_or(0) > 1 {
+            if shared(&base, label) {
                 format!("{label} ({})", suite.sdk_output_path)
             } else {
                 label.clone()
-            };
-            docs::run(root, suite, artifacts, label)
+            }
+        })
+        .collect();
+    suites
+        .iter()
+        .zip(&base)
+        .zip(&with_sdk)
+        .map(|((suite, label), by_sdk)| {
+            if shared(&with_sdk, by_sdk.as_str()) {
+                format!(
+                    "{label} ({}, docs {})",
+                    suite.sdk_output_path, suite.docs_dir
+                )
+            } else {
+                by_sdk.clone()
+            }
         })
         .collect()
 }
@@ -688,7 +710,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{
-        run_python, suite_labels, SuiteReport, VerifyReport, VerifyTimings, FAILED, PASSED,
+        docs_suite_labels, run_python, suite_labels, SuiteReport, VerifyReport, VerifyTimings,
+        FAILED, PASSED,
     };
     use crate::DiagnosticCounts;
     use gnr8_engine::sdk::Artifact;
@@ -705,6 +728,41 @@ mod tests {
             refused: 0,
             go_verification: None,
         }
+    }
+
+    /// Every docs suite gets its own label: two `StaticDocs` targets check one SDK twice, so its
+    /// two suites are told apart by the docs directory.
+    #[test]
+    fn docs_suite_labels_are_distinct() {
+        let docs = |language, sdk: &str, docs: &str| gnr8_engine::verify::DocsSnippetSuite {
+            language,
+            docs_dir: docs.to_string(),
+            sdk_output_path: sdk.to_string(),
+            package: "sdk".to_string(),
+            compile_unit: None,
+            cases: 1,
+            refused: 0,
+            go_verification: None,
+        };
+        let suites = [
+            docs(ContractTestLanguage::Go, "gen/go", "gen/docs-a"),
+            docs(ContractTestLanguage::Python, "gen/py", "gen/docs-a"),
+            docs(ContractTestLanguage::Go, "gen/go", "gen/docs-b"),
+            docs(ContractTestLanguage::Go, "gen/go2", "gen/docs-b"),
+        ];
+        assert_eq!(
+            docs_suite_labels(&suites),
+            vec![
+                "Go docs samples (gen/go, docs gen/docs-a)",
+                "Python docs samples",
+                "Go docs samples (gen/go, docs gen/docs-b)",
+                "Go docs samples (gen/go2)",
+            ]
+        );
+        assert_eq!(
+            docs_suite_labels(&suites[..2]),
+            vec!["Go docs samples", "Python docs samples"]
+        );
     }
 
     /// A report with no suites, for tests that assemble one of their own.
