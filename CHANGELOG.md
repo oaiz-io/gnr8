@@ -48,6 +48,9 @@ must move the minor version.
   section. Where the example is declared, the page keeps its name and prose. `SampleBody` and
   `SuccessSample` gain `example`, `SampleRefusal` gains `Declared`, and `CoreError` gains
   `InvalidExample`.
+- **A generated SDK method whose success reply has a schema but a non-JSON media type changes its
+  return type**: a `text/*` reply returns `string` / `str`, any other returns bytes, instead of the
+  schema's model (see Fixed). Code that used the model type there must use the new one.
 
 ### Added
 
@@ -131,6 +134,20 @@ must move the minor version.
 - **An SDK package or model name can no longer break a docs compile unit**: a Go package named
   `errors` or `outcome` is imported under an alias, a Python model named after the unit's own test
   classes no longer replaces one, and a Python package named `snippets` no longer shadows the unit.
+- **A generated client returns a `text/*` success reply as the text.** Go, Python and TypeScript
+  decoded it as JSON, so a `text/plain` reply of `gnr8` failed the call (TypeScript refused the
+  media type outright). The method now reads the body as UTF-8 text and returns `string` (Go,
+  TypeScript) or `str` (Python), whatever schema describes the content; Python's `client.py` no
+  longer imports that schema. A schema-backed reply in a media type that is neither JSON nor text
+  (`application/xml`, say) was decoded as JSON too; it is now returned as bytes (`[]byte`, `bytes`,
+  `Blob`), as a download is. One classification of a media type — JSON for `application/json` and
+  `+json`, text for `text/*`, anything else neither — now serves the SDKs, the contract tests and
+  the docs page. A text reply is the return type only when the operation declares no JSON model;
+  beside one it is a status the method does not return, read from a response hook, and opaque bytes
+  beside a text reply are too. Contract tests answer a text reply with the text under its declared
+  media type (`content-type: text/plain`, body `gnr8`), and a text reply whose sample is not a string
+  drives no case, as its docs page prints no body. Generated operations and `contract_test.*` files
+  change for every operation with a non-JSON schema-backed success reply.
 
 - A `pattern` no longer costs contract-test coverage. gnr8 still never synthesizes a value for one:
   the sample is drawn from the input's other constraints and records the pattern as unmet. A contract
@@ -156,8 +173,7 @@ must move the minor version.
 - A docs page prints a reply in its declared media type's wire form, and the `gnr8 verify` docs check
   answers the call with exactly that: a `text/plain` reply is the text itself (`gnr8`, not the JSON
   string `"gnr8"`), and a reply in a media type that is neither JSON nor text prints no body, as a
-  file download already did. The docs check therefore now reports that the generated SDKs decode a
-  `text/*` success reply as JSON.
+  file download already did.
 - An imported document's base path is no longer stated twice. The first server's path (or Swagger
   2's `basePath`) becomes the graph's base path, which every generated path, the SDKs and the docs
   request line already carry; the imported servers now drop it (`https://api.example.com/v1` is

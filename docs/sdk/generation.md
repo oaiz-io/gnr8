@@ -324,8 +324,18 @@ generates a method returning the 200 model, with a documentation line naming 202
 itself. The OpenAPI document still states both responses in full; the narrowing is the SDK's, so it
 is stated where an SDK caller reads it rather than by rewriting the response.
 
-Only when no JSON success model is declared do opaque successes become the return type (`[]byte`,
-`bytes`, `Blob`). Two body-bearing successes pointing at *different* JSON models remain a generation
+A schema-backed success is read by its media type's family — the first of its declared media types,
+in sorted order — with one classification shared by the SDKs, the contract tests and the docs pages:
+
+| Media type | The body | Return type |
+| --- | --- | --- |
+| `application/json`, any `+json` | JSON, decoded into the model | the model |
+| any `text/*` | the text itself, decoded as UTF-8 | `string` (Go, TypeScript), `str` (Python) |
+| anything else | the bytes, as an opaque success | `[]byte`, `bytes`, `Blob` |
+
+Only when no JSON success model is declared does another success become the return type: a `text/*`
+reply first, then opaque bytes. A `text/*` reply is returned as a string whatever schema describes
+its content. Two body-bearing successes pointing at *different* JSON models remain a generation
 error: neither model is the operation's, so there is no return type to choose.
 
 Declared 3xx responses are successful operation outcomes. Generated clients do not follow redirects

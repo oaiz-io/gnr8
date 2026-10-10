@@ -2048,6 +2048,13 @@ fn emit_operation(
         } else {
             "Blob".to_string()
         }
+    } else if success.text_body {
+        // A `text/*` reply is returned as the text itself.
+        if has_empty_wire_outcome {
+            "string | undefined".to_string()
+        } else {
+            "string".to_string()
+        }
     } else {
         return_model.as_ref().map_or_else(
             || "void".to_string(),
@@ -3617,11 +3624,16 @@ fn emit_op_dispatch(
             ts_status_match("res.status", &success.body_statuses)
         )
         .map_err(sink)?;
-        writeln!(
-            out,
-            "      return await this._decodeJson<models.{model}>(res);"
-        )
-        .map_err(sink)?;
+        if success.text_body {
+            // `Response.text()` decodes the body as UTF-8.
+            writeln!(out, "      return await res.text();").map_err(sink)?;
+        } else {
+            writeln!(
+                out,
+                "      return await this._decodeJson<models.{model}>(res);"
+            )
+            .map_err(sink)?;
+        }
         writeln!(out, "    }}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
             writeln!(out, "    throw new ApiError(res.status);").map_err(sink)?;

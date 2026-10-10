@@ -700,7 +700,8 @@ fn docs_edge_samples_send_the_page_request_in_python() {
 /// `date-time`, a boolean and an integer in the path; reserved characters and a space in the query;
 /// an optional enum or `date-time` body the call passes by pointer — vets as printed, reaches the
 /// wire byte for byte as the page prints it (rung 3 compares the raw query string), and passes the
-/// SDK's own contract test, whose expected path is spelled by the same encoder as the page.
+/// SDK's own contract test, whose expected path is spelled by the same encoder as the page. The
+/// `text/plain` reply the page prints as `gnr8` is returned as that text, never decoded as JSON.
 #[test]
 fn docs_wire_samples_vet_send_the_page_request_and_pass_the_contract_test_in_go() {
     if !docs_pipeline::go_available() {
@@ -728,8 +729,9 @@ fn docs_wire_samples_vet_send_the_page_request_and_pass_the_contract_test_in_go(
 }
 
 /// The docs-wire fixture through TypeScript: the same values reach the wire as the page prints them —
-/// `encodeURIComponent` alone leaves `! ' ( ) *` and `URLSearchParams` writes a space as `+` — and a
-/// JSON string body goes out JSON-encoded, quotes and all.
+/// `encodeURIComponent` alone leaves `! ' ( ) *` and `URLSearchParams` writes a space as `+` — a
+/// JSON string body goes out JSON-encoded, quotes and all, and a `text/plain` reply is returned as
+/// the text, both to the page's call and to the SDK's own contract test.
 #[test]
 fn docs_wire_samples_typecheck_and_send_the_page_request_in_typescript() {
     if !typescript_available() {
@@ -751,6 +753,70 @@ fn docs_wire_samples_typecheck_and_send_the_page_request_in_typescript() {
         unit.text
     );
     typescript_rung_three(&run, &ts);
+    run_typescript_contract_test(&run, &ts);
+}
+
+/// Compile a TypeScript SDK to `CommonJS` and run its own contract test through `node --test`, bound
+/// the way `gnr8 verify` binds it: a harness outside the SDK registers each exported case.
+fn run_typescript_contract_test(run: &DocsRun, ts: &TsSdk) {
+    let dir = temp_dir("typescript-contract");
+    let sdk = dir.join("sdk");
+    run.write_dir(&ts.dir, &sdk);
+    let sources: Vec<String> = std::fs::read_dir(&sdk)
+        .unwrap()
+        .map(|entry| std::path::PathBuf::from(entry.unwrap().file_name()))
+        .filter(|name| name.extension().is_some_and(|ext| ext == "ts"))
+        .map(|name| format!("sdk/{}", name.display()))
+        .collect();
+    let output = Command::new("node")
+        .arg(TSC)
+        .args([
+            "--outDir",
+            "out",
+            "--rootDir",
+            "sdk",
+            "--module",
+            "commonjs",
+            "--target",
+            "es2022",
+            "--lib",
+            "es2022,dom",
+            "--moduleResolution",
+            "node",
+            "--strict",
+            "--skipLibCheck",
+        ])
+        .args(&sources)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    std::fs::write(
+        dir.join("out/contract.cjs"),
+        "const { test } = require(\"node:test\");\nconst suite = require(\"./contract.test.js\");\nfor (const contractCase of suite.contractTests) {\n  test(contractCase.name, async () => {\n    await contractCase.run();\n  });\n}\n",
+    )
+    .unwrap();
+    let output = Command::new("node")
+        .args(["--test", "contract.cjs"])
+        .current_dir(dir.join("out"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        report.contains("# fail 0") && !report.contains("# pass 0\n"),
+        "the contract suite ran no case:\n{report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Run a Python SDK's own contract test, from the directory that holds the package.
@@ -788,8 +854,9 @@ fn assert_python_records_match(run: &DocsRun, py: &PySdk) {
 }
 
 /// The docs-wire fixture through the dataclass-style Python SDK: an enum path parameter goes out as
-/// its wire value (never `Kind._1ST`), a boolean as `true`, and a body leaves unset optional fields
-/// out and spells keyword-named fields by their wire names (`class`, never `class_`).
+/// its wire value (never `Kind._1ST`), a boolean as `true`, a body leaves unset optional fields out
+/// and spells keyword-named fields by their wire names (`class`, never `class_`), and a `text/plain`
+/// reply is returned as the text.
 #[test]
 fn docs_wire_samples_send_the_page_request_in_python_dataclasses() {
     if !python_available() {

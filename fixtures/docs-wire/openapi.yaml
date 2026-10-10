@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Wire
   version: 1.0.0
-  description: Values every generated SDK has to put on the wire exactly as the page prints them.
+  description: Values every generated SDK has to put on the wire, and read off it, exactly as the page prints them.
 components:
   schemas:
     Kind:
@@ -107,3 +107,21 @@ paths:
             schema: { type: string, format: date-time }
       responses:
         "204": { description: none }
+  /name:
+    get:
+      operationId: getName
+      responses:
+        "200":
+          description: The service name, as plain text.
+          content:
+            text/plain:
+              schema: { type: string }
+  /report:
+    get:
+      operationId: getReport
+      responses:
+        "200":
+          description: The thing, as XML, which no generated client decodes.
+          content:
+            application/xml:
+              schema: { $ref: "#/components/schemas/Thing" }

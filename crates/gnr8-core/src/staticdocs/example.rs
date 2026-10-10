@@ -312,21 +312,15 @@ pub(crate) fn wire_reply(
         serde_json::from_str(&reply.body).map_err(|error| CoreError::DocsGen {
             message: format!("the sampled reply is not JSON: {error}"),
         })?;
-    let essence = content_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    let (body, printed) = if essence == "application/json" || essence.ends_with("+json") {
-        (reply.body.clone(), pretty(&value)?)
-    } else if essence.starts_with("text/") {
-        let serde_json::Value::String(text) = value else {
-            return Ok(None);
-        };
-        (text.clone(), text)
-    } else {
-        return Ok(None);
+    let (body, printed) = match crate::sdk::emit_common::media_family(&content_type) {
+        crate::sdk::emit_common::MediaFamily::Json => (reply.body.clone(), pretty(&value)?),
+        crate::sdk::emit_common::MediaFamily::Text => {
+            let serde_json::Value::String(text) = value else {
+                return Ok(None);
+            };
+            (text.clone(), text)
+        }
+        crate::sdk::emit_common::MediaFamily::Other => return Ok(None),
     };
     Ok(Some(WireReply {
         status: reply.status,

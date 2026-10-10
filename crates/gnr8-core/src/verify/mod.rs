@@ -20,7 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 
 use crate::graph::{ApiGraph, Operation, Type};
-use crate::sdk::emit_common::request_body_models_of;
+use crate::sdk::emit_common::{
+    media_family, request_body_models_of, response_media_type, MediaFamily,
+};
 use crate::CoreError;
 
 mod sample;
@@ -614,6 +616,8 @@ struct Candidate<'op> {
     auth: Vec<SampleAuth>,
     /// The canned success reply, sampled once.
     reply: SuccessOutcome,
+    /// That reply in its declared media type's wire form, when it has one.
+    reply_wire: Option<CannedResponse>,
     /// Whether the operation declares a body at all (even one the sampler cannot construct).
     declares_body: bool,
     /// Whether every declared representation was constructible.
@@ -631,6 +635,10 @@ impl<'op> Candidate<'op> {
     ) -> Result<Self, CoreError> {
         let declared = request_body_models_of(op, graph)?;
         let absolute_path = absolute_path(&graph.base_path, &op.path, &sample.params);
+        let reply_wire = match &sample.reply {
+            SuccessOutcome::Sample(success) => success_reply(op, success),
+            SuccessOutcome::NoReply | SuccessOutcome::Refused(_) => None,
+        };
         Ok(Self {
             op,
             declares_body: !declared.is_empty(),
@@ -639,15 +647,16 @@ impl<'op> Candidate<'op> {
             bodies: sample.bodies,
             auth: sample.auth,
             reply: sample.reply,
+            reply_wire,
             absolute_path,
         })
     }
 
-    /// The sampled success reply, when there is one to drive a case with.
-    fn success(&self) -> Option<&SuccessSample> {
-        match &self.reply {
-            SuccessOutcome::Sample(success) => Some(success),
-            SuccessOutcome::NoReply | SuccessOutcome::Refused(_) => None,
+    /// The sampled success reply and its wire form, when there is one to drive a case with.
+    fn success(&self) -> Option<(&SuccessSample, CannedResponse)> {
+        match (&self.reply, &self.reply_wire) {
+            (SuccessOutcome::Sample(success), Some(wire)) => Some((success, wire.clone())),
+            _ => None,
         }
     }
 
@@ -718,7 +727,7 @@ fn request_shape_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
         if seen.contains(&key) {
             continue;
         }
-        let Some(success) = candidate.success() else {
+        let Some((success, reply)) = candidate.success() else {
             continue;
         };
         seen.insert(key);
@@ -726,11 +735,7 @@ fn request_shape_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
             ContractCaseClass::RequestShape,
             None,
             body,
-            CannedResponse {
-                status: success.status,
-                headers: json_response_headers(&success.body),
-                body: success.body.clone(),
-            },
+            reply,
             CaseOutcome::Decode {
                 model: success.model.clone(),
                 field: success.field.clone(),
@@ -743,7 +748,7 @@ fn request_shape_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
 fn body_selection_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
     let mut cases = Vec::new();
     for candidate in candidates.iter().filter(|c| c.can_select_bodies()) {
-        let Some(success) = candidate.success() else {
+        let Some((success, reply)) = candidate.success() else {
             continue;
         };
         for body in &candidate.bodies {
@@ -751,11 +756,7 @@ fn body_selection_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
                 ContractCaseClass::BodySelection,
                 Some(&media_suffix(&body.content_type)),
                 Some(body),
-                CannedResponse {
-                    status: success.status,
-                    headers: json_response_headers(&success.body),
-                    body: success.body.clone(),
-                },
+                reply.clone(),
                 CaseOutcome::Decode {
                     model: success.model.clone(),
                     field: None,
@@ -777,7 +778,7 @@ fn response_decode_cases(
         if candidate.declares_body && body.is_none() {
             continue;
         }
-        let Some(success) = candidate.success() else {
+        let Some((success, reply)) = candidate.success() else {
             continue;
         };
         let Some(model) = success.model.clone() else {
@@ -790,26 +791,21 @@ fn response_decode_cases(
             ContractCaseClass::ResponseDecode,
             Some("present"),
             body,
-            CannedResponse {
-                status: success.status,
-                headers: json_response_headers(&success.body),
-                body: success.body.clone(),
-            },
+            reply,
             CaseOutcome::Decode {
                 model: Some(model.clone()),
                 field: success.field.clone(),
             },
         ));
         if let SuccessOutcome::Sample(absent) = success_sample(candidate.op, graph, true)? {
+            let Some(reply) = success_reply(candidate.op, &absent) else {
+                continue;
+            };
             cases.push(candidate.case(
                 ContractCaseClass::ResponseDecode,
                 Some("absent"),
                 body,
-                CannedResponse {
-                    status: absent.status,
-                    headers: json_response_headers(&absent.body),
-                    body: absent.body,
-                },
+                reply,
                 CaseOutcome::Decode {
                     model: Some(model),
                     field: absent.field,
@@ -894,7 +890,7 @@ fn auth_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
         if seen.contains(&key) {
             continue;
         }
-        let Some(success) = candidate.success() else {
+        let Some((success, reply)) = candidate.success() else {
             continue;
         };
         seen.insert(key);
@@ -902,11 +898,7 @@ fn auth_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
             ContractCaseClass::Auth,
             None,
             body,
-            CannedResponse {
-                status: success.status,
-                headers: json_response_headers(&success.body),
-                body: success.body.clone(),
-            },
+            reply,
             CaseOutcome::Decode {
                 model: success.model.clone(),
                 field: None,
@@ -1056,6 +1048,34 @@ pub(crate) fn absolute_path(base_path: &str, path: &str, params: &[SampleParam])
     } else {
         out
     }
+}
+
+/// A sampled success reply in the wire form of the media type its status declares, as
+/// [`MediaFamily`] rules for every consumer of a reply: the text itself for a `text/*` type, which
+/// the generated SDKs return as a string, and JSON otherwise, which they decode. `None` when the
+/// sample has no such form — a `text/*` reply whose sample is not a string — so no case relies on it,
+/// exactly as a docs page prints no body for it.
+fn success_reply(op: &Operation, success: &SuccessSample) -> Option<CannedResponse> {
+    let media = op
+        .responses
+        .iter()
+        .find(|response| response.status == success.status)
+        .map_or("application/json", response_media_type);
+    if success.body.is_empty() || media_family(media) != MediaFamily::Text {
+        return Some(CannedResponse {
+            status: success.status,
+            headers: json_response_headers(&success.body),
+            body: success.body.clone(),
+        });
+    }
+    let Ok(Value::String(text)) = serde_json::from_str::<Value>(&success.body) else {
+        return None;
+    };
+    Some(CannedResponse {
+        status: success.status,
+        headers: vec![("content-type".to_string(), media.to_string())],
+        body: text,
+    })
 }
 
 fn json_response_headers(body: &str) -> Vec<(String, String)> {
@@ -1409,6 +1429,69 @@ mod tests {
                 .find(|(name, _)| name == "content-type")
                 .map(|(_, value)| value.as_str()),
             Some("application/json")
+        );
+    }
+
+    /// A `text/*` success reply is canned as the text itself under its declared media type, as the
+    /// SDKs return it and the docs page prints it; one whose sample is not a string has no wire form
+    /// and drives no case, as a docs page prints no body for it.
+    #[test]
+    fn a_text_reply_is_canned_as_the_text_under_its_declared_media_type() {
+        let mut graph = catalog_graph();
+        let mut text_op = graph.operations[0].clone();
+        text_op.id = "getName".to_string();
+        text_op.path = "/name".to_string();
+        text_op.params.clear();
+        text_op.security = Vec::new();
+        text_op.responses = serde_json::from_value(serde_json::json!([
+            {"status": 200, "body": {"ref_id": "catalog.Name"}, "content_types": ["text/plain; charset=utf-8"]}
+        ]))
+        .unwrap();
+        let mut csv_op = text_op.clone();
+        csv_op.id = "getCsv".to_string();
+        csv_op.path = "/csv".to_string();
+        csv_op.responses = serde_json::from_value(serde_json::json!([
+            {"status": 200, "body": {"ref_id": "catalog.Item"}, "content_types": ["text/csv"]}
+        ]))
+        .unwrap();
+        graph.operations.extend([text_op, csv_op]);
+        graph.schemas.push(
+            serde_json::from_value(serde_json::json!(
+                {"id": "catalog.Name", "name": "Name", "body": {"type": "primitive", "of": {"prim": "string"}},
+                 "provenance": {"file": "a.go", "start_line": 30, "end_line": 30}}
+            ))
+            .unwrap(),
+        );
+        let plan = plan_contract_tests(&graph).expect("plan");
+        let text_cases: Vec<&super::ContractCase> = plan
+            .cases
+            .iter()
+            .filter(|case| case.operation_id == "getName" && case.response.status == 200)
+            .collect();
+        assert!(!text_cases.is_empty(), "the text reply drives a case");
+        for case in text_cases {
+            assert_eq!(
+                case.response.headers,
+                vec![(
+                    "content-type".to_string(),
+                    "text/plain; charset=utf-8".to_string()
+                )],
+                "{}",
+                case.name
+            );
+            assert!(
+                !case.response.body.starts_with('"'),
+                "{}: the text is canned unquoted: {}",
+                case.name,
+                case.response.body
+            );
+        }
+        assert!(
+            plan.cases
+                .iter()
+                .filter(|case| case.operation_id == "getCsv")
+                .all(|case| case.response.status != 200),
+            "a text reply with no string sample drives no success case"
         );
     }
 

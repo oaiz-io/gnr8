@@ -1743,9 +1743,12 @@ fn emit_operation(
             OperationAuthScheme::ApiKey(_) => None,
         })
         .collect();
-    // The return type is the success model when one exists, else an empty struct.
+    // The return type is the success model when one exists, else an empty struct. A `text/*`
+    // reply is returned as the text itself.
     let return_model = if success.has_binary_body() {
         "[]byte".to_string()
+    } else if success.text_body {
+        "string".to_string()
     } else {
         success
             .body_model
@@ -2756,14 +2759,22 @@ fn emit_request_dispatch(
             go_status_match("resp.StatusCode", &success.body_statuses)
         )
         .map_err(sink)?;
-        writeln!(
-            body,
-            "if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {{"
-        )
-        .map_err(sink)?;
-        writeln!(body, "return out, err").map_err(sink)?;
-        writeln!(body, "}}").map_err(sink)?;
-        writeln!(body, "return out, nil").map_err(sink)?;
+        if success.text_body {
+            writeln!(body, "data, err := io.ReadAll(resp.Body)").map_err(sink)?;
+            writeln!(body, "if err != nil {{").map_err(sink)?;
+            writeln!(body, "return out, err").map_err(sink)?;
+            writeln!(body, "}}").map_err(sink)?;
+            writeln!(body, "return string(data), nil").map_err(sink)?;
+        } else {
+            writeln!(
+                body,
+                "if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {{"
+            )
+            .map_err(sink)?;
+            writeln!(body, "return out, err").map_err(sink)?;
+            writeln!(body, "}}").map_err(sink)?;
+            writeln!(body, "return out, nil").map_err(sink)?;
+        }
         writeln!(body, "}}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
             writeln!(body, "return out, &APIError{{StatusCode: resp.StatusCode}}").map_err(sink)?;
