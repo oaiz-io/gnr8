@@ -1056,6 +1056,7 @@ return nil
 }}
 "
     );
+    let body = format!("{body}{WIRE_ENCODING_HELPERS}");
     file(
         package,
         &[
@@ -1064,12 +1065,52 @@ return nil
             "errors",
             "io",
             "net/http",
+            "net/url",
+            "sort",
             "strconv",
+            "strings",
             "time",
         ],
         &body,
     )
 }
+
+/// The one encoding rule every request URL and cookie a Go client sends is written with, emitted
+/// into `client.go` so every operation file can call it: each byte but an RFC 3986 unreserved one
+/// (`A-Z a-z 0-9 - . _ ~`) becomes `%XX`. It is the rule the docs page and the contract test spell
+/// a path and a query with (`verify::percent_encode`), so a space is `%20`, never `+`.
+const WIRE_ENCODING_HELPERS: &str = r##"
+// wireEscape percent-encodes one path segment, query name or value, or cookie name or value:
+// every byte but an unreserved one (A-Z a-z 0-9 - . _ ~) becomes %XX, so a space is %20.
+func wireEscape(value string) string {
+return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+}
+
+// encodeWireQuery writes a query string with wireEscape: names sorted, each name's values in
+// order. A value allowReserved marks keeps the reserved characters RFC 3986 lets it carry.
+func encodeWireQuery(values url.Values, allowReserved map[string]map[int]bool) string {
+keys := make([]string, 0, len(values))
+for key := range values {
+keys = append(keys, key)
+}
+sort.Strings(keys)
+parts := make([]string, 0)
+for _, key := range keys {
+for index, value := range values[key] {
+encoded := wireEscape(value)
+if allowReserved[key][index] {
+encoded = strings.NewReplacer(
+"%3A", ":", "%2F", "/", "%3F", "?", "%23", "#", "%5B", "[", "%5D", "]",
+"%40", "@", "%21", "!", "%24", "$", "%26", "&", "%27", "'", "%28", "(",
+"%29", ")", "%2A", "*", "%2B", "+", "%2C", ",", "%3B", ";", "%3D", "=",
+).Replace(encoded)
+}
+parts = append(parts, wireEscape(key)+"="+encoded)
+}
+}
+return strings.Join(parts, "&")
+}
+"##;
 
 fn go_duration_ms(timeout_ms: u64) -> String {
     format!("{timeout_ms} * time.Millisecond")
@@ -1276,7 +1317,7 @@ pub(crate) fn emit_shared_request_helpers(
 }
 
 /// Packages referenced by [`emit_wire_parameter_helpers`]'s emitted source.
-const WIRE_HELPER_IMPORTS: [&str; 6] = ["fmt", "net/url", "reflect", "sort", "strings", "time"];
+const WIRE_HELPER_IMPORTS: [&str; 5] = ["fmt", "reflect", "sort", "strings", "time"];
 
 /// Packages referenced by [`emit_request_body_helpers`]'s emitted source, for the given encodings.
 ///
@@ -1387,13 +1428,20 @@ fn emit_operations_inner(
     if include_shared_helpers && needs_wire_helpers {
         imports.extend(WIRE_HELPER_IMPORTS);
     }
-    // WR-04: any op with a templated path interpolates `url.PathEscape(...)`, which needs `net/url`.
+    // WR-04: any op with a templated path interpolates `wireEscape(...)` through `fmt.Sprintf`; a
+    // `date-time` segment is formatted with `time` first.
     if ops
         .iter()
         .any(|op| op.params.iter().any(|p| p.location == "path"))
     {
         imports.push("fmt");
-        imports.push("net/url");
+    }
+    for op in ops {
+        for param in op.params.iter().filter(|p| p.location == "path") {
+            if resolves_to_date_time(&param.schema, graph)? {
+                imports.push("time");
+            }
+        }
     }
     if include_facades {
         emit_group_facades(&mut body, graph, ops)?;
@@ -2420,7 +2468,7 @@ fn emit_request_dispatch(
     }
 
     // URL construction: baseURL + absolute path with path params interpolated.
-    emit_url(body, op, base_path, path_params)?;
+    emit_url(body, op, graph, base_path, path_params)?;
     emit_go_auth_selection(body, &op.id, auth_alternatives)?;
 
     // Request build.
@@ -2550,15 +2598,14 @@ fn emit_request_dispatch(
             writeln!(body, "}}").map_err(sink)?;
             writeln!(body, "}}").map_err(sink)?;
         }
-        if has_allow_reserved {
-            writeln!(
-                body,
-                "req.URL.RawQuery = encodeWireQuery(q, wireAllowReserved)"
-            )
-            .map_err(sink)?;
+        // One encoder for every query string: `url.Values.Encode` writes a space as `+`, which is not
+        // the `%20` the page and the contract test spell it with.
+        let reserved = if has_allow_reserved {
+            "wireAllowReserved"
         } else {
-            writeln!(body, "req.URL.RawQuery = q.Encode()").map_err(sink)?;
-        }
+            "nil"
+        };
+        writeln!(body, "req.URL.RawQuery = encodeWireQuery(q, {reserved})").map_err(sink)?;
     }
 
     emit_header_and_cookie_params(body, header_params, cookie_params, graph)?;
@@ -3049,7 +3096,7 @@ fn emit_non_query_parameter(
         } else {
             writeln!(
                 body,
-                "req.AddCookie(&http.Cookie{{Name: wireCookieEscape(pair.Name), Value: wireCookieEscape(pair.Value)}})"
+                "req.AddCookie(&http.Cookie{{Name: wireEscape(pair.Name), Value: wireEscape(pair.Value)}})"
             )
             .map_err(sink)?;
         }
@@ -3067,7 +3114,7 @@ fn emit_non_query_parameter(
         } else {
             writeln!(
                 body,
-                "req.AddCookie(&http.Cookie{{Name: wireCookieEscape({}), Value: wireCookieEscape({value})}})",
+                "req.AddCookie(&http.Cookie{{Name: wireEscape({}), Value: wireEscape({value})}})",
                 quoted_string_literal(&param.name)
             )
             .map_err(sink)?;
@@ -3155,33 +3202,6 @@ return instant.Format(time.RFC3339)
 return fmt.Sprint(value)
 }
 
-func encodeWireQuery(values url.Values, allowReserved map[string]map[int]bool) string {
-keys := make([]string, 0, len(values))
-for key := range values {
-keys = append(keys, key)
-}
-sort.Strings(keys)
-parts := make([]string, 0)
-for _, key := range keys {
-for index, value := range values[key] {
-encoded := strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
-if allowReserved[key][index] {
-encoded = strings.NewReplacer(
-"%3A", ":", "%2F", "/", "%3F", "?", "%23", "#", "%5B", "[", "%5D", "]",
-"%40", "@", "%21", "!", "%24", "$", "%26", "&", "%27", "'", "%28", "(",
-"%29", ")", "%2A", "*", "%2B", "+", "%2C", ",", "%3B", ";", "%3D", "=",
-).Replace(encoded)
-}
-encodedKey := strings.ReplaceAll(url.QueryEscape(key), "+", "%20")
-parts = append(parts, encodedKey+"="+encoded)
-}
-}
-return strings.Join(parts, "&")
-}
-
-func wireCookieEscape(value string) string {
-return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
-}
 "##,
     );
 }
@@ -3481,6 +3501,7 @@ return err
 fn emit_url(
     body: &mut String,
     op: &Operation,
+    graph: &ApiGraph,
     base_path: &str,
     path_params: &[&str],
 ) -> Result<(), CoreError> {
@@ -3511,10 +3532,7 @@ fn emit_url(
         let placeholder = format!("{{{token}}}");
         format_str = format_str.replace(&placeholder, "%s");
         // WR-04: percent-encode the value so it cannot inject extra path/query segments.
-        args.push(format!(
-            "url.PathEscape(fmt.Sprint({}))",
-            lower_camel(token)
-        ));
+        args.push(path_segment_expr(op, token, graph)?);
     }
     writeln!(
         body,
@@ -3523,6 +3541,53 @@ fn emit_url(
     )
     .map_err(sink)?;
     Ok(())
+}
+
+/// The escaped text of one path segment: the argument as the wire spells it — a `date-time` in
+/// RFC 3339, the format the client sends a `date-time` query or header value in; any other value as
+/// `fmt.Sprint` prints it — percent-encoded by `wireEscape`, the rule the page prints the path with.
+fn path_segment_expr(op: &Operation, token: &str, graph: &ApiGraph) -> Result<String, CoreError> {
+    let param = op
+        .params
+        .iter()
+        .find(|param| param.location == "path" && param.name == token)
+        .ok_or_else(|| CoreError::SdkGen {
+            message: format!(
+                "operation '{}' path token '{token}' names no path parameter",
+                op.id
+            ),
+        })?;
+    let ident = lower_camel(token);
+    let text = if resolves_to_date_time(&param.schema, graph)? {
+        format!("{ident}.Format(time.RFC3339)")
+    } else {
+        format!("fmt.Sprint({ident})")
+    };
+    Ok(format!("wireEscape({text})"))
+}
+
+/// Whether `schema`, through any chain of named aliases, is a `date-time` — a `time.Time` in Go.
+fn resolves_to_date_time(schema: &Type, graph: &ApiGraph) -> Result<bool, CoreError> {
+    let mut current = schema;
+    let mut visited = BTreeSet::new();
+    while let Type::Named(ref_id) = current {
+        if !visited.insert(ref_id.clone()) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "cyclic named schema reference '{ref_id}' while resolving a Go path parameter"
+                ),
+            });
+        }
+        current = &graph
+            .schemas
+            .iter()
+            .find(|schema| &schema.id == ref_id)
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!("dangling $ref '{ref_id}' is not among graph.schemas"),
+            })?
+            .body;
+    }
+    Ok(matches!(current, Type::WellKnown(WellKnown::DateTime)))
 }
 
 /// Emit a `<Method>Params` struct for a query-bearing operation (required → value, optional → pointer).
@@ -4432,22 +4497,23 @@ mod tests {
         }
 
         #[test]
-        fn templated_path_escapes_each_arg_and_imports_net_url() {
-            // WR-04: a `{uuid}` path param must be interpolated through `url.PathEscape` so a value
-            // containing `/`, `?`, `#`, or `..` cannot restructure the request URL, and the file must
-            // import `net/url`. The local URL var is `reqURL` to avoid shadowing the `url` package.
+        fn templated_path_escapes_each_arg_with_wire_escape() {
+            // WR-04: a `{uuid}` path param must be interpolated through `wireEscape` so a value
+            // containing `/`, `?`, `#`, or `..` cannot restructure the request URL. `wireEscape`
+            // lives in client.go, so the operations file needs no `net/url` for a path. The local URL
+            // var is `reqURL` to avoid shadowing the `url` package.
             let graph = super::path_param_graph();
             let ops: Vec<&crate::graph::Operation> = graph.operations.iter().collect();
             let out = emit_operations(&graph, "goalservice", "/goal", &ops).unwrap();
             assert!(
                 out.contains(
-                    "reqURL := c.baseURL + fmt.Sprintf(\"/goal/%s\", url.PathEscape(fmt.Sprint(uuid)))"
+                    "reqURL := c.baseURL + fmt.Sprintf(\"/goal/%s\", wireEscape(fmt.Sprint(uuid)))"
                 ),
-                "path arg must be wrapped in url.PathEscape:\n{out}"
+                "path arg must be wrapped in wireEscape:\n{out}"
             );
             assert!(
-                out.contains("\"net/url\""),
-                "a templated path must import net/url:\n{out}"
+                !out.contains("url.PathEscape"),
+                "url.PathEscape leaves + $ & = @ : unescaped, unlike the page:\n{out}"
             );
         }
 
@@ -4465,8 +4531,44 @@ mod tests {
                 "integer path parameter must remain integer in the Go API:\n{out}"
             );
             assert!(
-                out.contains("url.PathEscape(fmt.Sprint(uuid))"),
+                out.contains("wireEscape(fmt.Sprint(uuid))"),
                 "typed path parameter must be converted to its wire string before escaping:\n{out}"
+            );
+        }
+
+        #[test]
+        fn date_time_path_parameter_is_formatted_as_rfc3339_and_imports_time() {
+            // A `time.Time` path argument is sent the way a `date-time` query or header value is —
+            // RFC 3339 — never as `fmt.Sprint` prints it, and its file imports `time`.
+            let mut graph = super::path_param_graph();
+            graph.operations[0].params[0].schema =
+                Type::WellKnown(crate::graph::WellKnown::DateTime);
+            let ops: Vec<&crate::graph::Operation> = graph.operations.iter().collect();
+            let out = emit_operations(&graph, "goalservice", "/goal", &ops).unwrap();
+            assert!(
+                out.contains("uuid time.Time,"),
+                "a date-time path parameter is a time.Time:\n{out}"
+            );
+            assert!(
+                out.contains("wireEscape(uuid.Format(time.RFC3339))"),
+                "a date-time path segment is RFC 3339:\n{out}"
+            );
+            assert!(
+                out.contains("\"time\""),
+                "a date-time path imports time:\n{out}"
+            );
+        }
+
+        #[test]
+        fn query_string_is_written_by_the_one_wire_encoder() {
+            // `url.Values.Encode` writes a space as `+`; the page and the contract test print `%20`.
+            let graph = super::typed_query_graph();
+            let ops: Vec<&crate::graph::Operation> = graph.operations.iter().collect();
+            let out = emit_operations(&graph, "goalservice", "/goal", &ops).unwrap();
+            assert!(!out.contains("q.Encode()"), "{out}");
+            assert!(
+                out.contains("req.URL.RawQuery = encodeWireQuery(q, nil)"),
+                "{out}"
             );
         }
 
@@ -4612,7 +4714,7 @@ mod tests {
 
             assert!(
                 out.contains(
-                    "req.AddCookie(&http.Cookie{Name: wireCookieEscape(\"cursor\"), Value: wireCookieEscape(string(*params.Cursor))})"
+                    "req.AddCookie(&http.Cookie{Name: wireEscape(\"cursor\"), Value: wireEscape(string(*params.Cursor))})"
                 ),
                 "optional named enum cookie must use its string wire value:\n{out}"
             );

@@ -125,7 +125,7 @@ type contractTransport struct {{
 func (transport *contractTransport) RoundTrip(request *http.Request) (*http.Response, error) {{
 	recorded := contractRequest{{
 		method: request.Method,
-		path:   request.URL.Path,
+		path:   request.URL.EscapedPath(),
 		query:  request.URL.Query(),
 		header: request.Header.Clone(),
 	}}
