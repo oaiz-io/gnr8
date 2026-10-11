@@ -288,6 +288,10 @@ must move the minor version.
   ways, because nothing in its type says which variant a JSON object is. An optional nullable field
   can still send `null` (see Breaking). Generated dataclass `models.py` changes for every object
   model.
+- **A Python form body leaves a `None` field out**, as the Go and TypeScript clients do and as a
+  multipart body already did. It sent the text `None` (`a=x&b=None`) for a nullable field holding
+  `None`, required or optional, in both model styles; a `None` list item is left out too. Generated
+  `client.py` gains `Client._form_fields`.
 - **A Pydantic model's `to_dict` re-encodes a nested model reached through a named alias** (a field
   typed `Inners`, where `Inners` is a list of `Inner`). It stopped at the alias, so `model_dump`
   dropped a required nullable key inside each item, and the model's own `from_dict` rejected the

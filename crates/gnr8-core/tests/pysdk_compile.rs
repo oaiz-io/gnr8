@@ -2926,3 +2926,102 @@ fn an_optional_nullable_field_sends_null_only_when_set_in_both_styles() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A form body with a required string, a required nullable string, an optional nullable string and
+/// an optional list.
+const FORM_NONE_SPEC: &str = r##"openapi: 3.0.3
+info: { title: Form, version: 1.0.0 }
+components:
+  schemas:
+    FormIn:
+      type: object
+      required: [a, c]
+      properties:
+        a: { type: string }
+        b: { type: string, nullable: true }
+        c: { type: string, nullable: true }
+        tags: { type: array, items: { type: string } }
+paths:
+  /f:
+    post:
+      operationId: postF
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/FormIn" }
+      responses:
+        "204": { description: ok }
+"##;
+
+/// Send form bodies to a stdlib server and read back exactly the fields that arrived: a `None`
+/// value — required nullable or optional nullable alike — is no field, never the text `None`.
+const FORM_NONE_DRIVER: &str = r#"
+import threading
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import bookstore
+
+
+class _Handler(BaseHTTPRequestHandler):
+    bodies = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        _Handler.bodies.append(urllib.parse.parse_qs(body, keep_blank_values=True))
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+server = HTTPServer(("127.0.0.1", 0), _Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+try:
+    client = bookstore.Client(
+        f"http://127.0.0.1:{server.server_address[1]}",
+        opener=urllib.request.build_opener(),
+    )
+    client.post_f(bookstore.FormIn(a="x", b=None, c=None))
+    client.post_f(bookstore.FormIn(a="x", b="y", c="z", tags=["p", "q"]))
+    assert _Handler.bodies == [
+        {"a": ["x"]},
+        {"a": ["x"], "b": ["y"], "c": ["z"], "tags": ["p", "q"]},
+    ], _Handler.bodies
+finally:
+    server.shutdown()
+    server.server_close()
+"#;
+
+/// A `None` in a form body is no field in both model styles, as the Go and TypeScript clients send
+/// it, rather than the four characters `None`.
+#[test]
+fn a_none_form_field_is_not_sent_in_both_styles() {
+    if !python_available() {
+        eprintln!("skipping form None test: python3 toolchain unavailable");
+        return;
+    }
+    let mut styles = vec![PyModelStyle::Dataclass];
+    if pydantic_v2_available() {
+        styles.push(PyModelStyle::Pydantic);
+    } else {
+        eprintln!("skipping Pydantic form None test: Pydantic v2 unavailable");
+    }
+    for style in styles {
+        let dir = materialize_spec_sdk("form-none", FORM_NONE_SPEC, style);
+        let driver = dir.join("form_driver.py");
+        std::fs::write(&driver, FORM_NONE_DRIVER).expect("write driver");
+        let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+        assert!(
+            result.is_ok(),
+            "{style:?}: a None form field must not be sent: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

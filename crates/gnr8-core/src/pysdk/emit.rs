@@ -2499,8 +2499,8 @@ class Client:
         if body_encoding == \"json\":
             return json.dumps(value).encode(), content_type
         if body_encoding == \"form\":
-            encoded = urllib.parse.urlencode(value, doseq=True).encode()
-            return encoded, content_type
+            encoded = urllib.parse.urlencode(self._form_fields(value), doseq=True)
+            return encoded.encode(), content_type
         if body_encoding == \"multipart\":
             boundary = f\"gnr8-{{secrets.token_hex(16)}}\"
             return (
@@ -2508,6 +2508,19 @@ class Client:
                 f\"multipart/form-data; boundary={{boundary}}\",
             )
         raise ValueError(f\"unsupported request body encoding: {{body_encoding}}\")
+
+    @staticmethod
+    def _form_fields(value: Any) -> Any:
+        # A `None` is no field, as it is no multipart part: never the text \"None\".
+        if not isinstance(value, dict):
+            return value
+        fields = {{}}
+        for key, item in value.items():
+            if isinstance(item, (list, tuple)):
+                item = [part for part in item if part is not None]
+            if item is not None:
+                fields[key] = item
+        return fields
 
     def _encode_multipart(self, value: Any, boundary: str) -> bytes:
         if not isinstance(value, dict):
