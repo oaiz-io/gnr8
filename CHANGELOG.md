@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.18.2 — 2026-10-11
+
 ### Added
 
 - **Retired flags.** A `CliRenameError` may end in one long flag the command no longer takes:
