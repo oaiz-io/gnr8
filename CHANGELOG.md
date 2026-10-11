@@ -100,8 +100,8 @@ must move the minor version.
   media type the sample uses, are now the values the docs pages and the contract tests send and
   reply with. A body or reply that declares an example is that example, and is not built from its
   fields. Each declared example is checked against its input before anything is sampled, whether a
-  sample uses it or not: its type (an integer within its type's width and sign, a float32 within
-  the float32 range), the required fields, fields the schema does not declare, nullability and
+  sample uses it or not: its type (an integer within its type's width and sign, a `uint64` above
+  `i64::MAX` included, a float32 within the float32 range), the required fields, fields the schema does not declare, nullability and
   every constraint except `pattern`. An integral number is an integer: a declared `5.0` is accepted
   for an integer input and stated as `5`. A field example is read as a value of the field's type,
   so it can state only a scalar: `example:"a,b"` on a `[]string` field is not a list, and an

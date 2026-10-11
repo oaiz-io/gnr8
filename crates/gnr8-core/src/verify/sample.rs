@@ -1840,19 +1840,36 @@ fn enum_candidate(
 }
 
 /// An integer's text: digits (`-12`), or a number with no fraction (`5.0`, `1e3`), which is the same
-/// integer. `None` for anything else or beyond `i64`.
-fn integer_text(text: &str) -> Option<i64> {
+/// integer. `None` for anything else or beyond `i128`. Every integer type's range lies well inside
+/// `i128`, so a `uint64` above `i64::MAX` is read as itself and the type's width decides it.
+fn integer_text(text: &str) -> Option<i128> {
     if !text.contains(['.', 'e', 'E']) {
-        return text.parse::<i64>().ok();
+        return text.parse::<i128>().ok();
     }
     let (mantissa, scale) = exact_decimal(text)?;
     if scale > 0 {
         let power = 10_i128.checked_pow(scale.unsigned_abs())?;
-        return (mantissa % power == 0)
-            .then(|| i64::try_from(mantissa / power).ok())
-            .flatten();
+        return (mantissa % power == 0).then(|| mantissa / power);
     }
-    i64::try_from(mantissa.checked_mul(10_i128.checked_pow(scale.unsigned_abs())?)?).ok()
+    mantissa.checked_mul(10_i128.checked_pow(scale.unsigned_abs())?)
+}
+
+/// An integer as a JSON number: exact within `i64 ∪ u64`, which holds every integer type's range.
+/// One beyond both is no value of any integer type; it is stated as the nearest float, which the
+/// type's width check reads as outside its range rather than as no integer at all.
+fn integer_json(integer: i128) -> Value {
+    if let Ok(signed) = i64::try_from(integer) {
+        return json!(signed);
+    }
+    if let Ok(unsigned) = u64::try_from(integer) {
+        return json!(unsigned);
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "beyond u64 the value is outside every integer range; only its magnitude is read"
+    )]
+    let approximate = integer as f64;
+    json!(approximate)
 }
 
 /// The range of an integer type of `bits` bits, signed or not.
@@ -1885,7 +1902,7 @@ fn parse_member(member: &str, ty: &Type) -> Option<Value> {
         Type::Primitive(Prim::String) | Type::WellKnown(_) | Type::Enum(_) => {
             Some(Value::String(member.to_string()))
         }
-        Type::Primitive(Prim::Int { .. }) => integer_text(member.trim()).map(|n| json!(n)),
+        Type::Primitive(Prim::Int { .. }) => integer_text(member.trim()).map(integer_json),
         Type::Primitive(Prim::Float { .. }) => member
             .trim()
             .parse::<f64>()

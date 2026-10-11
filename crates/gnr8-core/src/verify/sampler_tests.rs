@@ -2295,6 +2295,66 @@ fn a_declared_value_no_call_can_state_is_a_refusal_not_an_error() {
     ));
 }
 
+/// A `uint64` value above `i64::MAX` is an integer of its type: an example stating one is valid,
+/// and is refused as a sample only because no TypeScript `number` carries it exactly, in a request
+/// and a reply alike. One beyond `u64` is outside the type's range. An enum member above `i64::MAX`
+/// is a member, so an enum of only such members is refused with that reason, not left unsampled
+/// as if it had none.
+#[test]
+fn a_uint64_value_above_i64_max_is_an_integer_of_its_type() {
+    let uint64 = json!({"type": "primitive", "of": {"prim": "int", "bits": 64, "signed": false}});
+    let max = "18446744073709551615";
+    let mut param = query("q", &uint64, true, &json!({}));
+    param["example"] = json!(max);
+    let request = probe(&[param.clone()], None, None, &[]);
+    let refused = refusal(&request);
+    assert!(
+        matches!(
+            &refused,
+            SampleRefusal::Declared { limit: super::DeclaredLimit::Integer, value, .. }
+                if value == max
+        ),
+        "{refused:?}"
+    );
+    let field = probe(
+        &[],
+        None,
+        Some(&object(&[example_fld("n", &uint64, true, &json!({}), max)])),
+        &[],
+    );
+    assert!(
+        matches!(
+            reply(&field),
+            SuccessOutcome::Refused(SampleRefusal::Declared {
+                limit: super::DeclaredLimit::Integer,
+                ..
+            })
+        ),
+        "{:?}",
+        reply(&field)
+    );
+
+    param["example"] = json!("18446744073709551616");
+    let beyond = probe(&[param], None, None, &[]);
+    let (_, problem) = invalid_example(sample_operation(&beyond.operations[0], &beyond));
+    assert_eq!(
+        problem,
+        "parameter `q` is outside the range of an unsigned 64-bit integer"
+    );
+
+    let members = probe(
+        &[query("q", &uint64, true, &json!({"enum_values": [max]}))],
+        None,
+        None,
+        &[],
+    );
+    let refused = refusal(&members);
+    assert!(
+        matches!(&refused, SampleRefusal::IntegerWire { .. }),
+        "{refused:?}"
+    );
+}
+
 /// The float-print rule is about what a call sends: a reply is decoded, never printed by a
 /// generated language, so a declared reply float is the reply whatever its spelling. A request float
 /// is narrowed to 32 bits only when its field is a `float32`.
