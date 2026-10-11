@@ -1490,7 +1490,9 @@ fn emit_dataclass(
     // newer server adding a response key no longer crashes the SDK), bind each by its ORIGINAL wire key
     // (json_name), and decode nested dataclasses recursively. Required fields read with `_data["key"]`
     // (a missing required key is a real protocol error → KeyError); omittable fields test for the key
-    // so an absent one keeps the None default.
+    // so an absent one keeps the None default. `ruff format` sets the method one blank line below
+    // the fields.
+    writeln!(out).map_err(sink)?;
     writeln!(out, "    @classmethod").map_err(sink)?;
     writeln!(
         out,
@@ -1522,27 +1524,38 @@ fn emit_dataclass(
             let accessor = format!("_data[\"{wire}\"]");
             let decoded = decode_expr(&field.schema, graph, &accessor);
             if decoded == accessor {
-                writeln!(
+                write_keyword_argument(
                     out,
-                    "            {ident}={accessor} if \"{wire}\" in _data else UNSET,"
-                )
-                .map_err(sink)?;
+                    ident,
+                    &accessor,
+                    &[format!("if \"{wire}\" in _data"), "else UNSET".to_string()],
+                )?;
             } else {
-                writeln!(
+                write_keyword_argument(
                     out,
-                    "            {ident}=UNSET if \"{wire}\" not in _data else ({decoded}) if {accessor} is not None else None,"
-                )
-                .map_err(sink)?;
+                    ident,
+                    "UNSET",
+                    &[
+                        format!("if \"{wire}\" not in _data"),
+                        format!("else ({decoded})"),
+                        format!("if {accessor} is not None"),
+                        "else None".to_string(),
+                    ],
+                )?;
             }
         } else if directions.model_field_is_optional(field) {
             // Omittable: only decode when present (and non-null), else keep the None default. The
             // conditional expression evaluates the decode lazily so a nested model still recurses.
             let decoded_present = decode_expr(&field.schema, graph, &format!("_data[\"{wire}\"]"));
-            writeln!(
+            write_keyword_argument(
                 out,
-                "            {ident}=({decoded_present}) if \"{wire}\" in _data and _data[\"{wire}\"] is not None else None,"
-            )
-            .map_err(sink)?;
+                ident,
+                &format!("({decoded_present})"),
+                &[
+                    format!("if \"{wire}\" in _data and _data[\"{wire}\"] is not None"),
+                    "else None".to_string(),
+                ],
+            )?;
         } else {
             let accessor = format!("_data[\"{wire}\"]");
             let decoded = decode_expr(&field.schema, graph, &accessor);
@@ -1552,11 +1565,15 @@ fn emit_dataclass(
                 // list comprehension over None raises TypeError, and a nested `from_dict(None)` fails
                 // inside. Guard it the way the optional branch does. A passthrough decode needs no
                 // guard: it already yields None.
-                writeln!(
+                write_keyword_argument(
                     out,
-                    "            {ident}=({decoded}) if {accessor} is not None else None,"
-                )
-                .map_err(sink)?;
+                    ident,
+                    &format!("({decoded})"),
+                    &[
+                        format!("if {accessor} is not None"),
+                        "else None".to_string(),
+                    ],
+                )?;
             } else {
                 writeln!(out, "            {ident}={decoded},").map_err(sink)?;
             }
@@ -1564,6 +1581,34 @@ fn emit_dataclass(
     }
     writeln!(out, "        )").map_err(sink)?;
     emit_dataclass_to_dict(out, &emissions, graph, directions)
+}
+
+/// The column limit `ruff format` holds generated Python to.
+const PY_LINE_LIMIT: usize = 88;
+
+/// Write one keyword argument of a dataclass's `from_dict` call: `{ident}={value}` followed by the
+/// clauses of its conditional expression (`if …`, `else …`). It is one line when that fits
+/// [`PY_LINE_LIMIT`], and otherwise one line per clause, which is how `ruff format` splits a
+/// conditional expression that does not fit.
+fn write_keyword_argument(
+    out: &mut String,
+    ident: &str,
+    value: &str,
+    clauses: &[String],
+) -> Result<(), CoreError> {
+    const INDENT: &str = "            ";
+    let line = format!("{INDENT}{ident}={value} {},", clauses.join(" "));
+    if line.chars().count() <= PY_LINE_LIMIT {
+        writeln!(out, "{line}").map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "{INDENT}{ident}={value}").map_err(sink)?;
+    let last = clauses.len().saturating_sub(1);
+    for (index, clause) in clauses.iter().enumerate() {
+        let comma = if index == last { "," } else { "" };
+        writeln!(out, "{INDENT}{clause}{comma}").map_err(sink)?;
+    }
+    Ok(())
 }
 
 /// The models other than `self_name` a dataclass's `from_dict` rebuilds through their own
@@ -1687,21 +1732,26 @@ pub(crate) fn emit_unset() -> String {
 from __future__ import annotations
 
 import enum
+from typing import Literal
 
 
 class Unset(enum.Enum):
     \"\"\"The value of an optional field the caller left out.
 
-    A model sends a field holding ``UNSET`` as no key at all, and ``None`` as an explicit ``null``.
-    Reading a reply, a key the server left out is ``UNSET`` and a ``null`` is ``None``.
+    A model sends a field holding ``UNSET`` as no key at all, and ``None`` as an
+    explicit ``null``. Reading a reply, a key the server left out is ``UNSET`` and a
+    ``null`` is ``None``.
     \"\"\"
 
     UNSET = \"UNSET\"
 
-    def __bool__(self) -> bool:
+    def __bool__(self) -> Literal[False]:
         return False
 
     def __repr__(self) -> str:
+        return \"UNSET\"
+
+    def __str__(self) -> str:
         return \"UNSET\"
 
 
@@ -4500,10 +4550,11 @@ mod tests {
                 emit_models_with_style(&nullable_nested_graph(), "app", PyModelStyle::Dataclass)
                     .unwrap();
 
-            // A list of nested models: guarded, and the recursion is preserved.
+            // A list of nested models: guarded, and the recursion is preserved. The line would
+            // pass 88 columns, so it is split at its clauses as `ruff format` splits it.
             assert!(
                 out.contains(
-                    "items=([Item.from_dict(_item) for _item in _data[\"items\"]]) if _data[\"items\"] is not None else None,"
+                    "            items=([Item.from_dict(_item) for _item in _data[\"items\"]])\n            if _data[\"items\"] is not None\n            else None,\n"
                 ),
                 "nullable list-of-models decode must be null-guarded:\n{out}"
             );

@@ -2910,6 +2910,8 @@ assert P.from_dict({}).name is UNSET
 assert P.from_dict({"name": None}).name is None
 assert not UNSET
 assert repr(UNSET) == "UNSET"
+assert str(UNSET) == "UNSET"
+assert f"{UNSET}" == "UNSET"
 "#;
 
 /// Pydantic style: an unset field reads `None`; `model_fields_set` says whether it was set.

@@ -47,7 +47,8 @@ must move the minor version.
   - A version 1 artifact never held the bounds of the schema an imported parameter names with
     `$ref`. A keyword the current graph holds tighter than the base states reads as the base's
     value, and so does an enum that is a subset of the base's; a keyword loosened or removed is
-    still reported, and `pattern` and `multipleOf` are compared as they are. So on that first
+    still reported, `pattern` is compared as it is, and `multipleOf` as any imported parameter's
+    is (above). So on that first
     comparison, a real tightening stated beside the `$ref` is not reported.
   - An imported base server whose URL is a current server's URL followed by the base graph's base
     path (`https://api.example.com/v1` beside `/v1`, trailing slashes ignored) is the same server.
@@ -56,7 +57,8 @@ must move the minor version.
 - **A Python field that is optional and nullable can be sent as an explicit `null` again**, the
   PATCH that clears a value. A dataclass field of that kind is typed `Union[T, Unset]` and defaults
   to `UNSET`, defined in the new `unset.py` every dataclass SDK carries (`from <package>.unset
-  import UNSET`; falsy, `repr` `UNSET`). `to_dict` sends `UNSET` as no key and `None` as `null`, and
+  import UNSET`; falsy, with `__bool__` typed `Literal[False]` so a type checker narrows on it,
+  and `UNSET` as both `repr` and `str`). `to_dict` sends `UNSET` as no key and `None` as `null`, and
   `from_dict` reads an absent key as `UNSET` and a `null` as `None`, where both used to read `None`.
   Code that tests such a field with `is None` after decoding a reply must test `is UNSET` for an
   absent key. The generated CLI prints `UNSET` as `null`. A Pydantic model's field still reads
@@ -222,6 +224,11 @@ must move the minor version.
   parameters through `wireNumber`, and no longer import `net/url` for a templated path or
   `strconv` for a float query parameter; one that returns a text reply imports `fmt` and
   `unicode/utf8`.
+- **Generated Python dataclass models are laid out as `ruff format` lays them out**: a blank line
+  above `from_dict`, and a `from_dict` argument that would pass 88 columns split at its `if` /
+  `else` clauses. With the `unset.py` docstring wrapped, a dataclass SDK of the FastAPI bookstore
+  fixture passes `ruff check` and `ruff format --check`. A decode expression that is itself wider
+  than 88 columns (a long comprehension) is not split further.
 - **Generated TypeScript operation files define the wire helpers they call**: `wireEscape` when an
   operation has a path or query parameter or a query API key, and `wireQueryString` when it has a
   query parameter or a query API key. `client.ts` carries `_decodeText`.
