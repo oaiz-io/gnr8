@@ -1,0 +1,681 @@
+---
+source: crates/gnr8-core/tests/snapshot_docs.rs
+expression: tree
+---
+--- authentication.md ---
+# Authentication
+
+## `ApiKeyAuth`
+
+API key in header `X-API-Key`.
+
+| SDK | Credential option |
+| --- | --- |
+| Go — `example.com/goalservice/sdk` | `sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey)` |
+
+Required by:
+
+- [`createGoal`](operations/create-goal.md)
+- [`listGoals`](operations/list-goals.md)
+- [`deleteGoal`](operations/delete-goal.md)
+- [`updateGoal`](operations/update-goal.md)
+--- errors.md ---
+# Errors
+
+The generated SDK surfaces a non-success status as its typed error, including a status the API does not declare: Go `*APIError`.
+
+| Status | Body | Operations |
+| --- | --- | --- |
+| `400` | [`HttpError`](schemas/http-error.md) | [`createGoal`](operations/create-goal.md); [`deleteGoal`](operations/delete-goal.md); [`updateGoal`](operations/update-goal.md) |
+--- index.md ---
+# goalservice
+
+- Base path: `/goal`
+
+## Operations
+
+- [`createGoal`](operations/create-goal.md) — `POST /goal/` — Creates a goal for the calling actor.
+- [`listGoals`](operations/list-goals.md) — `GET /goal/list` — Returns a page of goals for the calling actor.
+- [`deleteGoal`](operations/delete-goal.md) — `DELETE /goal/{uuid}` — Permanently removes one goal.
+- [`updateGoal`](operations/update-goal.md) — `PUT /goal/{uuid}` — Replaces the mutable fields of one goal.
+
+## Schemas
+
+- [`CommandMessage`](schemas/command-message.md)
+- [`CommandMessageWithUUID`](schemas/command-message-with-uuid.md)
+- [`CreateGoalInput`](schemas/create-goal-input.md)
+- [`GoalAnalyticsQueryInput`](schemas/goal-analytics-query-input.md)
+- [`GoalAnalyticsQueryOutput`](schemas/goal-analytics-query-output.md)
+- [`GoalResponse`](schemas/goal-response.md)
+- [`HttpError`](schemas/http-error.md)
+- [`ListGoalsOutput`](schemas/list-goals-output.md)
+- [`TargetDirection`](schemas/target-direction.md)
+- [`UpdateGoalInput`](schemas/update-goal-input.md)
+
+## Reference
+
+- [Errors](errors.md)
+- [Authentication](authentication.md)
+
+## Diagnostics
+
+- INFO: free-form map field: GoalResponse.Metadata (map[string]any) lowers to additionalProperties: true (TARGET-API.md §5.1) (internal/common/dto/goal.go:62)
+- WARN: unsupported Gin route pattern: dynamic Gin group prefix; prefix skipped rather than guessed (GO-04) (internal/goal/ports/http.go:52)
+--- llms.txt ---
+# goalservice
+
+## Operations
+
+- [createGoal](operations/create-goal.md): Creates a goal for the calling actor.
+- [listGoals](operations/list-goals.md): Returns a page of goals for the calling actor.
+- [deleteGoal](operations/delete-goal.md): Permanently removes one goal.
+- [updateGoal](operations/update-goal.md): Replaces the mutable fields of one goal.
+
+## Schemas
+
+- [CommandMessage](schemas/command-message.md)
+- [CommandMessageWithUUID](schemas/command-message-with-uuid.md)
+- [CreateGoalInput](schemas/create-goal-input.md)
+- [GoalAnalyticsQueryInput](schemas/goal-analytics-query-input.md)
+- [GoalAnalyticsQueryOutput](schemas/goal-analytics-query-output.md)
+- [GoalResponse](schemas/goal-response.md)
+- [HttpError](schemas/http-error.md)
+- [ListGoalsOutput](schemas/list-goals-output.md)
+- [TargetDirection](schemas/target-direction.md)
+- [UpdateGoalInput](schemas/update-goal-input.md)
+
+## Reference
+
+- [Errors](errors.md)
+- [Authentication](authentication.md)
+--- operations/create-goal.md ---
+# `createGoal`
+
+`POST /goal/`
+
+Creates a goal for the calling actor.
+
+The goal starts in the pending state and is assigned a server-generated
+identifier, which is returned in the response.
+
+## Authentication
+
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
+
+## Request body
+
+Required: yes
+
+| Media type | Schema |
+| --- | --- |
+| `application/json` | [`CreateGoalInput`](../schemas/create-goal-input.md) |
+
+## Responses
+
+| Status | Body | Media types |
+| --- | --- | --- |
+| `201` | [`CommandMessageWithUUID`](../schemas/command-message-with-uuid.md) | `application/json` |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |
+
+## Example
+
+Each value is the example the API declares for it, or else one sampled from the schema, and satisfies every declared constraint. Credentials are placeholders — `{apiKey}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+POST /goal/ HTTP/1.1
+content-type: application/json
+x-api-key: {apiKey}
+
+{
+  "analyticsQuery": {
+    "metric": "gnr8"
+  },
+  "name": "gnr8"
+}
+```
+
+```http
+HTTP/1.1 201
+content-type: application/json
+
+{
+  "message": "gnr8",
+  "uuid": "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234"
+}
+```
+
+The typed-error samples receive this `400` reply:
+
+```http
+HTTP/1.1 400
+content-type: application/json
+
+{
+  "hints": [
+    "gnr8"
+  ],
+  "message": "error message",
+  "slug": "error-slug"
+}
+```
+
+### Go — `example.com/goalservice/sdk`
+
+```go
+import (
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.CreateGoal(ctx, sdk.CreateGoalInput{AnalyticsQuery: sdk.Ptr[sdk.GoalAnalyticsQueryInput](sdk.GoalAnalyticsQueryInput{Metric: "gnr8"}), Name: "gnr8"})
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+
+Handling the `400` reply:
+
+```go
+import (
+	"errors"
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.CreateGoal(ctx, sdk.CreateGoalInput{AnalyticsQuery: sdk.Ptr[sdk.GoalAnalyticsQueryInput](sdk.GoalAnalyticsQueryInput{Metric: "gnr8"}), Name: "gnr8"})
+var apiErr *sdk.APIError
+if errors.As(err, &apiErr) && apiErr.StatusCode == 400 {
+	body, _ := apiErr.Body.(sdk.HttpError)
+	fmt.Printf("%+v\n", body)
+	return nil
+}
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+--- operations/delete-goal.md ---
+# `deleteGoal`
+
+`DELETE /goal/{uuid}`
+
+Permanently removes one goal.
+
+## Authentication
+
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
+
+## Parameters
+
+### Path
+
+| Name | Type | Required |
+| --- | --- | --- |
+| `uuid` | `string` | yes |
+
+## Responses
+
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`CommandMessage`](../schemas/command-message.md) | `application/json` |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |
+
+## Example
+
+Each value is the example the API declares for it, or else one sampled from the schema, and satisfies every declared constraint. Credentials are placeholders — `{apiKey}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+DELETE /goal/gnr8 HTTP/1.1
+x-api-key: {apiKey}
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "message": "gnr8"
+}
+```
+
+The typed-error samples receive this `400` reply:
+
+```http
+HTTP/1.1 400
+content-type: application/json
+
+{
+  "hints": [
+    "gnr8"
+  ],
+  "message": "error message",
+  "slug": "error-slug"
+}
+```
+
+### Go — `example.com/goalservice/sdk`
+
+```go
+import (
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.DeleteGoal(ctx, "gnr8")
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+
+Handling the `400` reply:
+
+```go
+import (
+	"errors"
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.DeleteGoal(ctx, "gnr8")
+var apiErr *sdk.APIError
+if errors.As(err, &apiErr) && apiErr.StatusCode == 400 {
+	body, _ := apiErr.Body.(sdk.HttpError)
+	fmt.Printf("%+v\n", body)
+	return nil
+}
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+--- operations/list-goals.md ---
+# `listGoals`
+
+`GET /goal/list`
+
+Returns a page of goals for the calling actor.
+
+Results are ordered newest first and paginated with an opaque cursor. Pass the
+cursor from the previous page to continue; omit it to start from the beginning.
+
+## Authentication
+
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
+
+## Parameters
+
+### Query
+
+| Name | Type | Required |
+| --- | --- | --- |
+| `aggregation` | `string` | no |
+| `cursor` | `string` | no |
+| `page_size` | `string` | no |
+
+## Responses
+
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`ListGoalsOutput`](../schemas/list-goals-output.md) | `application/json` |
+
+## Example
+
+Each value is the example the API declares for it, or else one sampled from the schema, and satisfies every declared constraint. Credentials are placeholders — `{apiKey}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+GET /goal/list?aggregation=gnr8&cursor=gnr8&page_size=gnr8 HTTP/1.1
+x-api-key: {apiKey}
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "goals": [
+    {
+      "analyticsQuery": {
+        "includePast": true,
+        "metric": "gnr8",
+        "windowDays": 7
+      },
+      "createdAt": "2024-01-02T03:04:05.123Z",
+      "description": "gnr8",
+      "metadata": {},
+      "name": "gnr8",
+      "targetDirection": "gte",
+      "targetValue": 1.5,
+      "uuid": "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234"
+    }
+  ],
+  "nextCursor": "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234",
+  "pageSize": 7,
+  "total": 7
+}
+```
+
+### Go — `example.com/goalservice/sdk`
+
+```go
+import (
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.ListGoals(ctx, sdk.ListGoalsParams{Aggregation: sdk.Ptr[string]("gnr8"), Cursor: sdk.Ptr[string]("gnr8"), PageSize: sdk.Ptr[string]("gnr8")})
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+
+## Diagnostics
+
+- WARN: untyped query param 'cursor' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:46)
+- WARN: untyped query param 'page_size' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:47)
+- WARN: untyped query param 'aggregation' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:48)
+--- operations/update-goal.md ---
+# `updateGoal`
+
+`PUT /goal/{uuid}`
+
+Replaces the mutable fields of one goal.
+
+The goal is identified by its uuid. Fields omitted from the payload are left
+unchanged; the goal's identifier and creation time are never modified.
+
+## Authentication
+
+- [`ApiKeyAuth`](../authentication.md) (API key in header `X-API-Key`)
+
+## Parameters
+
+### Path
+
+| Name | Type | Required |
+| --- | --- | --- |
+| `uuid` | `string` | yes |
+
+## Request body
+
+Required: yes
+
+| Media type | Schema |
+| --- | --- |
+| `application/json` | [`UpdateGoalInput`](../schemas/update-goal-input.md) |
+
+## Responses
+
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`CommandMessage`](../schemas/command-message.md) | `application/json` |
+| `400` | [`HttpError`](../schemas/http-error.md) | `application/json` |
+
+## Example
+
+Each value is the example the API declares for it, or else one sampled from the schema, and satisfies every declared constraint. Credentials are placeholders — `{apiKey}` — and the code samples take them and the base URL as variables. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+PUT /goal/gnr8 HTTP/1.1
+content-type: application/json
+x-api-key: {apiKey}
+
+{}
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "message": "gnr8"
+}
+```
+
+The typed-error samples receive this `400` reply:
+
+```http
+HTTP/1.1 400
+content-type: application/json
+
+{
+  "hints": [
+    "gnr8"
+  ],
+  "message": "error message",
+  "slug": "error-slug"
+}
+```
+
+### Go — `example.com/goalservice/sdk`
+
+```go
+import (
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.UpdateGoal(ctx, "gnr8", sdk.UpdateGoalInput{})
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+
+Handling the `400` reply:
+
+```go
+import (
+	"errors"
+	"fmt"
+
+	"example.com/goalservice/sdk"
+)
+
+client := sdk.NewClient(baseURL, sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey))
+result, err := client.UpdateGoal(ctx, "gnr8", sdk.UpdateGoalInput{})
+var apiErr *sdk.APIError
+if errors.As(err, &apiErr) && apiErr.StatusCode == 400 {
+	body, _ := apiErr.Body.(sdk.HttpError)
+	fmt.Printf("%+v\n", body)
+	return nil
+}
+if err != nil {
+	return err
+}
+fmt.Printf("%+v\n", result)
+```
+--- schemas/command-message-with-uuid.md ---
+# `CommandMessageWithUUID`
+
+Kind: object
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `message` | `string` | yes | no |
+| `uuid` | `string` (`uuid`) | yes | no |
+--- schemas/command-message.md ---
+# `CommandMessage`
+
+Kind: object
+
+## Used by
+
+- [`deleteGoal`](../operations/delete-goal.md)
+- [`updateGoal`](../operations/update-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `message` | `string` | yes | no |
+--- schemas/create-goal-input.md ---
+# `CreateGoalInput`
+
+Kind: object
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryInput`](goal-analytics-query-input.md) | yes | yes |  |
+| `description` | `string` | no | yes | Longer explanation |
+| `name` | `string` | yes | no | Short human-readable goal name |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | yes |  |
+| `targetValue` | `number` | no | yes |  |
+| `workflowChainIds` | array of `string` (`uuid`) | no | yes |  |
+--- schemas/goal-analytics-query-input.md ---
+# `GoalAnalyticsQueryInput`
+
+Kind: object
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+- [`updateGoal`](../operations/update-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| `includePast` | `boolean` | no | yes | Whether to include historical data points |
+| `metric` | `string` | yes | no | Analytics metric to evaluate |
+| `windowDays` | `integer` | no | yes | Rolling window size in days |
+--- schemas/goal-analytics-query-output.md ---
+# `GoalAnalyticsQueryOutput`
+
+Kind: object
+
+## Used by
+
+- [`listGoals`](../operations/list-goals.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| `includePast` | `boolean` | no | no | Whether to include historical data points |
+| `metric` | `string` | yes | no | Analytics metric to evaluate |
+| `windowDays` | `integer` | yes | no | Rolling window size in days |
+--- schemas/goal-response.md ---
+# `GoalResponse`
+
+Kind: object
+
+## Used by
+
+- [`listGoals`](../operations/list-goals.md)
+
+## Fields
+
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryOutput`](goal-analytics-query-output.md) | yes | no |
+| `createdAt` | `string` (`date-time`) | yes | no |
+| `description` | `string` | no | no |
+| `metadata` | `object` (free-form) | no | no |
+| `name` | `string` | yes | no |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | no |
+| `targetValue` | `number` | no | no |
+| `uuid` | `string` (`uuid`) | yes | no |
+--- schemas/http-error.md ---
+# `HttpError`
+
+Kind: object
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+- [`deleteGoal`](../operations/delete-goal.md)
+- [`updateGoal`](../operations/update-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Example |
+| --- | --- | --- | --- | --- |
+| `hints` | array of `string` | no | no |  |
+| `message` | `string` | yes | no | `error message` |
+| `slug` | `string` | no | no | `error-slug` |
+--- schemas/list-goals-output.md ---
+# `ListGoalsOutput`
+
+Kind: object
+
+## Used by
+
+- [`listGoals`](../operations/list-goals.md)
+
+## Fields
+
+| Field | Type | Required | Nullable |
+| --- | --- | --- | --- |
+| `goals` | array of [`GoalResponse`](goal-response.md) | yes | yes |
+| `nextCursor` | `string` (`uuid`) | no | no |
+| `pageSize` | `integer` | yes | no |
+| `total` | `integer` | yes | no |
+--- schemas/target-direction.md ---
+# `TargetDirection`
+
+Kind: enum
+
+## Used by
+
+- [`createGoal`](../operations/create-goal.md)
+- [`listGoals`](../operations/list-goals.md)
+- [`updateGoal`](../operations/update-goal.md)
+
+## Members
+
+- `gte`
+- `lte`
+--- schemas/update-goal-input.md ---
+# `UpdateGoalInput`
+
+Kind: object
+
+## Used by
+
+- [`updateGoal`](../operations/update-goal.md)
+
+## Fields
+
+| Field | Type | Required | Nullable | Description |
+| --- | --- | --- | --- | --- |
+| `analyticsQuery` | [`GoalAnalyticsQueryInput`](goal-analytics-query-input.md) | no | yes |  |
+| `description` | `string` | no | yes | Updated explanation |
+| `name` | `string` | no | yes | Updated goal name |
+| `targetDirection` | [`TargetDirection`](target-direction.md) | no | yes |  |
+| `targetValue` | `number` | no | yes |  |
+| `workflowChainIds` | array of `string` (`uuid`) | no | yes |  |

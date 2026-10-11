@@ -87,7 +87,7 @@ builtin_enum! {
 
 builtin_enum! {
     /// Every built-in target, as a declaration the host executes.
-    BuiltinTarget { OpenApi31, OpenApi31Json, StaticFiles, GoSdk, PySdk, TsSdk }
+    BuiltinTarget { OpenApi31, OpenApi31Json, StaticFiles, StaticDocs, GoSdk, PySdk, TsSdk }
 }
 
 builtin_enum! {
@@ -178,7 +178,15 @@ from_builtins!(
 from_builtins!(
     TargetStage,
     BuiltinTarget,
-    [OpenApi31, OpenApi31Json, StaticFiles, GoSdk, PySdk, TsSdk]
+    [
+        OpenApi31,
+        OpenApi31Json,
+        StaticFiles,
+        StaticDocs,
+        GoSdk,
+        PySdk,
+        TsSdk
+    ]
 );
 from_builtins!(PostStage, BuiltinPost, [FormatCommand, Header]);
 
@@ -321,8 +329,8 @@ impl StagePlan {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{BuiltinTransform, PlanStage, StagePlan};
-    use crate::sdk::builtins::SetTitle;
+    use super::{BuiltinTarget, BuiltinTransform, PlanStage, StagePlan};
+    use crate::sdk::builtins::{SetTitle, StaticDocs};
 
     #[test]
     fn builtin_declarations_round_trip_through_json() {
@@ -360,5 +368,27 @@ mod tests {
         assert_eq!(index, 2);
         assert_eq!(label, "my::Stage");
         assert_eq!(output_anchors, vec!["generated/API.md".to_string()]);
+    }
+
+    #[test]
+    fn static_docs_declaration_round_trips_through_json() {
+        let spec = BuiltinTarget::StaticDocs(StaticDocs::new().to("generated/docs"));
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("\"stage\":\"static_docs\""), "{json}");
+        let back: BuiltinTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.label(), "StaticDocs");
+        let BuiltinTarget::StaticDocs(decl) = back else {
+            panic!("expected the static docs declaration back");
+        };
+        assert_eq!(decl, StaticDocs::new().to("generated/docs"));
+    }
+
+    #[test]
+    fn static_docs_to_sets_the_output_dir() {
+        assert_eq!(StaticDocs::new().dir(), "");
+        assert_eq!(
+            StaticDocs::new().to("generated/docs").dir(),
+            "generated/docs"
+        );
     }
 }

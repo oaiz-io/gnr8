@@ -40,6 +40,7 @@ fn main() -> std::process::ExitCode {
                     .to("generated/sdk")
                     .cli(bookstore_cli("http://127.0.0.1:8080")),
             )
+            .target(StaticDocs::new().to("generated/docs"))
             .post(Header::generated()),
     )
 }

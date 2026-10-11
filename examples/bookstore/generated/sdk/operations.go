@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 )
 
 // ListBooksParams carries the query parameters for ListBooks.
@@ -40,7 +39,7 @@ func (c *Client) ListBooks(ctx context.Context, params ListBooksParams, opts ...
 	if params.Genre != nil {
 		q.Set("genre", *params.Genre)
 	}
-	req.URL.RawQuery = q.Encode()
+	req.URL.RawQuery = encodeWireQuery(q, nil)
 	if selectedAuth["ApiKeyAuth"] {
 		if key := c.apiKeys["ApiKeyAuth"]; key != "" {
 			req.Header.Set("X-API-Key", key)
@@ -188,7 +187,7 @@ func (c *Client) CreateBook(ctx context.Context, in CreateBookRequest, opts ...R
 // DELETE /books/{id}
 func (c *Client) DeleteBook(ctx context.Context, id string, opts ...RequestOption) (ErrorResponse, error) {
 	var out ErrorResponse
-	reqURL := c.baseURL + fmt.Sprintf("/books/%s", url.PathEscape(fmt.Sprint(id)))
+	reqURL := c.baseURL + fmt.Sprintf("/books/%s", wireEscape(fmt.Sprint(id)))
 	selectedAuth := map[string]bool{}
 	if !c.authTransport {
 		if c.apiKeys["ApiKeyAuth"] != "" || c.apiKeys["X-API-Key"] != "" || c.apiKey != "" {
@@ -260,7 +259,7 @@ func (c *Client) DeleteBook(ctx context.Context, id string, opts ...RequestOptio
 // GET /books/{id}
 func (c *Client) GetBook(ctx context.Context, id string, opts ...RequestOption) (Book, error) {
 	var out Book
-	reqURL := c.baseURL + fmt.Sprintf("/books/%s", url.PathEscape(fmt.Sprint(id)))
+	reqURL := c.baseURL + fmt.Sprintf("/books/%s", wireEscape(fmt.Sprint(id)))
 	selectedAuth := map[string]bool{}
 	if !c.authTransport {
 		if c.apiKeys["ApiKeyAuth"] != "" || c.apiKeys["X-API-Key"] != "" || c.apiKey != "" {
@@ -347,7 +346,7 @@ func (c *Client) UpdateBook(ctx context.Context, id string, in UpdateBookRequest
 		return out, err
 	}
 	reqBody := bytes.NewReader(payload)
-	reqURL := c.baseURL + fmt.Sprintf("/books/%s", url.PathEscape(fmt.Sprint(id)))
+	reqURL := c.baseURL + fmt.Sprintf("/books/%s", wireEscape(fmt.Sprint(id)))
 	selectedAuth := map[string]bool{}
 	if !c.authTransport {
 		if c.apiKeys["ApiKeyAuth"] != "" || c.apiKeys["X-API-Key"] != "" || c.apiKey != "" {

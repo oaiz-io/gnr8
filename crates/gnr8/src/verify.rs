@@ -12,6 +12,7 @@
 //! Nothing here decides what the tests assert; that is the graph's job, in `gnr8-engine::verify`.
 
 mod cli_help;
+mod docs;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -58,6 +59,8 @@ pub(crate) struct SuiteReport {
     pub(crate) test_file: String,
     /// How many cases the suite carries.
     pub(crate) cases: usize,
+    /// How many samples the planner refused; counted, not run.
+    pub(crate) refused: usize,
     /// The command line that ran the suite.
     pub(crate) tool: String,
     /// `passed` or `failed`.
@@ -92,6 +95,8 @@ pub(crate) struct VerifyReport {
     pub(crate) suites: Vec<SuiteReport>,
     /// One entry per generated CLI target.
     pub(crate) cli_suites: Vec<cli_help::CliHelpReport>,
+    /// One entry per docs code-sample suite.
+    pub(crate) docs_suites: Vec<docs::DocsReport>,
     /// Per-status suite counts.
     counts: VerifyCounts,
     /// Timing buckets in milliseconds.
@@ -107,6 +112,7 @@ impl VerifyReport {
     pub(crate) fn new(
         suites: Vec<SuiteReport>,
         cli_suites: Vec<cli_help::CliHelpReport>,
+        docs_suites: Vec<docs::DocsReport>,
         timings_ms: VerifyTimings,
         diagnostics: DiagnosticCounts,
         worker: String,
@@ -115,12 +121,20 @@ impl VerifyReport {
             + cli_suites
                 .iter()
                 .filter(|suite| suite.status == cli_help::CliHelpStatus::Passed)
+                .count()
+            + docs_suites
+                .iter()
+                .filter(|suite| suite.status == docs::DocsStatus::Passed)
                 .count();
         let skipped = cli_suites
             .iter()
             .filter(|suite| suite.status == cli_help::CliHelpStatus::Skipped)
-            .count();
-        let failed = suites.len() + cli_suites.len() - passed - skipped;
+            .count()
+            + docs_suites
+                .iter()
+                .filter(|suite| suite.status == docs::DocsStatus::Skipped)
+                .count();
+        let failed = suites.len() + cli_suites.len() + docs_suites.len() - passed - skipped;
         Self {
             verified: failed == 0 && passed > 0,
             counts: VerifyCounts {
@@ -130,6 +144,7 @@ impl VerifyReport {
             },
             suites,
             cli_suites,
+            docs_suites,
             timings_ms,
             diagnostics,
             worker,
@@ -149,6 +164,11 @@ impl VerifyReport {
             .map(|s| (s.label.as_str(), s.status))
             .chain(
                 self.cli_suites
+                    .iter()
+                    .map(|s| (s.label.as_str(), s.status.id())),
+            )
+            .chain(
+                self.docs_suites
                     .iter()
                     .map(|s| (s.label.as_str(), s.status.id())),
             )
@@ -179,8 +199,24 @@ impl VerifyReport {
                 }
             }
         }
+        for suite in &self.docs_suites {
+            if let Some(reason) = &suite.reason {
+                let _ = writeln!(out, "  {}: {}", suite.label, reason.explain());
+            }
+        }
+        for suite in self.suites.iter().filter(|suite| suite.refused > 0) {
+            let _ = writeln!(
+                out,
+                "  {}: {} case{}, {} refused sample{} counted, not run",
+                suite.label,
+                suite.cases,
+                if suite.cases == 1 { "" } else { "s" },
+                suite.refused,
+                if suite.refused == 1 { "" } else { "s" },
+            );
+        }
         if self.no_checks_executed() {
-            out.push_str("no checks executed: all generated CLI help suites were skipped\n");
+            out.push_str("no checks executed: every generated check was skipped\n");
         }
         out
     }
@@ -216,8 +252,80 @@ impl VerifyReport {
                 }
             }
         }
+        for suite in self
+            .docs_suites
+            .iter()
+            .filter(|s| s.status == docs::DocsStatus::Failed)
+        {
+            if let Some(reason) = &suite.reason {
+                messages.push(format!(
+                    "{} check failed: {}",
+                    suite.label,
+                    reason.explain()
+                ));
+            }
+        }
         messages
     }
+}
+
+/// Run every docs code-sample suite the `StaticDocs` target declared.
+pub(crate) fn run_docs_suites(
+    root: &Path,
+    suites: &[gnr8_engine::verify::DocsSnippetSuite],
+    artifacts: &[Artifact],
+) -> Vec<docs::DocsReport> {
+    suites
+        .iter()
+        .zip(docs_suite_labels(suites))
+        .map(|(suite, label)| docs::run(root, suite, artifacts, label))
+        .collect()
+}
+
+/// One distinct label per docs suite: `<Language> docs samples`, then the SDK directory when two
+/// suites share a language, then the docs directory too when they share the SDK — one SDK checked
+/// against the pages of two `StaticDocs` targets.
+fn docs_suite_labels(suites: &[gnr8_engine::verify::DocsSnippetSuite]) -> Vec<String> {
+    let base: Vec<String> = suites
+        .iter()
+        .map(|suite| {
+            format!(
+                "{} docs samples",
+                match suite.language {
+                    ContractTestLanguage::Go => "Go",
+                    ContractTestLanguage::Python => "Python",
+                    ContractTestLanguage::TypeScript => "TypeScript",
+                }
+            )
+        })
+        .collect();
+    let shared = |labels: &[String], label: &str| labels.iter().filter(|l| *l == label).count() > 1;
+    let with_sdk: Vec<String> = suites
+        .iter()
+        .zip(&base)
+        .map(|(suite, label)| {
+            if shared(&base, label) {
+                format!("{label} ({})", suite.sdk_output_path)
+            } else {
+                label.clone()
+            }
+        })
+        .collect();
+    suites
+        .iter()
+        .zip(&base)
+        .zip(&with_sdk)
+        .map(|((suite, label), by_sdk)| {
+            if shared(&with_sdk, by_sdk.as_str()) {
+                format!(
+                    "{label} ({}, docs {})",
+                    suite.sdk_output_path, suite.docs_dir
+                )
+            } else {
+                by_sdk.clone()
+            }
+        })
+        .collect()
 }
 
 /// Run every declared SDK contract suite and report what its tool did.
@@ -354,6 +462,7 @@ fn run_suite(
         output_path: suite.output_path.clone(),
         test_file: suite.test_file.clone(),
         cases: suite.cases,
+        refused: suite.refused,
         tool,
         status,
         duration_ms: duration_ms(started.elapsed()),
@@ -601,7 +710,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{
-        run_python, suite_labels, SuiteReport, VerifyReport, VerifyTimings, FAILED, PASSED,
+        docs_suite_labels, run_python, suite_labels, SuiteReport, VerifyReport, VerifyTimings,
+        FAILED, PASSED,
     };
     use crate::DiagnosticCounts;
     use gnr8_engine::sdk::Artifact;
@@ -615,8 +725,103 @@ mod tests {
             package: "sdk".to_string(),
             test_file: format!("{dir}/contract_test.go"),
             cases: 3,
+            refused: 0,
             go_verification: None,
         }
+    }
+
+    /// Every docs suite gets its own label: two `StaticDocs` targets check one SDK twice, so its
+    /// two suites are told apart by the docs directory.
+    #[test]
+    fn docs_suite_labels_are_distinct() {
+        let docs = |language, sdk: &str, docs: &str| gnr8_engine::verify::DocsSnippetSuite {
+            language,
+            docs_dir: docs.to_string(),
+            sdk_output_path: sdk.to_string(),
+            package: "sdk".to_string(),
+            compile_unit: None,
+            cases: 1,
+            refused: 0,
+            go_verification: None,
+        };
+        let suites = [
+            docs(ContractTestLanguage::Go, "gen/go", "gen/docs-a"),
+            docs(ContractTestLanguage::Python, "gen/py", "gen/docs-a"),
+            docs(ContractTestLanguage::Go, "gen/go", "gen/docs-b"),
+            docs(ContractTestLanguage::Go, "gen/go2", "gen/docs-b"),
+        ];
+        assert_eq!(
+            docs_suite_labels(&suites),
+            vec![
+                "Go docs samples (gen/go, docs gen/docs-a)",
+                "Python docs samples",
+                "Go docs samples (gen/go, docs gen/docs-b)",
+                "Go docs samples (gen/go2)",
+            ]
+        );
+        assert_eq!(
+            docs_suite_labels(&suites[..2]),
+            vec!["Go docs samples", "Python docs samples"]
+        );
+    }
+
+    /// A report with no suites, for tests that assemble one of their own.
+    pub(super) fn empty_report() -> VerifyReport {
+        report(&[])
+    }
+
+    /// A docs suite report with the given status, as the runner would produce it.
+    fn docs_report(status: super::docs::DocsStatus) -> super::docs::DocsReport {
+        super::docs::DocsReport {
+            language: "go",
+            label: "Go docs samples".to_string(),
+            docs_dir: "generated/docs".to_string(),
+            sdk_output_path: "generated/sdk".to_string(),
+            status,
+            cases: 5,
+            refused: 1,
+            tool: "go vet ./...",
+            duration_ms: 1,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn verify_report_counts_docs_suites() {
+        use super::docs::DocsStatus;
+        let base = report(&[("go", PASSED)]);
+        let report = VerifyReport::new(
+            base.suites,
+            Vec::new(),
+            vec![
+                docs_report(DocsStatus::Passed),
+                docs_report(DocsStatus::Skipped),
+                docs_report(DocsStatus::Failed),
+            ],
+            base.timings_ms,
+            base.diagnostics,
+            base.worker,
+        );
+        assert_eq!(report.counts.passed, 2);
+        assert_eq!(report.counts.skipped, 1);
+        assert_eq!(report.counts.failed, 1);
+        assert!(!report.verified, "a failed docs suite fails verify");
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["docs_suites"][0]["status"], "passed");
+        assert_eq!(json["docs_suites"][1]["status"], "skipped");
+        assert_eq!(json["docs_suites"][2]["refused"], 1);
+        assert!(report.render_human().contains("Go docs samples"));
+
+        let base = super::tests::empty_report();
+        let only_docs = VerifyReport::new(
+            Vec::new(),
+            Vec::new(),
+            vec![docs_report(DocsStatus::Passed)],
+            base.timings_ms,
+            base.diagnostics,
+            base.worker,
+        );
+        assert!(only_docs.verified, "a passing docs suite alone verifies");
     }
 
     fn report(statuses: &[(&'static str, &'static str)]) -> VerifyReport {
@@ -629,12 +834,14 @@ mod tests {
                     output_path: "generated/sdk".to_string(),
                     test_file: "generated/sdk/contract_test.go".to_string(),
                     cases: 3,
+                    refused: 0,
                     tool: "go test ./...".to_string(),
                     status,
                     duration_ms: 1,
                     reason: (*status == FAILED).then(|| "boom".to_string()),
                 })
                 .collect(),
+            Vec::new(),
             Vec::new(),
             VerifyTimings {
                 pipeline: 1,
@@ -716,6 +923,7 @@ mod tests {
         sdk_report = VerifyReport::new(
             sdk_report.suites,
             vec![skipped],
+            Vec::new(),
             sdk_report.timings_ms,
             sdk_report.diagnostics,
             sdk_report.worker,
@@ -735,6 +943,7 @@ mod tests {
             vec![super::cli_help::tests::report_for_status(
                 CliHelpStatus::Skipped,
             )],
+            Vec::new(),
             base.timings_ms,
             base.diagnostics,
             base.worker,
@@ -748,6 +957,7 @@ mod tests {
             vec![super::cli_help::tests::report_for_status(
                 CliHelpStatus::Failed,
             )],
+            Vec::new(),
             base.timings_ms,
             base.diagnostics,
             base.worker,
@@ -783,6 +993,7 @@ mod tests {
         let passed = VerifyReport::new(
             Vec::new(),
             vec![a, b],
+            Vec::new(),
             base.timings_ms,
             base.diagnostics,
             base.worker,
@@ -804,6 +1015,7 @@ mod tests {
                     output_path: "generated/sdk".to_string(),
                     test_file: "generated/sdk/contract_test.go".to_string(),
                     cases: 3,
+                    refused: 0,
                     tool: "go test ./...".to_string(),
                     status: PASSED,
                     duration_ms: 1,
@@ -815,12 +1027,14 @@ mod tests {
                     output_path: "generated/sdk-ts".to_string(),
                     test_file: "generated/sdk-ts/contract.test.ts".to_string(),
                     cases: 4,
+                    refused: 2,
                     tool: "tsc && node --test".to_string(),
                     status: PASSED,
                     duration_ms: 2,
                     reason: None,
                 },
             ],
+            Vec::new(),
             Vec::new(),
             VerifyTimings {
                 pipeline: 1,
@@ -838,7 +1052,8 @@ mod tests {
 
         assert_eq!(
             report.render_human(),
-            "Go SDK          passed\nTypeScript SDK  passed\n"
+            "Go SDK          passed\nTypeScript SDK  passed\n  TypeScript SDK: 4 cases, 2 \
+             refused samples counted, not run\n"
         );
     }
 
@@ -915,6 +1130,7 @@ mod tests {
             package: "sdk".to_string(),
             test_file: "generated/sdk/contract_test.py".to_string(),
             cases: 1,
+            refused: 0,
             go_verification: None,
         }
     }
@@ -989,6 +1205,7 @@ mod tests {
         assert_eq!(value["suites"][0]["language"], serde_json::json!("go"));
         assert_eq!(value["suites"][0]["status"], serde_json::json!("passed"));
         assert_eq!(value["suites"][0]["cases"], serde_json::json!(3));
+        assert_eq!(value["suites"][0]["refused"], serde_json::json!(0));
         assert!(value["timings_ms"]["tests"].is_number());
         assert!(value["diagnostics"]["total"].is_number());
     }

@@ -1,0 +1,96 @@
+# `list_books`
+
+`GET /books/`
+
+List books in one genre.
+
+Results are ordered by title and paginated with an opaque cursor. Pass the
+cursor from the previous page to continue; omit it to start from the
+beginning.
+
+## Parameters
+
+### Query
+
+| Name | Type | Required |
+| --- | --- | --- |
+| `cursor` | `string` | no |
+| `genre` | `string` | yes |
+| `sort` | `string` | no |
+
+## Responses
+
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`ListBooksResponse`](../schemas/list-books-response.md) | `application/json` |
+
+## Example
+
+Each value is the example the API declares for it, or else one sampled from the schema, and satisfies every declared constraint. The code samples take the base URL as a variable. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+GET /books/?cursor=gnr8&genre=gnr8&sort=gnr8 HTTP/1.1
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "books": [
+    {
+      "author": {
+        "bio": "gnr8",
+        "name": "gnr8"
+      },
+      "format": "hardcover",
+      "id": 7,
+      "rating": 7,
+      "tags": [
+        "gnr8"
+      ],
+      "title": "gnr8"
+    }
+  ],
+  "next_cursor": "gnr8",
+  "total": 7
+}
+```
+
+### Python — `sdk`
+
+```python
+from sdk import Client
+
+client = Client(base_url)
+result = client.list_books(cursor="gnr8", genre="gnr8", sort="gnr8")
+print(result)
+```
+
+Iterating over every item of every page:
+
+```python
+from sdk import Client
+
+client = Client(base_url)
+for item in client.iter_list_books(genre="gnr8", sort="gnr8"):
+    print(item)
+```
+
+### CLI — `bookstore`
+
+`bookstore books list`
+
+```sh
+bookstore books list --genre fiction
+```
+
+## Pagination
+
+- Mode: `cursor`
+- Items field: `books`
+- Cursor parameter: `cursor`
+- Next-cursor field: `next_cursor`
+- Stops when the next cursor is absent, empty or null.

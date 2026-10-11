@@ -403,3 +403,21 @@ fn nestjs_to_openapi_is_byte_identical_across_two_runs() {
         "two NestJS to_openapi runs over unchanged source must be byte-identical (idempotent lowering)"
     );
 }
+
+#[path = "support/docs_pipeline.rs"]
+mod docs_pipeline;
+
+/// Rung 1 for the docs target: the same graph and declarations give the same bytes, page for page.
+#[test]
+fn docs_are_byte_identical_across_two_generations() {
+    let go = || gnr8_engine::sdk::prelude::GoSdk::new().module("example.com/goalservice/sdk");
+    let Some(first) = docs_pipeline::goalservice(go()) else {
+        return;
+    };
+    let Some(second) = docs_pipeline::goalservice(go()) else {
+        return;
+    };
+    let pages = first.pages();
+    assert!(pages.len() > 10, "{:?}", pages.keys().collect::<Vec<_>>());
+    assert_eq!(pages, second.pages());
+}

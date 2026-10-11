@@ -16,7 +16,7 @@ impl SdkDocs {
         Self { reference: false }
     }
 
-    /// Emit the historical gnr8 `README.md` and `reference.md` files.
+    /// Emit the SDK's `README.md` and `reference.md`, rendered from the docs model.
     #[must_use]
     pub fn reference() -> Self {
         Self { reference: true }

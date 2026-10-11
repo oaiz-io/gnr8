@@ -554,11 +554,11 @@ fn assert_typescript_client(ts_client: &str) {
     assert!(ts_client.contains("get files(): FilesApi"), "{ts_client}");
     assert!(ts_client.contains("get items(): ItemsApi"), "{ts_client}");
     assert!(
-        ts_client.contains("encodeURIComponent(String(itemId))"),
+        ts_client.contains("wireEscape(String(itemId))"),
         "{ts_client}"
     );
     assert!(
-        ts_client.contains("encodeURIComponent(String(childId))"),
+        ts_client.contains("wireEscape(String(childId))"),
         "{ts_client}"
     );
     assert!(
@@ -1247,6 +1247,172 @@ fn go_gin_contract_pipeline_generates_expected_sdk_surfaces() {
             file.path
         );
     }
+}
+
+/// The Go contract test of the richest committed graph — multi-representation bodies, bounds,
+/// `dive` items — byte for byte. Recorded before the call-site renderer was lifted out of the
+/// contract emitter; the constraint-respecting sampler re-accepts it, and says why.
+#[test]
+fn go_contract_test_text_snapshot_for_gin_regression() {
+    let Some(outcome) = run_pipeline() else {
+        return;
+    };
+    insta::assert_snapshot!(
+        "go_contract_test_gin_regression",
+        artifact(&outcome, "generated/go/contract_test.go")
+    );
+}
+
+/// Walk a sampled JSON value against its type, asserting `satisfies` for every field that carries
+/// constraints. Returns how many constrained values were checked.
+fn assert_value_satisfies(
+    graph: &ApiGraph,
+    value: &serde_json::Value,
+    ty: &Type,
+    constraints: &gnr8_engine::analyze::facts::Constraints,
+    subject: &str,
+) -> usize {
+    use gnr8_engine::verify::satisfies;
+    let mut checked = 0;
+    if !constraints.is_empty() {
+        satisfies(value, constraints)
+            .unwrap_or_else(|violation| panic!("{subject} = {value}: {violation}"));
+        checked += 1;
+    }
+    let none = gnr8_engine::analyze::facts::Constraints::default();
+    match ty {
+        Type::Named(id) => {
+            let schema = graph
+                .schemas
+                .iter()
+                .find(|schema| &schema.id == id)
+                .unwrap_or_else(|| panic!("dangling {id}"));
+            checked += assert_value_satisfies(graph, value, &schema.body, &none, subject);
+        }
+        Type::Object(fields) => {
+            for field in fields {
+                if let Some(entry) = value.get(&field.json_name) {
+                    checked += assert_value_satisfies(
+                        graph,
+                        entry,
+                        &field.schema,
+                        &field.meta.constraints,
+                        &format!("{subject}.{}", field.json_name),
+                    );
+                }
+            }
+        }
+        Type::Array(items) => {
+            for item in value.as_array().into_iter().flatten() {
+                checked += assert_value_satisfies(graph, item, items, &none, subject);
+            }
+        }
+        Type::Map { value: item, .. } => {
+            for entry in value.as_object().into_iter().flat_map(|map| map.values()) {
+                checked += assert_value_satisfies(graph, entry, item, &none, subject);
+            }
+        }
+        _ => {}
+    }
+    checked
+}
+
+/// S1's real-graph test. Its oracle is S1's own predicate, so it cannot catch a misreading of the
+/// source's semantics (inclusive versus exclusive bounds, how a bound string parses);
+/// `generated_sdks_compile` — which runs the generated Go contract test — is the independent check.
+#[test]
+fn gin_regression_samples_satisfy_every_declared_constraint() {
+    use gnr8_engine::verify::{
+        sample_operation, satisfies, Sampled, SuccessOutcome, SuccessSample,
+    };
+    let Some(outcome) = run_pipeline() else {
+        return;
+    };
+    let graph = graph_artifact(&outcome).graph;
+    let mut checked = 0;
+    let mut sampled_operations = 0;
+    for op in &graph.operations {
+        let Sampled::Sample(sample) = sample_operation(op, &graph).expect("no graph error") else {
+            continue;
+        };
+        sampled_operations += 1;
+        for param in &sample.params {
+            let declared = op
+                .params
+                .iter()
+                .find(|candidate| {
+                    candidate.name == param.name && candidate.location == param.location
+                })
+                .expect("a sampled parameter is declared");
+            satisfies(&param.value, &declared.constraints).unwrap_or_else(|violation| {
+                panic!(
+                    "{} {}.{} = {}: {violation}",
+                    op.id, param.location, param.name, param.value
+                )
+            });
+            if !declared.constraints.is_empty() {
+                checked += 1;
+            }
+        }
+        for body in &sample.bodies {
+            checked += assert_value_satisfies(
+                &graph,
+                &body.value,
+                &Type::Named(body.schema_id.clone()),
+                &gnr8_engine::analyze::facts::Constraints::default(),
+                &format!("{} body", op.id),
+            );
+        }
+        if let SuccessOutcome::Sample(SuccessSample {
+            model: Some(model),
+            body,
+            ..
+        }) = &sample.reply
+        {
+            let schema = graph
+                .schemas
+                .iter()
+                .find(|schema| &schema.name == model)
+                .expect("the success model is a graph schema");
+            let value: serde_json::Value = serde_json::from_str(body).expect("the reply is JSON");
+            checked += assert_value_satisfies(
+                &graph,
+                &value,
+                &schema.body,
+                &gnr8_engine::analyze::facts::Constraints::default(),
+                &format!("{} reply", op.id),
+            );
+        }
+    }
+    assert!(
+        sampled_operations > 10,
+        "only {sampled_operations} operations sampled"
+    );
+    assert!(
+        checked >= 8,
+        "only {checked} constrained values were checked"
+    );
+
+    // The values the constraint-blind sampler got wrong: `count` (`gte=-5,lte=5`) was 7 and `ratio`
+    // (`min=0.25,max=0.75`) was 1.5.
+    let native = graph
+        .operations
+        .iter()
+        .find(|op| op.params.iter().any(|param| param.name == "ratio"))
+        .expect("the native binding operation");
+    let Sampled::Sample(sample) = sample_operation(native, &graph).unwrap() else {
+        panic!("the native binding operation samples");
+    };
+    let value = |name: &str| {
+        sample
+            .params
+            .iter()
+            .find(|param| param.name == name)
+            .map(|param| param.value.clone())
+    };
+    assert_eq!(value("count"), Some(serde_json::json!(5)));
+    assert_eq!(value("ratio"), Some(serde_json::json!(0.75)));
+    assert_eq!(value("limit"), Some(serde_json::json!(7)));
 }
 
 #[test]

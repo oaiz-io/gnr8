@@ -38,7 +38,7 @@ diagnostics.
 | `generate` | Run the pipeline and reconcile generated files | yes |
 | `watch` | Regenerate after source changes | yes |
 | `check` | Detect generated drift without writing | no |
-| `verify` | Run generated SDK contract tests and Go/Python CLI help checks | no |
+| `verify` | Run generated SDK contract tests, Go/Python CLI help checks and docs code samples | no |
 | `changes` | Classify API changes against a committed graph artifact | no |
 | `inspect` | Explain extracted routes, schemas, or graph | no |
 | `doctor` | Diagnose workspace, output, and pipeline health | no |
@@ -131,8 +131,9 @@ gnr8 verify
 gnr8 --json verify
 ```
 
-Runs the pipeline, then runs generated SDK contract tests and every selected Go/Python CLI
-command's `--help`:
+Runs the pipeline, then runs generated SDK contract tests, every selected Go/Python CLI command's
+`--help`, and every SDK code sample a docs file prints — on `StaticDocs` pages, and in each SDK's own
+`README.md` and `reference.md`:
 
 ```text
 Go SDK              passed
@@ -140,6 +141,7 @@ Python SDK          passed
 TypeScript SDK      passed
 Go CLI catalog      passed
 Python CLI catalog  passed
+Go docs samples     passed
 ```
 
 Each SDK target emits a contract test beside its sources — `contract_test.go`, `contract_test.py`,
@@ -153,6 +155,14 @@ Cases are sampled per wire-shape class rather than per operation — one represe
 request shape, success model, error status and security scheme, capped at 24 cases per target — so a
 large API still emits a suite that runs quickly. `.without_contract_tests()` on a target stops the
 file being emitted. CLI help checks remain enabled for targets with `.cli(...)`.
+
+A case sends the same constraint-respecting sample a docs page prints. An input the sampler refuses —
+a required parameter or body it cannot construct, a success reply or a declared error model with no
+satisfying value — skips the cases that need it, and the suite counts every such refused sample: the
+human report prints `N cases, M refused samples counted, not run` under the suite, and JSON carries
+`refused` beside `cases`. A `pattern` refuses nothing here: gnr8 never synthesizes a value for one,
+and no generated SDK validates one, so the case sends the sample with the pattern unmet (a docs page,
+which promises schema-satisfying values, prints the refusal instead).
 
 Generated CLI checks cover root help, every effective topic and sub-noun prefix, and every selected
 operation command. Command selectors, declared verbs and groups determine the argument vectors;
@@ -183,10 +193,27 @@ executable. A nonzero probe, permission error, build/import failure, missing ent
 help is a failure. SDK toolchain failures retain their failure policy. A missing Go formatter can
 stop pipeline generation before the CLI probe, with exit 2.
 
+Docs suites check the SDK code samples gnr8 prints (see
+[Static docs generation](../static-docs/generation.md#how-the-pages-are-verified)). A pipeline that
+declares `StaticDocs` gets one suite per sibling SDK target for each `StaticDocs` target; its pages
+live in the `StaticDocs` directory, and an SDK that writes its docs must print the same samples in
+its `README.md` and `reference.md`. A pipeline without `StaticDocs` gets one suite per SDK target
+that writes its `README.md` and `reference.md` (the default) and emits package metadata; its pages
+are those two files, in the SDK's own directory. An SDK target with no package metadata prints no
+sample, so without `StaticDocs` it has no docs suite at all. Each suite first requires every page it
+checks among this run's fresh artifacts and every block a sample relies on printed verbatim in it,
+after post-processors. Then it runs the language's tool over the samples (rung 2), and runs each
+sample's call against a recording transport that answers with the reply the page prints, comparing
+the request sent with the page's HTTP exchange and asserting the call's outcome (rung 3). A suite is
+skipped — with the reason — when its SDK target emits no package metadata (no published import
+name; with `StaticDocs` only), when its toolchain is missing (no `go`, no `python3`, no `node`, or
+`node` without a `typescript` compiler), or when every operation's sample is refused (the count is
+reported; nothing runs).
+
 Exit 0 requires at least one passing suite and no failing suite; mixed passing/skipped results list
-the skips and pass. An all-skipped CLI-only run reports `verified: false`, explains that no checks
-executed, and exits 1. Any suite failure exits 1. Startup failures (no `.gnr8/`, a pipeline failure,
-or neither SDK contract tests nor generated CLI help checks) exit 2.
+the skips and pass. A run in which every suite was skipped reports `verified: false`, explains that
+no checks executed, and exits 1. Any suite failure exits 1. Startup failures (no `.gnr8/`, a
+pipeline failure, or no SDK contract test, generated CLI help check or docs sample to run) exit 2.
 
 The tools it runs, and the toolchains they need:
 
@@ -197,12 +224,22 @@ The tools it runs, and the toolchains they need:
 | Go CLI | One `go build` with the same module environment, then binary `--help` per vector | `go` |
 | Python CLI | One importlib/runpy harness, invoked per command vector | `python3` |
 | TypeScript SDK | the project's own `typescript`, then `node --test` | `node` + a resolvable `typescript` |
+| Go docs samples | `go vet ./...`, then `go test` of the samples' recording harness | `go` |
+| Python docs samples | the samples' `unittest` module (stub, then recording transport) | `python3` + the SDK's dependencies |
+| TypeScript docs samples | the project's `typescript` (`tsc -p`, gate options), then `node` | `node` + a resolvable `typescript` |
 
-JSON retains SDK results in `suites` and adds `cli_suites` with language, program, output path,
-planned case count, tool, duration, status, typed reason and per-command results. Failure reasons
-carry the command arguments, exit code when available and captured output excerpt. Human reports
-label CLI rows separately; repeated labels include the output path. `counts.passed`, `counts.failed`
-and `counts.skipped` count target suites across both arrays. `timings_ms`, `diagnostics` and `worker`
+JSON retains SDK results in `suites` (each with its `cases` and `refused` counts) and adds `cli_suites` with language, program, output path,
+planned case count, tool, duration, status, typed reason and per-command results, and `docs_suites`
+with language, label, docs and SDK output paths (`docs_dir` is the `StaticDocs` directory, or the
+SDK's own directory for a suite that checks its `README.md` and `reference.md`), the checked and
+refused sample counts, tool,
+duration, status and a typed reason (`no_consumer_identity`, `toolchain_absent`, `no_samples`,
+`missing_page`, `snippet_not_in_page`, `materialization`, `rejected`, `wire_mismatch`) naming the
+operation and page when one is at fault. Failure reasons carry the command arguments, exit code when
+available and captured output excerpt. Human reports label CLI and docs rows separately; repeated
+labels include the output path, and a docs label still repeated (one SDK checked against two
+`StaticDocs` targets) also names the docs directory. `counts.passed`, `counts.failed` and `counts.skipped` count target
+suites across all three arrays. `timings_ms`, `diagnostics` and `worker`
 retain their existing meanings.
 
 ## `changes`

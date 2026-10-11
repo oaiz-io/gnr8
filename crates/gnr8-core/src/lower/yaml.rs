@@ -536,6 +536,12 @@ fn write_schema_constraints(out: &mut String, schema: &SchemaObject, pad: &str) 
             number_or_scalar(exclusive_maximum)
         );
     }
+    if let Some(multiple_of) = &schema.multiple_of {
+        let _ = writeln!(out, "{pad}multipleOf: {}", number_or_scalar(multiple_of));
+    }
+    if schema.unique_items {
+        let _ = writeln!(out, "{pad}uniqueItems: true");
+    }
     if let Some(pattern) = &schema.pattern {
         let _ = writeln!(out, "{pad}pattern: {}", scalar(pattern));
     }

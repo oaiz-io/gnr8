@@ -13,6 +13,7 @@
 //! across runs and never panics (RUST-04). [`write_to_dir`](crate::sdk::bundle::write_to_dir)
 //! materializes the same framing.
 
+pub(crate) mod callsite;
 mod cli;
 mod contract;
 mod emit;
@@ -30,6 +31,10 @@ use crate::sdk::emit_common::{
 };
 use crate::sdk::layout::{OperationFileSplit, SdkFileLayout};
 use crate::sdk::model_style::PyModelStyle;
+
+/// The Python SDK's typed error for a rejected HTTP response: the one spelling every emitted file,
+/// the generated CLI and contract tests, and every docs page name it by.
+pub(crate) const ERROR_TYPE: &str = "ApiError";
 
 /// Generate the Python SDK as a deterministic multi-file bundle String (D-06, PYSDK-01).
 ///
@@ -225,6 +230,13 @@ pub(crate) fn generate_files_with_options(
         contents: emit::emit_multipart(),
     });
 
+    if model_style == PyModelStyle::Dataclass {
+        files.push(SdkFile {
+            name: "unset.py".to_string(),
+            contents: emit::emit_unset(),
+        });
+    }
+
     if split_operations {
         files.extend(generate_operation_files(
             graph,
@@ -314,6 +326,7 @@ pub(crate) fn generate_files_with_options(
                 dep_modules,
                 directions_of(&directions, &schema.id),
                 &python_relative_module(&name, "multipart.py"),
+                &python_relative_module(&name, "unset.py"),
             )?;
             Ok(SdkFile { name, contents })
         })?);
@@ -434,7 +447,11 @@ fn emit_operation_file(
 
     let mut out = String::from("from __future__ import annotations\n\n");
     out.push_str("import json\n");
-    out.push_str("import urllib.parse\n");
+    // A path segment is encoded by `Client._path_segment`, so only a cookie parameter's encoding
+    // still spells `urllib.parse` in an operation body.
+    if body.contains("urllib.parse.") {
+        out.push_str("import urllib.parse\n");
+    }
     if ops.iter().any(|op| {
         graph
             .pagination

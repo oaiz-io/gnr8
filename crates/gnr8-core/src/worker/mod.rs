@@ -654,6 +654,8 @@ pub struct PipelineRun {
     pub outcome: crate::pipeline::PipelineOutcome,
     /// How this run obtained the worker binary it ran.
     pub worker_origin: WorkerOrigin,
+    /// The stage plan the run executed.
+    pub plan: StagePlan,
 }
 
 /// Run a complete generation for `project_root`: build/start the worker, run the plan, stop.
@@ -675,6 +677,7 @@ pub fn run_pipeline(
     Ok(PipelineRun {
         outcome,
         worker_origin,
+        plan,
     })
 }
 

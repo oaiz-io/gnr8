@@ -39,6 +39,7 @@ use super::emit::{
     go_request_body_variant_names, go_type, lower_camel, operation_method_name,
     ordered_path_params,
 };
+use super::ERROR_TYPE;
 
 fn sink(error: std::fmt::Error) -> CoreError {
     CoreError::SdkGen {
@@ -5131,7 +5132,7 @@ if requestID != "" { limit-- }
         .map_err(sink)?;
         writeln!(out, "}}").map_err(sink)?;
     }
-    writeln!(out, "var apiErr *{package}.APIError").map_err(sink)?;
+    writeln!(out, "var apiErr *{package}.{ERROR_TYPE}").map_err(sink)?;
     writeln!(out, "if errors.As(err, &apiErr) {{").map_err(sink)?;
     writeln!(out, "code := exitCodeForStatus(apiErr.StatusCode)").map_err(sink)?;
     writeln!(

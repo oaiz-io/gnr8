@@ -81,6 +81,7 @@ fn main() -> std::process::ExitCode {
                     // the program's own facts: its name, and the host it talks to by default
                     .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8080")),
             )
+            .target(StaticDocs::new().to("generated/docs"))    // Markdown reference + llms.txt
             .post(Header::generated()),                         // "DO NOT EDIT" banner on every .go
     )
 }

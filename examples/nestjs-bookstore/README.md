@@ -69,7 +69,14 @@ fn main() -> std::process::ExitCode {
             .source(NestJs::new().inputs(["src"]))             // analyze the src/ tree
             .transform(SetTitle::new("Bookstore API"))         // OpenAPI info.title
             .target(OpenApi31::new().to("generated/openapi.yaml"))
-            .target(TsSdk::new().module("example.com/bookstore/sdk").to("generated/sdk"))
+            .target(
+                TsSdk::new()
+                    .module("example.com/bookstore/sdk")
+                    // a published name: what the docs samples import
+                    .package(SdkPackageMetadata::new().registry_name("@example/bookstore-sdk"))
+                    .to("generated/sdk"),
+            )
+            .target(StaticDocs::new().to("generated/docs"))    // Markdown reference + llms.txt
             .post(Header::generated()),                         // "DO NOT EDIT" banner on every .ts
     )
 }

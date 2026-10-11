@@ -215,7 +215,6 @@ components:
       properties:
         hints:
           type: array
-          example: hint 1,hint 2
           items:
             type: string
         message:

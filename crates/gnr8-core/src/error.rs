@@ -154,6 +154,29 @@ pub enum CoreError {
         message: String,
     },
 
+    /// The `StaticDocs` target could not render its reference from the graph: a page name it cannot
+    /// form, two subjects with one page, a fact a page cannot state, or a rung-0 failure.
+    #[error("docs generation failed: {message}")]
+    DocsGen {
+        /// Human-readable failure detail.
+        message: String,
+    },
+
+    /// A declared example is not a value of the input it is declared for.
+    ///
+    /// A field's `example` and an operation's request or response `MediaExample` are inputs to the
+    /// one sampler behind the `StaticDocs` pages and the contract tests. One that breaks its own
+    /// input — its type, a required field, a field the schema does not declare, or a declared
+    /// constraint — fails generation. It is never skipped, and never replaced by a sampled value.
+    #[error("invalid declared example: {example}: {problem}")]
+    InvalidExample {
+        /// Which example, named by where it is declared: the schema and field, or the operation,
+        /// the request or response status, the example's name and its media type.
+        example: String,
+        /// What is wrong, naming the value inside the example and the type or constraint it breaks.
+        problem: String,
+    },
+
     /// The `gofmt` subprocess ran but exited with a non-zero status (Phase 3 / SDK formatting).
     ///
     /// Mirrors the [`Self::HelperExit`] shape (exit `code` + captured `stderr`) and is kept distinct
@@ -261,7 +284,10 @@ pub enum CoreError {
 
     /// The committed base graph artifact uses a different on-disk schema.
     #[error(
-        "base graph artifact at '{reference}:{path}' has schema version {found}; expected {expected}"
+        "base graph artifact at '{reference}:{path}' has schema version {found}; expected \
+         {expected}: it represents the graph differently, so comparing it would report changes \
+         the API did not make. Compare against a revision whose `{path}` this gnr8 wrote (run \
+         `gnr8 generate` and commit it first)"
     )]
     BaseGraphSchemaVersion {
         /// User-provided revision expression.

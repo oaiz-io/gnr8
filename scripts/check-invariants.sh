@@ -97,8 +97,11 @@ check_rule "foreign annotation/generator coupling" \
 #   - host/child protocol and wire/serialization compatibility (gnr8's own formats)
 #   - "compatible"/"compatibility" describing runtime or toolchain requirements
 #   - Swagger 2.0 / OpenAPI 3.x as SPEC FORMATS we import (tool-neutral)
+#
+# The word itself is matched in any case — a sentence-case doc heading must not slip past a
+# lowercase-only match, and no test should have to spell the word in pieces to check for it.
 check_rule "brownfield/compatibility product surface" \
-  '(brownfield|SdkProfile|SdkTypeAliases|SdkOperationAliases|OpenApiSchemaAliases|clone_alias|GoExecuteCompatibility|GoRequestBuilderAliases|GoQuerySetterArgumentPolicy|RequiredPointerConstructorPolicy|TsModelPropertyPolicy|TsNullablePolicy|TsResponsePolicy|TsBarrelExports|legacy-bundle)' \
+  '([Bb]rownfield|BROWNFIELD|SdkProfile|SdkTypeAliases|SdkOperationAliases|OpenApiSchemaAliases|clone_alias|GoExecuteCompatibility|GoRequestBuilderAliases|GoQuerySetterArgumentPolicy|RequiredPointerConstructorPolicy|TsModelPropertyPolicy|TsNullablePolicy|TsResponsePolicy|TsBarrelExports|legacy-bundle)' \
   ''
 
 # 0.3 — vocabulary discipline for identifiers. Deliberately narrow: it targets DECLARATIONS

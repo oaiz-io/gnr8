@@ -2613,3 +2613,464 @@ fn generated_cli_python_command_spec_keeps_the_output_contract() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A model nested in every shape a field's type can carry it in: through a named alias of a list
+/// and of a map, inside a list of lists and a map, and as one variant of a union. `note` is a
+/// required nullable key, which `model_dump` drops unless the nested model's own `to_dict` puts
+/// it back.
+const NESTED_MODELS_SPEC: &str = r##"openapi: 3.1.0
+info: { title: Nested, version: 1.0.0 }
+components:
+  schemas:
+    Inner:
+      type: object
+      required: [label, note]
+      properties:
+        label: { type: string }
+        note: { type: [string, "null"] }
+    Inners: { type: array, items: { $ref: "#/components/schemas/Inner" } }
+    InnerMap: { type: object, additionalProperties: { $ref: "#/components/schemas/Inner" } }
+    Holder:
+      type: object
+      required: [list]
+      properties:
+        list: { $ref: "#/components/schemas/Inners" }
+        nested: { type: array, items: { type: array, items: { $ref: "#/components/schemas/Inner" } } }
+        by_key: { type: object, additionalProperties: { $ref: "#/components/schemas/Inner" } }
+        alias_map: { $ref: "#/components/schemas/InnerMap" }
+        choice:
+          oneOf:
+            - { $ref: "#/components/schemas/Inner" }
+            - { type: string }
+paths:
+  /h:
+    post:
+      operationId: postH
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Holder" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Holder" }
+"##;
+
+/// Generate the Python SDK for `spec` in `style` into a fresh dir as the importable `bookstore`
+/// package, returning the dir.
+fn materialize_spec_sdk(label: &str, spec: &str, style: PyModelStyle) -> PathBuf {
+    materialize_spec_sdk_with_layout(label, spec, style, SdkFileLayout::compact())
+}
+
+/// [`materialize_spec_sdk`] in the file `layout`.
+fn materialize_spec_sdk_with_layout(
+    label: &str,
+    spec: &str,
+    style: PyModelStyle,
+    layout: SdkFileLayout,
+) -> PathBuf {
+    use gnr8_engine::sdk::prelude::*;
+
+    let dir = unique_temp_dir(label);
+    std::fs::write(dir.join("openapi.yaml"), spec).expect("write spec");
+    let target = PySdk::new()
+        .module(format!("example.com/{PACKAGE}"))
+        .layout(layout)
+        .to(PACKAGE);
+    let target = match style {
+        PyModelStyle::Dataclass => target.dataclasses(),
+        PyModelStyle::Pydantic => target.pydantic(),
+    };
+    let pipeline = Pipeline::new()
+        .source(OpenApi::new().input("openapi.yaml"))
+        .target(target);
+    let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&dir), None)
+        .expect("pipeline must generate");
+    for artifact in &outcome.artifacts {
+        let path = dir.join(&artifact.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &artifact.text).expect("write artifact");
+    }
+    dir
+}
+
+/// Decode a payload carrying a model in every shape, and encode it back.
+const NESTED_PAYLOAD: &str = r#"
+import json
+import bookstore
+
+def inner(label):
+    return {"label": label, "note": None}
+
+
+payload = {
+    "list": [inner("a")],
+    "nested": [[inner("b")]],
+    "by_key": {"k": inner("c")},
+    "alias_map": {"m": inner("d")},
+    "choice": inner("e"),
+}
+decoded = bookstore.Holder.from_dict(payload)
+assert isinstance(decoded.list_[0], bookstore.Inner), decoded.list_
+assert isinstance(decoded.nested[0][0], bookstore.Inner), decoded.nested
+assert isinstance(decoded.by_key["k"], bookstore.Inner), decoded.by_key
+assert isinstance(decoded.alias_map["m"], bookstore.Inner), decoded.alias_map
+assert decoded.to_dict() == payload, decoded.to_dict()
+json.dumps(decoded.to_dict())
+"#;
+
+/// Dataclass style: `from_dict` rebuilds a model wherever the field's type names one — through a
+/// named alias, list items and map values — and `to_dict` encodes exactly those positions back. A
+/// union holds its JSON value in both directions.
+const NESTED_DATACLASS_DRIVER: &str = r#"
+assert decoded.choice == inner("e"), decoded.choice
+
+built = bookstore.Holder(
+    list_=[bookstore.Inner(label="a", note=None)],
+    nested=[[bookstore.Inner(label="b", note=None)]],
+    by_key={"k": bookstore.Inner(label="c", note=None)},
+    alias_map={"m": bookstore.Inner(label="d", note=None)},
+    choice=inner("e"),
+)
+assert built.to_dict() == payload, built.to_dict()
+json.dumps(built.to_dict())
+"#;
+
+/// Pydantic style: `model_validate` rebuilds every nested model, a union variant included, and
+/// `to_dict` re-encodes each through its own `to_dict`.
+const NESTED_PYDANTIC_DRIVER: &str = r#"
+assert isinstance(decoded.choice, bookstore.Inner), decoded.choice
+
+built = bookstore.Holder(
+    list=[bookstore.Inner(label="a", note=None)],
+    nested=[[bookstore.Inner(label="b", note=None)]],
+    by_key={"k": bookstore.Inner(label="c", note=None)},
+    alias_map={"m": bookstore.Inner(label="d", note=None)},
+    choice=bookstore.Inner(label="e", note=None),
+)
+assert built.to_dict() == payload, built.to_dict()
+json.dumps(built.to_dict())
+"#;
+
+/// `to_dict` and `from_dict` walk the same shapes, so each reads back what the other writes, and a
+/// model reached through a named alias, a nested list or a map is encoded rather than handed to
+/// `json` as an object it cannot serialize.
+#[test]
+fn nested_models_round_trip_through_every_shape_in_both_styles() {
+    if !python_available() {
+        eprintln!("skipping nested model round trip: python3 toolchain unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "nested-dataclass",
+        NESTED_MODELS_SPEC,
+        PyModelStyle::Dataclass,
+    );
+    let driver = dir.join("nested_driver.py");
+    std::fs::write(
+        &driver,
+        format!("{NESTED_PAYLOAD}{NESTED_DATACLASS_DRIVER}"),
+    )
+    .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let models = std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "dataclass nested models must round trip: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if !pydantic_v2_available() {
+        eprintln!("skipping Pydantic nested model round trip: Pydantic v2 unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "nested-pydantic",
+        NESTED_MODELS_SPEC,
+        PyModelStyle::Pydantic,
+    );
+    let driver = dir.join("nested_driver.py");
+    std::fs::write(&driver, format!("{NESTED_PAYLOAD}{NESTED_PYDANTIC_DRIVER}"))
+        .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let models = std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "Pydantic nested models must round trip: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A split dataclass SDK puts each model in its own module. A model whose fields name another
+/// model rebuilds and encodes it at run time, so it imports that model at run time too, not only
+/// for type checkers.
+#[test]
+fn split_dataclass_models_round_trip_through_every_shape() {
+    if !python_available() {
+        eprintln!("skipping split dataclass round trip: python3 toolchain unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk_with_layout(
+        "nested-dataclass-split",
+        NESTED_MODELS_SPEC,
+        PyModelStyle::Dataclass,
+        SdkFileLayout::split(),
+    );
+    let driver = dir.join("nested_driver.py");
+    std::fs::write(
+        &driver,
+        format!("{NESTED_PAYLOAD}{NESTED_DATACLASS_DRIVER}"),
+    )
+    .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let holder = std::fs::read_to_string(dir.join(PACKAGE).join("models").join("holder.py"))
+        .unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "split dataclass nested models must round trip: {result:?}\n{holder}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A PATCH-shaped model: optional nullable keys (`name`, `class`, a list of models) beside an
+/// optional key that is not nullable (`tag`).
+const OPTIONAL_NULLABLE_SPEC: &str = r##"openapi: 3.0.3
+info: { title: Patch, version: 1.0.0 }
+components:
+  schemas:
+    Inner:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+    Patch:
+      type: object
+      properties:
+        name: { type: string, nullable: true }
+        class: { type: string, nullable: true }
+        tag: { type: string }
+        items: { type: array, nullable: true, items: { $ref: "#/components/schemas/Inner" } }
+paths:
+  /p:
+    patch:
+      operationId: patchP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Patch" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Patch" }
+"##;
+
+/// What both styles send: a key left unset is no key, an explicit `None` on a nullable key is
+/// `null`, and `None` on a key that is not nullable is no key. Each payload reads back as itself.
+const OPTIONAL_NULLABLE_DRIVER: &str = r#"
+import json
+import bookstore
+
+P = bookstore.Patch
+I = bookstore.Inner
+assert P().to_dict() == {}, P().to_dict()
+assert P(name=None).to_dict() == {"name": None}, P(name=None).to_dict()
+assert P(class_=None).to_dict() == {"class": None}, P(class_=None).to_dict()
+assert P(tag=None).to_dict() == {}, P(tag=None).to_dict()
+assert P(items=None).to_dict() == {"items": None}, P(items=None).to_dict()
+built = P(name="x", tag="y", items=[I(label="b")])
+assert built.to_dict() == {"name": "x", "tag": "y", "items": [{"label": "b"}]}, built.to_dict()
+for payload in [
+    {},
+    {"name": None},
+    {"name": "x"},
+    {"class": None},
+    {"items": None},
+    {"items": [{"label": "b"}]},
+]:
+    decoded = P.from_dict(payload)
+    assert decoded.to_dict() == payload, (payload, decoded.to_dict())
+    json.dumps(decoded.to_dict())
+"#;
+
+/// Dataclass style: an optional nullable field defaults to `UNSET`, which reads as no key.
+const OPTIONAL_NULLABLE_DATACLASS_DRIVER: &str = r#"
+from bookstore.unset import UNSET
+
+assert P().name is UNSET
+assert P().tag is None
+assert P.from_dict({}).name is UNSET
+assert P.from_dict({"name": None}).name is None
+assert not UNSET
+assert repr(UNSET) == "UNSET"
+assert str(UNSET) == "UNSET"
+assert f"{UNSET}" == "UNSET"
+"#;
+
+/// Pydantic style: an unset field reads `None`; `model_fields_set` says whether it was set.
+const OPTIONAL_NULLABLE_PYDANTIC_DRIVER: &str = r"
+assert P().name is None
+assert P.from_dict({}).name is None
+";
+
+/// An optional nullable field can be left out or sent as an explicit `null` — the PATCH that clears
+/// a value — in both model styles, and every payload reads back as itself.
+#[test]
+fn an_optional_nullable_field_sends_null_only_when_set_in_both_styles() {
+    if !python_available() {
+        eprintln!("skipping optional nullable round trip: python3 toolchain unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "unset-dataclass",
+        OPTIONAL_NULLABLE_SPEC,
+        PyModelStyle::Dataclass,
+    );
+    let driver = dir.join("unset_driver.py");
+    std::fs::write(
+        &driver,
+        format!("{OPTIONAL_NULLABLE_DRIVER}{OPTIONAL_NULLABLE_DATACLASS_DRIVER}"),
+    )
+    .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let models = std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "dataclass optional nullable fields: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if !pydantic_v2_available() {
+        eprintln!("skipping Pydantic optional nullable round trip: Pydantic v2 unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "unset-pydantic",
+        OPTIONAL_NULLABLE_SPEC,
+        PyModelStyle::Pydantic,
+    );
+    let driver = dir.join("unset_driver.py");
+    std::fs::write(
+        &driver,
+        format!("{OPTIONAL_NULLABLE_DRIVER}{OPTIONAL_NULLABLE_PYDANTIC_DRIVER}"),
+    )
+    .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let models = std::fs::read_to_string(dir.join(PACKAGE).join("models.py")).unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "Pydantic optional nullable fields: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A form body with a required string, a required nullable string, an optional nullable string and
+/// an optional list.
+const FORM_NONE_SPEC: &str = r##"openapi: 3.0.3
+info: { title: Form, version: 1.0.0 }
+components:
+  schemas:
+    FormIn:
+      type: object
+      required: [a, c]
+      properties:
+        a: { type: string }
+        b: { type: string, nullable: true }
+        c: { type: string, nullable: true }
+        tags: { type: array, items: { type: string } }
+        flag: { type: boolean }
+        ratio: { type: number }
+paths:
+  /f:
+    post:
+      operationId: postF
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/FormIn" }
+      responses:
+        "204": { description: ok }
+"##;
+
+/// Send form bodies to a stdlib server and read back exactly the fields that arrived: a `None`
+/// value — required nullable or optional nullable alike — is no field, never the text `None`.
+const FORM_NONE_DRIVER: &str = r#"
+import threading
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import bookstore
+
+
+class _Handler(BaseHTTPRequestHandler):
+    bodies = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        _Handler.bodies.append(urllib.parse.parse_qs(body, keep_blank_values=True))
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+server = HTTPServer(("127.0.0.1", 0), _Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+try:
+    client = bookstore.Client(
+        f"http://127.0.0.1:{server.server_address[1]}",
+        opener=urllib.request.build_opener(),
+    )
+    client.post_f(bookstore.FormIn(a="x", b=None, c=None))
+    client.post_f(bookstore.FormIn(a="x", b="y", c="z", tags=["p", "q"]))
+    client.post_f(bookstore.FormIn(a="x", b=None, c=None, flag=True, ratio=3.0))
+    assert _Handler.bodies == [
+        {"a": ["x"]},
+        {"a": ["x"], "b": ["y"], "c": ["z"], "tags": ["p", "q"]},
+        {"a": ["x"], "flag": ["true"], "ratio": ["3"]},
+    ], _Handler.bodies
+finally:
+    server.shutdown()
+    server.server_close()
+"#;
+
+/// A `None` in a form body is no field in both model styles, as the Go and TypeScript clients send
+/// it, rather than the four characters `None`; a boolean is `true` and a number is spelled as every
+/// generated SDK spells one (`3`, not `True` or `3.0`).
+#[test]
+fn a_none_form_field_is_not_sent_in_both_styles() {
+    if !python_available() {
+        eprintln!("skipping form None test: python3 toolchain unavailable");
+        return;
+    }
+    let mut styles = vec![PyModelStyle::Dataclass];
+    if pydantic_v2_available() {
+        styles.push(PyModelStyle::Pydantic);
+    } else {
+        eprintln!("skipping Pydantic form None test: Pydantic v2 unavailable");
+    }
+    for style in styles {
+        let dir = materialize_spec_sdk("form-none", FORM_NONE_SPEC, style);
+        let driver = dir.join("form_driver.py");
+        std::fs::write(&driver, FORM_NONE_DRIVER).expect("write driver");
+        let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+        assert!(
+            result.is_ok(),
+            "{style:?}: a None form field must not be sent: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

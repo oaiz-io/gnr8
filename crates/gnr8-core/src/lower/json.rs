@@ -466,6 +466,12 @@ fn write_schema(schema: &SchemaObject) -> Value {
             number_or_string(exclusive_maximum),
         );
     }
+    if let Some(multiple_of) = &schema.multiple_of {
+        out.insert("multipleOf".to_string(), number_or_string(multiple_of));
+    }
+    if schema.unique_items {
+        out.insert("uniqueItems".to_string(), Value::Bool(true));
+    }
     if let Some(pattern) = &schema.pattern {
         out.insert("pattern".to_string(), Value::String(pattern.clone()));
     }
@@ -530,7 +536,7 @@ fn literal(value: &LiteralValue) -> Value {
     }
 }
 
-fn number_or_string(value: &str) -> Value {
+pub(crate) fn number_or_string(value: &str) -> Value {
     if let Ok(value) = value.parse::<i64>() {
         return Value::Number(value.into());
     }

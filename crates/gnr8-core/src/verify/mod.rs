@@ -17,14 +17,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::{json, Map, Value};
+use serde_json::Value;
 
-use crate::graph::{ApiGraph, Field, Operation, Param, Prim, Schema, Type, WellKnown};
+use crate::graph::{ApiGraph, Operation, Type};
 use crate::sdk::emit_common::{
-    operation_auth_alternatives, request_body_models_of, success_responses_of, ApiKeyLocation,
-    HttpAuthScheme, OperationAuthScheme, RequestBodyEncoding,
+    media_family, reply_wire_media_type, request_body_models_of, response_media_type, MediaFamily,
 };
 use crate::CoreError;
+
+mod sample;
+
+pub use sample::{
+    check_declared_examples, sample_operation, satisfies, DeclaredLimit, OperationSample,
+    RefusedBody, SampleRefusal, Sampled, SuccessOutcome, SuccessSample, UnmetConstraint, Violation,
+};
+pub(crate) use sample::{credential_of, error_body_sample, reply_media};
+use sample::{error_payload, success_sample};
 
 /// The largest number of cases one target's contract test may carry.
 pub const CONTRACT_TEST_CASE_CAP: usize = 24;
@@ -109,6 +117,8 @@ pub struct ContractTestSuite {
     pub test_file: String,
     /// How many cases the suite carries.
     pub cases: usize,
+    /// How many samples the planner refused ([`ContractTestPlan::refused`]); counted, not run.
+    pub refused: usize,
     /// Declared Go module facts; other languages carry none.
     pub go_verification: Option<GoVerificationModule>,
 }
@@ -159,6 +169,35 @@ pub struct CliHelpSuite {
     pub target: CliHelpTarget,
     /// Commands to exercise.
     pub plan: CliHelpPlan,
+}
+
+/// Docs code samples for one sibling SDK target, and what `gnr8 verify` needs to check them.
+///
+/// Declared by the `StaticDocs` target, one per sibling Go/Python/TypeScript SDK declaration of the
+/// same plan, in plan order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocsSnippetSuite {
+    /// Taken from `SiblingSdk::language()` — never stated separately.
+    pub language: ContractTestLanguage,
+    /// The docs target's project-relative output directory.
+    pub docs_dir: String,
+    /// The SDK target's project-relative output directory.
+    pub sdk_output_path: String,
+    /// The SDK's own package or module name (`sdk_package`), exactly as
+    /// [`ContractTestSuite::package`]. It is NOT the consumer import specifier, which is
+    /// `CompileUnit::identity` (Go: package `sdk`, identity `example.com/bookstore/sdk`).
+    pub package: String,
+    /// The compile unit from `docs::verify::compile_unit`, the same `render_call` output the
+    /// pages were assembled from. Its `entries` carry each page path and the snippet text that page
+    /// must contain verbatim. `None` is the one encoding of "no consumer identity": the suite is
+    /// reported skipped with that reason and never run.
+    pub compile_unit: Option<crate::docs::verify::CompileUnit>,
+    /// Operations with a sample.
+    pub cases: usize,
+    /// Operations whose sample is refused; counted, not run.
+    pub refused: usize,
+    /// Declared Go module facts; other languages carry none.
+    pub go_verification: Option<GoVerificationModule>,
 }
 
 /// Plan help checks using the same command facts as generation.
@@ -255,10 +294,14 @@ pub struct SampleParam {
     pub location: String,
     /// The parameter's neutral type, so each target can render a typed literal.
     pub schema: Type,
+    /// Whether a call must carry the parameter: a required or path parameter.
+    pub required: bool,
     /// The sampled scalar, as JSON.
     pub value: Value,
     /// The exact string the scalar takes on the wire.
     pub wire: String,
+    /// The constraints the sampled value leaves unmet.
+    pub unmet: Vec<UnmetConstraint>,
 }
 
 /// The request body one case sends.
@@ -278,6 +321,42 @@ pub struct SampleBody {
     /// How many representations the operation declares. `> 1` means the target's body wrapper is
     /// exercised.
     pub representations: usize,
+    /// The constraints the sampled body leaves unmet, in field order.
+    pub unmet: Vec<UnmetConstraint>,
+    /// The name of the declared request example this body is, when the operation declares one for
+    /// this representation's media type.
+    pub example: Option<String>,
+}
+
+impl SampleBody {
+    /// The media type of the representation this sample selects, as the operation declares it.
+    ///
+    /// Every call-site renderer that spells a representation choice reads it here, so a selection
+    /// the operation does not declare is the same typed error in every language — never a silent
+    /// stand-in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::SdkGen`] when the selection is not among the operation's declared
+    /// representations, or the declarations themselves are rejected.
+    pub(crate) fn declared_content_type(
+        &self,
+        op: &Operation,
+        graph: &ApiGraph,
+    ) -> Result<String, CoreError> {
+        let declared = request_body_models_of(op, graph)?;
+        declared
+            .get(self.selection)
+            .map(|model| model.content_type.clone())
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!(
+                    "sampled call selects request representation {} of operation '{}', which has {}",
+                    self.selection,
+                    op.id,
+                    declared.len()
+                ),
+            })
+    }
 }
 
 /// One credential the client is configured with and the request must carry.
@@ -383,6 +462,41 @@ pub struct ContractCase {
     pub outcome: CaseOutcome,
 }
 
+/// What part of an operation the planner could not sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefusedScope {
+    /// A required input — so no case calls the operation at all.
+    Operation,
+    /// An optional request body with no constructible JSON representation: a case would have to
+    /// send it, so none calls the operation.
+    OptionalBody,
+    /// One request representation of an operation that has a sampled one — so no body-selection
+    /// case sends it. The reason names its media type.
+    BodyRepresentation {
+        /// Its index in the operation's sorted request-body list.
+        selection: usize,
+    },
+    /// The success reply — so no case that needs one calls the operation.
+    SuccessReply,
+    /// The declared error model of one status — so that typed-error case is skipped.
+    ErrorReply {
+        /// The error status.
+        status: u16,
+    },
+}
+
+/// One sample the planner refused, and why. A contract suite counts these instead of losing the
+/// cases silently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedSample {
+    /// The operation whose sample was refused.
+    pub operation_id: String,
+    /// Which part of it.
+    pub scope: RefusedScope,
+    /// The sampler's reason.
+    pub reason: SampleRefusal,
+}
+
 /// A complete, language-neutral contract-test plan for one SDK target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractTestPlan {
@@ -390,6 +504,9 @@ pub struct ContractTestPlan {
     pub base_url: String,
     /// The sampled cases, ordered by class then case name.
     pub cases: Vec<ContractCase>,
+    /// Every sample the planner refused, in operation order (a refused error model after them, in
+    /// the order the typed-error class meets it). Each is counted, never silently lost.
+    pub refused: Vec<RefusedSample>,
 }
 
 impl ContractTestPlan {
@@ -445,24 +562,64 @@ impl ContractTestPlan {
 /// # Errors
 ///
 /// Returns [`CoreError::SdkGen`] when the graph carries a fact the shared SDK helpers reject (a
-/// dangling `$ref`, an unsupported request media type, contradictory responses).
+/// dangling `$ref`, an unsupported request media type, contradictory responses), and
+/// [`CoreError::InvalidExample`] for a declared example that is not a value of its input
+/// ([`check_declared_examples`]).
 pub fn plan_contract_tests(graph: &ApiGraph) -> Result<ContractTestPlan, CoreError> {
+    check_declared_examples(graph)?;
     let mut candidates: Vec<Candidate> = Vec::new();
+    let mut refused: Vec<RefusedSample> = Vec::new();
     for op in &graph.operations {
-        if let Some(candidate) = Candidate::build(op, graph)? {
-            candidates.push(candidate);
+        let refuse = |scope, reason| RefusedSample {
+            operation_id: op.id.clone(),
+            scope,
+            reason,
+        };
+        match sample_operation(op, graph)? {
+            // A refused required input: the planner skips the operation, exactly as the docs page
+            // prints the refusal instead of a call — and counts it.
+            Sampled::Refused(reason) => refused.push(refuse(RefusedScope::Operation, reason)),
+            Sampled::Sample(sample) => {
+                if let (false, Some(reason)) = (sample.body_required, &sample.body_refusal) {
+                    refused.push(refuse(RefusedScope::OptionalBody, (**reason).clone()));
+                }
+                // Beside a sampled representation, every other one without a sample is a
+                // body-selection case no plan can hold: each is counted.
+                if !sample.bodies.is_empty() {
+                    for body in &sample.refused_bodies {
+                        refused.push(refuse(
+                            RefusedScope::BodyRepresentation {
+                                selection: body.selection,
+                            },
+                            SampleRefusal::BodyRefused {
+                                content_type: body.content_type.clone(),
+                                inner: Box::new(body.reason.clone()),
+                            },
+                        ));
+                    }
+                }
+                if let SuccessOutcome::Refused(reason) = &sample.reply {
+                    refused.push(refuse(RefusedScope::SuccessReply, reason.clone()));
+                }
+                let candidate = Candidate::build(op, graph, sample)?;
+                // A sampled reply with no wire form drives no case — counted, never lost.
+                if let Some(reason) = &candidate.reply_refusal {
+                    refused.push(refuse(RefusedScope::SuccessReply, reason.clone()));
+                }
+                candidates.push(candidate);
+            }
         }
     }
 
     let mut cases: Vec<ContractCase> = Vec::new();
     for class in ContractCaseClass::all() {
         let mut selected = match class {
-            ContractCaseClass::RequestShape => request_shape_cases(&candidates, graph)?,
-            ContractCaseClass::BodySelection => body_selection_cases(&candidates, graph)?,
+            ContractCaseClass::RequestShape => request_shape_cases(&candidates),
+            ContractCaseClass::BodySelection => body_selection_cases(&candidates),
             ContractCaseClass::ResponseDecode => response_decode_cases(&candidates, graph)?,
-            ContractCaseClass::TypedError => typed_error_cases(&candidates, graph),
-            ContractCaseClass::Auth => auth_cases(&candidates, graph)?,
-            ContractCaseClass::RedirectPolicy => redirect_cases(&candidates, graph)?,
+            ContractCaseClass::TypedError => typed_error_cases(&candidates, graph, &mut refused)?,
+            ContractCaseClass::Auth => auth_cases(&candidates),
+            ContractCaseClass::RedirectPolicy => redirect_cases(&candidates),
         };
         selected.truncate(class.cap());
         cases.append(&mut selected);
@@ -472,6 +629,7 @@ pub fn plan_contract_tests(graph: &ApiGraph) -> Result<ContractTestPlan, CoreErr
     Ok(ContractTestPlan {
         base_url: CONTRACT_TEST_BASE_URL.to_string(),
         cases,
+        refused,
     })
 }
 
@@ -481,61 +639,57 @@ struct Candidate<'op> {
     params: Vec<SampleParam>,
     /// Every JSON-renderable request representation, in the operation's sorted media-type order.
     bodies: Vec<SampleBody>,
-    /// Index into [`Self::bodies`] chosen when a single body is needed.
     auth: Vec<SampleAuth>,
+    /// The canned success reply, sampled once.
+    reply: SuccessOutcome,
+    /// That reply in its declared media type's wire form, when it has one.
+    reply_wire: Option<CannedResponse>,
+    /// Why a sampled reply has no wire form, so the plan counts it.
+    reply_refusal: Option<SampleRefusal>,
     /// Whether the operation declares a body at all (even one the sampler cannot construct).
     declares_body: bool,
-    /// Whether every declared representation was constructible.
-    bodies_complete: bool,
+    /// How many request representations the operation declares.
+    representations: usize,
     absolute_path: String,
 }
 
 impl<'op> Candidate<'op> {
-    fn build(op: &'op Operation, graph: &ApiGraph) -> Result<Option<Self>, CoreError> {
-        let Some(params) = sample_params(op, graph) else {
-            return Ok(None);
-        };
+    /// The operation's one sample, as a contract case sends it: every value, including one whose
+    /// `pattern` is unmet — no generated SDK validates `pattern`, so the wire contract is the same.
+    fn build(
+        op: &'op Operation,
+        graph: &ApiGraph,
+        sample: OperationSample,
+    ) -> Result<Self, CoreError> {
         let declared = request_body_models_of(op, graph)?;
-        let declares_body = !declared.is_empty();
-        let mut bodies = Vec::new();
-        for (index, model) in declared.iter().enumerate() {
-            if model.encoding != RequestBodyEncoding::Json {
-                continue;
-            }
-            let schema = graph.schemas.iter().find(|s| s.id == model.schema_id);
-            let Some(schema) = schema else { continue };
-            let Some(value) = sample_json(&schema.body, graph, &mut BTreeSet::new(), 0) else {
-                continue;
-            };
-            bodies.push(SampleBody {
-                content_type: model.content_type.clone(),
-                schema_id: model.schema_id.clone(),
-                model: model.model.clone(),
-                value,
-                selection: index,
-                representations: declared.len(),
-            });
-        }
-        let bodies_complete = bodies.len() == declared.len();
-        // A required body the sampler cannot construct makes the operation uncallable; an optional
-        // one can simply be left out.
-        let body_required = declared.first().is_some_and(|model| model.required);
-        if body_required && bodies.is_empty() {
-            return Ok(None);
-        }
-        let Some(auth) = sample_auth(op, graph)? else {
-            return Ok(None);
+        let absolute_path = absolute_path(&graph.base_path, &op.path, &sample.params);
+        let (reply_wire, reply_refusal) = match &sample.reply {
+            SuccessOutcome::Sample(success) => match success_reply(op, success) {
+                Ok(wire) => (Some(wire), None),
+                Err(refusal) => (None, Some(refusal)),
+            },
+            SuccessOutcome::NoReply | SuccessOutcome::Refused(_) => (None, None),
         };
-        let absolute_path = absolute_path(&graph.base_path, &op.path, &params);
-        Ok(Some(Self {
+        Ok(Self {
             op,
-            params,
-            bodies,
-            auth,
-            declares_body,
-            bodies_complete,
+            declares_body: !declared.is_empty(),
+            representations: declared.len(),
+            params: sample.params,
+            bodies: sample.bodies,
+            auth: sample.auth,
+            reply: sample.reply,
+            reply_wire,
+            reply_refusal,
             absolute_path,
-        }))
+        })
+    }
+
+    /// The sampled success reply and its wire form, when there is one to drive a case with.
+    fn success(&self) -> Option<(&SuccessSample, CannedResponse)> {
+        match (&self.reply, &self.reply_wire) {
+            (SuccessOutcome::Sample(success), Some(wire)) => Some((success, wire.clone())),
+            _ => None,
+        }
     }
 
     /// The representation a single-body case sends: the first constructible one.
@@ -543,70 +697,18 @@ impl<'op> Candidate<'op> {
         self.bodies.first()
     }
 
-    /// Whether a case for this operation can send every declared representation.
+    /// Whether the operation's body wrapper selects among representations and one has a sample. A
+    /// representation without one is counted on the plan, never dropped with the rest.
     fn can_select_bodies(&self) -> bool {
-        self.bodies_complete && self.bodies.len() > 1
+        self.representations > 1 && !self.bodies.is_empty()
     }
 
     fn query_pairs(&self) -> Vec<(String, Vec<String>)> {
-        let mut pairs: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for param in self.params.iter().filter(|p| p.location == "query") {
-            pairs
-                .entry(param.name.clone())
-                .or_default()
-                .push(param.wire.clone());
-        }
-        for auth in &self.auth {
-            if let SampleCredential::ApiKeyQuery { name } = &auth.credential {
-                pairs
-                    .entry(name.clone())
-                    .or_default()
-                    .push(CONTRACT_TEST_CREDENTIAL.to_string());
-            }
-        }
-        pairs.into_iter().collect()
+        request_query(&self.params, &self.auth, &WireCredentials::contract())
     }
 
     fn header_pairs(&self, body: Option<&SampleBody>) -> Vec<(String, String)> {
-        let mut headers: BTreeMap<String, String> = BTreeMap::new();
-        for param in self.params.iter().filter(|p| p.location == "header") {
-            headers.insert(param.name.to_ascii_lowercase(), param.wire.clone());
-        }
-        if let Some(body) = body {
-            headers.insert("content-type".to_string(), body.content_type.clone());
-        }
-        for auth in &self.auth {
-            match &auth.credential {
-                SampleCredential::ApiKeyHeader { name } => {
-                    headers.insert(
-                        name.to_ascii_lowercase(),
-                        CONTRACT_TEST_CREDENTIAL.to_string(),
-                    );
-                }
-                SampleCredential::Bearer => {
-                    headers.insert(
-                        "authorization".to_string(),
-                        format!("Bearer {CONTRACT_TEST_BEARER}"),
-                    );
-                }
-                SampleCredential::Basic => {
-                    headers.insert(
-                        "authorization".to_string(),
-                        format!(
-                            "Basic {}",
-                            base64_encode(
-                                format!(
-                                    "{CONTRACT_TEST_BASIC_USER}:{CONTRACT_TEST_BASIC_PASSWORD}"
-                                )
-                                .as_bytes()
-                            )
-                        ),
-                    );
-                }
-                SampleCredential::ApiKeyQuery { .. } => {}
-            }
-        }
-        headers.into_iter().collect()
+        request_headers(&self.params, body, &self.auth, &WireCredentials::contract())
     }
 
     fn case(
@@ -639,85 +741,7 @@ impl<'op> Candidate<'op> {
     }
 }
 
-/// The success response a case can drive: status, model, and the JSON it decodes.
-struct SuccessSample {
-    status: u16,
-    model: Option<String>,
-    body: String,
-    field: Option<DecodedField>,
-}
-
-fn success_sample(
-    op: &Operation,
-    graph: &ApiGraph,
-    omit_optional: bool,
-) -> Result<Option<SuccessSample>, CoreError> {
-    let success = success_responses_of(op, graph)?;
-    if success.has_binary_body() {
-        return Ok(None);
-    }
-    let Some(status) = success
-        .body_statuses
-        .first()
-        .copied()
-        .or_else(|| success.statuses.first().copied())
-    else {
-        return Ok(None);
-    };
-    if !(200..300).contains(&status) {
-        return Ok(None);
-    }
-    let Some(model) = success.body_model.clone() else {
-        if omit_optional {
-            return Ok(None);
-        }
-        return Ok(Some(SuccessSample {
-            status,
-            model: None,
-            body: String::new(),
-            field: None,
-        }));
-    };
-    let schema = graph
-        .schemas
-        .iter()
-        .find(|schema| schema.name == model)
-        .ok_or_else(|| CoreError::SdkGen {
-            message: format!(
-                "operation '{}' success model '{model}' is not a graph schema",
-                op.id
-            ),
-        })?;
-    let Some(value) = response_json(&schema.body, graph, &mut BTreeSet::new(), 0) else {
-        return Ok(None);
-    };
-    let field = if omit_optional {
-        omitted_field(&schema.body)
-    } else {
-        checked_field(&schema.body, &value)
-    };
-    let value = if omit_optional {
-        let (Some(field), Some(object)) = (field.as_ref(), value.as_object()) else {
-            return Ok(None);
-        };
-        let mut object = object.clone();
-        object.remove(&field.json_name);
-        Value::Object(object)
-    } else {
-        value
-    };
-    Ok(Some(SuccessSample {
-        status,
-        model: Some(model),
-        body: serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
-        field,
-    }))
-}
-
-fn request_shape_cases(
-    candidates: &[Candidate<'_>],
-    graph: &ApiGraph,
-) -> Result<Vec<ContractCase>, CoreError> {
+fn request_shape_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut cases = Vec::new();
     for candidate in candidates {
@@ -736,7 +760,7 @@ fn request_shape_cases(
         if seen.contains(&key) {
             continue;
         }
-        let Some(success) = success_sample(candidate.op, graph, false)? else {
+        let Some((success, reply)) = candidate.success() else {
             continue;
         };
         seen.insert(key);
@@ -744,27 +768,20 @@ fn request_shape_cases(
             ContractCaseClass::RequestShape,
             None,
             body,
-            CannedResponse {
-                status: success.status,
-                headers: json_response_headers(&success.body),
-                body: success.body,
-            },
+            reply,
             CaseOutcome::Decode {
-                model: success.model,
-                field: success.field,
+                model: success.model.clone(),
+                field: success.field.clone(),
             },
         ));
     }
-    Ok(cases)
+    cases
 }
 
-fn body_selection_cases(
-    candidates: &[Candidate<'_>],
-    graph: &ApiGraph,
-) -> Result<Vec<ContractCase>, CoreError> {
+fn body_selection_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
     let mut cases = Vec::new();
     for candidate in candidates.iter().filter(|c| c.can_select_bodies()) {
-        let Some(success) = success_sample(candidate.op, graph, false)? else {
+        let Some((success, reply)) = candidate.success() else {
             continue;
         };
         for body in &candidate.bodies {
@@ -772,11 +789,7 @@ fn body_selection_cases(
                 ContractCaseClass::BodySelection,
                 Some(&media_suffix(&body.content_type)),
                 Some(body),
-                CannedResponse {
-                    status: success.status,
-                    headers: json_response_headers(&success.body),
-                    body: success.body.clone(),
-                },
+                reply.clone(),
                 CaseOutcome::Decode {
                     model: success.model.clone(),
                     field: None,
@@ -784,7 +797,7 @@ fn body_selection_cases(
             ));
         }
     }
-    Ok(cases)
+    cases
 }
 
 fn response_decode_cases(
@@ -798,7 +811,7 @@ fn response_decode_cases(
         if candidate.declares_body && body.is_none() {
             continue;
         }
-        let Some(success) = success_sample(candidate.op, graph, false)? else {
+        let Some((success, reply)) = candidate.success() else {
             continue;
         };
         let Some(model) = success.model.clone() else {
@@ -811,26 +824,23 @@ fn response_decode_cases(
             ContractCaseClass::ResponseDecode,
             Some("present"),
             body,
-            CannedResponse {
-                status: success.status,
-                headers: json_response_headers(&success.body),
-                body: success.body,
-            },
+            reply,
             CaseOutcome::Decode {
                 model: Some(model.clone()),
-                field: success.field,
+                field: success.field.clone(),
             },
         ));
-        if let Some(absent) = success_sample(candidate.op, graph, true)? {
+        if let SuccessOutcome::Sample(absent) = success_sample(candidate.op, graph, true)? {
+            // The present reply of the same schema and media type had a wire form, so this one has
+            // one too; the arm is unreachable rather than a lost case.
+            let Ok(reply) = success_reply(candidate.op, &absent) else {
+                continue;
+            };
             cases.push(candidate.case(
                 ContractCaseClass::ResponseDecode,
                 Some("absent"),
                 body,
-                CannedResponse {
-                    status: absent.status,
-                    headers: json_response_headers(&absent.body),
-                    body: absent.body,
-                },
+                reply,
                 CaseOutcome::Decode {
                     model: Some(model),
                     field: absent.field,
@@ -841,9 +851,16 @@ fn response_decode_cases(
     Ok(cases)
 }
 
-fn typed_error_cases(candidates: &[Candidate<'_>], graph: &ApiGraph) -> Vec<ContractCase> {
+fn typed_error_cases(
+    candidates: &[Candidate<'_>],
+    graph: &ApiGraph,
+    refused: &mut Vec<RefusedSample>,
+) -> Result<Vec<ContractCase>, CoreError> {
     let mut seen: BTreeSet<u16> = BTreeSet::new();
     let mut cases = Vec::new();
+    // Refused error models, counted only for a status no operation ends up supplying: a status
+    // another operation covers loses no case.
+    let mut pending: Vec<RefusedSample> = Vec::new();
     for candidate in candidates {
         let body = candidate.primary_body();
         if candidate.declares_body && body.is_none() {
@@ -861,10 +878,23 @@ fn typed_error_cases(candidates: &[Candidate<'_>], graph: &ApiGraph) -> Vec<Cont
             .collect();
         statuses.insert(UNDECLARED_ERROR_STATUS);
         for status in statuses {
-            if !seen.insert(status) {
+            if seen.contains(&status) {
                 continue;
             }
-            let payload = error_payload(candidate.op, status, graph);
+            // A declared error model with no sample skips this case and leaves the status
+            // unclaimed, so a later operation that declares it can still supply one.
+            let payload = match error_payload(candidate.op, status, graph)? {
+                Ok(payload) => payload,
+                Err(reason) => {
+                    pending.push(RefusedSample {
+                        operation_id: candidate.op.id.clone(),
+                        scope: RefusedScope::ErrorReply { status },
+                        reason,
+                    });
+                    continue;
+                }
+            };
+            seen.insert(status);
             cases.push(candidate.case(
                 ContractCaseClass::TypedError,
                 Some(&status.to_string()),
@@ -878,13 +908,13 @@ fn typed_error_cases(candidates: &[Candidate<'_>], graph: &ApiGraph) -> Vec<Cont
             ));
         }
     }
-    cases
+    refused.extend(pending.into_iter().filter(|sample| {
+        !matches!(sample.scope, RefusedScope::ErrorReply { status } if seen.contains(&status))
+    }));
+    Ok(cases)
 }
 
-fn auth_cases(
-    candidates: &[Candidate<'_>],
-    graph: &ApiGraph,
-) -> Result<Vec<ContractCase>, CoreError> {
+fn auth_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut cases = Vec::new();
     for candidate in candidates.iter().filter(|c| !c.auth.is_empty()) {
@@ -901,7 +931,7 @@ fn auth_cases(
         if seen.contains(&key) {
             continue;
         }
-        let Some(success) = success_sample(candidate.op, graph, false)? else {
+        let Some((success, reply)) = candidate.success() else {
             continue;
         };
         seen.insert(key);
@@ -909,24 +939,17 @@ fn auth_cases(
             ContractCaseClass::Auth,
             None,
             body,
-            CannedResponse {
-                status: success.status,
-                headers: json_response_headers(&success.body),
-                body: success.body,
-            },
+            reply,
             CaseOutcome::Decode {
-                model: success.model,
+                model: success.model.clone(),
                 field: None,
             },
         ));
     }
-    Ok(cases)
+    cases
 }
 
-fn redirect_cases(
-    candidates: &[Candidate<'_>],
-    graph: &ApiGraph,
-) -> Result<Vec<ContractCase>, CoreError> {
+fn redirect_cases(candidates: &[Candidate<'_>]) -> Vec<ContractCase> {
     // A declared 3xx is a success status the client returns, so the redirect contract is only
     // observable on an operation that does NOT declare one.
     for candidate in candidates {
@@ -942,10 +965,10 @@ fn redirect_cases(
         {
             continue;
         }
-        if success_sample(candidate.op, graph, false)?.is_none() {
+        if candidate.success().is_none() {
             continue;
         }
-        return Ok(vec![candidate.case(
+        return vec![candidate.case(
             ContractCaseClass::RedirectPolicy,
             None,
             body,
@@ -955,87 +978,180 @@ fn redirect_cases(
                 body: String::new(),
             },
             CaseOutcome::Redirect { status: 302 },
-        )]);
+        )];
     }
-    Ok(Vec::new())
+    Vec::new()
 }
 
-/// Resolve every request parameter of an operation to a sampled value, or refuse the operation.
+/// One value a request carries: a literal, or a credential whose value the reader supplies.
 ///
-/// Only scalars with the default serialization style are sampled: an array, object or
-/// non-default-style parameter has a wire form the plan would have to restate, and restating it is
-/// how a test starts asserting its own encoder instead of the SDK's.
-fn sample_params(op: &Operation, graph: &ApiGraph) -> Option<Vec<SampleParam>> {
-    let mut out = Vec::new();
-    for param in &op.params {
-        let sampled = sample_param(param, graph);
-        match sampled {
-            Some(value) => out.push(value),
-            None if param.required || param.location == "path" => return None,
-            None => {}
+/// A contract case sends the contract constants; a docs page prints placeholders, because the reader
+/// supplies their own. Both resolve the same [`request_query_values`] and [`request_header_values`],
+/// so the request a page prints and the request a contract case asserts are one derivation with two
+/// sets of credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireValue {
+    /// A value exactly as derived from the sample, before any encoding.
+    Literal(String),
+    /// A credential, after a fixed scheme prefix (`Bearer `, `Basic `, or none).
+    Credential {
+        /// The scheme prefix printed before the credential.
+        prefix: &'static str,
+        /// Which credential it is.
+        slot: CredentialSlot,
+    },
+}
+
+/// Which credential a [`WireValue::Credential`] stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialSlot {
+    /// The API key, in whichever header or query parameter the scheme names.
+    ApiKey,
+    /// The bearer token after `Bearer `.
+    Bearer,
+    /// The basic credentials after `Basic `.
+    Basic,
+}
+
+/// The credential values one request carries on the wire.
+pub(crate) struct WireCredentials {
+    /// The API key, in whichever header or query parameter the scheme names.
+    pub(crate) api_key: String,
+    /// The bearer token after `Bearer `.
+    pub(crate) bearer: String,
+    /// The basic credentials after `Basic `.
+    pub(crate) basic: String,
+}
+
+impl WireCredentials {
+    /// The constants every generated contract test configures and expects.
+    pub(crate) fn contract() -> Self {
+        Self {
+            api_key: CONTRACT_TEST_CREDENTIAL.to_string(),
+            bearer: CONTRACT_TEST_BEARER.to_string(),
+            basic: base64_encode(
+                format!("{CONTRACT_TEST_BASIC_USER}:{CONTRACT_TEST_BASIC_PASSWORD}").as_bytes(),
+            ),
         }
     }
-    Some(out)
-}
 
-fn sample_param(param: &Param, graph: &ApiGraph) -> Option<SampleParam> {
-    if param.allow_reserved
-        || param.style.as_deref().is_some_and(|style| style != "form")
-        || param.explode == Some(false)
-        || param.openapi_content.is_some()
-    {
-        return None;
+    /// The credential a slot stands for.
+    pub(crate) fn slot(&self, slot: CredentialSlot) -> &str {
+        match slot {
+            CredentialSlot::ApiKey => &self.api_key,
+            CredentialSlot::Bearer => &self.bearer,
+            CredentialSlot::Basic => &self.basic,
+        }
     }
-    let value = scalar_sample(&param.schema, graph, &mut BTreeSet::new(), 0)?;
-    let wire = wire_scalar(&value)?;
-    Some(SampleParam {
-        name: param.name.clone(),
-        location: param.location.clone(),
-        schema: param.schema.clone(),
-        value,
-        wire,
-    })
+
+    /// The text one value carries with these credentials, unencoded.
+    pub(crate) fn resolve(&self, value: &WireValue) -> String {
+        match value {
+            WireValue::Literal(text) => text.clone(),
+            WireValue::Credential { prefix, slot } => format!("{prefix}{}", self.slot(*slot)),
+        }
+    }
 }
 
-/// Resolve the credential set one call must configure, or refuse the operation.
-fn sample_auth(op: &Operation, graph: &ApiGraph) -> Result<Option<Vec<SampleAuth>>, CoreError> {
-    let alternatives = operation_auth_alternatives(graph, op)?;
-    let Some(alternative) = alternatives.first() else {
-        return Ok(Some(Vec::new()));
-    };
-    let mut out = Vec::new();
-    for scheme in alternative {
-        let (scheme_id, credential) = match scheme {
-            OperationAuthScheme::ApiKey(scheme) => (
-                scheme.id.clone(),
-                match scheme.location {
-                    ApiKeyLocation::Header => SampleCredential::ApiKeyHeader {
-                        name: scheme.name.clone(),
-                    },
-                    ApiKeyLocation::Query => SampleCredential::ApiKeyQuery {
-                        name: scheme.name.clone(),
-                    },
-                },
+/// The query parameters one request carries, sorted by name: sampled query parameters, then an
+/// API key a query-parameter scheme sends.
+pub(crate) fn request_query_values(
+    params: &[SampleParam],
+    auth: &[SampleAuth],
+) -> Vec<(String, Vec<WireValue>)> {
+    let mut pairs: BTreeMap<String, Vec<WireValue>> = BTreeMap::new();
+    for param in params.iter().filter(|p| p.location == "query") {
+        pairs
+            .entry(param.name.clone())
+            .or_default()
+            .push(WireValue::Literal(param.wire.clone()));
+    }
+    for auth in auth {
+        if let SampleCredential::ApiKeyQuery { name } = &auth.credential {
+            pairs
+                .entry(name.clone())
+                .or_default()
+                .push(WireValue::Credential {
+                    prefix: "",
+                    slot: CredentialSlot::ApiKey,
+                });
+        }
+    }
+    pairs.into_iter().collect()
+}
+
+/// [`request_query_values`] with `credentials` filled in.
+pub(crate) fn request_query(
+    params: &[SampleParam],
+    auth: &[SampleAuth],
+    credentials: &WireCredentials,
+) -> Vec<(String, Vec<String>)> {
+    request_query_values(params, auth)
+        .into_iter()
+        .map(|(name, values)| {
+            let values = values
+                .iter()
+                .map(|value| credentials.resolve(value))
+                .collect();
+            (name, values)
+        })
+        .collect()
+}
+
+/// The request headers one request must carry, lowercase names, sorted.
+pub(crate) fn request_header_values(
+    params: &[SampleParam],
+    body: Option<&SampleBody>,
+    auth: &[SampleAuth],
+) -> Vec<(String, WireValue)> {
+    let mut headers: BTreeMap<String, WireValue> = BTreeMap::new();
+    for param in params.iter().filter(|p| p.location == "header") {
+        headers.insert(
+            param.name.to_ascii_lowercase(),
+            WireValue::Literal(param.wire.clone()),
+        );
+    }
+    if let Some(body) = body {
+        headers.insert(
+            "content-type".to_string(),
+            WireValue::Literal(body.content_type.clone()),
+        );
+    }
+    for auth in auth {
+        let (name, prefix, slot) = match &auth.credential {
+            SampleCredential::ApiKeyHeader { name } => {
+                (name.to_ascii_lowercase(), "", CredentialSlot::ApiKey)
+            }
+            SampleCredential::Bearer => (
+                "authorization".to_string(),
+                "Bearer ",
+                CredentialSlot::Bearer,
             ),
-            OperationAuthScheme::Http {
-                id,
-                scheme: HttpAuthScheme::Bearer,
-            } => (id.clone(), SampleCredential::Bearer),
-            OperationAuthScheme::Http {
-                id,
-                scheme: HttpAuthScheme::Basic,
-            } => (id.clone(), SampleCredential::Basic),
+            SampleCredential::Basic => {
+                ("authorization".to_string(), "Basic ", CredentialSlot::Basic)
+            }
+            SampleCredential::ApiKeyQuery { .. } => continue,
         };
-        out.push(SampleAuth {
-            scheme_id,
-            credential,
-        });
+        headers.insert(name, WireValue::Credential { prefix, slot });
     }
-    Ok(Some(out))
+    headers.into_iter().collect()
+}
+
+/// [`request_header_values`] with `credentials` filled in.
+pub(crate) fn request_headers(
+    params: &[SampleParam],
+    body: Option<&SampleBody>,
+    auth: &[SampleAuth],
+    credentials: &WireCredentials,
+) -> Vec<(String, String)> {
+    request_header_values(params, body, auth)
+        .into_iter()
+        .map(|(name, value)| (name, credentials.resolve(&value)))
+        .collect()
 }
 
 /// Join the base path and the operation path, substituting sampled path parameters.
-fn absolute_path(base_path: &str, path: &str, params: &[SampleParam]) -> String {
+pub(crate) fn absolute_path(base_path: &str, path: &str, params: &[SampleParam]) -> String {
     let base = base_path.trim_end_matches('/');
     let joined = if path.starts_with('/') {
         format!("{base}{path}")
@@ -1053,226 +1169,38 @@ fn absolute_path(base_path: &str, path: &str, params: &[SampleParam]) -> String 
     }
 }
 
-/// A JSON value for a request-side type, or `None` when the type is not constructible in all three
-/// generated languages.
-fn sample_json(
-    ty: &Type,
-    graph: &ApiGraph,
-    visiting: &mut BTreeSet<String>,
-    depth: usize,
-) -> Option<Value> {
-    if depth > MAX_SAMPLE_DEPTH {
-        return None;
-    }
-    match ty {
-        Type::Primitive(prim) => primitive_sample(prim),
-        Type::WellKnown(well_known) => Some(Value::String(well_known_sample(well_known))),
-        Type::Array(items) => {
-            let item = sample_json(items, graph, visiting, depth + 1)?;
-            Some(Value::Array(vec![item]))
-        }
-        Type::Map { key, value } => {
-            if !matches!(key.as_ref(), Type::Primitive(Prim::String) | Type::Enum(_)) {
-                return None;
-            }
-            let entry = sample_json(value, graph, visiting, depth + 1)?;
-            let mut map = Map::new();
-            map.insert("key".to_string(), entry);
-            Some(Value::Object(map))
-        }
-        Type::Enum(members) => members.first().map(|first| Value::String(first.clone())),
-        Type::Any {} => Some(Value::Object(Map::new())),
-        Type::Named(id) => {
-            let schema = graph.schemas.iter().find(|schema| &schema.id == id)?;
-            if !visiting.insert(id.clone()) {
-                return None;
-            }
-            let value = sample_json(&schema.body, graph, visiting, depth + 1);
-            visiting.remove(id);
-            value
-        }
-        Type::Object(fields) => {
-            let mut map = Map::new();
-            for field in fields.iter().filter(|field| field_is_required(field)) {
-                let value = sample_json(&field.schema, graph, visiting, depth + 1)?;
-                map.insert(field.json_name.clone(), value);
-            }
-            Some(Value::Object(map))
-        }
-        // Go has no anonymous sum type, so a union in request position could only be rendered by
-        // two of the three targets. Refusing it keeps one plan valid everywhere.
-        Type::Union(_) => None,
-    }
-}
-
-/// A JSON value for a response-side type.
-///
-/// Responses are handed to the decoder as text, so nothing has to be constructible as a literal:
-/// unions pick their first variant and byte strings carry as a string, exactly as they arrive over
-/// the wire.
-fn response_json(
-    ty: &Type,
-    graph: &ApiGraph,
-    visiting: &mut BTreeSet<String>,
-    depth: usize,
-) -> Option<Value> {
-    if depth > MAX_SAMPLE_DEPTH {
-        return None;
-    }
-    match ty {
-        Type::Union(variants) => variants
-            .first()
-            .and_then(|first| response_json(first, graph, visiting, depth + 1)),
-        Type::Primitive(Prim::Bytes) => Some(Value::String("Z25yOA==".to_string())),
-        Type::Array(items) => {
-            let item = response_json(items, graph, visiting, depth + 1)?;
-            Some(Value::Array(vec![item]))
-        }
-        Type::Map { value, .. } => {
-            let entry = response_json(value, graph, visiting, depth + 1)?;
-            let mut map = Map::new();
-            map.insert("key".to_string(), entry);
-            Some(Value::Object(map))
-        }
-        Type::Named(id) => {
-            let schema = graph.schemas.iter().find(|schema| &schema.id == id)?;
-            if !visiting.insert(id.clone()) {
-                return None;
-            }
-            let value = response_json(&schema.body, graph, visiting, depth + 1);
-            visiting.remove(id);
-            value
-        }
-        Type::Object(fields) => {
-            let mut map = Map::new();
-            for field in fields {
-                // Optional fields are carried too: the "present" decode case needs them, and the
-                // "absent" case is built by removing exactly one of them.
-                let value = response_json(&field.schema, graph, visiting, depth + 1)?;
-                map.insert(field.json_name.clone(), value);
-            }
-            Some(Value::Object(map))
-        }
-        other => sample_json(other, graph, visiting, depth + 1),
-    }
-}
-
-/// The first required scalar field of an object body, with the value the canned reply carries.
-fn checked_field(body: &Type, value: &Value) -> Option<DecodedField> {
-    let Type::Object(fields) = body else {
-        return None;
-    };
-    let object = value.as_object()?;
-    fields
+/// A sampled success reply in the wire form of the media type its status declares, as
+/// [`MediaFamily`] rules for every consumer of a reply: the text itself for a `text/*` type, which
+/// the generated SDKs return as a string, and JSON otherwise, which they decode. A `text/*` reply
+/// whose sample is not a string has no such form: the refusal says so, the plan counts it, and no
+/// case relies on the reply, exactly as a docs page prints the refusal instead of a body.
+fn success_reply(op: &Operation, success: &SuccessSample) -> Result<CannedResponse, SampleRefusal> {
+    let media = op
+        .responses
         .iter()
-        .find(|field| {
-            field_is_required(field)
-                && is_checkable_scalar(&field.schema)
-                && object.contains_key(&field.json_name)
-        })
-        .map(|field| DecodedField {
-            json_name: field.json_name.clone(),
-            schema: field.schema.clone(),
-            value: object.get(&field.json_name).cloned(),
-        })
-}
-
-/// The first optional scalar field that a decoder must accept as absent.
-fn omitted_field(body: &Type) -> Option<DecodedField> {
-    let Type::Object(fields) = body else {
-        return None;
+        .find(|response| response.status == success.status)
+        .map_or("application/json", response_media_type);
+    if success.body.is_empty() || media_family(media) != MediaFamily::Text {
+        return Ok(CannedResponse {
+            status: success.status,
+            headers: json_response_headers(&success.body),
+            body: success.body.clone(),
+        });
+    }
+    let Ok(Value::String(text)) = serde_json::from_str::<Value>(&success.body) else {
+        return Err(SampleRefusal::TextReply {
+            status: success.status,
+            content_type: media.to_string(),
+        });
     };
-    fields
-        .iter()
-        .find(|field| {
-            !field_is_required(field)
-                && field.deserializer_accepts_absent
-                && field.serializer_may_omit
-                && is_checkable_scalar(&field.schema)
-        })
-        .map(|field| DecodedField {
-            json_name: field.json_name.clone(),
-            schema: field.schema.clone(),
-            value: None,
-        })
-}
-
-/// Whether a field must be present in an inbound payload.
-///
-/// This is the graph's own presence fact, not a re-derivation: a field the deserializer accepts as
-/// absent is optional however the source spelled it.
-fn field_is_required(field: &Field) -> bool {
-    !field.deserializer_accepts_absent || field.validator_requires_presence
-}
-
-fn is_checkable_scalar(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Primitive(Prim::String | Prim::Bool | Prim::Int { .. } | Prim::Float { .. })
-    )
-}
-
-fn scalar_sample(
-    ty: &Type,
-    graph: &ApiGraph,
-    visiting: &mut BTreeSet<String>,
-    depth: usize,
-) -> Option<Value> {
-    if depth > MAX_SAMPLE_DEPTH {
-        return None;
-    }
-    match ty {
-        Type::Primitive(prim) => match prim {
-            Prim::Bytes => None,
-            other => primitive_sample(other),
-        },
-        Type::WellKnown(well_known) => Some(Value::String(well_known_sample(well_known))),
-        Type::Enum(members) => members.first().map(|first| Value::String(first.clone())),
-        Type::Named(id) => {
-            let schema = graph.schemas.iter().find(|schema| &schema.id == id)?;
-            if !visiting.insert(id.clone()) {
-                return None;
-            }
-            let value = scalar_sample(&schema.body, graph, visiting, depth + 1);
-            visiting.remove(id);
-            value
-        }
-        _ => None,
-    }
-}
-
-fn primitive_sample(prim: &Prim) -> Option<Value> {
-    match prim {
-        Prim::String => Some(Value::String("gnr8".to_string())),
-        Prim::Bool => Some(Value::Bool(true)),
-        Prim::Int { .. } => Some(json!(7)),
-        Prim::Float { .. } => Some(json!(1.5)),
-        // A byte string has a different literal in every target and a base64 wire form on top;
-        // request-side samples stay out of that.
-        Prim::Bytes => None,
-    }
-}
-
-fn well_known_sample(well_known: &WellKnown) -> String {
-    match well_known {
-        WellKnown::Uuid => "8f14e45f-ea69-4f6b-b2c1-9a1f4dcb1234".to_string(),
-        WellKnown::DateTime => "2024-01-02T03:04:05Z".to_string(),
-        WellKnown::Date => "2024-01-02".to_string(),
-        WellKnown::Duration => "PT1H".to_string(),
-        WellKnown::Decimal => "1.50".to_string(),
-        WellKnown::Email => "contract@gnr8.test".to_string(),
-        WellKnown::Uri => "https://gnr8.test/resource".to_string(),
-    }
-}
-
-/// The exact string a sampled scalar takes on the wire.
-fn wire_scalar(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Bool(flag) => Some(flag.to_string()),
-        Value::Number(number) => Some(number.to_string()),
-        _ => None,
-    }
+    Ok(CannedResponse {
+        status: success.status,
+        headers: vec![(
+            "content-type".to_string(),
+            reply_wire_media_type(media).to_string(),
+        )],
+        body: text,
+    })
 }
 
 fn json_response_headers(body: &str) -> Vec<(String, String)> {
@@ -1281,27 +1209,6 @@ fn json_response_headers(body: &str) -> Vec<(String, String)> {
     } else {
         vec![("content-type".to_string(), "application/json".to_string())]
     }
-}
-
-/// The canned error payload for one status.
-///
-/// The declared error model is used when the graph names one, so the body a target decodes matches
-/// the shape it declares; otherwise the generic message/slug envelope every SDK reads is sent.
-fn error_payload(op: &Operation, status: u16, graph: &ApiGraph) -> String {
-    let declared = op
-        .responses
-        .iter()
-        .find(|response| response.status == status)
-        .and_then(|response| response.body.as_ref())
-        .and_then(|body| graph.schemas.iter().find(|schema| schema.id == body.ref_id))
-        .and_then(|schema: &Schema| response_json(&schema.body, graph, &mut BTreeSet::new(), 0));
-    let value = declared.unwrap_or_else(|| {
-        json!({
-            "message": "contract test error",
-            "slug": "contract_test_error",
-        })
-    });
-    serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
 }
 
 fn media_suffix(content_type: &str) -> String {
@@ -1338,7 +1245,7 @@ fn snake_case(value: &str) -> String {
 }
 
 /// Percent-encode a path segment the way every generated client encodes one.
-fn percent_encode(value: &str) -> String {
+pub(crate) fn percent_encode(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
@@ -1377,6 +1284,9 @@ fn base64_encode(input: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod sampler_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1644,6 +1554,85 @@ mod tests {
                 .find(|(name, _)| name == "content-type")
                 .map(|(_, value)| value.as_str()),
             Some("application/json")
+        );
+    }
+
+    /// A `text/*` success reply is canned as the text itself under its declared media type, as the
+    /// SDKs return it and the docs page prints it; one whose sample is not a string has no wire form
+    /// and drives no case, as a docs page prints no body for it.
+    #[test]
+    fn a_text_reply_is_canned_as_the_text_under_its_declared_media_type() {
+        let mut graph = catalog_graph();
+        let mut text_op = graph.operations[0].clone();
+        text_op.id = "getName".to_string();
+        text_op.path = "/name".to_string();
+        text_op.params.clear();
+        text_op.security = Vec::new();
+        text_op.responses = serde_json::from_value(serde_json::json!([
+            {"status": 200, "body": {"ref_id": "catalog.Name"}, "content_types": ["text/plain; charset=utf-8"]}
+        ]))
+        .unwrap();
+        let mut csv_op = text_op.clone();
+        csv_op.id = "getCsv".to_string();
+        csv_op.path = "/csv".to_string();
+        csv_op.responses = serde_json::from_value(serde_json::json!([
+            {"status": 200, "body": {"ref_id": "catalog.Item"}, "content_types": ["text/csv"]}
+        ]))
+        .unwrap();
+        graph.operations.extend([text_op, csv_op]);
+        graph.schemas.push(
+            serde_json::from_value(serde_json::json!(
+                {"id": "catalog.Name", "name": "Name", "body": {"type": "primitive", "of": {"prim": "string"}},
+                 "provenance": {"file": "a.go", "start_line": 30, "end_line": 30}}
+            ))
+            .unwrap(),
+        );
+        let plan = plan_contract_tests(&graph).expect("plan");
+        let text_cases: Vec<&super::ContractCase> = plan
+            .cases
+            .iter()
+            .filter(|case| case.operation_id == "getName" && case.response.status == 200)
+            .collect();
+        assert!(!text_cases.is_empty(), "the text reply drives a case");
+        for case in text_cases {
+            assert_eq!(
+                case.response.headers,
+                vec![(
+                    "content-type".to_string(),
+                    "text/plain; charset=utf-8".to_string()
+                )],
+                "{}",
+                case.name
+            );
+            assert!(
+                !case.response.body.starts_with('"'),
+                "{}: the text is canned unquoted: {}",
+                case.name,
+                case.response.body
+            );
+        }
+        assert!(
+            plan.cases
+                .iter()
+                .filter(|case| case.operation_id == "getCsv")
+                .all(|case| case.response.status != 200),
+            "a text reply with no string sample drives no success case"
+        );
+        // ... and the reply it cannot drive is counted, never lost silently.
+        assert_eq!(
+            plan.refused
+                .iter()
+                .filter(|refused| refused.operation_id == "getCsv")
+                .map(|refused| (&refused.scope, refused.reason.to_string()))
+                .collect::<Vec<_>>(),
+            vec![(
+                &super::RefusedScope::SuccessReply,
+                "response `200` is declared `text/csv`, whose wire form is text, but its sample \
+                 is not a string"
+                    .to_string()
+            )],
+            "{:?}",
+            plan.refused
         );
     }
 

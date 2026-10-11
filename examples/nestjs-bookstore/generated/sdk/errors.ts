@@ -42,7 +42,7 @@ export class AuthConfigurationError extends Error {
 }
 
 export type ResponseDecodeFailure =
-  "empty_body" | "unexpected_content_type" | "invalid_json";
+  "empty_body" | "unexpected_content_type" | "invalid_json" | "invalid_text";
 
 export interface ResponseDecodeErrorInit {
   headers?: Headers | undefined;

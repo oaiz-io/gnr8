@@ -291,6 +291,13 @@ The graph is deliberately smaller than the full OpenAPI vocabulary. Unrepresenta
 emit `source.openapi.unrepresentable`; escaping external references are rejected. Treat those
 diagnostics as blocking when exact preservation is required.
 
+A server's `variables` are not carried. A server's path is read with each variable replaced by
+its `default` (that is how the base path is found), and the server keeps its URL as written,
+without the base path. `openapi.yaml` publishes that URL with no `variables`, so a variable left in
+it (`https://{region}.example.com`) is published undefined. Set concrete server URLs with an
+`OpenApiMetadata` transform (`OpenApiMetadata::server`; it replaces the imported metadata), or
+publish the variables with a custom `PostProcess`.
+
 ## Source-to-target example
 
 ```rust

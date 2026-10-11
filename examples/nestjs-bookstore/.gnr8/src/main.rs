@@ -33,7 +33,13 @@ fn main() -> std::process::ExitCode {
             .source(NestJs::new().inputs(["src"]))
             .transform(SetTitle::new("Bookstore API"))
             .target(OpenApi31::new().to("generated/openapi.yaml"))
-            .target(TsSdk::new().module("example.com/bookstore/sdk").to("generated/sdk"))
+            .target(
+                TsSdk::new()
+                    .module("example.com/bookstore/sdk")
+                    .package(SdkPackageMetadata::new().registry_name("@example/bookstore-sdk"))
+                    .to("generated/sdk"),
+            )
+            .target(StaticDocs::new().to("generated/docs"))
             .post(Header::generated()),
     )
 }

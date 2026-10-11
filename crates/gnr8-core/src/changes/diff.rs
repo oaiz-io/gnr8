@@ -6,8 +6,8 @@ use crate::graph::direction::{
     directions_of, schema_consumers, schema_directions, SchemaConsumers, SchemaDirections,
 };
 use crate::graph::{
-    ApiGraph, Field, OpenApiMetadataPolicy, Operation, Param, Response, Schema, SecurityScheme,
-    SourceSpan, Type,
+    ApiGraph, Field, OpenApiMetadataPolicy, Operation, Param, Prim, Response, Schema,
+    SecurityScheme, SourceSpan, Type, WellKnown,
 };
 use crate::CoreError;
 
@@ -174,6 +174,10 @@ struct Scope {
     protected: Sides<bool>,
     checked: bool,
     current_span: Option<SourceSpan>,
+    /// Whether the base node compared here was imported from an `OpenAPI` document
+    /// ([`imported_document`]): the operation, parameter or schema, or for the document itself,
+    /// any of the base graph's operations and schemas.
+    base_imported: bool,
 }
 
 impl Scope {
@@ -182,6 +186,22 @@ impl Scope {
         scope.current_span = current_span;
         scope
     }
+}
+
+/// Whether `span` is the provenance of a node an `OpenApi` source imported.
+///
+/// The importer gives every node it imports the document it read as provenance, and a document is
+/// JSON or YAML (`openapi.yaml`, `spec.json`). A source extractor gives a node the source file that
+/// declares it (`handlers.go`, `app.py`, `books.controller.ts`), never one of those.
+fn imported_document(span: &SourceSpan) -> bool {
+    std::path::Path::new(&span.file)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            ["json", "yaml", "yml"]
+                .iter()
+                .any(|document| extension.eq_ignore_ascii_case(document))
+        })
 }
 
 struct GraphIndex<'a> {
@@ -333,9 +353,21 @@ impl<'a> GraphIndex<'a> {
 
 struct Collector {
     changes: Vec<Change>,
+    /// Whether the base was read from a version 1 artifact, which held less of an imported
+    /// `OpenAPI` document than this graph does: no bounds of the schema a parameter names with `$ref`
+    /// ([`comparable_parameter_constraints`]), not every field fact ([`version_1_field_facts`],
+    /// [`enum_unknown_on_version_1`]), and the base path on a server ([`version_1_servers`]).
+    base_from_version_1: bool,
 }
 
 impl Collector {
+    /// Whether the base node `scope` compares is a version 1 artifact's import of an `OpenAPI`
+    /// document, read for what that artifact held of it. A node gnr8 extracted from source code, or
+    /// any node of a version 2 base, is compared whole.
+    const fn version_1_import(&self, scope: &Scope) -> bool {
+        self.base_from_version_1 && scope.base_imported
+    }
+
     fn push(
         &mut self,
         scope: &Scope,
@@ -371,7 +403,33 @@ pub fn diff_graphs(
     current: &ApiGraph,
     exempt_tags: &BTreeSet<String>,
 ) -> ChangeReport {
-    diff_graphs_inner(base, current, exempt_tags, &[], Vec::new())
+    diff_graphs_inner(base, current, exempt_tags, &[], Vec::new(), false)
+}
+
+/// Compare a committed base graph with the current one, as [`diff_graphs_with_gate_operations`]
+/// does, reading a base upgraded from a version 1 artifact for what it held: a parameter whose base
+/// schema is a `$ref` is compared only on the constraint keywords the base states, a field fact a
+/// version 1 artifact could not hold is unknown rather than added, and a server that still holds
+/// the base path is the current server without it.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when a gate selector matches neither graph side.
+pub fn diff_base_graph(
+    base: &super::BaseGraph,
+    current: &ApiGraph,
+    exempt_tags: &BTreeSet<String>,
+    gate_operations: &[GateOperation],
+) -> Result<ChangeReport, CoreError> {
+    let labels = gate_operation_labels(&base.graph, current, gate_operations)?;
+    Ok(diff_graphs_inner(
+        &base.graph,
+        current,
+        exempt_tags,
+        gate_operations,
+        labels,
+        base.upgraded_from_version_1,
+    ))
 }
 
 /// Compare two projected graphs while limiting the gate to exact effective-route selectors.
@@ -389,6 +447,24 @@ pub fn diff_graphs_with_gate_operations(
     exempt_tags: &BTreeSet<String>,
     gate_operations: &[GateOperation],
 ) -> Result<ChangeReport, CoreError> {
+    let labels = gate_operation_labels(base, current, gate_operations)?;
+    Ok(diff_graphs_inner(
+        base,
+        current,
+        exempt_tags,
+        gate_operations,
+        labels,
+        false,
+    ))
+}
+
+/// The sorted, deduplicated labels of the gate selectors, each of which must match an operation on
+/// one side.
+fn gate_operation_labels(
+    base: &ApiGraph,
+    current: &ApiGraph,
+    gate_operations: &[GateOperation],
+) -> Result<Vec<String>, CoreError> {
     let mut labels = Vec::with_capacity(gate_operations.len());
     for selector in gate_operations {
         let matched = base
@@ -410,13 +486,7 @@ pub fn diff_graphs_with_gate_operations(
     }
     labels.sort();
     labels.dedup();
-    Ok(diff_graphs_inner(
-        base,
-        current,
-        exempt_tags,
-        gate_operations,
-        labels,
-    ))
+    Ok(labels)
 }
 
 fn diff_graphs_inner(
@@ -425,11 +495,13 @@ fn diff_graphs_inner(
     exempt_tags: &BTreeSet<String>,
     gate_operations: &[GateOperation],
     gate_operation_labels: Vec<String>,
+    base_from_version_1: bool,
 ) -> ChangeReport {
     let base_index = GraphIndex::new(base, exempt_tags, gate_operations);
     let current_index = GraphIndex::new(current, exempt_tags, gate_operations);
     let mut collector = Collector {
         changes: Vec::new(),
+        base_from_version_1,
     };
 
     compare_document(&base_index, &current_index, &mut collector);
@@ -501,12 +573,16 @@ fn compare_document(base: &GraphIndex<'_>, current: &GraphIndex<'_>, out: &mut C
             "document metadata changed".to_string(),
         );
     }
-    compare_servers(
-        &base.graph.openapi_metadata,
-        &current.graph.openapi_metadata,
-        &scope,
-        out,
-    );
+    let base_servers = if out.version_1_import(&scope) {
+        version_1_servers(
+            &base.graph.openapi_metadata,
+            &current.graph.openapi_metadata,
+            &base.graph.base_path,
+        )
+    } else {
+        base.graph.openapi_metadata.clone()
+    };
+    compare_servers(&base_servers, &current.graph.openapi_metadata, &scope, out);
     compare_security_schemes(base, current, &scope, out);
     let base_security = document_security_alternatives(base.graph);
     let current_security = document_security_alternatives(current.graph);
@@ -520,6 +596,43 @@ fn compare_document(base: &GraphIndex<'_>, current: &GraphIndex<'_>, out: &mut C
             "global security requirements changed".to_string(),
         );
     }
+}
+
+/// The servers of a version 1 base imported from an `OpenAPI` document, as the current ones can be
+/// compared with them.
+///
+/// The version 1 importer kept the base path on each server it imported
+/// (`https://api.example.com/v1` beside the base path `/v1`), where the importer now writes the
+/// server without it. So a base server is read as the current server whose URL, followed by the
+/// base's base path, is its URL. Any other base server is compared as written. Only a base whose
+/// nodes were imported is read this way ([`Collector::version_1_import`]): a server set in
+/// configuration was sent as written in both versions, so the same move there changed every URL a
+/// client calls.
+fn version_1_servers(
+    base: &OpenApiMetadataPolicy,
+    current: &OpenApiMetadataPolicy,
+    base_path: &str,
+) -> OpenApiMetadataPolicy {
+    let mut base = base.clone();
+    let base_path = base_path.trim_matches('/');
+    if base_path.is_empty() {
+        return base;
+    }
+    for server in &mut base.servers {
+        if current.servers.iter().any(|now| now.url == server.url) {
+            continue;
+        }
+        let written = server.url.trim_end_matches('/');
+        if let Some(now) = current.servers.iter().find(|now| {
+            written
+                .strip_prefix(now.url.trim_end_matches('/'))
+                .and_then(|rest| rest.strip_prefix('/'))
+                == Some(base_path)
+        }) {
+            server.url.clone_from(&now.url);
+        }
+    }
+    base
 }
 
 fn compare_servers(
@@ -1021,7 +1134,10 @@ fn compare_parameters(base: &Operation, current: &Operation, scope: &Scope, out:
                     parameter,
                     current_parameter,
                     &subject,
-                    &scope.at(Some(current_parameter.provenance.clone())),
+                    &Scope {
+                        base_imported: imported_document(&parameter.provenance),
+                        ..scope.at(Some(current_parameter.provenance.clone()))
+                    },
                     out,
                 );
             }
@@ -1101,8 +1217,9 @@ fn compare_existing_parameter(
     }
     // The validation bounds a bound parameter carries are part of what callers must satisfy, the
     // same public fact `*.property.constraints.changed` reports for a schema field.
-    if base.constraints != current.constraints || base.item_constraints != current.item_constraints
-    {
+    let (current_constraints, current_items) =
+        comparable_parameter_constraints(base, current, out.version_1_import(scope));
+    if base.constraints != current_constraints || base.item_constraints != current_items {
         out.push(
             scope,
             ChangeKind::Breaking,
@@ -1140,6 +1257,143 @@ fn compare_existing_parameter(
     }
 }
 
+/// The current parameter's constraints and item constraints as the base can be compared with them.
+///
+/// A version 1 artifact kept an imported parameter's keywords in its raw schema and never resolved
+/// a `$ref`, so the bounds of the schema a `$ref` names were never in it. For a base read from one,
+/// a parameter whose base schema (or items schema) is a `$ref` is compared only on the keywords the
+/// base states ([`stated_by`]); a keyword it does not state is unknown, not added. 0.18.0 also built
+/// a Swagger 2 parameter's schema from a list of keywords that left out `multipleOf`, so an
+/// imported parameter's `multipleOf` is unknown on such a base when the base states none; a
+/// `multipleOf` it does state is compared. Every other parameter, and every comparison of two
+/// version 2 graphs, compares the constraints whole.
+fn comparable_parameter_constraints(
+    base: &Param,
+    current: &Param,
+    version_1_import: bool,
+) -> (
+    crate::analyze::facts::Constraints,
+    crate::analyze::facts::Constraints,
+) {
+    let raw = base
+        .openapi_fields
+        .iter()
+        .find(|(name, _)| name == "schema")
+        .map(|(_, raw)| raw);
+    let names_ref = |schema: Option<&serde_json::Value>| {
+        version_1_import && schema.is_some_and(|schema| schema.get("$ref").is_some())
+    };
+    let items = raw.and_then(|raw| {
+        raw.get("items").or_else(|| {
+            raw.get("additionalProperties")
+                .filter(|value| value.is_object())
+        })
+    });
+    let project = |current: &crate::analyze::facts::Constraints,
+                   base: &crate::analyze::facts::Constraints,
+                   partial: bool| {
+        if partial {
+            stated_by(current, base)
+        } else {
+            current.clone()
+        }
+    };
+    let mut constraints = project(&current.constraints, &base.constraints, names_ref(raw));
+    if version_1_import && base.constraints.multiple_of.is_none() {
+        constraints.multiple_of = None;
+    }
+    (
+        constraints,
+        project(
+            &current.item_constraints,
+            &base.item_constraints,
+            names_ref(raw) || names_ref(items),
+        ),
+    )
+}
+
+/// `current`'s constraints on exactly the keywords `base` states, read for a `$ref` parameter of a
+/// version 1 base.
+///
+/// The current graph holds each keyword combined from the two places it may be stated — beside the
+/// `$ref`, which the base held, and in the schema it names, which the base never held — by the
+/// importer's one rule: the tighter bound or count, the enum members both admit, `uniqueItems` from
+/// either side. So a current keyword *tighter* than the base's may come from the referenced schema
+/// alone, and is unknown: it reads as the base's. A current keyword as loose as or looser than the
+/// base's (or gone) can only be the keyword beside the `$ref` changing, and is compared. A
+/// `pattern` or `multipleOf` stated on both sides is carried from beside the `$ref`, so it is
+/// compared as it is.
+fn stated_by(
+    current: &crate::analyze::facts::Constraints,
+    base: &crate::analyze::facts::Constraints,
+) -> crate::analyze::facts::Constraints {
+    fn keep<T: Clone>(current: Option<&T>, base: Option<&T>) -> Option<T> {
+        base.and(current).cloned()
+    }
+    /// A count the base states: the base's when the current one is tighter.
+    fn count(current: Option<u64>, base: Option<u64>, lower: bool) -> Option<u64> {
+        let base = base?;
+        match current {
+            Some(current) if (lower && current > base) || (!lower && current < base) => Some(base),
+            current => current,
+        }
+    }
+    /// A numeric bound the base states: the base's when the current one is tighter.
+    fn bound(current: Option<&String>, base: Option<&String>, lower: bool) -> Option<String> {
+        let base = base?;
+        let current = current?;
+        let order = match (current.trim().parse::<i128>(), base.trim().parse::<i128>()) {
+            (Ok(current), Ok(base)) => Some(current.cmp(&base)),
+            _ => match (current.trim().parse::<f64>(), base.trim().parse::<f64>()) {
+                (Ok(current), Ok(base)) => current.partial_cmp(&base),
+                _ => None,
+            },
+        };
+        let tighter = match order {
+            Some(std::cmp::Ordering::Greater) => lower,
+            Some(std::cmp::Ordering::Less) => !lower,
+            Some(std::cmp::Ordering::Equal) | None => false,
+        };
+        Some(if tighter { base } else { current }.clone())
+    }
+    crate::analyze::facts::Constraints {
+        min_length: count(current.min_length, base.min_length, true),
+        max_length: count(current.max_length, base.max_length, false),
+        min_items: count(current.min_items, base.min_items, true),
+        max_items: count(current.max_items, base.max_items, false),
+        min_properties: count(current.min_properties, base.min_properties, true),
+        max_properties: count(current.max_properties, base.max_properties, false),
+        minimum: bound(current.minimum.as_ref(), base.minimum.as_ref(), true),
+        maximum: bound(current.maximum.as_ref(), base.maximum.as_ref(), false),
+        exclusive_minimum: bound(
+            current.exclusive_minimum.as_ref(),
+            base.exclusive_minimum.as_ref(),
+            true,
+        ),
+        exclusive_maximum: bound(
+            current.exclusive_maximum.as_ref(),
+            base.exclusive_maximum.as_ref(),
+            false,
+        ),
+        multiple_of: keep(current.multiple_of.as_ref(), base.multiple_of.as_ref()),
+        unique_items: base.unique_items && current.unique_items,
+        pattern: keep(current.pattern.as_ref(), base.pattern.as_ref()),
+        enum_values: if base.enum_values.is_empty() {
+            Vec::new()
+        } else if !current.enum_values.is_empty()
+            && current
+                .enum_values
+                .iter()
+                .all(|member| base.enum_values.contains(member))
+        {
+            // The members both sides admit: narrowed, perhaps, by the referenced schema's enum.
+            base.enum_values.clone()
+        } else {
+            current.enum_values.clone()
+        },
+    }
+}
+
 fn parameter_openapi_value(parameter: &Param) -> serde_json::Value {
     let mut fields: serde_json::Map<String, serde_json::Value> =
         parameter.openapi_fields.iter().cloned().collect();
@@ -1149,6 +1403,13 @@ fn parameter_openapi_value(parameter: &Param) -> serde_json::Value {
         fields.insert(
             "description".to_string(),
             serde_json::Value::String(description.clone()),
+        );
+    }
+    // So is the typed example: the Parameter Object `example` the document carries.
+    if let Some(example) = &parameter.example {
+        fields.insert(
+            "example".to_string(),
+            serde_json::Value::String(example.clone()),
         );
     }
     serde_json::json!({ "content": parameter.openapi_content, "fields": fields })
@@ -1742,6 +2003,7 @@ fn compare_type(
             );
         }
         _ if base == current => {}
+        _ if enum_unknown_on_version_1(base, current, out.version_1_import(scope)) => {}
         _ => {
             let prefix = directions.prefix(true);
             out.push(
@@ -1839,7 +2101,9 @@ fn compare_existing_field(
         scope,
         out,
     );
-    if base.description != current.description || base.example != current.example {
+    // A version 1 base read for what it could hold ([`version_1_field_facts`]).
+    let (example, constraints) = version_1_field_facts(base, current, out.version_1_import(scope));
+    if base.description != current.description || base.example != *example {
         out.push(
             scope,
             ChangeKind::DocOnly,
@@ -1857,16 +2121,13 @@ fn compare_existing_field(
     if !constraints_mirror_type {
         compare_enum(
             &base.meta.constraints.enum_values,
-            &current.meta.constraints.enum_values,
+            &constraints.enum_values,
             subject,
             directions,
             scope,
             out,
         );
-        if enum_source_order_changed(
-            &base.meta.constraints.enum_values,
-            &current.meta.constraints.enum_values,
-        ) {
+        if enum_source_order_changed(&base.meta.constraints.enum_values, &constraints.enum_values) {
             out.push(
                 scope,
                 ChangeKind::DocOnly,
@@ -1878,6 +2139,7 @@ fn compare_existing_field(
     }
     let mut base_meta = base.meta.clone();
     let mut current_meta = current.meta.clone();
+    current_meta.constraints = constraints;
     base_meta.constraints.enum_values.clear();
     current_meta.constraints.enum_values.clear();
     if base_meta != current_meta {
@@ -1890,6 +2152,82 @@ fn compare_existing_field(
             format!("{prefix} field `{name}` constraints changed"),
         );
     }
+}
+
+/// The current field's example and constraints as a base can be compared with them.
+///
+/// Comparing two version 2 graphs, they are the field's own. A version 1 artifact (gnr8 0.18.0 and
+/// earlier) could not hold every fact of a field imported from an `OpenAPI` document that this
+/// graph holds, so on such a base (`version_1_import`) a fact it could not hold is unknown, not added:
+///
+/// - `multipleOf` and `uniqueItems`, which no version 1 field carried;
+/// - an enum the base states none of: 0.18.0 dropped a field enum with a member of another kind than
+///   its `type` (`type: string, enum: [a, 1]`), so a base without one cannot say it had none; and
+/// - an example the base states none of: 0.18.0 dropped a number or boolean field example.
+///
+/// Every fact the base does state is compared. A field gnr8 extracted from source code is compared
+/// whole: no extractor states `multipleOf` or `uniqueItems`, and 0.18.0 kept every enum and
+/// example it read from source, so a fact added there is a real change.
+fn version_1_field_facts<'f>(
+    base: &Field,
+    current: &'f Field,
+    version_1_import: bool,
+) -> (&'f Option<String>, crate::analyze::facts::Constraints) {
+    const UNSTATED: &Option<String> = &None;
+    let mut constraints = current.meta.constraints.clone();
+    if !version_1_import {
+        return (&current.example, constraints);
+    }
+    let base_constraints = &base.meta.constraints;
+    constraints
+        .multiple_of
+        .clone_from(&base_constraints.multiple_of);
+    constraints.unique_items = base_constraints.unique_items;
+    if base_constraints.enum_values.is_empty() {
+        constraints.enum_values.clear();
+    }
+    let example = if base.example.is_none() {
+        UNSTATED
+    } else {
+        &current.example
+    };
+    (example, constraints)
+}
+
+/// Whether `current` is a string enum where a version 1 base's import holds a plain string.
+///
+/// gnr8 0.18.0 imported `type: string, enum: [a, 1]` — an enum with a member of another kind — as a
+/// plain string, dropping the enum and any `null` member with it. This graph imports it as the enum
+/// of its string members. A version 1 base imported from an `OpenAPI` document (`version_1_import`)
+/// cannot say which it held, so the enum, and the null its members admit, are unknown on it rather
+/// than a changed type. A type extracted from source code is compared as it is.
+fn enum_unknown_on_version_1(base: &Type, current: &Type, version_1_import: bool) -> bool {
+    version_1_import
+        && matches!(
+            base,
+            Type::Primitive(Prim::String)
+                | Type::WellKnown(
+                    WellKnown::Uuid
+                        | WellKnown::DateTime
+                        | WellKnown::Date
+                        | WellKnown::Email
+                        | WellKnown::Uri
+                )
+        )
+        && matches!(current, Type::Enum(_))
+}
+
+/// Whether a version 1 base's import cannot say if a field naming a schema with `$ref` admitted
+/// null.
+///
+/// gnr8 0.18.0 kept no nullability for a value that names a schema, so a field naming one that
+/// admits null (`Color: {type: string, enum: [red, null]}`, or a `type` listing `null`) imported as
+/// non-nullable. This graph imports it as nullable. On a version 1 base imported from an `OpenAPI`
+/// document (`version_1_import`), a field naming the same schema as before that now accepts null is
+/// unknown there, not changed. A field extracted from source code is compared as it is.
+fn null_unknown_on_version_1(base: &Type, current: &Type, version_1_import: bool) -> bool {
+    version_1_import
+        && matches!((base, current), (Type::Named(was), Type::Named(now)) if was == now)
 }
 
 fn enum_constraints_mirror_type(field: &Field) -> bool {
@@ -1955,7 +2293,16 @@ fn compare_field_axes(
     }
     let base_nullable = nullable_on(base, directions.base);
     let current_nullable = nullable_on(current, directions.current);
-    if base_nullable != current_nullable {
+    // The `null` member of an enum a version 1 base dropped is as unknown as the enum, and so is
+    // the null a schema named with `$ref` admits ([`null_unknown_on_version_1`]).
+    let null_unknown = !base_nullable
+        && (enum_unknown_on_version_1(&base.schema, &current.schema, out.version_1_import(scope))
+            || null_unknown_on_version_1(
+                &base.schema,
+                &current.schema,
+                out.version_1_import(scope),
+            ));
+    if base_nullable != current_nullable && !null_unknown {
         let added = current_nullable;
         let breaking = directions.unconsumed()
             || if added {
@@ -2217,6 +2564,7 @@ fn operation_scope(
         checked: base.is_some_and(|operation| base_index.operation_checked(operation))
             || current.is_some_and(|operation| current_index.operation_checked(operation)),
         current_span: current.map(|operation| operation.provenance.clone()),
+        base_imported: base.is_some_and(|operation| imported_document(&operation.provenance)),
     }
 }
 
@@ -2278,6 +2626,7 @@ fn schema_scope(
         },
         checked: base_checked || current_checked,
         current_span: current.map(|schema| schema.provenance.clone()),
+        base_imported: base.is_some_and(|schema| imported_document(&schema.provenance)),
     }
 }
 
@@ -2325,6 +2674,13 @@ fn document_scope(base: &GraphIndex<'_>, current: &GraphIndex<'_>) -> Scope {
         },
         checked: base_checked || current_checked,
         current_span: None,
+        base_imported: base
+            .graph
+            .operations
+            .iter()
+            .map(|operation| &operation.provenance)
+            .chain(base.graph.schemas.iter().map(|schema| &schema.provenance))
+            .any(imported_document),
     }
 }
 
@@ -2690,6 +3046,7 @@ mod tests {
             explode: None,
             allow_reserved: false,
             description: None,
+            example: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: span("handlers.rs"),
@@ -4396,5 +4753,121 @@ mod tests {
         );
         assert_eq!(finding.file.as_deref(), Some("models.rs"));
         assert_eq!(finding.line, Some(10));
+    }
+
+    /// Compare `base`, read as a version 1 artifact, with `current`; the sorted change messages.
+    fn version_1_messages(base: ApiGraph, current: &ApiGraph) -> Vec<String> {
+        let base = crate::changes::BaseGraph {
+            reference: "v0.18.0".to_string(),
+            commit: "0".repeat(40),
+            graph: base,
+            upgraded_from_version_1: true,
+        };
+        let report = super::diff_base_graph(&base, current, &BTreeSet::new(), &[]).expect("diff");
+        let mut messages: Vec<String> = report
+            .changes
+            .into_iter()
+            .map(|change| change.message)
+            .collect();
+        messages.sort();
+        messages
+    }
+
+    /// A response schema `Book` with a string `kind`, an integer `count` and a string `label`, read
+    /// from `file`; `added` gives `kind` an enum, `count` a `multipleOf`, `label` an example, the
+    /// string `code` the enum type, and `tone`, naming the schema `Tone`, null.
+    fn version_1_field_graph(file: &str, added: bool) -> ApiGraph {
+        let mut tone = field("tone");
+        tone.schema = Type::Named("Tone".to_string());
+        tone.deserializer_accepts_null = added;
+        tone.serializer_may_emit_null = added;
+        let mut kind = field("kind");
+        let mut count = field("count");
+        count.schema = Type::Primitive(Prim::Int {
+            bits: 64,
+            signed: true,
+        });
+        let mut label = field("label");
+        let mut code = field("code");
+        if added {
+            kind.meta.constraints.enum_values = vec!["a".to_string(), "b".to_string()];
+            count.meta.constraints.multiple_of = Some("3".to_string());
+            label.example = Some("x".to_string());
+            code.schema = Type::Enum(vec!["p".to_string(), "q".to_string()]);
+        }
+        let mut book = schema("Book", vec![kind, count, label, code, tone]);
+        book.provenance = span(file);
+        let mut graph = response_graph(book);
+        let mut tones = schema("Tone", Vec::new());
+        tones.body = Type::Enum(vec!["dark".to_string()]);
+        tones.provenance = span(file);
+        graph.schemas.push(tones);
+        graph.operations[0].provenance = span(file);
+        graph
+    }
+
+    /// A version 1 artifact could not hold some field facts of an imported `OpenAPI` document, so
+    /// on a base read from one they are unknown there. A field gnr8 extracted from source code held
+    /// every one of them in version 1 too, so each fact added to it is reported.
+    #[test]
+    fn a_version_1_base_hides_only_the_field_facts_an_import_could_not_hold() {
+        assert_eq!(
+            version_1_messages(
+                version_1_field_graph("openapi.yaml", false),
+                &version_1_field_graph("openapi.yaml", true)
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            version_1_messages(
+                version_1_field_graph("models.go", false),
+                &version_1_field_graph("models.go", true)
+            ),
+            vec![
+                "field `label` documentation changed".to_string(),
+                "response enum value `a` added to `Book.kind`".to_string(),
+                "response enum value `b` added to `Book.kind`".to_string(),
+                "response field `count` constraints changed".to_string(),
+                "response field `tone` now accepts null".to_string(),
+                "response type `Book.code` changed".to_string(),
+            ]
+        );
+    }
+
+    /// A graph at the base path `/v1` whose operation is read from `file`, with `servers`.
+    fn version_1_server_graph(file: &str, servers: &[&str]) -> ApiGraph {
+        let mut graph = graph_with_tags(&[]);
+        graph.operations[0].provenance = span(file);
+        graph.base_path = "/v1".to_string();
+        graph.openapi_metadata = OpenApiMetadataPolicy {
+            servers: servers.iter().map(|url| OpenApiServer::new(*url)).collect(),
+            ..OpenApiMetadataPolicy::default()
+        };
+        graph
+    }
+
+    /// The version 1 importer kept the base path on a server it imported, so such a server is the
+    /// current one without it. A server set in configuration was sent as written in both versions:
+    /// moving it from `https://api.example.com/v1` to `https://api.example.com` changes every URL
+    /// a client calls, and is reported.
+    #[test]
+    fn a_version_1_base_reads_only_an_imported_server_without_the_base_path() {
+        assert_eq!(
+            version_1_messages(
+                version_1_server_graph("openapi.yaml", &["https://api.example.com/v1"]),
+                &version_1_server_graph("openapi.yaml", &["https://api.example.com"])
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            version_1_messages(
+                version_1_server_graph("handlers.go", &["https://api.example.com/v1"]),
+                &version_1_server_graph("handlers.go", &["https://api.example.com"])
+            ),
+            vec![
+                "server `https://api.example.com/v1` removed".to_string(),
+                "server `https://api.example.com` added as the new default".to_string(),
+            ]
+        );
     }
 }

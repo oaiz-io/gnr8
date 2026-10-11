@@ -106,11 +106,11 @@ pub(crate) struct CliHelpReport {
     pub(crate) commands: Vec<CommandReport>,
 }
 
-trait ProcessRunner {
+pub(super) trait ProcessRunner {
     fn output(&mut self, command: &mut Command) -> io::Result<Output>;
 }
 
-struct NativeRunner;
+pub(super) struct NativeRunner;
 impl ProcessRunner for NativeRunner {
     fn output(&mut self, command: &mut Command) -> io::Result<Output> {
         command.output()
@@ -731,7 +731,7 @@ pub(super) mod tests {
                 assert_eq!(report.status, status, "{report:?}");
                 assert_eq!(report.reason.unwrap().code, kind);
                 assert_eq!(runner.calls.len(), 1);
-                assert!(report.commands.is_empty());
+                assert!(report.commands.is_empty(), "{:?}", report.commands);
             }
         }
         let mut runner = FakeRunner::default();

@@ -283,6 +283,10 @@ pub(crate) struct SchemaObject {
     pub exclusive_minimum: Option<String>,
     /// Exclusive numeric maximum (`exclusiveMaximum`).
     pub exclusive_maximum: Option<String>,
+    /// The number a numeric value is a multiple of (`multipleOf`).
+    pub multiple_of: Option<String>,
+    /// Whether an array's items are pairwise distinct (`uniqueItems`).
+    pub unique_items: bool,
     /// String pattern.
     pub pattern: Option<String>,
     /// Source-declared default value.

@@ -2270,6 +2270,45 @@ impl StaticFiles {
     }
 }
 
+/// The static docs target: a deterministic Markdown reference for the frozen graph, written under
+/// [`StaticDocs::to`]. Code samples cover exactly the built-in SDK targets the same pipeline declares.
+///
+/// The output is one directory of plain Markdown pages — an index, one page per group, operation and
+/// schema — plus an `llms.txt` index for agents. Every fact on a page comes from the graph, and every
+/// code sample is spelled with the names the sibling SDK target emits.
+///
+/// The declaration's one fact is private: [`StaticDocs::to`] sets it and [`StaticDocs::dir`] reads
+/// it, so no caller can build a declaration the builder could not.
+///
+/// ```compile_fail
+/// let docs = gnr8::sdk::builtins::StaticDocs { dir: "generated/docs".to_string() };
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StaticDocs {
+    dir: String,
+}
+
+impl StaticDocs {
+    /// A static docs target with no output directory yet (set with [`StaticDocs::to`]).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the project-relative output directory (e.g. `"generated/docs"`).
+    #[must_use]
+    pub fn to(mut self, dir: impl Into<String>) -> Self {
+        self.dir = dir.into();
+        self
+    }
+
+    /// The project-relative output directory [`StaticDocs::to`] set; empty until it is set.
+    #[must_use]
+    pub fn dir(&self) -> &str {
+        &self.dir
+    }
+}
+
 /// Generated contract tests are on unless a target turns them off.
 const fn default_contract_tests() -> bool {
     true

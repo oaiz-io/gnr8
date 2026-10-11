@@ -17,6 +17,13 @@ pub struct BaseGraph {
     pub commit: String,
     /// Projected graph committed by that revision.
     pub graph: ApiGraph,
+    /// Whether the committed artifact was schema version 1, read through the one upgrade step.
+    ///
+    /// A version 1 artifact held less than this graph does — the bounds of the schema an imported
+    /// parameter names with `$ref`, some field facts — and kept the base path on an imported
+    /// server, so the comparison reads such a base for what it held
+    /// ([`crate::changes::diff_base_graph`]).
+    pub upgraded_from_version_1: bool,
 }
 
 /// Load the projected graph committed at `reference`.
@@ -57,11 +64,13 @@ fn load_base_graph_with(
             path: artifact_path.to_string(),
         });
     }
-    let graph = parse_base_artifact(reference, artifact_path, &output.stdout)?;
+    let (graph, upgraded_from_version_1) =
+        parse_base_artifact(reference, artifact_path, &output.stdout)?;
     Ok(BaseGraph {
         reference: reference.to_string(),
         commit,
         graph,
+        upgraded_from_version_1,
     })
 }
 
@@ -117,7 +126,7 @@ fn parse_base_artifact(
     reference: &str,
     artifact_path: &str,
     bytes: &[u8],
-) -> Result<ApiGraph, CoreError> {
+) -> Result<(ApiGraph, bool), CoreError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|error| CoreError::BaseGraphCorrupt {
             reference: reference.to_string(),
@@ -138,7 +147,10 @@ fn parse_base_artifact(
             path: artifact_path.to_string(),
             detail: "field 'schema_version' must be a non-negative integer".to_string(),
         })?;
-    if version_number != u64::from(GRAPH_ARTIFACT_SCHEMA_VERSION) {
+    // Version 1 is read as version 2 represents the same API (one upgrade step, applied once);
+    // any other version is refused.
+    let from_v1 = version_number == 1;
+    if !from_v1 && version_number != u64::from(GRAPH_ARTIFACT_SCHEMA_VERSION) {
         return Err(CoreError::BaseGraphSchemaVersion {
             reference: reference.to_string(),
             path: artifact_path.to_string(),
@@ -146,12 +158,15 @@ fn parse_base_artifact(
             found: version_number.to_string(),
         });
     }
-    let artifact: GraphArtifact =
+    let mut artifact: GraphArtifact =
         serde_json::from_value(value).map_err(|error| CoreError::BaseGraphCorrupt {
             reference: reference.to_string(),
             path: artifact_path.to_string(),
             detail: error.to_string(),
         })?;
+    if from_v1 {
+        crate::sdk::openapi_source::upgrade_graph_from_artifact_v1(&mut artifact.graph);
+    }
     crate::graph_artifact::validate_comparison_identities(&artifact.graph).map_err(|detail| {
         CoreError::BaseGraphCorrupt {
             reference: reference.to_string(),
@@ -176,7 +191,7 @@ fn parse_base_artifact(
             });
         }
     }
-    Ok(artifact.graph)
+    Ok((artifact.graph, from_v1))
 }
 
 fn run_git<I, S>(project_root: &Path, git: &OsStr, args: I) -> Result<Output, CoreError>
@@ -224,7 +239,9 @@ mod tests {
     use crate::graph::{
         ApiGraph, Field, Operation, Prim, Response, Schema, SchemaRef, SourceSpan, Type,
     };
-    use crate::graph_artifact::{GraphArtifact, GRAPH_ARTIFACT_PATH};
+    use crate::graph_artifact::{
+        GraphArtifact, GRAPH_ARTIFACT_PATH, GRAPH_ARTIFACT_SCHEMA_VERSION,
+    };
     use crate::CoreError;
 
     const FIXTURE_ARTIFACT_PATH: &str = "examples/bookstore/generated/gnr8.graph.json";
@@ -337,20 +354,38 @@ mod tests {
         let corrupt = parse_base_artifact("main", GRAPH_ARTIFACT_PATH, b"{not json").unwrap_err();
         assert!(matches!(corrupt, CoreError::BaseGraphCorrupt { .. }));
 
+        let current = format!("\"schema_version\": {GRAPH_ARTIFACT_SCHEMA_VERSION}");
         let text = GraphArtifact::new(crate::graph::ApiGraph::default())
             .to_json()
             .expect("serialize current artifact")
-            .replace("\"schema_version\": 1", "\"schema_version\": 99");
+            .replace(&current, "\"schema_version\": 99");
         let mismatch =
             parse_base_artifact("main", GRAPH_ARTIFACT_PATH, text.as_bytes()).unwrap_err();
         assert!(matches!(
             mismatch,
             CoreError::BaseGraphSchemaVersion {
-                expected: 1,
+                expected: GRAPH_ARTIFACT_SCHEMA_VERSION,
                 ref found,
                 ..
             } if found == "99"
         ));
+    }
+
+    /// A base artifact written by gnr8 0.18.0 or earlier (schema version 1) is read, upgraded to the
+    /// version 2 representation, so a project's first comparison after upgrading still works.
+    #[test]
+    fn a_version_1_base_artifact_is_read_and_upgraded() {
+        assert_eq!(GRAPH_ARTIFACT_SCHEMA_VERSION, 2);
+        let current = format!("\"schema_version\": {GRAPH_ARTIFACT_SCHEMA_VERSION}");
+        let text = GraphArtifact::new(crate::graph::ApiGraph::default())
+            .to_json()
+            .expect("serialize current artifact")
+            .replace(&current, "\"schema_version\": 1");
+        let (graph, upgraded) =
+            parse_base_artifact("origin/main", GRAPH_ARTIFACT_PATH, text.as_bytes())
+                .expect("a version 1 artifact is read");
+        assert_eq!(graph, crate::graph::ApiGraph::default());
+        assert!(upgraded, "the reader says the base was upgraded");
     }
 
     #[test]

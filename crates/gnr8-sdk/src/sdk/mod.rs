@@ -720,7 +720,7 @@ pub mod prelude {
         OpenApiMetadata, OpenApiSchemaPatch, OperationSelector, ParameterOverride, PySdk,
         RenameOperation, RenameType, RequestParameter, RequireOperationDocs, ResponseOverride,
         SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
-        SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticFiles, TsSdk,
+        SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticDocs, StaticFiles, TsSdk,
     };
     pub use super::cli::{OwnedCommand, SdkCli};
     pub use super::cli_spec::{

@@ -473,6 +473,7 @@ mod tests {
             reference: "origin/main".to_string(),
             commit: "0123456789012345678901234567890123456789".to_string(),
             graph: gnr8_engine::graph::ApiGraph::default(),
+            upgraded_from_version_1: false,
         };
         let report = ChangeReport {
             policy: ChangePolicy {
@@ -576,6 +577,7 @@ mod tests {
             reference: "origin/main".to_string(),
             commit: "0123456789012345678901234567890123456789".to_string(),
             graph: gnr8_engine::graph::ApiGraph::default(),
+            upgraded_from_version_1: false,
         };
         let mut change = finding(
             ChangeKind::Breaking,
@@ -644,6 +646,7 @@ mod tests {
             reference: "refs/heads/<script>".to_string(),
             commit: "0123456789012345678901234567890123456789".to_string(),
             graph: gnr8_engine::graph::ApiGraph::default(),
+            upgraded_from_version_1: false,
         };
         let mut change = finding(
             ChangeKind::Breaking,
@@ -709,6 +712,7 @@ mod tests {
             reference: "HEAD".to_string(),
             commit: "0123456789012345678901234567890123456789".to_string(),
             graph: gnr8_engine::graph::ApiGraph::default(),
+            upgraded_from_version_1: false,
         };
         let report = ChangeReport {
             policy: ChangePolicy {
@@ -736,6 +740,7 @@ mod tests {
             reference: "HEAD".to_string(),
             commit: "0123456789012345678901234567890123456789".to_string(),
             graph: gnr8_engine::graph::ApiGraph::default(),
+            upgraded_from_version_1: false,
         };
         let mut changes = Vec::new();
         for (kind, gating) in [

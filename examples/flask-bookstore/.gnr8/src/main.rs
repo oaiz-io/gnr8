@@ -20,6 +20,7 @@
 //!   title             → SetTitle::new("Bookstore Orders API")
 //!   output.openapi    → OpenApi31::new().to("generated/openapi.yaml")
 //!   output.sdk + module → PySdk::new().module("example.com/orders/sdk").to("generated/sdk")
+//!   docs              → StaticDocs::new().to("generated/docs")
 //! plus a Header post-process that stamps the generated banner on every .py file.
 //!
 //! This is the HONEST Flask typed-envelope (the second-class Python frontend): typed handlers + typed
@@ -45,6 +46,7 @@ fn main() -> std::process::ExitCode {
                     .module("example.com/orders/sdk")
                     .to("generated/sdk"),
             )
+            .target(StaticDocs::new().to("generated/docs"))
             .post(Header::generated()),
     )
 }

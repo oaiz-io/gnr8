@@ -110,8 +110,8 @@ fn run_changes(
     }
 
     let exempt_tags: std::collections::BTreeSet<String> = exempt_tags.iter().cloned().collect();
-    let report = gnr8_engine::changes::diff_graphs_with_gate_operations(
-        &base.graph,
+    let report = gnr8_engine::changes::diff_base_graph(
+        &base,
         &current.graph,
         &exempt_tags,
         gate_operations,
@@ -697,14 +697,19 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
     output.verbose("verify: running pipeline");
     let pipeline_start = Instant::now();
     let run = gnr8_engine::worker::run_pipeline(&root, policy, cache_store().as_ref())?;
+    // Docs suites are built here, their only consumer, not on every pipeline run.
+    let docs = gnr8_engine::pipeline::docs_suites_of_run(&run.plan, &run.outcome.artifacts)?;
     let pipeline_elapsed = pipeline_start.elapsed();
 
     let diagnostics = run.outcome.diagnostics;
     print_diagnostics(output, &diagnostics);
 
-    if run.outcome.contract_test_suites.is_empty() && run.outcome.cli_help_suites.is_empty() {
+    if run.outcome.contract_test_suites.is_empty()
+        && run.outcome.cli_help_suites.is_empty()
+        && docs.is_empty()
+    {
         bail!(
-            "no SDK contract tests or generated CLI help checks to run — add an SDK or CLI target to .gnr8/src/main.rs"
+            "no SDK contract tests or generated CLI help checks to run, and no docs samples — add an SDK, CLI or StaticDocs target to .gnr8/src/main.rs"
         );
     }
 
@@ -717,11 +722,13 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
     );
     let cli_suites =
         verify::run_cli_help_suites(&root, &run.outcome.cli_help_suites, &run.outcome.artifacts);
+    let docs_suites = verify::run_docs_suites(&root, &docs, &run.outcome.artifacts);
     let run_elapsed = run_start.elapsed();
 
     let report = verify::VerifyReport::new(
         suites,
         cli_suites,
+        docs_suites,
         verify::VerifyTimings {
             pipeline: duration_ms(pipeline_elapsed),
             tests: duration_ms(run_elapsed),
@@ -756,7 +763,7 @@ fn run_verify(policy: WorkerPolicy, output: Output) -> Result<()> {
             eprintln!("error: {message}");
         }
         if report.no_checks_executed() {
-            eprintln!("error: no checks executed: all generated CLI help suites were skipped");
+            eprintln!("error: no checks executed: every generated check was skipped");
         }
         std::io::stdout().flush()?;
         std::io::stderr().flush()?;
@@ -1149,7 +1156,7 @@ const UNCOPIED_OUTPUT_DIRECTORIES: &[&str] = &[
 ///
 /// Symlinks are skipped rather than followed: the temp tree must stay a self-contained copy, and a
 /// link out of the output directory would make it one that reaches back into the project.
-fn copy_output_tree(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn copy_output_tree(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::create_dir_all(destination).map_err(|err| {
         format!(
             "failed to create readiness temp dir '{}': {err}",

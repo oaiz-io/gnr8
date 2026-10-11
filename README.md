@@ -55,7 +55,8 @@ crate.
 | TypeScript + NestJS | controllers, typed parameters, DTO classes, enums, and unions | Node and the project’s TypeScript package |
 | OpenAPI | an OpenAPI document used as a neutral source | none beyond gnr8 |
 
-Targets include OpenAPI 3.1 YAML and typed Go, Python, and TypeScript SDKs. Go uses `net/http`.
+Targets include OpenAPI 3.1 YAML, typed Go, Python, and TypeScript SDKs, and `StaticDocs`, a
+Markdown reference whose code samples `gnr8 verify` checks against the SDKs. Go uses `net/http`.
 TypeScript uses the built-in `fetch` API. Python uses `urllib`; its models use Pydantic v2 by default
 or standard-library dataclasses when selected in the pipeline.
 
@@ -124,7 +125,7 @@ Use `gnr8 init --source fastapi --sdk python`, `--source flask --sdk python`, or
 | `gnr8 init` | Create the required `.gnr8/` pipeline crate. |
 | `gnr8 generate` | Generate all configured artifacts. |
 | `gnr8 check` | Fail when generated artifacts are stale or changed by hand. |
-| `gnr8 verify` | Run the generated SDK contract tests with each language's own test tool. |
+| `gnr8 verify` | Run the generated SDK contract tests, generated CLI help checks, and the docs' SDK code samples with each language's own tools. |
 | `gnr8 changes --base <ref>` | Classify API changes and gate checked breaking findings. |
 | `gnr8 watch` | Regenerate after source or pipeline changes. |
 | `gnr8 doctor` | Report toolchain, extraction, and output problems. |
@@ -180,6 +181,8 @@ routes and types produce a diagnostic or an explicit error.
 - [Pipeline configuration](docs/pipeline/configuration.md): built-in stages and custom Rust stages.
 - [Source extraction](docs/extraction/sources.md): supported patterns and limits.
 - [SDK generation](docs/sdk/generation.md): Go, Python, and TypeScript targets.
+- [Static docs](docs/static-docs/generation.md): the `StaticDocs` Markdown reference and how its
+  samples are verified.
 - [Full reference](docs/USAGE.md): detailed behavior and type mapping.
 - [Examples](examples/): complete inputs and committed generated output.
 

@@ -239,6 +239,62 @@ fn python_sdk_is_ruff_clean() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Python, dataclass style: the SDK package for the same fixture is `ruff check` + `ruff format`
+/// clean too, `unset.py` included.
+#[test]
+fn python_dataclass_sdk_is_ruff_clean() {
+    if !tool_available("ruff", &["--version"]) {
+        eprintln!("skipping python dataclass lint: ruff unavailable");
+        return;
+    }
+    let graph = gnr8_engine::analyze::build_graph(PY_FIXTURE)
+        .expect("build_graph must succeed (requires python3 for pyextract)");
+    let bundle = gnr8_engine::pysdk::generate_with_options(
+        &graph,
+        "bookstore",
+        &graph.base_path,
+        &gnr8_engine::sdk::layout::SdkFileLayout::compact(),
+        gnr8_engine::sdk::model_style::PyModelStyle::Dataclass,
+    )
+    .expect("dataclass pysdk must generate");
+    let dir = unique_temp_dir("py-dataclass");
+    let pkg = dir.join("bookstore");
+    std::fs::create_dir_all(&pkg).expect("create package dir");
+    gnr8_engine::sdk::bundle::write_to_dir(&bundle, &pkg).expect("materialize Python SDK");
+    let pkg_str = pkg.to_str().expect("utf-8 path");
+
+    let (check_ok, check_out, check_err) = run(
+        "ruff",
+        &[
+            "check",
+            "--isolated",
+            "--no-cache",
+            "--select",
+            "F,I,UP,E",
+            "--ignore",
+            "UP007,UP045",
+            pkg_str,
+        ],
+        &dir,
+        &[],
+    );
+    assert!(
+        check_ok,
+        "ruff check flagged the generated dataclass Python SDK:\n{check_out}{check_err}"
+    );
+    let (fmt_ok, fmt_out, fmt_err) = run(
+        "ruff",
+        &["format", "--isolated", "--no-cache", "--diff", pkg_str],
+        &dir,
+        &[],
+    );
+    assert!(
+        fmt_ok,
+        "ruff format would reformat the generated dataclass Python SDK:\n{fmt_out}{fmt_err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Python target output — the SDK package plus the generated `cli/` subpackage — is `ruff` clean.
 ///
 /// The files are passed by name rather than as a directory, for two reasons that are both facts

@@ -86,12 +86,12 @@ we support. We took none of their tags. If any of them changed tomorrow, nothing
 > licence to add more. Field prose should move to the field's own doc comment; until it does, do not
 > extend the tag grammar.
 >
-> The same applies to the `enums:"…"` / `enum:"…"` tags a bound parameter's enum can be written in
-> (`goextract/internal/handlers/handlers.go`, `parameterEnumRules`). That spelling is a *foreign*
-> generator's convention rather than one we invented, which puts it on the wrong side of the line
-> above, and no Go runtime consumes it — only `binding:`/`validate:` are read by the validator that
-> actually enforces the constraint. It is recorded here because it was already read before the rule
-> existed; reading it is not a precedent, and the resolution is to remove it, not to grow it.
+> **Resolved (after 0.18.0):** `goextract` used to read the `enums:"…"` / `enum:"…"` struct tags as an
+> enum, on bound parameters and schema fields alike. That spelling is a *foreign* generator's
+> convention, and no Go runtime consumes it. The reading was removed, with no detection or warning
+> left behind, because reporting the tag would still mean reading it. `binding:"oneof=…"` /
+> `validate:"oneof=…"`, which the enforcing validator itself reads, is the one source of an enum
+> constraint. Do not reintroduce it.
 
 ### 0.2 Forbidden: brownfield / compatibility / migration product surface
 

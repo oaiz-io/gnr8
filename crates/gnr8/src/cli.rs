@@ -88,7 +88,8 @@ pub(crate) enum Commands {
     },
     /// Verify generated outputs are up to date.
     Check,
-    /// Run generated SDK contract tests and generated Go/Python CLI help checks.
+    /// Run generated SDK contract tests, generated Go/Python CLI help checks, and the SDK code
+    /// samples the docs print.
     Verify,
     /// Classify API changes against a committed graph artifact.
     Changes {

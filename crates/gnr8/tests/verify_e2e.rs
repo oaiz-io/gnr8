@@ -204,8 +204,14 @@ fn verify_emits_runs_and_gates_the_generated_contract_test() {
     assert!(ok, "gnr8 verify must pass.\nstdout:\n{out}\nstderr:\n{err}");
     let report: serde_json::Value = serde_json::from_str(&out).expect("verify --json is JSON");
     assert_eq!(report["verified"], serde_json::json!(true), "{out}");
-    assert_eq!(report["counts"]["passed"], serde_json::json!(1), "{out}");
+    // The contract suite, and the samples the SDK's own README and reference print.
+    assert_eq!(report["counts"]["passed"], serde_json::json!(2), "{out}");
     assert_eq!(report["counts"]["failed"], serde_json::json!(0), "{out}");
+    assert_eq!(
+        report["docs_suites"][0]["docs_dir"],
+        serde_json::json!("sdk"),
+        "{out}"
+    );
     assert_eq!(
         report["suites"][0]["language"],
         serde_json::json!("go"),
@@ -228,7 +234,10 @@ fn verify_emits_runs_and_gates_the_generated_contract_test() {
         "{out}"
     );
     let (ok, out, _err) = run_gnr8(&root, &["verify"]);
-    assert!(ok && out.trim() == "Go SDK  passed", "{out:?}");
+    assert!(
+        ok && out == "Go SDK           passed\nGo docs samples  passed\n",
+        "{out:?}"
+    );
 
     // 3. The gate is real: make the pipeline emit a client that sends the wrong path, and verify
     //    fails with the tool's own message. `verify` answers for what the pipeline produces now, so
@@ -279,9 +288,10 @@ fn verify_emits_runs_and_gates_the_generated_contract_test() {
         root.join(".gnr8/src/main.rs"),
         PIPELINE.replace(
             ".to(\"sdk\")",
-            ".to(\"sdk\")\n            .without_contract_tests()",
+            ".to(\"sdk\")\n            .without_contract_tests()\n            .without_docs()",
         ),
     )
+    // Its README and reference would print samples `verify` checks, so it writes no docs either.
     .expect("opt out of contract tests");
     let (ok, out, err) = run_gnr8(&root, &["generate"]);
     assert!(
@@ -438,7 +448,8 @@ fn verify_checks_go_cli_with_metadata_disabled_and_contract_tests_enabled() {
     assert_eq!(code, 0, "{out}\n{err}");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&out).unwrap()["counts"]["passed"],
-        2
+        3,
+        "contract, CLI and README/reference samples"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -479,7 +490,8 @@ fn verify_checks_go_cli_help_and_gates_a_help_defect() {
     );
     assert_eq!(good_code, 0, "{good_out}\n{good_err}");
     let good: serde_json::Value = serde_json::from_str(&good_out).unwrap();
-    assert_eq!(good["counts"]["passed"], 2);
+    // The contract suite, the CLI suite and the SDK's README/reference samples.
+    assert_eq!(good["counts"]["passed"], 3);
     std::fs::write(
         root.join(".gnr8/src/main.rs"),
         healthy.replace("GoSdk::new()", "GoSdk::new().without_contract_tests()"),
@@ -489,7 +501,8 @@ fn verify_checks_go_cli_help_and_gates_a_help_defect() {
     assert_eq!(code, 0, "{out}\n{err}");
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(report["suites"], serde_json::json!([]));
-    assert_eq!(report["counts"]["passed"], 1);
+    // The CLI suite and the SDK's README/reference samples.
+    assert_eq!(report["counts"]["passed"], 2);
     let (code, out, err) = run_gnr8_status(&root, &["verify"]);
     assert_eq!(code, 0, "{out}\n{err}");
     assert!(
@@ -535,7 +548,8 @@ fn verify_checks_python_cli_help_without_installing_the_program() {
     assert_eq!(before, output_bytes(&root.join("unrelated-directory")));
     assert_eq!(good_code, 0, "{good_out}\n{good_err}");
     let good: serde_json::Value = serde_json::from_str(&good_out).unwrap();
-    assert_eq!(good["counts"]["passed"], 2);
+    // The contract suite, the CLI suite and the SDK's README/reference samples.
+    assert_eq!(good["counts"]["passed"], 3);
     std::fs::write(root.join(".gnr8/src/main.rs"), cli_pipeline(target, None)).unwrap();
     let (code, out, err) = run_gnr8_status(&root, &["verify"]);
     assert_eq!(code, 0, "{out}\n{err}");
@@ -546,4 +560,69 @@ fn verify_checks_python_cli_help_without_installing_the_program() {
         "{out}"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Copy `src` into `dst`, leaving out build and cache directories a fresh checkout would not have.
+fn copy_project(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name == "target" || name == "cache" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            copy_project(&path, &dst.join(&name));
+        } else {
+            std::fs::copy(&path, dst.join(&name)).unwrap();
+        }
+    }
+}
+
+/// `gnr8 verify` over a copy of `examples/bookstore`, which declares `StaticDocs` beside its
+/// `GoSdk`: the Go docs suite runs `go vet` over the compile unit and passes, next to the contract
+/// and CLI help suites the same project already had.
+#[test]
+fn verify_runs_the_go_docs_suite_for_bookstore() {
+    if !toolchains_available() {
+        eprintln!("skipping verify_e2e: go/gofmt/cargo toolchain unavailable");
+        return;
+    }
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gnr8-docs-verify-{}-{nanos}", std::process::id()));
+    copy_project(&repo.join("examples/bookstore"), &root);
+    let sdk = std::fs::canonicalize(repo.join("crates/gnr8-sdk")).unwrap();
+    let manifest = root.join(".gnr8/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap().replace(
+        "path = \"../../../crates/gnr8-sdk\"",
+        &format!("path = {:?}", sdk.to_string_lossy()),
+    );
+    std::fs::write(&manifest, text).unwrap();
+
+    let (ok, out, err) = run_gnr8(&root, &["--json", "verify"]);
+    assert!(ok, "gnr8 verify must pass.\nstdout:\n{out}\nstderr:\n{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("verify --json is JSON");
+    assert_eq!(report["verified"], serde_json::json!(true), "{out}");
+    let docs = report["docs_suites"].as_array().expect("docs suites");
+    assert_eq!(docs.len(), 1, "{out}");
+    assert_eq!(docs[0]["language"], serde_json::json!("go"), "{out}");
+    assert_eq!(docs[0]["status"], serde_json::json!("passed"), "{out}");
+    assert_eq!(docs[0]["cases"], serde_json::json!(5), "{out}");
+    assert_eq!(
+        docs[0]["docs_dir"],
+        serde_json::json!("generated/docs"),
+        "{out}"
+    );
+
+    // The human report's `Go docs samples  passed` row is pinned by `verify_report_counts_docs_suites`.
+
+    // Rung 3's teeth against the real tools — a page that prints another request than the SDK
+    // sends — are checked in process by the host runner's own tests, without a second worker build
+    // (`verify::docs::tests::host_runner_go_suite_fails_on_a_page_that_prints_another_request`).
+    let _ = std::fs::remove_dir_all(&root);
 }
