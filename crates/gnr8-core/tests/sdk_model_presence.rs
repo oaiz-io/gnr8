@@ -275,12 +275,12 @@ fn dataclass_models_and_their_decoders_agree_on_the_direction() {
     ] {
         let lines = declaration_lines(&out, &format!("class {model}:"));
         for (field, omittable) in table {
-            let declaration = if omittable {
-                format!("{field}: Optional[str] = None")
-            } else if is_nullable(field) {
-                format!("{field}: Optional[str]")
-            } else {
-                format!("{field}: str")
+            // An omittable nullable field defaults to `UNSET`, so `None` can be its `null`.
+            let declaration = match (omittable, is_nullable(field)) {
+                (true, true) => format!("{field}: Union[Optional[str], Unset] = UNSET"),
+                (true, false) => format!("{field}: Optional[str] = None"),
+                (false, true) => format!("{field}: Optional[str]"),
+                (false, false) => format!("{field}: str"),
             };
             assert_declares(&lines, &declaration, model);
         }
