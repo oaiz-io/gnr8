@@ -5945,12 +5945,12 @@ components:
     }
 
     /// The version 1 importer kept the base path on the servers it imported (`https://api.example.com/v1`
-    /// where this importer writes `https://api.example.com` beside the base path `/v1`); a server
-    /// set in configuration keeps whatever URL it was given, in either version. The comparison
-    /// reads a version 1 base server whose URL is a current server's URL followed by the base path
-    /// as that same server, whoever wrote the graph — so neither an imported graph (whatever its
-    /// operations' provenance) nor a `SetBasePath` + `OpenApiMetadata::server` pair reports a
-    /// server change the API never made, and a server that did change is still reported.
+    /// where this importer writes `https://api.example.com` beside the base path `/v1`). The
+    /// comparison reads a server of a version 1 base imported from an OpenAPI document, whose URL
+    /// is a current server's URL followed by the base path, as that same server, so the upgrade
+    /// reports no server change the API never made. A server set in configuration was sent as
+    /// written in both versions, so in a graph read from source code the same move is a changed
+    /// URL and is reported, and a server that did change is reported either way.
     #[test]
     fn a_version_1_server_holding_the_base_path_is_the_same_server() {
         let graph = |servers: &[&str], file: &str| -> crate::graph::ApiGraph {
@@ -5999,24 +5999,25 @@ components:
             "https://api.example.com/v1",
             "https://staging.example.com/v1/",
         ];
-        // Imported, whatever the provenance its operations carry (a transform may add or move one).
-        for file in ["openapi.yaml", "handlers.go"] {
-            assert_eq!(
-                diff(
-                    graph(&both, file),
-                    &graph(
-                        &["https://api.example.com", "https://staging.example.com"],
-                        file
-                    )
-                ),
-                Vec::<String>::new(),
-                "{file}"
-            );
-        }
-        // Configured beside `SetBasePath`: the URL never moved.
+        let moved = ["https://api.example.com", "https://staging.example.com"];
+        // Imported: the importer, not the API, moved the base path off the server.
+        assert_eq!(
+            diff(graph(&both, "openapi.yaml"), &graph(&moved, "openapi.yaml")),
+            Vec::<String>::new()
+        );
+        // Configured beside `SetBasePath`: the URL never moved unless the configuration moved it.
         assert_eq!(
             diff(graph(&both, "handlers.go"), &graph(&both, "handlers.go")),
             Vec::<String>::new()
+        );
+        assert_eq!(
+            diff(graph(&both, "handlers.go"), &graph(&moved, "handlers.go")),
+            vec![
+                "server `https://api.example.com/v1` removed".to_string(),
+                "server `https://api.example.com` added as the new default".to_string(),
+                "server `https://staging.example.com/v1/` removed".to_string(),
+                "server `https://staging.example.com` added".to_string(),
+            ]
         );
         // A server that did change is reported, in the base's own spelling.
         assert_eq!(

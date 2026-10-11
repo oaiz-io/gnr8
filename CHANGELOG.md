@@ -28,23 +28,27 @@ must move the minor version.
   `unique_items`, and an imported server no longer repeats the base path. Tools that read the
   artifact must accept version 2. `gnr8 changes --base <ref>` still reads a version 1 base, by the
   importer's own rules, so the first comparison after upgrading reports no change the API did not
-  make:
+  make. The rules below that leave a fact unknown apply only to what the base imported from an
+  OpenAPI document: a node whose provenance file is a JSON or YAML document (`openapi.yaml`), or
+  for servers, a base with such a node. Anything gnr8 extracted from source code is compared whole,
+  so a fact added to it is reported:
   - A parameter is read through the importer's parameter rules. A field bound kept as the OpenAPI
     3.0 flag (`minimum: 0` with `exclusiveMinimum: "true"`, in a schema, a parameter's type or a
     response header's type) reads as the exclusive bound.
-  - A field fact a version 1 artifact could not hold is unknown, not added: `multipleOf` and
-    `uniqueItems`, an enum or an example the base does not state, and a plain string that is now a
-    string enum. Every fact the base states is still compared. So on that first comparison, an
-    enum or example newly added to a field whose base had none is not reported.
+  - A fact a version 1 artifact could not hold of an imported field is unknown, not added:
+    `multipleOf` and `uniqueItems`, an enum or an example the base does not state, and a plain
+    string that is now a string enum. Every fact the base states is still compared. So on that
+    first comparison, an enum or example newly added to an imported field whose base had none is
+    not reported.
   - A version 1 artifact never held the bounds of the schema an imported parameter names with
     `$ref`. A keyword the current graph holds tighter than the base states reads as the base's
     value, and so does an enum that is a subset of the base's; a keyword loosened or removed is
     still reported, and `pattern` and `multipleOf` are compared as they are. So on that first
     comparison, a real tightening stated beside the `$ref` is not reported.
-  - A base server whose URL is a current server's URL followed by the base graph's base path
-    (`https://api.example.com/v1` beside `/v1`, trailing slashes ignored) is the same server,
-    whoever wrote the graph. A server set with `OpenApiMetadata::server` beside `SetBasePath` keeps
-    its URL in both.
+  - An imported base server whose URL is a current server's URL followed by the base graph's base
+    path (`https://api.example.com/v1` beside `/v1`, trailing slashes ignored) is the same server.
+    A server set with `OpenApiMetadata::server` in a graph read from source code was sent as
+    written in both versions, so moving it off the base path is reported.
 - **A Python field that is optional and nullable can be sent as an explicit `null` again**, the
   PATCH that clears a value. A dataclass field of that kind is typed `Union[T, Unset]` and defaults
   to `UNSET`, defined in the new `unset.py` every dataclass SDK carries (`from <package>.unset

@@ -174,6 +174,10 @@ struct Scope {
     protected: Sides<bool>,
     checked: bool,
     current_span: Option<SourceSpan>,
+    /// Whether the base node compared here was imported from an OpenAPI document
+    /// ([`imported_document`]): the operation, parameter or schema, or for the document itself,
+    /// any of the base graph's operations and schemas.
+    base_imported: bool,
 }
 
 impl Scope {
@@ -182,6 +186,22 @@ impl Scope {
         scope.current_span = current_span;
         scope
     }
+}
+
+/// Whether `span` is the provenance of a node an `OpenApi` source imported.
+///
+/// The importer gives every node it imports the document it read as provenance, and a document is
+/// JSON or YAML (`openapi.yaml`, `spec.json`). A source extractor gives a node the source file that
+/// declares it (`handlers.go`, `app.py`, `books.controller.ts`), never one of those.
+fn imported_document(span: &SourceSpan) -> bool {
+    std::path::Path::new(&span.file)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            ["json", "yaml", "yml"]
+                .iter()
+                .any(|document| extension.eq_ignore_ascii_case(document))
+        })
 }
 
 struct GraphIndex<'a> {
@@ -333,14 +353,21 @@ impl<'a> GraphIndex<'a> {
 
 struct Collector {
     changes: Vec<Change>,
-    /// Whether the base was read from a version 1 artifact, which held less than this graph does:
-    /// no bounds of the schema a parameter names with `$ref` ([`comparable_parameter_constraints`]),
-    /// not every field fact ([`version_1_field_facts`], [`enum_unknown_on_version_1`]), and the
-    /// base path on an imported server ([`version_1_servers`]).
+    /// Whether the base was read from a version 1 artifact, which held less of an imported OpenAPI
+    /// document than this graph does: no bounds of the schema a parameter names with `$ref`
+    /// ([`comparable_parameter_constraints`]), not every field fact ([`version_1_field_facts`],
+    /// [`enum_unknown_on_version_1`]), and the base path on a server ([`version_1_servers`]).
     base_from_version_1: bool,
 }
 
 impl Collector {
+    /// Whether the base node `scope` compares is a version 1 artifact's import of an OpenAPI
+    /// document, read for what that artifact held of it. A node gnr8 extracted from source code, or
+    /// any node of a version 2 base, is compared whole.
+    const fn version_1_import(&self, scope: &Scope) -> bool {
+        self.base_from_version_1 && scope.base_imported
+    }
+
     fn push(
         &mut self,
         scope: &Scope,
@@ -546,7 +573,7 @@ fn compare_document(base: &GraphIndex<'_>, current: &GraphIndex<'_>, out: &mut C
             "document metadata changed".to_string(),
         );
     }
-    let base_servers = if out.base_from_version_1 {
+    let base_servers = if out.version_1_import(&scope) {
         version_1_servers(
             &base.graph.openapi_metadata,
             &current.graph.openapi_metadata,
@@ -571,13 +598,16 @@ fn compare_document(base: &GraphIndex<'_>, current: &GraphIndex<'_>, out: &mut C
     }
 }
 
-/// A version 1 base's servers as the current ones can be compared with them.
+/// The servers of a version 1 base imported from an OpenAPI document, as the current ones can be
+/// compared with them.
 ///
 /// The version 1 importer kept the base path on each server it imported
 /// (`https://api.example.com/v1` beside the base path `/v1`), where the importer now writes the
-/// server without it. A server set in configuration keeps the URL it was given in both versions.
-/// So a base server is read as the current server whose URL, followed by the base's base path, is
-/// its URL — whoever wrote either graph. Any other base server is compared as written.
+/// server without it. So a base server is read as the current server whose URL, followed by the
+/// base's base path, is its URL. Any other base server is compared as written. Only a base whose
+/// nodes were imported is read this way ([`Collector::version_1_import`]): a server set in
+/// configuration was sent as written in both versions, so the same move there changed every URL a
+/// client calls.
 fn version_1_servers(
     base: &OpenApiMetadataPolicy,
     current: &OpenApiMetadataPolicy,
@@ -1104,7 +1134,10 @@ fn compare_parameters(base: &Operation, current: &Operation, scope: &Scope, out:
                     parameter,
                     current_parameter,
                     &subject,
-                    &scope.at(Some(current_parameter.provenance.clone())),
+                    &Scope {
+                        base_imported: imported_document(&parameter.provenance),
+                        ..scope.at(Some(current_parameter.provenance.clone()))
+                    },
                     out,
                 );
             }
@@ -1185,7 +1218,7 @@ fn compare_existing_parameter(
     // The validation bounds a bound parameter carries are part of what callers must satisfy, the
     // same public fact `*.property.constraints.changed` reports for a schema field.
     let (current_constraints, current_items) =
-        comparable_parameter_constraints(base, current, out.base_from_version_1);
+        comparable_parameter_constraints(base, current, out.version_1_import(scope));
     if base.constraints != current_constraints || base.item_constraints != current_items {
         out.push(
             scope,
@@ -1234,7 +1267,7 @@ fn compare_existing_parameter(
 fn comparable_parameter_constraints(
     base: &Param,
     current: &Param,
-    base_from_version_1: bool,
+    version_1_import: bool,
 ) -> (
     crate::analyze::facts::Constraints,
     crate::analyze::facts::Constraints,
@@ -1245,7 +1278,7 @@ fn comparable_parameter_constraints(
         .find(|(name, _)| name == "schema")
         .map(|(_, raw)| raw);
     let names_ref = |schema: Option<&serde_json::Value>| {
-        base_from_version_1 && schema.is_some_and(|schema| schema.get("$ref").is_some())
+        version_1_import && schema.is_some_and(|schema| schema.get("$ref").is_some())
     };
     let items = raw.and_then(|raw| {
         raw.get("items").or_else(|| {
@@ -1963,7 +1996,7 @@ fn compare_type(
             );
         }
         _ if base == current => {}
-        _ if enum_unknown_on_version_1(base, current, out.base_from_version_1) => {}
+        _ if enum_unknown_on_version_1(base, current, out.version_1_import(scope)) => {}
         _ => {
             let prefix = directions.prefix(true);
             out.push(
@@ -2062,7 +2095,7 @@ fn compare_existing_field(
         out,
     );
     // A version 1 base read for what it could hold ([`version_1_field_facts`]).
-    let (example, constraints) = version_1_field_facts(base, current, out.base_from_version_1);
+    let (example, constraints) = version_1_field_facts(base, current, out.version_1_import(scope));
     if base.description != current.description || base.example != *example {
         out.push(
             scope,
@@ -2117,23 +2150,25 @@ fn compare_existing_field(
 /// The current field's example and constraints as a base can be compared with them.
 ///
 /// Comparing two version 2 graphs, they are the field's own. A version 1 artifact (gnr8 0.18.0 and
-/// earlier) could not hold every field fact this graph holds, so on a base read from one a fact it
-/// could not hold is unknown, not added:
+/// earlier) could not hold every fact of a field imported from an OpenAPI document that this graph
+/// holds, so on such a base (`version_1_import`) a fact it could not hold is unknown, not added:
 ///
 /// - `multipleOf` and `uniqueItems`, which no version 1 field carried;
 /// - an enum the base states none of: 0.18.0 dropped a field enum with a member of another kind than
 ///   its `type` (`type: string, enum: [a, 1]`), so a base without one cannot say it had none; and
 /// - an example the base states none of: 0.18.0 dropped a number or boolean field example.
 ///
-/// Every fact the base does state is compared.
+/// Every fact the base does state is compared. A field gnr8 extracted from source code is compared
+/// whole: no extractor states `multipleOf` or `uniqueItems`, and 0.18.0 kept every enum and
+/// example it read from source, so a fact added there is a real change.
 fn version_1_field_facts<'f>(
     base: &Field,
     current: &'f Field,
-    base_from_version_1: bool,
+    version_1_import: bool,
 ) -> (&'f Option<String>, crate::analyze::facts::Constraints) {
     const UNSTATED: &Option<String> = &None;
     let mut constraints = current.meta.constraints.clone();
-    if !base_from_version_1 {
+    if !version_1_import {
         return (&current.example, constraints);
     }
     let base_constraints = &base.meta.constraints;
@@ -2152,14 +2187,15 @@ fn version_1_field_facts<'f>(
     (example, constraints)
 }
 
-/// Whether `current` is a string enum where a version 1 base holds a plain string.
+/// Whether `current` is a string enum where a version 1 base's import holds a plain string.
 ///
 /// gnr8 0.18.0 imported `type: string, enum: [a, 1]` — an enum with a member of another kind — as a
 /// plain string, dropping the enum and any `null` member with it. This graph imports it as the enum
-/// of its string members. A version 1 base cannot say which it held, so the enum, and the null its
-/// members admit, are unknown on it rather than a changed type.
-fn enum_unknown_on_version_1(base: &Type, current: &Type, base_from_version_1: bool) -> bool {
-    base_from_version_1
+/// of its string members. A version 1 base imported from an OpenAPI document (`version_1_import`)
+/// cannot say which it held, so the enum, and the null its members admit, are unknown on it rather
+/// than a changed type. A type extracted from source code is compared as it is.
+fn enum_unknown_on_version_1(base: &Type, current: &Type, version_1_import: bool) -> bool {
+    version_1_import
         && matches!(
             base,
             Type::Primitive(Prim::String)
@@ -2239,7 +2275,7 @@ fn compare_field_axes(
     let current_nullable = nullable_on(current, directions.current);
     // The `null` member of an enum a version 1 base dropped is as unknown as the enum.
     let null_unknown = !base_nullable
-        && enum_unknown_on_version_1(&base.schema, &current.schema, out.base_from_version_1);
+        && enum_unknown_on_version_1(&base.schema, &current.schema, out.version_1_import(scope));
     if base_nullable != current_nullable && !null_unknown {
         let added = current_nullable;
         let breaking = directions.unconsumed()
@@ -2502,6 +2538,7 @@ fn operation_scope(
         checked: base.is_some_and(|operation| base_index.operation_checked(operation))
             || current.is_some_and(|operation| current_index.operation_checked(operation)),
         current_span: current.map(|operation| operation.provenance.clone()),
+        base_imported: base.is_some_and(|operation| imported_document(&operation.provenance)),
     }
 }
 
@@ -2563,6 +2600,7 @@ fn schema_scope(
         },
         checked: base_checked || current_checked,
         current_span: current.map(|schema| schema.provenance.clone()),
+        base_imported: base.is_some_and(|schema| imported_document(&schema.provenance)),
     }
 }
 
@@ -2610,6 +2648,13 @@ fn document_scope(base: &GraphIndex<'_>, current: &GraphIndex<'_>) -> Scope {
         },
         checked: base_checked || current_checked,
         current_span: None,
+        base_imported: base
+            .graph
+            .operations
+            .iter()
+            .map(|operation| &operation.provenance)
+            .chain(base.graph.schemas.iter().map(|schema| &schema.provenance))
+            .any(imported_document),
     }
 }
 
@@ -4682,5 +4727,112 @@ mod tests {
         );
         assert_eq!(finding.file.as_deref(), Some("models.rs"));
         assert_eq!(finding.line, Some(10));
+    }
+
+    /// Compare `base`, read as a version 1 artifact, with `current`; the sorted change messages.
+    fn version_1_messages(base: ApiGraph, current: &ApiGraph) -> Vec<String> {
+        let base = crate::changes::BaseGraph {
+            reference: "v0.18.0".to_string(),
+            commit: "0".repeat(40),
+            graph: base,
+            upgraded_from_version_1: true,
+        };
+        let report = super::diff_base_graph(&base, current, &BTreeSet::new(), &[]).expect("diff");
+        let mut messages: Vec<String> = report
+            .changes
+            .into_iter()
+            .map(|change| change.message)
+            .collect();
+        messages.sort();
+        messages
+    }
+
+    /// A response schema `Book` with a string `kind`, an integer `count` and a string `label`, read
+    /// from `file`; `added` gives `kind` an enum, `count` a `multipleOf`, `label` an example and the
+    /// string `code` the enum type.
+    fn version_1_field_graph(file: &str, added: bool) -> ApiGraph {
+        let mut kind = field("kind");
+        let mut count = field("count");
+        count.schema = Type::Primitive(Prim::Int {
+            bits: 64,
+            signed: true,
+        });
+        let mut label = field("label");
+        let mut code = field("code");
+        if added {
+            kind.meta.constraints.enum_values = vec!["a".to_string(), "b".to_string()];
+            count.meta.constraints.multiple_of = Some("3".to_string());
+            label.example = Some("x".to_string());
+            code.schema = Type::Enum(vec!["p".to_string(), "q".to_string()]);
+        }
+        let mut book = schema("Book", vec![kind, count, label, code]);
+        book.provenance = span(file);
+        let mut graph = response_graph(book);
+        graph.operations[0].provenance = span(file);
+        graph
+    }
+
+    /// A version 1 artifact could not hold some field facts of an imported OpenAPI document, so on
+    /// a base read from one they are unknown there. A field gnr8 extracted from source code held
+    /// every one of them in version 1 too, so each fact added to it is reported.
+    #[test]
+    fn a_version_1_base_hides_only_the_field_facts_an_import_could_not_hold() {
+        assert_eq!(
+            version_1_messages(
+                version_1_field_graph("openapi.yaml", false),
+                &version_1_field_graph("openapi.yaml", true)
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            version_1_messages(
+                version_1_field_graph("models.go", false),
+                &version_1_field_graph("models.go", true)
+            ),
+            vec![
+                "field `label` documentation changed".to_string(),
+                "response enum value `a` added to `Book.kind`".to_string(),
+                "response enum value `b` added to `Book.kind`".to_string(),
+                "response field `count` constraints changed".to_string(),
+                "response type `Book.code` changed".to_string(),
+            ]
+        );
+    }
+
+    /// A graph at the base path `/v1` whose operation is read from `file`, with `servers`.
+    fn version_1_server_graph(file: &str, servers: &[&str]) -> ApiGraph {
+        let mut graph = graph_with_tags(&[]);
+        graph.operations[0].provenance = span(file);
+        graph.base_path = "/v1".to_string();
+        graph.openapi_metadata = OpenApiMetadataPolicy {
+            servers: servers.iter().map(|url| OpenApiServer::new(*url)).collect(),
+            ..OpenApiMetadataPolicy::default()
+        };
+        graph
+    }
+
+    /// The version 1 importer kept the base path on a server it imported, so such a server is the
+    /// current one without it. A server set in configuration was sent as written in both versions:
+    /// moving it from `https://api.example.com/v1` to `https://api.example.com` changes every URL
+    /// a client calls, and is reported.
+    #[test]
+    fn a_version_1_base_reads_only_an_imported_server_without_the_base_path() {
+        assert_eq!(
+            version_1_messages(
+                version_1_server_graph("openapi.yaml", &["https://api.example.com/v1"]),
+                &version_1_server_graph("openapi.yaml", &["https://api.example.com"])
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            version_1_messages(
+                version_1_server_graph("handlers.go", &["https://api.example.com/v1"]),
+                &version_1_server_graph("handlers.go", &["https://api.example.com"])
+            ),
+            vec![
+                "server `https://api.example.com/v1` removed".to_string(),
+                "server `https://api.example.com` added as the new default".to_string(),
+            ]
+        );
     }
 }
