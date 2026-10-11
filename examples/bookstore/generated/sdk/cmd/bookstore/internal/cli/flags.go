@@ -43,6 +43,9 @@ func parseFlags(fs *flag.FlagSet, args []string) (bool, int) {
 		if errors.Is(err, flag.ErrHelp) {
 			return false, 0
 		}
+		if code := checkRetired(strings.Fields(fs.Name()), flags); code != 0 {
+			return false, code
+		}
 		errorMessage(2, "%v", err)
 		return false, 2
 	}
