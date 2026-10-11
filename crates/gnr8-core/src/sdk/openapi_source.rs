@@ -6052,7 +6052,8 @@ components:
     /// with this importer's graph of the same document without a change: every fact a version 1
     /// artifact held is read by the importer's rules, and a fact it could not hold — a field's
     /// `multipleOf` or `uniqueItems`, an enum or example 0.18.0 dropped, the referenced bounds of
-    /// a `$ref` parameter — is unknown on that base, not added.
+    /// a `$ref` parameter, a Swagger 2 parameter's `multipleOf` — is unknown on that base, not
+    /// added.
     #[test]
     fn a_version_1_artifact_compares_with_this_importer_without_change() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -6104,7 +6105,8 @@ components:
                     "minimum: 0, exclusiveMinimum: true}",
                     "minimum: 1, exclusiveMinimum: true}",
                 )
-                .replace("example: \"8\"", "example: \"9\"");
+                .replace("example: \"8\"", "example: \"9\"")
+                .replace("multipleOf: 2}", "multipleOf: 4}");
             let edited = import_openapi_document(
                 std::path::Path::new("."),
                 std::path::PathBuf::from("openapi.yaml"),
@@ -6131,6 +6133,7 @@ components:
                 changes,
                 vec![
                     "field `label` documentation changed",
+                    "parameter `page` constraints changed",
                     "response field `price` constraints changed",
                     "response field `score` constraints changed",
                 ]

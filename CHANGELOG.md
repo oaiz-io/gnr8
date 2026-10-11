@@ -32,7 +32,9 @@ must move the minor version.
   OpenAPI document: a node whose provenance file is a JSON or YAML document (`openapi.yaml`), or
   for servers, a base with such a node. Anything gnr8 extracted from source code is compared whole,
   so a fact added to it is reported:
-  - A parameter is read through the importer's parameter rules. A field bound kept as the OpenAPI
+  - A parameter is read through the importer's parameter rules. 0.18.0 did not import a Swagger 2
+    parameter's `multipleOf`, so an imported parameter's `multipleOf` is unknown when the base
+    states none; one the base states is compared. A field bound kept as the OpenAPI
     3.0 flag (`minimum: 0` with `exclusiveMinimum: "true"`, in a schema, a parameter's type or a
     response header's type) reads as the exclusive bound.
   - A fact a version 1 artifact could not hold of an imported field is unknown, not added:

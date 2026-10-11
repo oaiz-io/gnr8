@@ -10,6 +10,34 @@
         "handler": "listItems",
         "params": [
           {
+            "name": "n",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "int",
+                "bits": 64,
+                "signed": true
+              }
+            },
+            "openapi_fields": [
+              [
+                "schema",
+                {
+                  "exclusiveMinimum": true,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              ]
+            ],
+            "provenance": {
+              "file": "openapi.yaml",
+              "start_line": 1,
+              "end_line": 1
+            }
+          },
+          {
             "name": "page",
             "location": "query",
             "required": false,

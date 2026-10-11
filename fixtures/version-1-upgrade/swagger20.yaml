@@ -9,6 +9,7 @@ paths:
       operationId: listItems
       parameters:
         - {name: page, in: query, type: integer, minimum: 0, exclusiveMinimum: true}
+        - {name: n, in: query, type: integer, minimum: 0, exclusiveMinimum: true, multipleOf: 3}
       responses:
         "200":
           description: ok

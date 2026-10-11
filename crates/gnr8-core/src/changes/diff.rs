@@ -1262,8 +1262,11 @@ fn compare_existing_parameter(
 /// A version 1 artifact kept an imported parameter's keywords in its raw schema and never resolved
 /// a `$ref`, so the bounds of the schema a `$ref` names were never in it. For a base read from one,
 /// a parameter whose base schema (or items schema) is a `$ref` is compared only on the keywords the
-/// base states ([`stated_by`]); a keyword it does not state is unknown, not added. Every other
-/// parameter, and every comparison of two version 2 graphs, compares the constraints whole.
+/// base states ([`stated_by`]); a keyword it does not state is unknown, not added. 0.18.0 also built
+/// a Swagger 2 parameter's schema from a list of keywords that left out `multipleOf`, so an
+/// imported parameter's `multipleOf` is unknown on such a base when the base states none; a
+/// `multipleOf` it does state is compared. Every other parameter, and every comparison of two
+/// version 2 graphs, compares the constraints whole.
 fn comparable_parameter_constraints(
     base: &Param,
     current: &Param,
@@ -1295,8 +1298,12 @@ fn comparable_parameter_constraints(
             current.clone()
         }
     };
+    let mut constraints = project(&current.constraints, &base.constraints, names_ref(raw));
+    if version_1_import && base.constraints.multiple_of.is_none() {
+        constraints.multiple_of = None;
+    }
     (
-        project(&current.constraints, &base.constraints, names_ref(raw)),
+        constraints,
         project(
             &current.item_constraints,
             &base.item_constraints,
