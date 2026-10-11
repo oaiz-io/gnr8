@@ -354,6 +354,7 @@ fn build_paths(
         let tags = effective_tags.resolve(op);
         let operation = lower_operation(
             op,
+            &graph.schemas,
             operation_docs_policy(graph, &op.id),
             operation_security_policy(graph, &op.id),
             tags,
@@ -416,6 +417,7 @@ fn place_operation(
 /// stable default since the graph carries none.
 fn lower_operation(
     op: &GraphOp,
+    schemas: &[crate::graph::Schema],
     docs: Option<&OperationDocsPolicy>,
     exact_security: Option<&crate::graph::OperationSecurityPolicy>,
     tags: &[String],
@@ -425,12 +427,12 @@ fn lower_operation(
     let parameters = op
         .params
         .iter()
-        .map(|param| lower_parameter(param, ref_to_name))
+        .map(|param| lower_parameter(param, ref_to_name, schemas))
         .collect::<Result<Vec<_>, crate::CoreError>>()?;
 
     let request_body = lower_request_body(op, docs, ref_to_name)?;
 
-    let responses = lower_responses(op, docs, ref_to_name)?;
+    let responses = lower_responses(op, docs, ref_to_name, schemas)?;
     let operation_security = if let Some(policy) = exact_security {
         policy
             .alternatives
@@ -576,8 +578,14 @@ fn lower_request_body(
 fn lower_parameter(
     param: &crate::graph::Param,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[crate::graph::Schema],
 ) -> Result<Parameter, crate::CoreError> {
-    let mut schema = lower_schema_type(&param.schema, ref_to_name, SchemaDirections::REQUEST)?;
+    let mut schema = lower_schema_type(
+        &param.schema,
+        ref_to_name,
+        schemas,
+        SchemaDirections::REQUEST,
+    )?;
     apply_constraints(&param.constraints, &mut schema);
     if let Some(items) = &mut schema.items {
         apply_constraints(&param.item_constraints, items);
@@ -593,20 +601,59 @@ fn lower_parameter(
     for (_, value) in &mut openapi_fields {
         rewrite_parameter_local_refs(value, ref_to_name);
     }
-    // The typed prose is emitted at the position the Parameter Object's sorted fields give it, so a
-    // parameter documented from its source and one imported with a `description` render alike.
-    if let Some(description) = &param.description {
+    // A kept raw schema (an imported parameter's) holds no validation keyword: the importer moved
+    // them into the typed constraints, the one copy, and they are written back here — so a
+    // Transform that edits a parameter's constraints edits what `openapi.yaml` publishes.
+    if param.openapi_content.is_none() {
+        if let Some((_, raw)) = openapi_fields.iter_mut().find(|(name, _)| name == "schema") {
+            write_raw_constraints(raw, &param.constraints, &param.schema, schemas);
+            let items = match collection_of(&param.schema, schemas) {
+                Some(Type::Array(items)) => Some((items.as_ref(), "items")),
+                Some(Type::Map { value, .. }) => Some((value.as_ref(), "additionalProperties")),
+                _ => None,
+            };
+            if let (Some((item_type, key)), Some(object)) = (items, raw.as_object_mut()) {
+                // A schema that is a `$ref` to the collection states no items of its own; the
+                // referenced items' constraints are written beside the `$ref`, as the
+                // collection's own are.
+                if !object.contains_key(key)
+                    && object.contains_key("$ref")
+                    && !param.item_constraints.is_empty()
+                {
+                    object.insert(
+                        key.to_string(),
+                        serde_json::Value::Object(serde_json::Map::new()),
+                    );
+                }
+                if let Some(item_raw) = object.get_mut(key).filter(|value| value.is_object()) {
+                    write_raw_constraints(item_raw, &param.item_constraints, item_type, schemas);
+                }
+            }
+        }
+    }
+    // The typed prose and example are emitted at the position the Parameter Object's sorted fields
+    // give them, so a parameter documented from its source and one imported render alike.
+    let mut insert_sorted = |key: &str, value: serde_json::Value| {
         let at = openapi_fields
             .iter()
-            .position(|(name, _)| name.as_str() > "description")
+            .position(|(name, _)| name.as_str() > key)
             .unwrap_or(openapi_fields.len());
-        openapi_fields.insert(
-            at,
-            (
-                "description".to_string(),
-                serde_json::Value::String(description.clone()),
-            ),
+        openapi_fields.insert(at, (key.to_string(), value));
+    };
+    if let Some(description) = &param.description {
+        insert_sorted(
+            "description",
+            serde_json::Value::String(description.clone()),
         );
+    }
+    if let Some(example) = &param.example {
+        let value = match example_literal(example, scalar_kind(&param.schema, schemas)) {
+            LiteralValue::Number(text) => json::number_or_string(&text),
+            LiteralValue::Bool(flag) => serde_json::Value::Bool(flag),
+            LiteralValue::String(text) => serde_json::Value::String(text),
+            LiteralValue::Null => serde_json::Value::Null,
+        };
+        insert_sorted("example", value);
     }
     Ok(Parameter {
         name: param.name.clone(),
@@ -619,6 +666,106 @@ fn lower_parameter(
         openapi_fields,
         schema,
     })
+}
+
+/// Write typed constraints into a raw JSON Schema object as their `OpenAPI` 3.1 keywords. An enum
+/// member is written as the JSON kind of the value's type: a number for an integer or float, a
+/// boolean for a bool, a string otherwise.
+fn write_raw_constraints(
+    raw: &mut serde_json::Value,
+    constraints: &Constraints,
+    ty: &Type,
+    schemas: &[crate::graph::Schema],
+) {
+    use serde_json::Value;
+    let Some(object) = raw.as_object_mut() else {
+        return;
+    };
+    for (key, count) in [
+        ("minLength", constraints.min_length),
+        ("maxLength", constraints.max_length),
+        ("minItems", constraints.min_items),
+        ("maxItems", constraints.max_items),
+        ("minProperties", constraints.min_properties),
+        ("maxProperties", constraints.max_properties),
+    ] {
+        if let Some(count) = count {
+            object.insert(key.to_string(), Value::from(count));
+        }
+    }
+    for (key, bound) in [
+        ("minimum", &constraints.minimum),
+        ("maximum", &constraints.maximum),
+        ("exclusiveMinimum", &constraints.exclusive_minimum),
+        ("exclusiveMaximum", &constraints.exclusive_maximum),
+        ("multipleOf", &constraints.multiple_of),
+    ] {
+        if let Some(bound) = bound {
+            object.insert(key.to_string(), json::number_or_string(bound));
+        }
+    }
+    if constraints.unique_items {
+        object.insert("uniqueItems".to_string(), Value::Bool(true));
+    }
+    if let Some(pattern) = &constraints.pattern {
+        object.insert("pattern".to_string(), Value::String(pattern.clone()));
+    }
+    if !constraints.enum_values.is_empty() {
+        let kind = scalar_kind(ty, schemas);
+        let members = constraints
+            .enum_values
+            .iter()
+            .map(|member| match kind {
+                Some(Prim::Int { .. } | Prim::Float { .. }) => json::number_or_string(member),
+                Some(Prim::Bool) if member == "true" || member == "false" => {
+                    Value::Bool(member == "true")
+                }
+                _ => Value::String(member.clone()),
+            })
+            .collect();
+        object.insert("enum".to_string(), Value::Array(members));
+    }
+}
+
+/// A declared example's text as the literal `openapi.yaml` publishes: in the JSON kind of the
+/// primitive it is declared on — a number for an integer or float, a boolean for a bool — and a
+/// string otherwise, the way the sampler reads the same text.
+fn example_literal(text: &str, kind: Option<&Prim>) -> LiteralValue {
+    match kind {
+        Some(Prim::Int { .. } | Prim::Float { .. }) => LiteralValue::Number(text.to_string()),
+        Some(Prim::Bool) if text == "true" || text == "false" => LiteralValue::Bool(text == "true"),
+        _ => LiteralValue::String(text.to_string()),
+    }
+}
+
+/// The array or map a parameter type is, through named aliases; `None` for anything else.
+fn collection_of<'a>(ty: &'a Type, schemas: &'a [crate::graph::Schema]) -> Option<&'a Type> {
+    let mut ty = ty;
+    let mut seen = BTreeSet::new();
+    loop {
+        match ty {
+            Type::Array(_) | Type::Map { .. } => return Some(ty),
+            Type::Named(id) if seen.insert(id.as_str()) => {
+                ty = &schemas.iter().find(|schema| &schema.id == id)?.body;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The primitive a parameter type is, through named aliases; `None` for anything else.
+fn scalar_kind<'a>(ty: &'a Type, schemas: &'a [crate::graph::Schema]) -> Option<&'a Prim> {
+    let mut ty = ty;
+    let mut seen = BTreeSet::new();
+    loop {
+        match ty {
+            Type::Primitive(prim) => return Some(prim),
+            Type::Named(id) if seen.insert(id.as_str()) => {
+                ty = &schemas.iter().find(|schema| &schema.id == id)?.body;
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn rewrite_parameter_local_refs(value: &mut serde_json::Value, refs: &BTreeMap<&str, &str>) {
@@ -664,11 +811,12 @@ fn lower_responses(
     op: &GraphOp,
     docs: Option<&OperationDocsPolicy>,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
 ) -> Result<Vec<(String, ResponseObj)>, crate::CoreError> {
     let responses = op
         .responses
         .iter()
-        .map(|resp| lower_response(op, resp, docs, ref_to_name))
+        .map(|resp| lower_response(op, resp, docs, ref_to_name, schemas))
         .collect::<Result<Vec<_>, crate::CoreError>>()?;
     if responses.is_empty() {
         return Err(crate::CoreError::Lowering {
@@ -681,11 +829,37 @@ fn lower_responses(
     Ok(responses)
 }
 
+/// One response's headers, lowered and sorted by name.
+fn lower_response_headers(
+    resp: &crate::graph::Response,
+    ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
+) -> Result<Vec<model::ResponseHeader>, crate::CoreError> {
+    let mut headers = resp
+        .headers
+        .iter()
+        .map(|header| {
+            Ok(model::ResponseHeader {
+                name: header.name.clone(),
+                schema: lower_schema_type(
+                    &header.schema,
+                    ref_to_name,
+                    schemas,
+                    SchemaDirections::RESPONSE,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, crate::CoreError>>()?;
+    headers.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(headers)
+}
+
 fn lower_response(
     op: &GraphOp,
     resp: &crate::graph::Response,
     docs: Option<&OperationDocsPolicy>,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
 ) -> Result<(String, ResponseObj), crate::CoreError> {
     let response_docs = docs.and_then(|policy| {
         policy
@@ -757,17 +931,7 @@ fn lower_response(
                 });
             }
         };
-    let mut headers = resp
-        .headers
-        .iter()
-        .map(|header| {
-            Ok(model::ResponseHeader {
-                name: header.name.clone(),
-                schema: lower_schema_type(&header.schema, ref_to_name, SchemaDirections::RESPONSE)?,
-            })
-        })
-        .collect::<Result<Vec<_>, crate::CoreError>>()?;
-    headers.sort_by(|left, right| left.name.cmp(&right.name));
+    let headers = lower_response_headers(resp, ref_to_name, schemas)?;
     Ok((
         resp.status.to_string(),
         ResponseObj {
@@ -890,7 +1054,7 @@ fn build_component_schemas(
         .iter()
         .map(|schema| {
             let reached = directions_of(directions, &schema.id);
-            let object = lower_named_schema(schema, ref_to_name, reached)?;
+            let object = lower_named_schema(schema, ref_to_name, schemas, reached)?;
             Ok((schema.name.clone(), object))
         })
         .collect()
@@ -903,6 +1067,7 @@ fn build_component_schemas(
 fn lower_named_schema(
     schema: &Schema,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
     directions: SchemaDirections,
 ) -> Result<SchemaObject, crate::CoreError> {
     match &schema.body {
@@ -911,7 +1076,7 @@ fn lower_named_schema(
             enum_values: members.clone(),
             ..SchemaObject::default()
         }),
-        Type::Object(fields) => lower_object(fields, ref_to_name, directions),
+        Type::Object(fields) => lower_object(fields, ref_to_name, schemas, directions),
         // Named aliases lower exactly like inline field schemas, but live under components so other
         // schemas and SDK model split layouts can reference them by name.
         Type::Primitive(_)
@@ -920,7 +1085,7 @@ fn lower_named_schema(
         | Type::Map { .. }
         | Type::Union(_)
         | Type::Named(_)
-        | Type::Any {} => lower_schema_type(&schema.body, ref_to_name, directions),
+        | Type::Any {} => lower_schema_type(&schema.body, ref_to_name, schemas, directions),
     }
 }
 
@@ -931,6 +1096,7 @@ fn lower_named_schema(
 fn lower_object(
     fields: &[Field],
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
     directions: SchemaDirections,
 ) -> Result<SchemaObject, crate::CoreError> {
     let mut required: Vec<String> = fields
@@ -947,6 +1113,7 @@ fn lower_object(
                 &field.schema,
                 directions.field_is_nullable(field),
                 ref_to_name,
+                schemas,
                 directions,
             )?;
             // Attach field-owned keywords to the property schema whatever its shape. OpenAPI 3.1
@@ -957,7 +1124,9 @@ fn lower_object(
                 prop.description = Some(desc.clone());
             }
             if let Some(example) = &field.example {
-                prop.example = Some(LiteralValue::String(example.clone()));
+                // The JSON kind of the field's type, through named aliases, as a parameter's is.
+                let kind = scalar_kind(&field.schema, schemas);
+                prop.example = Some(example_literal(example, kind));
             }
             apply_field_meta(field, &mut prop);
             Ok((field.json_name.clone(), prop))
@@ -996,6 +1165,8 @@ fn apply_constraints(constraints: &Constraints, prop: &mut SchemaObject) {
         .clone_from(&constraints.exclusive_minimum);
     prop.exclusive_maximum
         .clone_from(&constraints.exclusive_maximum);
+    prop.multiple_of.clone_from(&constraints.multiple_of);
+    prop.unique_items = constraints.unique_items;
     prop.pattern.clone_from(&constraints.pattern);
     if !constraints.enum_values.is_empty() {
         let mut enum_values = constraints.enum_values.clone();
@@ -1012,9 +1183,10 @@ fn lower_field_schema(
     ty: &Type,
     nullable: bool,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
     directions: SchemaDirections,
 ) -> Result<SchemaObject, crate::CoreError> {
-    let lowered = lower_schema_type(ty, ref_to_name, directions)?;
+    let lowered = lower_schema_type(ty, ref_to_name, schemas, directions)?;
     if !nullable {
         return Ok(lowered);
     }
@@ -1050,6 +1222,7 @@ fn null_schema() -> SchemaObject {
 fn lower_schema_type(
     ty: &Type,
     ref_to_name: &BTreeMap<&str, &str>,
+    schemas: &[Schema],
     directions: SchemaDirections,
 ) -> Result<SchemaObject, crate::CoreError> {
     match ty {
@@ -1065,7 +1238,12 @@ fn lower_schema_type(
         )),
         Type::Array(items) => Ok(SchemaObject {
             type_name: Some("array".to_string()),
-            items: Some(Box::new(lower_schema_type(items, ref_to_name, directions)?)),
+            items: Some(Box::new(lower_schema_type(
+                items,
+                ref_to_name,
+                schemas,
+                directions,
+            )?)),
             ..SchemaObject::default()
         }),
         // OpenAPI object keys are strings. Reject maps whose source key cannot be represented rather
@@ -1084,6 +1262,7 @@ fn lower_schema_type(
                 additional_properties_schema: Some(Box::new(lower_schema_type(
                     value,
                     ref_to_name,
+                    schemas,
                     directions,
                 )?)),
                 ..SchemaObject::default()
@@ -1092,7 +1271,7 @@ fn lower_schema_type(
         Type::Named(ref_id) => Ok(SchemaObject::reference(resolve_ref(ref_id, ref_to_name)?)),
         // An inline (anonymous) object lowers to a full object schema with its own properties, in the
         // same positions as the schema that carries it.
-        Type::Object(fields) => lower_object(fields, ref_to_name, directions),
+        Type::Object(fields) => lower_object(fields, ref_to_name, schemas, directions),
         Type::Enum(members) => Ok(SchemaObject {
             type_name: Some("string".to_string()),
             enum_values: members.clone(),
@@ -1102,7 +1281,7 @@ fn lower_schema_type(
         Type::Union(variants) => {
             let one_of = variants
                 .iter()
-                .map(|variant| lower_schema_type(variant, ref_to_name, directions))
+                .map(|variant| lower_schema_type(variant, ref_to_name, schemas, directions))
                 .collect::<Result<Vec<_>, crate::CoreError>>()?;
             Ok(SchemaObject {
                 one_of,
@@ -1139,7 +1318,7 @@ fn openapi_primitive_format(prim: &Prim) -> Option<&'static str> {
 
 /// Map a neutral [`WellKnown`] to its canonical `OpenAPI`/`JSON Schema` `format` token (the neutral
 /// wire form, e.g. `uuid`, `date-time`); these are spec format strings, never language type names.
-fn openapi_format(well_known: &WellKnown) -> &'static str {
+pub(crate) fn openapi_format(well_known: &WellKnown) -> &'static str {
     match well_known {
         WellKnown::Uuid => "uuid",
         WellKnown::DateTime => "date-time",

@@ -1,0 +1,74 @@
+# `get_book`
+
+`GET /books/{book_id}`
+
+Fetch one book by its identifier.
+
+Returns the book when it is in stock, and an out-of-stock notice otherwise.
+
+## Parameters
+
+### Path
+
+| Name | Type | Required |
+| --- | --- | --- |
+| `book_id` | `integer` | yes |
+
+### Query
+
+| Name | Type | Required |
+| --- | --- | --- |
+| `fmt` | [`BookFormat`](../schemas/book-format.md) | no |
+
+## Responses
+
+| Status | Body | Media types |
+| --- | --- | --- |
+| `200` | [`BookOrError`](../schemas/book-or-error.md) | `application/json` |
+
+## Example
+
+Each value is the example the API declares for it, or else one sampled from the schema, and satisfies every declared constraint. The code samples take the base URL as a variable. Paths start at the server root; a server URL with a path prefix prepends it to every path.
+
+### HTTP
+
+```http
+GET /books/7?fmt=hardcover HTTP/1.1
+```
+
+```http
+HTTP/1.1 200
+content-type: application/json
+
+{
+  "author": {
+    "bio": "gnr8",
+    "name": "gnr8"
+  },
+  "format": "hardcover",
+  "id": 7,
+  "rating": 7,
+  "tags": [
+    "gnr8"
+  ],
+  "title": "gnr8"
+}
+```
+
+### Python — `sdk`
+
+```python
+from sdk import BookFormat, Client
+
+client = Client(base_url)
+result = client.get_book(book_id=7, fmt=BookFormat("hardcover"))
+print(result)
+```
+
+### CLI — `bookstore`
+
+`bookstore books get`
+
+```sh
+bookstore books get 1
+```

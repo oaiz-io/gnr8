@@ -303,6 +303,12 @@ pub struct Constraints {
     /// Exclusive numeric maximum (`exclusiveMaximum`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusive_maximum: Option<String>,
+    /// The number a numeric value is a multiple of (`multipleOf`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiple_of: Option<String>,
+    /// Whether an array's items are pairwise distinct (`uniqueItems`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unique_items: bool,
     /// String pattern constraint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
@@ -325,6 +331,8 @@ impl Constraints {
             && self.maximum.is_none()
             && self.exclusive_minimum.is_none()
             && self.exclusive_maximum.is_none()
+            && self.multiple_of.is_none()
+            && !self.unique_items
             && self.pattern.is_none()
             && self.enum_values.is_empty()
     }

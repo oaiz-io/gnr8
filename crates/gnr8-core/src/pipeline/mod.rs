@@ -248,6 +248,72 @@ pub fn cli_help_suites(
     Ok(suites)
 }
 
+/// Collect the docs code-sample suites a plan's `StaticDocs` targets declare.
+///
+/// They are built from the same sibling declarations the docs target read, so a suite exists for
+/// exactly the SDK sections the pages printed. Custom targets declare none.
+///
+/// # Errors
+/// Returns the sampler's or a call-site renderer's graph error.
+pub fn docs_suites(
+    plan: &StagePlan,
+    ir: &ApiGraph,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    let builtin_targets = emission::builtin_targets(&plan.targets);
+    let siblings = builtins::PlanTargets::new(&builtin_targets);
+    let mut suites = Vec::new();
+    for (_, spec) in &builtin_targets {
+        suites.extend(builtins::target_docs_suites(spec, ir, &siblings)?);
+    }
+    // Without a `StaticDocs` target, the samples an SDK's README and reference print are checked
+    // on their own: docs are verified wherever gnr8 writes a sample.
+    if suites.is_empty() {
+        suites = builtins::sdk_docs_suites(ir, &siblings)?;
+    }
+    Ok(suites)
+}
+
+/// The docs suites of one finished run, from its plan and the graph artifact it wrote.
+///
+/// Building a suite renders every compile unit — every operation sampled, for every sibling SDK —
+/// so it is done only where it is checked, by `gnr8 verify`, rather than on every `generate`,
+/// `check` and `watch` (measured: about 90 ms of a 170 ms warm `check` on a 400-operation API with
+/// three SDK siblings). The graph is the artifact the run wrote: the projected graph every target,
+/// the docs target included, consumed.
+///
+/// # Errors
+/// Returns a graph-artifact error when the run wrote none or it does not parse, and the sampler's
+/// or a call-site renderer's graph error.
+pub fn docs_suites_of_run(
+    plan: &StagePlan,
+    artifacts: &[Artifact],
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    let builtin_targets = emission::builtin_targets(&plan.targets);
+    let declares_docs = builtin_targets
+        .iter()
+        .any(|(_, spec)| matches!(spec, gnr8::sdk::BuiltinTarget::StaticDocs(_)))
+        || builtins::PlanTargets::new(&builtin_targets)
+            .sdks()
+            .any(|sdk| sdk.emits_docs());
+    if !declares_docs {
+        return Ok(Vec::new());
+    }
+    let text = artifacts
+        .iter()
+        .find(|artifact| artifact.path == crate::graph_artifact::GRAPH_ARTIFACT_PATH)
+        .map(|artifact| artifact.text.as_str())
+        .ok_or_else(|| CoreError::DocsGen {
+            message: "the run wrote no graph artifact to check the docs samples against"
+                .to_string(),
+        })?;
+    let graph = serde_json::from_str::<crate::graph_artifact::GraphArtifact>(text)
+        .map_err(|error| CoreError::DocsGen {
+            message: format!("the run's graph artifact does not parse: {error}"),
+        })?
+        .graph;
+    docs_suites(plan, &graph)
+}
+
 /// Project-relative input roots the plan's built-in source declares.
 ///
 /// `gnr8 doctor` probes the source language from these. A custom source declares none — its inputs
@@ -472,6 +538,7 @@ fn emit(
     // naming this graph, the declarations, this gnr8, and the `gofmt` any Go would be formatted by.
     // A key it cannot complete is `None`, and the block then runs exactly as it always did.
     let builtin_targets = emission::builtin_targets(&plan.targets);
+    let plan_targets = builtins::PlanTargets::new(&builtin_targets);
     let emission_key = emission::key(generation_ir, &builtin_targets);
     let restored = emission_key
         .as_deref()
@@ -498,7 +565,14 @@ fn emit(
                             move || {
                                 let mut out = Artifacts::new();
                                 out.begin_stage(builtin_target_producer(position, spec));
-                                builtins::generate_target(spec, graph, &mut out, cx, store)?;
+                                builtins::generate_target(
+                                    spec,
+                                    graph,
+                                    &mut out,
+                                    cx,
+                                    store,
+                                    &plan_targets,
+                                )?;
                                 Ok(out.into_files())
                             }
                         })
@@ -1565,5 +1639,163 @@ mod tests {
             matches!(err, CoreError::ArtifactOwnership { ref code, .. } if code == "artifact.path_collision"),
             "{err:?}"
         );
+    }
+
+    /// One graph with a sampled operation and one whose required parameter declares a `pattern`.
+    fn docs_graph() -> ApiGraph {
+        serde_json::from_value(serde_json::json!({
+            "module": "m", "base_path": "/", "title": "Docs", "diagnostics": [], "security": [],
+            "operations": [
+                {"id": "listItems", "method": "GET", "path": "/items", "handler": "listItems",
+                 "params": [], "request_body": null,
+                 "responses": [{"status": 204, "body": null, "body_kind": "empty"}],
+                 "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}},
+                {"id": "findItem", "method": "GET", "path": "/items/find", "handler": "findItem",
+                 "params": [{"name": "code", "location": "query", "required": true,
+                             "schema": {"type": "primitive", "of": {"prim": "string"}},
+                             "constraints": {"pattern": "^[a-z]+$"},
+                             "provenance": {"file": "a.go", "start_line": 2, "end_line": 2}}],
+                 "request_body": null,
+                 "responses": [{"status": 204, "body": null, "body_kind": "empty"}],
+                 "provenance": {"file": "a.go", "start_line": 2, "end_line": 2}}
+            ],
+            "schemas": []
+        }))
+        .expect("the docs graph deserializes")
+    }
+
+    #[test]
+    fn docs_suites_are_declared_per_sibling_sdk_in_plan_order() {
+        use crate::verify::ContractTestLanguage;
+        let plan = Pipeline::new()
+            .target(decl::TsSdk::new().module("items").to("gen/ts"))
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go"),
+            )
+            .target(decl::StaticDocs::new().to("gen/docs"))
+            .target(
+                decl::PySdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/py"),
+            )
+            .plan();
+        let suites = super::docs_suites(&plan, &docs_graph()).unwrap();
+        let shape: Vec<(ContractTestLanguage, &str, bool)> = suites
+            .iter()
+            .map(|suite| {
+                (
+                    suite.language,
+                    suite.sdk_output_path.as_str(),
+                    suite.compile_unit.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                // A TypeScript SDK emits no package.json by default, so it has no identity.
+                (ContractTestLanguage::TypeScript, "gen/ts", false),
+                (ContractTestLanguage::Go, "gen/go", true),
+                (ContractTestLanguage::Python, "gen/py", true),
+            ]
+        );
+        for suite in &suites {
+            assert_eq!(suite.docs_dir, "gen/docs");
+            assert_eq!(suite.cases, 1, "one operation samples");
+            assert_eq!(suite.refused, 1, "one operation is refused");
+        }
+        assert_eq!(suites[1].package, "sdk");
+        assert!(suites[1].go_verification.is_some());
+        let unit = suites[1].compile_unit.as_ref().unwrap();
+        assert_eq!(unit.identity, "example.com/items/sdk");
+        assert_eq!(unit.entries.len(), 1);
+        assert_eq!(unit.entries[0].page, "operations/list-items.md");
+    }
+
+    /// Without `StaticDocs`, an SDK that writes its README and reference has the samples those two
+    /// files print checked, in its own directory; one that writes no docs has nothing to check.
+    #[test]
+    fn without_static_docs_only_sdk_docs_have_suites() {
+        let plan = Pipeline::new()
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go"),
+            )
+            .plan();
+        let suites = super::docs_suites(&plan, &docs_graph()).unwrap();
+        assert_eq!(suites.len(), 1);
+        assert_eq!(suites[0].docs_dir, "gen/go");
+        let unit = suites[0]
+            .compile_unit
+            .as_ref()
+            .expect("a Go SDK has an identity");
+        assert!(unit.entries.iter().all(|entry| entry
+            .embeds
+            .iter()
+            .all(|embed| embed.root == crate::docs::verify::PageRoot::Sdk)));
+        let quiet = Pipeline::new()
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go")
+                    .without_docs(),
+            )
+            .plan();
+        assert!(
+            super::docs_suites(&quiet, &docs_graph())
+                .unwrap()
+                .is_empty(),
+            "an SDK that writes no docs has no docs suite"
+        );
+        let docs_alone = Pipeline::new()
+            .target(decl::StaticDocs::new().to("gen/docs"))
+            .plan();
+        assert!(
+            super::docs_suites(&docs_alone, &docs_graph())
+                .unwrap()
+                .is_empty(),
+            "docs alone should still build suites"
+        );
+    }
+
+    /// Without `StaticDocs` no page file is written, so a name `StaticDocs` would refuse — a
+    /// reserved device name, a name with no ASCII letter, two subjects on one slug — never stops the
+    /// SDK-only docs suites (and with them `gnr8 verify`).
+    #[test]
+    fn sdk_only_docs_suites_never_refuse_a_page_name() {
+        let mut graph = docs_graph();
+        graph.operations[0].id = "con".to_string();
+        graph.operations[1].id = "注释".to_string();
+        let mut twin = graph.operations[0].clone();
+        twin.id = "Con".to_string();
+        twin.path = "/con".to_string();
+        graph.operations.push(twin);
+        let plan = Pipeline::new()
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go"),
+            )
+            .plan();
+        let suites = super::docs_suites(&plan, &graph).expect("SDK-only suites build");
+        assert_eq!(suites.len(), 1);
+        let unit = suites[0].compile_unit.as_ref().unwrap();
+        assert!(unit
+            .entries
+            .iter()
+            .all(|entry| entry.page == crate::docs::verify::SDK_REFERENCE));
+        let with_site = Pipeline::new()
+            .target(
+                decl::GoSdk::new()
+                    .module("example.com/items/sdk")
+                    .to("gen/go"),
+            )
+            .target(decl::StaticDocs::new().to("gen/docs"))
+            .plan();
+        let err = super::docs_suites(&with_site, &graph).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
     }
 }

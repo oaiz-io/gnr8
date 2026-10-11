@@ -29,14 +29,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use super::ERROR_TYPE;
+
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{
     ApiGraph, Field, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Param,
     Prim, RuntimePolicy, Type,
 };
+use crate::sdk::emit_common::PaginationNames;
 use crate::sdk::emit_common::{
-    binary_value_shape, error_response_bodies_of, is_json_object_key, join_path,
-    operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
+    binary_value_shape, check_path_parameters, error_response_bodies_of, is_json_object_key,
+    join_path, operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
     quoted_string_literal, request_body_models_of, schema_is_multipart_request, split_words,
     success_responses_of, ApiKeyLocation, BinaryValueShape, ErrorResponseBody, HttpAuthScheme,
     OperationApiKeyScheme, OperationAuthScheme, RequestBodyEncoding, RequestBodyModel,
@@ -504,16 +507,17 @@ fn ts_field_type(
 
 /// Emit `errors.ts`: the typed `ApiError extends Error` carrying status, response metadata, and body.
 pub(crate) fn emit_errors(_package: &str) -> String {
-    "\
-export interface ApiErrorInit {
+    format!(
+        "\
+export interface {ERROR_TYPE}Init {{
   headers?: Headers | undefined;
   requestId?: string | undefined;
   rawBody?: string | undefined;
   jsonBody?: unknown;
   body?: unknown;
-}
+}}
 
-export class ApiError extends Error {
+export class {ERROR_TYPE} extends Error {{
   public readonly headers: Headers;
   public readonly requestId?: string | undefined;
   public readonly rawBody: string;
@@ -522,45 +526,45 @@ export class ApiError extends Error {
 
   constructor(
     public readonly status: number,
-    init: ApiErrorInit = {},
-  ) {
-    super(`HTTP ${status}`);
-    this.name = \"ApiError\";
+    init: {ERROR_TYPE}Init = {{}},
+  ) {{
+    super(`HTTP ${{status}}`);
+    this.name = \"{ERROR_TYPE}\";
     this.headers = init.headers ?? new Headers();
     this.requestId = init.requestId;
     this.rawBody = init.rawBody ?? \"\";
     this.jsonBody = init.jsonBody ?? null;
     this.body = init.body ?? this.jsonBody;
-  }
+  }}
 
-  isNotFound(): boolean {
+  isNotFound(): boolean {{
     return this.status === 404;
-  }
-}
+  }}
+}}
 
-export class AuthConfigurationError extends Error {
+export class AuthConfigurationError extends Error {{
   constructor(
     public readonly operationId: string,
     public readonly alternatives: readonly (readonly string[])[],
-  ) {
-    super(`No configured credentials satisfy operation ${operationId}`);
+  ) {{
+    super(`No configured credentials satisfy operation ${{operationId}}`);
     this.name = \"AuthConfigurationError\";
-  }
-}
+  }}
+}}
 
 export type ResponseDecodeFailure =
-  \"empty_body\" | \"unexpected_content_type\" | \"invalid_json\";
+  \"empty_body\" | \"unexpected_content_type\" | \"invalid_json\" | \"invalid_text\";
 
-export interface ResponseDecodeErrorInit {
+export interface ResponseDecodeErrorInit {{
   headers?: Headers | undefined;
   requestId?: string | undefined;
   rawBody?: string | undefined;
   expectedContentType?: string | undefined;
   actualContentType?: string | undefined;
   cause?: unknown;
-}
+}}
 
-export class ResponseDecodeError extends Error {
+export class ResponseDecodeError extends Error {{
   public readonly headers: Headers;
   public readonly requestId?: string | undefined;
   public readonly rawBody: string;
@@ -571,9 +575,9 @@ export class ResponseDecodeError extends Error {
   constructor(
     public readonly failure: ResponseDecodeFailure,
     public readonly status: number,
-    init: ResponseDecodeErrorInit = {},
-  ) {
-    super(`HTTP ${status}: response decode failed (${failure})`);
+    init: ResponseDecodeErrorInit = {{}},
+  ) {{
+    super(`HTTP ${{status}}: response decode failed (${{failure}})`);
     this.name = \"ResponseDecodeError\";
     this.headers = init.headers ?? new Headers();
     this.requestId = init.requestId;
@@ -581,10 +585,10 @@ export class ResponseDecodeError extends Error {
     this.expectedContentType = init.expectedContentType ?? \"application/json\";
     this.actualContentType = init.actualContentType;
     this.cause = init.cause;
-  }
-}
+  }}
+}}
 "
-    .to_string()
+    )
 }
 
 /// Emit `client.ts`'s header + the dependency-free `Client` backed by the platform `fetch` global.
@@ -629,8 +633,19 @@ pub(crate) fn emit_client_with_models(
     } else {
         ""
     };
-    let bearer_field = "  private readonly bearerToken?: string;\n";
-    let basic_field = "  private readonly basicAuth?: { username: string; password: string };\n";
+    // A declared scheme assigns the field from an optional option, so under
+    // `exactOptionalPropertyTypes` the field must admit `undefined` explicitly; an undeclared one
+    // is never assigned and keeps the plain optional field.
+    let bearer_field = if has_bearer_auth {
+        "  private readonly bearerToken?: string | undefined;\n"
+    } else {
+        "  private readonly bearerToken?: string;\n"
+    };
+    let basic_field = if has_basic_auth {
+        "  private readonly basicAuth?: { username: string; password: string } | undefined;\n"
+    } else {
+        "  private readonly basicAuth?: { username: string; password: string };\n"
+    };
     let bearer_init = if has_bearer_auth {
         "    this.bearerToken = opts.bearerToken;\n"
     } else {
@@ -658,7 +673,7 @@ pub(crate) fn emit_client_with_models(
     format!(
         "\
 import {{
-  ApiError,
+  {ERROR_TYPE},
   AuthConfigurationError,
   ResponseDecodeError,
 }} from \"./errors\";
@@ -844,6 +859,23 @@ export class Client {{
     }} catch (cause) {{
       throw new ResponseDecodeError(\"invalid_json\", response.status, {{
         ...errorInit,
+        cause,
+      }});
+    }}
+  }}
+
+  async _decodeText(response: Response): Promise<string> {{
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    try {{
+      return new TextDecoder(\"utf-8\", {{ fatal: true, ignoreBOM: true }}).decode(
+        bytes,
+      );
+    }} catch (cause) {{
+      throw new ResponseDecodeError(\"invalid_text\", response.status, {{
+        headers: response.headers,
+        requestId: response.headers.get(\"x-request-id\") ?? undefined,
+        expectedContentType: \"text/*\",
+        actualContentType: response.headers.get(\"content-type\") ?? undefined,
         cause,
       }});
     }}
@@ -1087,7 +1119,7 @@ export class Client {{
         !(context.successStatuses ?? []).includes(response.status) &&
         !opaqueRedirect
       ) {{
-        const error = new ApiError(response.status, {{
+        const error = new {ERROR_TYPE}(response.status, {{
           headers: response.headers,
           requestId: response.headers.get(\"x-request-id\") ?? undefined,
         }});
@@ -1221,9 +1253,9 @@ fn ts_operation_runtime<'a>(graph: &'a ApiGraph, op: &Operation) -> TsOperationR
 /// `ops` are all of the graph's operations, in graph order. Each method:
 /// - takes path params as positional args, then a typed `body` arg for body-bearing ops, then required
 ///   query params (positional), then optional query params (each defaulting to `undefined`);
-/// - interpolates each path param through `encodeURIComponent(String(value))` (V5 path-injection
-///   mitigation — twin of Go `url.PathEscape` / Python `urllib.quote(safe='')`); builds the query with a
-///   `URLSearchParams`; joins `base_path` + `op.path`;
+/// - interpolates each path param through `wireEscape(String(value))` (V5 path-injection mitigation —
+///   twin of Go `wireEscape` / Python `_path_segment`); builds the query with a `URLSearchParams`
+///   written by `wireQueryString`; joins `base_path` + `op.path`;
 /// - dispatches through `this._request`, throws `ApiError` for rejected responses, and returns decoded
 ///   JSON only for accepted statuses that declare a body model.
 ///
@@ -1255,9 +1287,7 @@ pub(crate) fn emit_operations(
     out.push_str("}\n");
     emit_group_facades(&mut out, ops)?;
     emit_operation_params_types(&mut out, graph, ops)?;
-    if ts_operations_need_wire_helpers(ops) {
-        emit_ts_wire_helpers(&mut out, ts_operations_need_query_string_helper(ops));
-    }
+    emit_ts_wire_helpers(&mut out, ts_wire_helpers_of(ops, graph)?);
     Ok(out)
 }
 
@@ -1295,9 +1325,7 @@ pub(crate) fn emit_operation_module(
         )?;
         emit_pagination_helpers(&mut body, op, graph, OperationEmitStyle::PrototypeFunction)?;
     }
-    if ts_operations_need_wire_helpers(ops) {
-        emit_ts_wire_helpers(&mut body, ts_operations_need_query_string_helper(ops));
-    }
+    emit_ts_wire_helpers(&mut body, ts_wire_helpers_of(ops, graph)?);
     let model_import = if body.contains("models.") {
         format!("import * as models from \"{models_module}\";\n")
     } else {
@@ -1317,7 +1345,7 @@ pub(crate) fn emit_operation_module(
         }
     }
     let out = format!(
-        "{}import {{ ApiError }} from \"{errors_module}\";\n{model_import}\n{body}",
+        "{}import {{ {ERROR_TYPE} }} from \"{errors_module}\";\n{model_import}\n{body}",
         ts_module_specifier_list("import type", &client_types, client_module)
     );
     Ok(out)
@@ -1348,11 +1376,17 @@ pub(crate) fn pagination_method_names(graph: &ApiGraph, op: &Operation) -> Vec<S
     if pagination_policy_for(graph, op).is_none() {
         return Vec::new();
     }
-    let method = operation_method_name(op);
-    vec![
-        format!("{method}Pages"),
-        format!("iterate{}", upper_camel_first(&method)),
-    ]
+    let PaginationNames { pages, iterate } = pagination_names(&operation_method_name(op));
+    vec![pages, iterate]
+}
+
+/// The two helpers a paginated operation's method `method` gains: the page collector and the item
+/// iterator — the one spelling the emitter and the docs use.
+pub(crate) fn pagination_names(method: &str) -> PaginationNames {
+    PaginationNames {
+        pages: format!("{method}Pages"),
+        iterate: format!("iterate{}", upper_camel_first(method)),
+    }
 }
 
 fn grouped_ops<'op>(ops: &[&'op Operation]) -> BTreeMap<String, Vec<&'op Operation>> {
@@ -1963,6 +1997,18 @@ fn fetch_transport_owns_parameter(param: &Param) -> bool {
     )
 }
 
+/// Whether an operation's method can resolve to `undefined`: a declared success with no body the
+/// method returns (a bodyless status, or one answering a body the return type does not carry), or
+/// a declared redirect, which browser Fetch surfaces as an opaque success. The method's return type
+/// and the contract test's narrowing both read this one answer.
+pub(crate) fn return_admits_undefined(success: &SuccessResponses) -> bool {
+    success.has_bodyless_alternative()
+        || success
+            .statuses
+            .iter()
+            .any(|status| (300..400).contains(status))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one operation emitter keeps signature, path, query, dispatch, and split-mode wrappers in one deterministic pass"
@@ -1997,6 +2043,7 @@ fn emit_operation(
             ),
         });
     }
+    check_path_parameters(op, graph)?;
 
     let success = success_responses_of(op, graph)?;
     let error_bodies = error_response_bodies_of(op, graph)?;
@@ -2028,11 +2075,7 @@ fn emit_operation(
         })
         .collect();
     let return_model = success.body_model.clone();
-    let has_redirect = success
-        .statuses
-        .iter()
-        .any(|status| (300..400).contains(status));
-    let has_empty_wire_outcome = success.has_bodyless_alternative() || has_redirect;
+    let has_empty_wire_outcome = return_admits_undefined(&success);
     // A typed body/response references a model symbol re-exported from ./models; reference it through the
     // `models` namespace import so client.ts has no per-name import to compute (determinism).
     let return_ty = if success.has_binary_body() {
@@ -2040,6 +2083,13 @@ fn emit_operation(
             "Blob | undefined".to_string()
         } else {
             "Blob".to_string()
+        }
+    } else if success.text_body {
+        // A `text/*` reply is returned as the text itself.
+        if has_empty_wire_outcome {
+            "string | undefined".to_string()
+        } else {
+            "string".to_string()
         }
     } else {
         return_model.as_ref().map_or_else(
@@ -2274,8 +2324,10 @@ fn emit_pagination_helpers(
         return Ok(());
     };
     let method_name = operation_method_name(op);
-    let pages_name = format!("{method_name}Pages");
-    let items_name = format!("iterate{}", upper_camel_first(&method_name));
+    let PaginationNames {
+        pages: pages_name,
+        iterate: items_name,
+    } = pagination_names(&method_name);
     let info = ts_pagination_info(graph, op, policy)?;
     let TsPaginationArgs {
         args,
@@ -2676,14 +2728,37 @@ fn ts_operations_need_wire_helpers(ops: &[&Operation]) -> bool {
     })
 }
 
-/// Whether any operation in this file builds its query string with `wireQueryString`.
-///
-/// Only `allowReserved` parameters need it — everything else uses `URLSearchParams.toString()`.
-/// Emitting it unconditionally would leave an unused function in most generated SDKs, which trips
-/// consumers compiling with `noUnusedLocals` or linting the generated output.
-fn ts_operations_need_query_string_helper(ops: &[&Operation]) -> bool {
-    ops.iter()
-        .any(|op| op.params.iter().any(|param| param.allow_reserved))
+/// The module-level wire helpers one file's operations call. Each is emitted exactly when called:
+/// an unused function trips consumers compiling with `noUnusedLocals` or linting the output.
+#[derive(Clone, Copy)]
+struct TsWireHelpers {
+    /// `wireParameterPairs`: a query parameter, an `allowReserved` one, or a header that pairs.
+    pairs: bool,
+    /// `wireQueryString`: a query string is built — a query parameter or a query API key.
+    query_string: bool,
+    /// `wireEscape`: a path segment or a query string is encoded.
+    escape: bool,
+}
+
+fn ts_wire_helpers_of(ops: &[&Operation], graph: &ApiGraph) -> Result<TsWireHelpers, CoreError> {
+    let mut query_string = false;
+    for op in ops {
+        query_string |= op.params.iter().any(|param| param.location == "query");
+        query_string |= flattened_auth_schemes(&operation_auth_alternatives(graph, op)?)
+            .iter()
+            .any(|scheme| {
+                matches!(scheme, OperationAuthScheme::ApiKey(scheme)
+                    if scheme.location == ApiKeyLocation::Query)
+            });
+    }
+    let path = ops
+        .iter()
+        .any(|op| op.params.iter().any(|param| param.location == "path"));
+    Ok(TsWireHelpers {
+        pairs: ts_operations_need_wire_helpers(ops),
+        query_string,
+        escape: query_string || path,
+    })
 }
 
 fn emit_ts_header_parameters(out: &mut String, args: &ResolvedArgs) -> Result<(), CoreError> {
@@ -2739,11 +2814,33 @@ fn emit_ts_header_parameter(
 }
 
 /// Emit only the wire helpers this file's operations actually call.
-fn emit_ts_wire_helpers(out: &mut String, needs_query_string: bool) {
-    emit_ts_wire_parameter_pairs(out);
-    if needs_query_string {
+fn emit_ts_wire_helpers(out: &mut String, helpers: TsWireHelpers) {
+    if helpers.pairs {
+        emit_ts_wire_parameter_pairs(out);
+    }
+    if helpers.query_string {
         emit_ts_wire_query_string(out);
     }
+    if helpers.escape {
+        emit_ts_wire_escape(out);
+    }
+}
+
+/// `wireEscape`: the one rule every path segment, query name and query value is encoded with. Each
+/// byte but an RFC 3986 unreserved one (`A-Z a-z 0-9 - . _ ~`) becomes `%XX` — the rule the page and
+/// the contract test spell a path and a query with (`verify::percent_encode`).
+/// `encodeURIComponent` alone leaves `! ' ( ) *`.
+fn emit_ts_wire_escape(out: &mut String) {
+    out.push_str(
+        r#"
+function wireEscape(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (char) => "%" + char.charCodeAt(0).toString(16).toUpperCase(),
+  );
+}
+"#,
+    );
 }
 
 fn emit_ts_wire_parameter_pairs(out: &mut String) {
@@ -2792,7 +2889,7 @@ fn emit_ts_wire_query_string(out: &mut String) {
         r#"
 function wireQueryString(
   values: URLSearchParams,
-  allowReserved: Set<number>,
+  allowReserved: Set<number> = new Set<number>(),
 ): string {
   const restoreReserved = (value: string): string =>
     value.replace(
@@ -2802,9 +2899,9 @@ function wireQueryString(
   const parts: string[] = [];
   let index = 0;
   values.forEach((value, key) => {
-    const encoded = encodeURIComponent(value);
+    const encoded = wireEscape(value);
     parts.push(
-      encodeURIComponent(key) +
+      wireEscape(key) +
         "=" +
         (allowReserved.has(index) ? restoreReserved(encoded) : encoded),
     );
@@ -2879,7 +2976,7 @@ fn emit_op_path(
             .find(|(pp, _)| &pp.name == token)
             .map_or_else(|| camel(token), |(_, id)| id.clone());
         let placeholder = format!("{{{token}}}");
-        let interp = format!("${{encodeURIComponent(String({ident}))}}");
+        let interp = format!("${{wireEscape(String({ident}))}}");
         tmpl = tmpl.replace(&placeholder, &interp);
     }
     writeln!(out, "    let path = `{tmpl}`;").map_err(sink)?;
@@ -2951,6 +3048,8 @@ fn emit_op_query(
         writeln!(out, "      }}").map_err(sink)?;
         writeln!(out, "    }}").map_err(sink)?;
     }
+    // One encoder for every query string: `URLSearchParams.toString()` writes a space as `+` and
+    // leaves `*` bare, unlike the page and the contract test.
     if has_allow_reserved {
         writeln!(
             out,
@@ -2958,7 +3057,7 @@ fn emit_op_query(
         )
         .map_err(sink)?;
     } else {
-        writeln!(out, "    const qs = searchParams.toString();").map_err(sink)?;
+        writeln!(out, "    const qs = wireQueryString(searchParams);").map_err(sink)?;
     }
     writeln!(out, "    if (qs) {{").map_err(sink)?;
     writeln!(out, "      path = path + \"?\" + qs;").map_err(sink)?;
@@ -3285,7 +3384,7 @@ fn emit_error_throw_branch(
         .map_err(sink)?;
         writeln!(out, "      }}").map_err(sink)?;
     }
-    writeln!(out, "      throw new ApiError(res.status, {{").map_err(sink)?;
+    writeln!(out, "      throw new {ERROR_TYPE}(res.status, {{").map_err(sink)?;
     writeln!(out, "        headers: res.headers,").map_err(sink)?;
     writeln!(
         out,
@@ -3321,9 +3420,8 @@ fn emit_ts_request_body_arg(
             let value = match body.encoding {
                 RequestBodyEncoding::FormUrlEncoded => "this._formBody(body.value)",
                 RequestBodyEncoding::Multipart => "this._multipartBody(body.value)",
-                RequestBodyEncoding::Json
-                | RequestBodyEncoding::Text
-                | RequestBodyEncoding::Binary => "body.value",
+                RequestBodyEncoding::Json => "JSON.stringify(body.value)",
+                RequestBodyEncoding::Text | RequestBodyEncoding::Binary => "body.value",
             };
             writeln!(out, "        requestBody = {value};").map_err(sink)?;
             writeln!(out, "        break;").map_err(sink)?;
@@ -3363,9 +3461,22 @@ fn emit_ts_request_body_arg(
             }
             Ok("requestBody")
         }
-        RequestBodyEncoding::Json | RequestBodyEncoding::Text | RequestBodyEncoding::Binary => {
-            Ok("body")
+        // A JSON body is encoded here, where its media type is known: `_request` passes a string
+        // through as already encoded (a text body is one), so a bare JSON string would otherwise
+        // go out without its quotes.
+        RequestBodyEncoding::Json => {
+            if request_body.is_required() {
+                writeln!(out, "    const requestBody = JSON.stringify(body);").map_err(sink)?;
+            } else {
+                writeln!(
+                    out,
+                    "    const requestBody = body === undefined ? undefined : JSON.stringify(body);"
+                )
+                .map_err(sink)?;
+            }
+            Ok("requestBody")
         }
+        RequestBodyEncoding::Text | RequestBodyEncoding::Binary => Ok("body"),
     }
 }
 
@@ -3542,7 +3653,7 @@ fn emit_op_dispatch(
         writeln!(out, "      return await res.blob();").map_err(sink)?;
         writeln!(out, "    }}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
-            writeln!(out, "    throw new ApiError(res.status);").map_err(sink)?;
+            writeln!(out, "    throw new {ERROR_TYPE}(res.status);").map_err(sink)?;
         }
     } else if let Some(model) = success.body_model.as_deref() {
         writeln!(
@@ -3551,14 +3662,19 @@ fn emit_op_dispatch(
             ts_status_match("res.status", &success.body_statuses)
         )
         .map_err(sink)?;
-        writeln!(
-            out,
-            "      return await this._decodeJson<models.{model}>(res);"
-        )
-        .map_err(sink)?;
+        if success.text_body {
+            // Strict UTF-8: `Response.text()` would replace a malformed byte instead of failing.
+            writeln!(out, "      return await this._decodeText(res);").map_err(sink)?;
+        } else {
+            writeln!(
+                out,
+                "      return await this._decodeJson<models.{model}>(res);"
+            )
+            .map_err(sink)?;
+        }
         writeln!(out, "    }}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
-            writeln!(out, "    throw new ApiError(res.status);").map_err(sink)?;
+            writeln!(out, "    throw new {ERROR_TYPE}(res.status);").map_err(sink)?;
         }
     }
     Ok(())
@@ -3649,16 +3765,16 @@ pub(crate) fn emit_index_with_models(
     }
     out.push_str(&ts_module_specifier_list(
         "export",
-        &fixed_exports(&["ApiError", "AuthConfigurationError", "ResponseDecodeError"]),
+        &fixed_exports(&[ERROR_TYPE, "AuthConfigurationError", "ResponseDecodeError"]),
         "./errors",
     ));
     out.push_str(&ts_module_specifier_list(
         "export type",
-        &fixed_exports(&[
-            "ApiErrorInit",
-            "ResponseDecodeErrorInit",
-            "ResponseDecodeFailure",
-        ]),
+        &[
+            format!("{ERROR_TYPE}Init"),
+            "ResponseDecodeErrorInit".to_string(),
+            "ResponseDecodeFailure".to_string(),
+        ],
         "./errors",
     ));
 
@@ -4297,6 +4413,7 @@ mod tests {
                 explode: None,
                 allow_reserved,
                 description: None,
+                example: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: SourceSpan {
@@ -4339,7 +4456,7 @@ mod tests {
             assert!(
                 out.contains("const res = await this._request(")
                     && out.contains("\"POST\",")
-                    && out.contains("body,")
+                    && out.contains("requestBody,")
                     && out.contains("operationId: \"createBook\",")
                     && out.contains("options,"),
                 "body op dispatches through the shared request helper:\n{out}"
@@ -4365,7 +4482,7 @@ mod tests {
             assert!(
                 out.contains("const res = await this._request(")
                     && out.contains("\"POST\",")
-                    && out.contains("body,")
+                    && out.contains("requestBody,")
                     && out.contains("options,"),
                 "{out}"
             );
@@ -4540,6 +4657,7 @@ mod tests {
                 explode: None,
                 allow_reserved: false,
                 description: None,
+                example: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: crate::graph::SourceSpan {
@@ -4630,12 +4748,8 @@ mod tests {
             );
         }
 
-        /// Every helper the emitter writes must be called by the file that carries it.
-        ///
-        /// `wireQueryString` is only reachable from an `allowReserved` parameter, but query
-        /// parameters in general now route through `wireParameterPairs` — emitting both together
-        /// would leave a dead function in most generated SDKs, breaking consumers that compile the
-        /// output with `noUnusedLocals` or lint it.
+        /// Every helper the emitter writes must be called by the file that carries it: a dead
+        /// function breaks consumers that compile the output with `noUnusedLocals` or lint it.
         fn assert_no_unreferenced_helpers(out: &str) {
             for line in out.lines() {
                 let Some(name) = line
@@ -4653,7 +4767,7 @@ mod tests {
         }
 
         #[test]
-        fn plain_query_params_do_not_emit_an_unused_query_string_helper() {
+        fn plain_query_params_are_written_by_the_one_wire_encoder() {
             let g = ops_graph();
             let out = emit_operations(&g, "bookstore", "/", &ops_for(&g, "listBooks")).unwrap();
 
@@ -4662,8 +4776,27 @@ mod tests {
                 "query params serialize through wireParameterPairs:\n{out}"
             );
             assert!(
-                !out.contains("wireQueryString"),
-                "wireQueryString must not be emitted when no parameter sets allowReserved:\n{out}"
+                out.contains("const qs = wireQueryString(searchParams);")
+                    && out.contains("function wireEscape(")
+                    && !out.contains("searchParams.toString()"),
+                "URLSearchParams.toString() writes a space as `+`, unlike the page:\n{out}"
+            );
+            assert_no_unreferenced_helpers(&out);
+        }
+
+        #[test]
+        fn json_body_is_json_encoded_by_the_operation() {
+            let g = ops_graph();
+            let out = emit_operations(
+                &g,
+                "bookstore",
+                "/",
+                &g.operations.iter().collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(
+                out.contains("const requestBody = JSON.stringify(body);"),
+                "a JSON body, a bare string included, goes out JSON-encoded:\n{out}"
             );
             assert_no_unreferenced_helpers(&out);
         }
@@ -4744,7 +4877,7 @@ mod tests {
             let g = ops_graph();
             let out = emit_operations(&g, "bookstore", "/", &ops_for(&g, "getBook")).unwrap();
             assert!(
-                out.contains("let path = `/books/${encodeURIComponent(String(bookId))}`;"),
+                out.contains("let path = `/books/${wireEscape(String(bookId))}`;"),
                 "path param must be percent-escaped (V5) via a backslash-free template literal:\n{out}"
             );
             assert!(
@@ -4837,6 +4970,7 @@ mod tests {
                 explode: None,
                 allow_reserved: false,
                 description: None,
+                example: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: crate::graph::SourceSpan {
@@ -4885,6 +5019,7 @@ mod tests {
                 explode: None,
                 allow_reserved: false,
                 description: None,
+                example: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: crate::graph::SourceSpan {

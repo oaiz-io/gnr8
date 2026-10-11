@@ -21,7 +21,7 @@ no `pip install` is needed.
 
 ```sh
 cd examples/flask-bookstore
-gnr8 generate      # writes generated/openapi.yaml + generated/sdk/
+gnr8 generate      # writes generated/openapi.yaml + generated/sdk/ + generated/docs/
 gnr8 check         # dry-run: confirms the committed output is byte-identical (drift gate)
 ```
 
@@ -32,4 +32,5 @@ gnr8 check         # dry-run: confirms the committed output is byte-identical (d
 
 - `app/` — the static Flask source (copied from `fixtures/flask-bookstore`).
 - `.gnr8/src/main.rs` — the generation pipeline (the config).
-- `generated/` — committed OpenAPI 3.1 document + the generated Python SDK.
+- `generated/` — committed OpenAPI 3.1 document, the generated Python SDK, and the Markdown
+  reference in `generated/docs/`.

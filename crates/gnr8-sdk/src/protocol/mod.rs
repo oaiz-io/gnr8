@@ -54,7 +54,7 @@ use crate::Error;
 /// Bumped on any breaking change to the frame or message shape. Both sides refuse to proceed on a
 /// mismatch, so a `.gnr8/` crate built against a skewed SDK fails with an actionable error rather
 /// than a confusing parse failure or silently-wrong output.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The frame magic. A stream that does not start with it is not this protocol.
 pub const FRAME_MAGIC: [u8; 4] = *b"GN8F";

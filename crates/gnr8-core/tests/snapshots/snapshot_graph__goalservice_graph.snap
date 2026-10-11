@@ -487,7 +487,7 @@ schemas:
               of:
                 prim: string
           description: ~
-          example: "hint 1,hint 2"
+          example: ~
         - json_name: message
           serializer_may_omit: false
           deserializer_accepts_absent: true

@@ -121,6 +121,7 @@ See [OpenAPI generation](../openapi/generation.md).
 | `SdkPackageMetadata` | registry name, version, description, URLs, license, keywords |
 | `PyModelStyle` | Pydantic v2 or stdlib dataclass model policy |
 | `StaticFiles` | copy exact companion files or included directory trees |
+| `StaticDocs` | deterministic Markdown reference and `llms.txt` with verified code samples; see [Static docs generation](../static-docs/generation.md) |
 | `ReadinessTarget` | declare a generated package/artifact for `doctor` validation |
 | `ReadinessKind` | choose the OpenAPI, Go, Python, or TypeScript readiness validator |
 

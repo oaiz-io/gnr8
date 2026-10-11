@@ -14,6 +14,7 @@
 //! markers; the pipeline is byte-identical across runs and never panics (RUST-04).
 //! [`write_to_dir`](crate::sdk::bundle::write_to_dir) materializes the same framing.
 
+pub(crate) mod callsite;
 mod contract;
 mod emit;
 
@@ -27,6 +28,10 @@ use crate::sdk::emit_common::{
 };
 use crate::sdk::layout::{OperationFileSplit, SdkFileLayout};
 use std::collections::BTreeMap;
+
+/// The TypeScript SDK's typed error for a rejected HTTP response: the one spelling every emitted
+/// file, the contract tests, and every docs page name it by.
+pub(crate) const ERROR_TYPE: &str = "ApiError";
 
 /// Generate the TypeScript SDK as a deterministic, dependency-free multi-file bundle String (D-06,
 /// TSSDK-01).

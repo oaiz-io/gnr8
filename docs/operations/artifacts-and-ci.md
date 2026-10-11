@@ -71,7 +71,11 @@ normally create; a post-processor should rewrite. Collisions or missing overlay/
 Every successful pipeline also creates `generated/gnr8.graph.json`. This always-on, projected graph
 snapshot is written after transforms and post-processors and participates in the same ownership,
 protected-edit, stale-file, and `gnr8 check` lifecycle as target output. Its envelope currently has
-`schema_version: 1`; readers reject any other version. Commit it with the other generated artifacts:
+`schema_version: 2`. The version moves whenever the same API is represented differently: version
+2 holds an imported parameter's validation keywords as typed constraints and keeps the base path off
+imported servers. `gnr8 changes` reads a version 1 base by applying those two rules to it, so a
+comparison across the upgrade reports no representation difference as a change; any other version
+is refused. Commit it with the other generated artifacts:
 `gnr8 changes --base <ref>` reads this exact file from the named Git revision and never executes that
 revision's pipeline.
 

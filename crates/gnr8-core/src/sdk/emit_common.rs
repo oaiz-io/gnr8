@@ -1061,9 +1061,13 @@ pub(crate) fn response_field_names(graph: &ApiGraph, op: &Operation) -> Vec<Stri
 /// The schema of an operation's one typed JSON success body.
 ///
 /// [`SuccessResponses::body_model`] carries the schema's *name* (the SDK model it decodes into),
-/// not its id, so it is resolved by name here.
+/// not its id, so it is resolved by name here. A `text/*` reply has none: it is returned as text.
 fn success_schema<'a>(graph: &'a ApiGraph, op: &Operation) -> Option<&'a Schema> {
-    let model = success_responses_of(op, graph).ok()?.body_model?;
+    let success = success_responses_of(op, graph).ok()?;
+    if success.text_body {
+        return None;
+    }
+    let model = success.body_model?;
     graph.schemas.iter().find(|schema| schema.name == model)
 }
 
@@ -1462,6 +1466,37 @@ fn api_key_security_schemes(graph: &ApiGraph) -> Result<BTreeMap<String, ApiKeyS
         }
     }
     Ok(schemes)
+}
+
+/// Every declared security scheme, in declaration order, as the credential an operation that
+/// requires it configures — the same resolution [`operation_auth_alternatives`] uses.
+///
+/// # Errors
+///
+/// Returns the SDK targets' own error for a scheme kind generated clients do not support.
+pub(crate) fn declared_auth_schemes(
+    graph: &ApiGraph,
+) -> Result<Vec<OperationAuthScheme>, CoreError> {
+    let mut schemes = supported_security_schemes(graph)?;
+    Ok(graph
+        .security
+        .iter()
+        .filter_map(|scheme| {
+            schemes.remove(&scheme.id).map(|supported| match supported {
+                SupportedAuthScheme::ApiKey(key) => {
+                    OperationAuthScheme::ApiKey(OperationApiKeyScheme {
+                        id: scheme.id.clone(),
+                        name: key.name,
+                        location: key.location,
+                    })
+                }
+                SupportedAuthScheme::Http(http) => OperationAuthScheme::Http {
+                    id: scheme.id.clone(),
+                    scheme: http,
+                },
+            })
+        })
+        .collect())
 }
 
 fn supported_security_schemes(
@@ -2483,6 +2518,74 @@ pub(crate) fn path_tokens_match(tokens: &[String], params: &[&str]) -> bool {
     token_set == param_set
 }
 
+/// Refuse a path parameter the generated SDKs cannot send as one segment.
+///
+/// Every SDK writes a path parameter as one scalar value, percent-encoded into its segment: OpenAPI's
+/// default `simple` style for a scalar, and the value the docs request line and the contract tests
+/// compute. An array, map, object or free-form path parameter has no such value, and the SDKs
+/// disagreed on what to send for one (Go `[a b]`, Python `['a', 'b']`, TypeScript `a,b`); a `label`
+/// or `matrix` style was sent as `simple`. Either is a generation error naming the parameter.
+pub(crate) fn check_path_parameters(op: &Operation, graph: &ApiGraph) -> Result<(), CoreError> {
+    fn scalar(
+        op: &Operation,
+        ty: &Type,
+        graph: &ApiGraph,
+        seen: &mut BTreeSet<String>,
+    ) -> Result<bool, CoreError> {
+        match ty {
+            Type::Primitive(_) | Type::WellKnown(_) | Type::Enum(_) => Ok(true),
+            Type::Array(_) | Type::Map { .. } | Type::Object(_) | Type::Any {} => Ok(false),
+            Type::Union(variants) => {
+                for variant in variants {
+                    if !scalar(op, variant, graph, seen)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Type::Named(ref_id) => {
+                if !seen.insert(ref_id.clone()) {
+                    return Ok(false);
+                }
+                let target = graph
+                    .schemas
+                    .iter()
+                    .find(|schema| schema.id == *ref_id)
+                    .ok_or_else(|| CoreError::SdkGen {
+                        message: format!(
+                            "operation '{}' path parameter references dangling schema '{ref_id}'",
+                            op.id
+                        ),
+                    })?;
+                scalar(op, &target.body, graph, seen)
+            }
+        }
+    }
+
+    for param in op.params.iter().filter(|param| param.location == "path") {
+        if let Some(style) = param.style.as_deref().filter(|style| *style != "simple") {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "operation '{}' path parameter '{}' declares style '{style}'; generated SDKs \
+                     send a path parameter in the `simple` style only",
+                    op.id, param.name
+                ),
+            });
+        }
+        if !scalar(op, &param.schema, graph, &mut BTreeSet::new())? {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "operation '{}' path parameter '{}' is not a scalar; generated SDKs send a \
+                     path parameter as one string, number, boolean, enum or date-time value, so \
+                     declare it as one or send the list in the query",
+                    op.id, param.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The success-response shape an SDK can represent for one operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SuccessResponses {
@@ -2492,10 +2595,15 @@ pub(crate) struct SuccessResponses {
     pub(crate) body_model: Option<String>,
     /// The statuses that carry [`Self::body_model`].
     pub(crate) body_statuses: Vec<u16>,
-    /// The statuses that carry binary/file content.
+    /// Whether [`Self::body_statuses`] answer in a `text/*` media type, so the method returns the
+    /// body as text (a string, decoded as UTF-8) rather than decoding [`Self::body_model`] as JSON.
+    ///
+    /// [`Self::body_model`] still names the declared schema: it is what a sample of the reply is
+    /// drawn from, and what the reference documents. It is never the method's return type then.
+    pub(crate) text_body: bool,
+    /// The statuses that carry binary/file content: an opaque body, or a schema-backed one in a
+    /// media type that is neither JSON nor text ([`MediaFamily::Other`]).
     pub(crate) binary_statuses: Vec<u16>,
-    /// The media type for binary/file success content.
-    pub(crate) binary_content_type: Option<String>,
     /// Statuses that answer with a body this method's return type does not carry, sorted.
     ///
     /// An operation that answers a typed JSON body on one success and opaque bytes on another
@@ -2768,6 +2876,143 @@ fn reject_impossible_body(op: &Operation, resp: &crate::graph::Response) -> Resu
     })
 }
 
+/// The family of a media type, which decides how a reply body in it travels.
+///
+/// One classification serves every consumer of a reply — the SDK emitters' decode and return type,
+/// the contract tests' canned replies, and the docs page's printed and replayed reply — so a media
+/// type cannot be JSON to one of them and text to another.
+///
+/// A media range (`*/*`, `application/*`, `text/*`) is classified by what it admits, because a
+/// schema declared under it describes the body whichever admitted type the server picks: a range
+/// that admits `application/json` (`*/*`, `application/*`) is JSON, `text/*` is text, and any other
+/// range is neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaFamily {
+    /// `application/json`, every `+json` structured-syntax type, and a range that admits
+    /// `application/json`: the body is JSON.
+    Json,
+    /// Every `text/*` type: the body is the text itself, UTF-8.
+    Text,
+    /// Anything else: a body no sample can state, which a generated client returns as bytes.
+    Other,
+}
+
+/// Classify one media type by its essence (`type/subtype`, parameters dropped, case-insensitive).
+pub(crate) fn media_family(media_type: &str) -> MediaFamily {
+    let essence = media_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if essence == "application/json"
+        || essence.ends_with("+json")
+        || essence == "*/*"
+        || essence == "application/*"
+    {
+        MediaFamily::Json
+    } else if essence.starts_with("text/") {
+        MediaFamily::Text
+    } else {
+        MediaFamily::Other
+    }
+}
+
+/// The `charset` a media type declares when it is not UTF-8, or `None` for UTF-8 or no charset.
+///
+/// A text reply is decoded as UTF-8 by every generated SDK, which is what `text/*` means when no
+/// charset is stated; a declared charset is the parameter's value, case-insensitive and unquoted.
+pub(crate) fn non_utf8_charset(media: &str) -> Option<String> {
+    media
+        .split(';')
+        .skip(1)
+        .filter_map(|parameter| parameter.split_once('='))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("charset"))
+        .map(|(_, value)| value.trim().trim_matches('"').to_string())
+        .filter(|charset| !charset.eq_ignore_ascii_case("utf-8"))
+}
+
+/// The concrete media type a reply declared under `media` is sent with.
+///
+/// A sent reply names one type, so a range answers in the type its [`MediaFamily`] reads the body
+/// as: `application/json` for a range that admits it (`*/*`, `application/*`), `text/plain` for
+/// `text/*`. A concrete type, and any other range, is sent as declared.
+pub(crate) fn reply_wire_media_type(media: &str) -> &str {
+    let essence = media
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !essence.ends_with("/*") {
+        return media;
+    }
+    match media_family(media) {
+        MediaFamily::Json => "application/json",
+        MediaFamily::Text => "text/plain",
+        MediaFamily::Other => media,
+    }
+}
+
+/// The media type a schema-backed response answers in: the first of its declared media types in
+/// sorted order, or `application/json`, which a schema-backed response that declares none means.
+///
+/// This is the only rule that picks one media type for a response. The SDK emitters' return type,
+/// the contract tests' canned reply and the docs page's printed reply all read it, so a response
+/// declaring several media types cannot answer in one of them for one consumer and another for the
+/// next.
+pub(crate) fn response_media_type(resp: &crate::graph::Response) -> &str {
+    resp.content_types
+        .iter()
+        .chain(resp.content_type.iter())
+        .min()
+        .map_or("application/json", String::as_str)
+}
+
+/// Reject an opaque (binary or event-stream) success that also carries a schema body.
+fn reject_opaque_success_schema(
+    op: &Operation,
+    resp: &crate::graph::Response,
+) -> Result<(), CoreError> {
+    if resp.body.is_some() {
+        if resp.body_kind == "sse" {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "operation '{}' response {} is text/event-stream with an event \
+                     schema; SDK targets do not yet support typed SSE event streams",
+                    op.id, resp.status
+                ),
+            });
+        }
+        return Err(CoreError::SdkGen {
+            message: format!(
+                "operation '{}' response {} is {} but also has a schema body",
+                op.id, resp.status, resp.body_kind
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a returned text reply whose declared charset is not UTF-8: every SDK decodes a text
+/// reply as UTF-8, so all three would read it wrong.
+fn refuse_foreign_text_charset(
+    op: &Operation,
+    foreign_charsets: &[(u16, String)],
+) -> Result<(), CoreError> {
+    let Some((status, charset)) = foreign_charsets.first() else {
+        return Ok(());
+    };
+    Err(CoreError::SdkGen {
+        message: format!(
+            "operation '{}' response {status} declares charset '{charset}'; generated SDKs return \
+             a text reply decoded as UTF-8, so declare `charset=utf-8` or none, or answer in \
+             another media type",
+            op.id
+        ),
+    })
+}
+
 /// Resolve every declared successful response for one operation.
 ///
 /// SDK methods have one return type, so one rule decides it: **an operation that declares a JSON
@@ -2775,10 +3020,12 @@ fn reject_impossible_body(op: &Operation, resp: &crate::graph::Response) -> Resu
 /// and is read through the client's response hook.** Body-less alternates, declared redirects, and a
 /// success answering opaque bytes beside a typed one are the same case under that rule, not three,
 /// and the statuses it applies to are named on the generated method so the shape is stated where the
-/// caller reads it. Only when no JSON model is declared do opaque successes become the return type.
+/// caller reads it. Only when no JSON model is declared does another success become the return
+/// type: a `text/*` reply first, returned as a string (see [`MediaFamily`]), then opaque bytes.
 ///
 /// Two body-bearing successes pointing at *different* JSON models stay an error: there the rule has
-/// no answer to give, because neither model is the operation's.
+/// no answer to give, because neither model is the operation's. Two `text/*` replies never are: both
+/// are returned as the same string, whatever schema describes their content.
 ///
 /// The alternative — refusing to emit the operation at all — takes an SDK target's modeling limit and
 /// spends it on the whole run, including the OpenAPI document, which represents both responses fine.
@@ -2792,7 +3039,9 @@ pub(crate) fn success_responses_of(
     let mut body_statuses = Vec::new();
     let mut binary_statuses = Vec::new();
     let mut body_model: Option<String> = None;
-    let mut binary_content_type: Option<String> = None;
+    let mut text_statuses = Vec::new();
+    let mut foreign_charsets: Vec<(u16, String)> = Vec::new();
+    let mut text_model: Option<String> = None;
     for resp in &op.responses {
         if (200..300).contains(&resp.status) || (300..400).contains(&resp.status) {
             statuses.push(resp.status);
@@ -2813,6 +3062,24 @@ pub(crate) fn success_responses_of(
                                     op.id, body.ref_id
                                 ),
                             })?;
+                        let media = response_media_type(resp);
+                        match media_family(media) {
+                            MediaFamily::Json => {}
+                            MediaFamily::Text => {
+                                text_statuses.push(resp.status);
+                                text_model.get_or_insert_with(|| model.name.clone());
+                                if let Some(charset) = non_utf8_charset(media) {
+                                    foreign_charsets.push((resp.status, charset));
+                                }
+                                continue;
+                            }
+                            // A schema describes the content, but no generated client decodes
+                            // this media type, so the body is the bytes, as a download's is.
+                            MediaFamily::Other => {
+                                binary_statuses.push(resp.status);
+                                continue;
+                            }
+                        }
                         match &body_model {
                             Some(existing) if existing != &model.name => {
                                 return Err(CoreError::SdkGen {
@@ -2831,32 +3098,8 @@ pub(crate) fn success_responses_of(
                 }
                 "empty" => {}
                 "binary" | "sse" => {
-                    if resp.body.is_some() {
-                        if resp.body_kind == "sse" {
-                            return Err(CoreError::SdkGen {
-                                message: format!(
-                                    "operation '{}' response {} is text/event-stream with an event \
-                                     schema; SDK targets do not yet support typed SSE event streams",
-                                    op.id, resp.status
-                                ),
-                            });
-                        }
-                        return Err(CoreError::SdkGen {
-                            message: format!(
-                                "operation '{}' response {} is {} but also has a schema body",
-                                op.id, resp.status, resp.body_kind
-                            ),
-                        });
-                    }
+                    reject_opaque_success_schema(op, resp)?;
                     binary_statuses.push(resp.status);
-                    let content_type = resp
-                        .content_type
-                        .clone()
-                        .or_else(|| resp.content_types.first().cloned())
-                        .unwrap_or_else(|| "application/octet-stream".to_string());
-                    if binary_content_type.is_none() {
-                        binary_content_type = Some(content_type);
-                    }
                 }
                 other => {
                     return Err(CoreError::SdkGen {
@@ -2872,17 +3115,27 @@ pub(crate) fn success_responses_of(
     // The declared JSON model is the return type. Opaque successes beside it therefore carry no
     // return value, which puts them in the same bucket a declared redirect is already in: named on
     // the method, answered with the empty value, and read through the response hook.
+    // A text reply is returned only when no JSON model is, and then opaque bytes beside it are not.
     let mut unreturned_statuses = Vec::new();
-    if body_model.is_some() && !binary_statuses.is_empty() {
-        unreturned_statuses = std::mem::take(&mut binary_statuses);
-        binary_content_type = None;
+    let mut text_body = false;
+    if body_model.is_some() {
+        unreturned_statuses.append(&mut text_statuses);
+    } else if text_model.is_some() {
+        refuse_foreign_text_charset(op, &foreign_charsets)?;
+        body_model = text_model;
+        body_statuses = text_statuses;
+        text_body = true;
     }
+    if body_model.is_some() && !binary_statuses.is_empty() {
+        unreturned_statuses.append(&mut binary_statuses);
+    }
+    unreturned_statuses.sort_unstable();
     Ok(SuccessResponses {
         statuses,
         body_model,
         body_statuses,
+        text_body,
         binary_statuses,
-        binary_content_type,
         unreturned_statuses,
     })
 }
@@ -3014,6 +3267,57 @@ fn validate_request_body_schema(
             op.id, schema.name, encoding
         ),
     })
+}
+
+/// How a rendered call names the SDK's symbols.
+///
+/// One renderer per language serves two consumers: the generated contract tests, which live inside
+/// the SDK package, and the docs target's code samples, which are written from a consumer's code.
+/// The mode is the only difference between them.
+#[derive(Debug, Clone)]
+pub(crate) enum Qualify<'a> {
+    /// Inside the SDK package — the contract tests (unchanged output).
+    InPackage,
+    /// From a consumer's code. `identity` is the one consumer identity the SDK target's own package
+    /// manifest declares; there is no other way to construct this variant.
+    Consumer {
+        /// What the consumer imports.
+        identity: &'a crate::docs::identity::ConsumerIdentity,
+    },
+}
+
+/// The two helpers a paginated operation gains in one SDK, as that SDK's emitter spells them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaginationNames {
+    /// The helper that collects every page.
+    pub(crate) pages: String,
+    /// The helper that iterates every item across pages.
+    pub(crate) iterate: String,
+}
+
+/// The sampled inputs of one call, whichever planner produced them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CallInputs<'a> {
+    /// Sampled parameter values, in graph order.
+    pub(crate) params: &'a [crate::verify::SampleParam],
+    /// The request body the call sends, when it sends one.
+    pub(crate) body: Option<&'a crate::verify::SampleBody>,
+    /// The credentials the client is configured with.
+    pub(crate) auth: &'a [crate::verify::SampleAuth],
+}
+
+/// One rendered call: the import lines it needs, the client construction, and the call statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallSite {
+    /// Import specifiers the two statements need beyond the harness's own.
+    pub(crate) imports: Vec<String>,
+    /// The statement that constructs the client.
+    pub(crate) construct: String,
+    /// The statement that calls the operation and binds its result.
+    pub(crate) call: String,
+    /// The call's arguments as `call` spells them, joined: what a helper taking the operation's
+    /// own arguments (a pagination iterator) is called with.
+    pub(crate) arguments: String,
 }
 
 /// One operation's human prose, normalized into lines ready for comment emission.
@@ -3287,6 +3591,7 @@ mod tests {
             explode: None,
             allow_reserved: false,
             description: None,
+            example: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: cli_span(),
@@ -3660,13 +3965,178 @@ mod tests {
         };
         let success = success_responses_of(&op, &graph)?;
         assert_eq!(success.binary_statuses, vec![200, 206]);
-        assert_eq!(
-            success.binary_content_type.as_deref(),
-            Some("application/pdf")
-        );
         assert!(success.has_binary_body());
         assert!(!success.has_bodyless_alternative());
         Ok(())
+    }
+
+    /// A `text/*` reply is returned as text: it is the return type only when no JSON model is,
+    /// beside one it is a status the method does not return, and opaque bytes beside it are too. A
+    /// reply in any other non-JSON media type is bytes.
+    #[test]
+    fn a_text_reply_is_returned_as_text_only_when_no_json_model_is() {
+        use super::{media_family, MediaFamily};
+
+        for (media, family) in [
+            ("application/json", MediaFamily::Json),
+            ("application/problem+json; charset=utf-8", MediaFamily::Json),
+            ("text/plain", MediaFamily::Text),
+            ("Text/CSV; charset=utf-8", MediaFamily::Text),
+            ("application/octet-stream", MediaFamily::Other),
+            ("application/xml", MediaFamily::Other),
+            // A range is classified by the media types it admits: one that admits
+            // `application/json` is JSON, `text/*` is text, and any other is neither.
+            ("*/*", MediaFamily::Json),
+            ("application/*", MediaFamily::Json),
+            ("Application/*; q=0.5", MediaFamily::Json),
+            ("text/*", MediaFamily::Text),
+            ("image/*", MediaFamily::Other),
+        ] {
+            assert_eq!(media_family(media), family, "{media}");
+        }
+
+        let graph = ApiGraph {
+            schemas: serde_json::from_value(serde_json::json!([
+                {"id": "t.Name", "name": "Name", "body": {"type": "primitive", "of": {"prim": "string"}},
+                 "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}},
+                {"id": "t.Widget", "name": "Widget", "body": {"type": "object", "of": []},
+                 "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}}
+            ]))
+            .unwrap(),
+            ..ApiGraph::default()
+        };
+        let op = |responses: serde_json::Value| -> Operation {
+            serde_json::from_value(serde_json::json!({
+                "id": "probe", "method": "GET", "path": "/probe", "handler": "probe",
+                "params": [], "request_body": null, "responses": responses,
+                "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}
+            }))
+            .unwrap()
+        };
+
+        let text = success_responses_of(
+            &op(serde_json::json!([
+                {"status": 200, "body": {"ref_id": "t.Name"}, "content_types": ["text/plain"]},
+                {"status": 206, "body": null, "body_kind": "binary", "content_types": ["application/pdf"]}
+            ])),
+            &graph,
+        )
+        .unwrap();
+        assert!(text.text_body);
+        assert_eq!(text.body_model.as_deref(), Some("Name"));
+        assert_eq!(text.body_statuses, vec![200]);
+        assert!(
+            !text.has_binary_body(),
+            "bytes beside text are not returned"
+        );
+        assert_eq!(text.unreturned_statuses, vec![206]);
+
+        let json = success_responses_of(
+            &op(serde_json::json!([
+                {"status": 200, "body": {"ref_id": "t.Widget"}, "content_types": ["application/json"]},
+                {"status": 203, "body": {"ref_id": "t.Name"}, "content_types": ["text/html"]}
+            ])),
+            &graph,
+        )
+        .unwrap();
+        assert!(!json.text_body);
+        assert_eq!(json.body_model.as_deref(), Some("Widget"));
+        assert_eq!(json.unreturned_statuses, vec![203]);
+
+        // A schema-backed reply in a media type no client decodes is bytes, as a download is.
+        let xml = success_responses_of(
+            &op(serde_json::json!([
+                {"status": 200, "body": {"ref_id": "t.Widget"}, "content_types": ["application/xml"]}
+            ])),
+            &graph,
+        )
+        .unwrap();
+        assert!(xml.body_model.is_none());
+        assert_eq!(xml.binary_statuses, vec![200]);
+
+        // A schema-backed reply declared under a range that admits JSON returns the model.
+        let any = success_responses_of(
+            &op(serde_json::json!([
+                {"status": 200, "body": {"ref_id": "t.Widget"}, "content_type": "*/*", "content_types": ["*/*"]}
+            ])),
+            &graph,
+        )
+        .unwrap();
+        assert_eq!(any.body_model.as_deref(), Some("Widget"));
+        assert!(!any.text_body);
+        assert!(!any.has_binary_body());
+
+        // A response declaring both a JSON and a text media type answers in the first, sorted.
+        let both = success_responses_of(
+            &op(serde_json::json!([
+                {"status": 200, "body": {"ref_id": "t.Name"}, "content_types": ["text/plain", "application/json"]}
+            ])),
+            &graph,
+        )
+        .unwrap();
+        assert!(!both.text_body);
+    }
+
+    /// One rule names the media type a response answers in, for the SDKs, the contract tests and
+    /// the docs alike: the first declared, sorted, or `application/json` for a schema-backed
+    /// response that declares none.
+    #[test]
+    fn one_picker_names_a_response_media_type_for_every_consumer() {
+        let op: Operation = serde_json::from_value(serde_json::json!({
+            "id": "probe", "method": "GET", "path": "/probe", "handler": "probe",
+            "params": [], "request_body": null,
+            "responses": [
+                {"status": 200, "body": {"ref_id": "t.Widget"}, "content_types": []},
+                {"status": 201, "body": {"ref_id": "t.Widget"},
+                 "content_type": "text/plain", "content_types": ["text/plain", "application/json"]}
+            ],
+            "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}
+        }))
+        .unwrap();
+        for response in &op.responses {
+            assert_eq!(
+                crate::verify::reply_media(&op, response.status).as_deref(),
+                Some(super::response_media_type(response)),
+                "status {}",
+                response.status
+            );
+        }
+        assert_eq!(
+            super::response_media_type(&op.responses[0]),
+            "application/json"
+        );
+        assert_eq!(
+            super::response_media_type(&op.responses[1]),
+            "application/json"
+        );
+    }
+
+    /// A reply declared under a range is sent as the concrete type its family reads the body as,
+    /// so a client that checks the reply's `content-type` accepts the reply a page replays.
+    #[test]
+    fn a_reply_under_a_range_is_sent_as_a_concrete_type() {
+        for (declared, sent) in [
+            ("*/*", "application/json"),
+            ("application/*", "application/json"),
+            ("text/*", "text/plain"),
+            ("image/*", "image/*"),
+            ("application/json", "application/json"),
+            ("text/csv; charset=utf-8", "text/csv; charset=utf-8"),
+        ] {
+            assert_eq!(super::reply_wire_media_type(declared), sent, "{declared}");
+        }
+        let op: Operation = serde_json::from_value(serde_json::json!({
+            "id": "probe", "method": "GET", "path": "/probe", "handler": "probe",
+            "params": [], "request_body": null,
+            "responses": [{"status": 200, "body": {"ref_id": "t.Widget"},
+                           "content_type": "*/*", "content_types": ["*/*"]}],
+            "provenance": {"file": "a.go", "start_line": 1, "end_line": 1}
+        }))
+        .unwrap();
+        assert_eq!(
+            crate::verify::reply_media(&op, 200).as_deref(),
+            Some("application/json")
+        );
     }
 
     /// The note is generated text emitted into a linted Python docstring at an 8-space indent,
@@ -3678,8 +4148,8 @@ mod tests {
                 statuses: statuses.clone(),
                 body_model: Some("Widget".to_string()),
                 body_statuses: vec![200],
+                text_body: false,
                 binary_statuses: Vec::new(),
-                binary_content_type: None,
                 unreturned_statuses: statuses,
             }
             .unreturned_note()

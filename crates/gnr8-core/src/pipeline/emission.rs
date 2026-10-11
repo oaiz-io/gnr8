@@ -505,4 +505,24 @@ mod tests {
         let statics = BuiltinTarget::StaticFiles(decl::StaticFiles::new().from("docs").to("out"));
         assert!(key(&mut graph, &[(0, &openapi_target()), (1, &statics)]).is_none());
     }
+
+    /// The docs target reads nothing but the graph and the declarations, so it keeps the memo — and
+    /// its own declaration, like every other, is part of the question a record answers.
+    #[test]
+    fn memo_key_moves_when_the_static_docs_declaration_moves() {
+        let mut graph = ApiGraph::default();
+        let docs = BuiltinTarget::StaticDocs(decl::StaticDocs::new().to("generated/docs"));
+        let moved = BuiltinTarget::StaticDocs(decl::StaticDocs::new().to("generated/reference"));
+        let base = key(&mut graph, &[(0, &openapi_target()), (1, &docs)])
+            .expect("a static docs target keeps the memo");
+        assert_ne!(
+            base,
+            key(&mut graph, &[(0, &openapi_target()), (1, &moved)]).unwrap()
+        );
+        assert_ne!(base, key(&mut graph, &[(0, &openapi_target())]).unwrap());
+        assert_eq!(
+            base,
+            key(&mut graph, &[(0, &openapi_target()), (1, &docs)]).unwrap()
+        );
+    }
 }

@@ -29,6 +29,7 @@ Supported targets:
 | Go SDK | `--sdk go` | `GoSdk::new().module("example.com/yourservice/sdk").to("sdk")` |
 | Python SDK | `--sdk python` | `PySdk::new().module("example.com/yourservice/sdk").to("sdk")` |
 | TypeScript SDK | `--sdk typescript` | `TsSdk::new().module("example.com/yourservice/sdk").to("sdk")` |
+| Static Markdown docs | n/a (add by hand) | `StaticDocs::new().to("docs")` |
 
 ## Standard Workflow
 
@@ -43,17 +44,21 @@ gnr8 check
 gnr8 verify
 ```
 
-`gnr8 verify` runs the contract test each SDK target emits beside its sources, with that language's
-own test tool, against a fake transport. It proves the generated client puts the graph's method,
-path, query, headers, body and auth on the wire and makes the right thing of a canned reply — the
-part a compile check cannot answer. Generated Go/Python CLIs also get exhaustive root, group and
-selected operation `--help` checks, including after `.without_contract_tests()`. Go builds the
-configured cmd package once per target; Python runs its declared package's CLI module without
-installation. CLI suites skip only when the designated compiler/interpreter probe cannot find its
-executable, and reports list these skips separately. Exit 0 requires a passing suite and no failures;
-any failure or an all-skipped run exits 1. Neither suite family configured is a startup error (exit 2).
-Both Go suite families use the target's declared module/version in temporary copies even when
-package metadata emission is disabled; verification leaves project outputs unchanged.
+`gnr8 verify` runs three suite families. **Contract tests**: the test each SDK target emits beside
+its sources, with that language's own test tool, against a fake transport. It proves the generated
+client puts the graph's method, path, query, headers, body and auth on the wire and makes the right
+thing of a canned reply — the part a compile check cannot answer. **CLI help checks**: generated
+Go/Python CLIs get exhaustive root, group and selected operation `--help` checks, including after
+`.without_contract_tests()`. Go builds the configured cmd package once per target; Python runs its
+declared package's CLI module without installation. **Docs samples**: every SDK code sample a
+`StaticDocs` page, an SDK `README.md` or an SDK `reference.md` prints is compiled or run against its
+SDK and must send the request its page prints. CLI suites skip only when the designated
+compiler/interpreter probe cannot find its executable; docs suites skip when their toolchain is
+missing or their SDK has no package metadata; reports list these skips separately. Exit 0 requires a
+passing suite and no failures; any failure or an all-skipped run exits 1. No suite of any family to
+run — no contract test, no CLI help check and no docs sample — is a startup error (exit 2). Both Go
+suite families use the target's declared module/version in temporary copies even when package
+metadata emission is disabled; verification leaves project outputs unchanged.
 
 Before merging API-shape changes, gate them: `gnr8 changes --base <ref>` classifies every graph
 change as `BREAKING`/`ADDITIVE`/`DOC-ONLY` and exits `1` on a checked breaking change. Repeat
@@ -183,11 +188,17 @@ OpenApi31::new()
     );
 ```
 
+A patch edits only that document. With `StaticDocs`, or an SDK target that writes its
+`reference.md` (the default), in the same pipeline, only `x-*` extensions may be patched; set other
+field facts in the source or with a graph `Transform`.
+
 ## Generated SDKs
 
 SDK targets write `README.md` and `reference.md` in the SDK output directory. Read those files before
-calling the client. They list operation IDs, paths, request schemas, response statuses, schemas, and
-diagnostics from the generation run.
+calling the client. The README names the package to import and install and quotes one verified call;
+`reference.md` documents every operation — parameters, bodies, responses, errors, credentials and
+`gnr8 verify`-checked samples for that SDK — every schema, and the diagnostics from the generation
+run.
 
 The SDK output is generated. Do not patch generated client files by hand; update service source or
 `.gnr8/src/main.rs`, then run `gnr8 generate`.
@@ -201,7 +212,7 @@ The SDK output is generated. Do not patch generated client files by hand; update
 | Missing source toolchain | Install `go`, `python3`, or `node` plus project `typescript`. |
 | Generated file skipped as user-edited | Inspect the edit; run `gnr8 generate --force` only if overwrite is intended. |
 | `gnr8 check` exits 1 | Run `gnr8 generate`; commit updated generated artifacts. |
-| `gnr8 verify` exits 1 | Read the failed SDK contract or CLI help check's command and reason; an all-skipped run means no checks executed. |
+| `gnr8 verify` exits 1 | Read the failed SDK contract, CLI help or docs sample check's command and reason (a docs reason names the operation and page); an all-skipped run means no checks executed. |
 | Diagnostics in `doctor` | Prefer typed source/config changes over guessing undocumented behavior. |
 
 ## CI

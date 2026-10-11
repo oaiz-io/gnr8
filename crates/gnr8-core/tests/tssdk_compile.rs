@@ -93,18 +93,32 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 /// variant — the plan's interfaces note). The helper uses NO `unwrap`/`expect` on the subprocess
 /// `Result` (no panic, threat T-05-03-04).
 fn run_tsc(ts_files: &[&str], dir: &Path) -> Result<String, gnr8_engine::CoreError> {
-    // The `--lib es2022,dom` is LOAD-BEARING: lib.dom.d.ts declares the `fetch` global so the SDK needs
-    // no `@types/node` (omit `,dom` → error TS2304: Cannot find name 'fetch', RESEARCH Pitfall 3).
     // `--noUnusedLocals` is LOAD-BEARING: it is off under plain `--strict`, so without it the gate
     // stays green while emitting dead locals that any consumer with `noUnusedLocals: true` (common,
     // and what `tsc --init` scaffolds) cannot compile.
-    let mut args: Vec<&str> = vec![
-        TSC,
-        "--noEmit",
-        "--strict",
-        "--noUnusedLocals",
-        "--exactOptionalPropertyTypes",
-        "--noUncheckedIndexedAccess",
+    run_tsc_with(
+        &[
+            "--noUnusedLocals",
+            "--exactOptionalPropertyTypes",
+            "--noUncheckedIndexedAccess",
+        ],
+        ts_files,
+        dir,
+    )
+}
+
+/// [`run_tsc`] with only `--strict` and the extra `flags`: the check `gnr8 doctor` runs on a
+/// generated contract test, which is a test module rather than library code a consumer compiles.
+fn run_tsc_with(
+    flags: &[&str],
+    ts_files: &[&str],
+    dir: &Path,
+) -> Result<String, gnr8_engine::CoreError> {
+    // The `--lib es2022,dom` is LOAD-BEARING: lib.dom.d.ts declares the `fetch` global so the SDK needs
+    // no `@types/node` (omit `,dom` → error TS2304: Cannot find name 'fetch', RESEARCH Pitfall 3).
+    let mut args: Vec<&str> = vec![TSC, "--noEmit", "--strict"];
+    args.extend_from_slice(flags);
+    args.extend_from_slice(&[
         "--target",
         "es2022",
         "--module",
@@ -113,7 +127,7 @@ fn run_tsc(ts_files: &[&str], dir: &Path) -> Result<String, gnr8_engine::CoreErr
         "bundler",
         "--lib",
         "es2022,dom",
-    ];
+    ]);
     args.extend_from_slice(ts_files);
 
     let output = Command::new("node")
@@ -515,4 +529,78 @@ fn invalid_ts_typecheck_maps_to_captured_error_not_panic() {
     }
 
     let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
+}
+
+/// Generate the TypeScript SDK and its contract test for `spec` into a fresh dir, returning it.
+fn materialize_spec_sdk(label: &str, spec: &str) -> PathBuf {
+    use gnr8_engine::sdk::prelude::*;
+
+    let dir = unique_temp_dir(label);
+    std::fs::write(dir.join("openapi.yaml"), spec).expect("write spec");
+    let pipeline = Pipeline::new()
+        .source(OpenApi::new().input("openapi.yaml"))
+        .target(TsSdk::new().module("@probe/sdk").to("ts"));
+    let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&dir), None)
+        .expect("pipeline must generate");
+    for artifact in &outcome.artifacts {
+        let path = dir.join(&artifact.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact dir");
+        }
+        std::fs::write(&path, &artifact.text).expect("write artifact");
+    }
+    dir.join("ts")
+}
+
+/// A JSON 200 beside a text 203 makes the method return `Inner | undefined`; the contract case
+/// that reads a decoded field off the result has to narrow it first, or `--strict` rejects the
+/// generated test with TS18048.
+#[test]
+fn the_contract_test_narrows_a_result_that_may_be_undefined() {
+    if !toolchain_available() {
+        eprintln!("skipping tssdk_compile contract narrowing: node/tsc toolchain unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk(
+        "contract-narrowing",
+        r##"openapi: 3.1.0
+info: { title: Mixed, version: 1.0.0 }
+components:
+  schemas:
+    Inner:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        note: { type: string }
+paths:
+  /mixed:
+    get:
+      operationId: getMixed
+      responses:
+        "200":
+          description: json
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inner" }
+        "203":
+          description: text
+          content:
+            text/plain:
+              schema: { type: string }
+"##,
+    );
+    let contract = std::fs::read_to_string(dir.join("contract.test.ts")).expect("contract test");
+    assert!(
+        contract.contains("result.label") || contract.contains("result.note"),
+        "the contract test must read a decoded field:\n{contract}"
+    );
+    let files = collect_ts_files(&dir);
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    let result = run_tsc_with(&[], &files, &dir);
+    assert!(
+        result.is_ok(),
+        "the contract test must type-check under --strict: {result:?}\n{contract}"
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().expect("temp root"));
 }

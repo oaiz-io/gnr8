@@ -116,6 +116,119 @@ pub trait TargetExec {
     }
 }
 
+/// The built-in target declarations of the plan being run, in plan order.
+///
+/// A target only ever sees its own declaration, except `StaticDocs`: its code samples cover exactly
+/// the SDK targets the same pipeline declares, and it refuses an OpenAPI schema patch that would make
+/// the published document disagree with its pages, so it reads those declarations — never their
+/// output, which keeps every built-in a pure function of the frozen graph plus declarations.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanTargets<'a> {
+    targets: &'a [(usize, &'a BuiltinTarget)],
+}
+
+/// A sibling SDK target a docs page can render calls for.
+#[derive(Debug, Clone, Copy)]
+pub enum SiblingSdk<'a> {
+    /// A Go SDK declaration.
+    Go(&'a GoSdk),
+    /// A Python SDK declaration.
+    Python(&'a PySdk),
+    /// A TypeScript SDK declaration.
+    TypeScript(&'a TsSdk),
+}
+
+impl SiblingSdk<'_> {
+    /// The language is a property of the variant, never a second argument.
+    #[must_use]
+    pub fn language(&self) -> ContractTestLanguage {
+        match self {
+            Self::Go(_) => ContractTestLanguage::Go,
+            Self::Python(_) => ContractTestLanguage::Python,
+            Self::TypeScript(_) => ContractTestLanguage::TypeScript,
+        }
+    }
+
+    /// The declaration's output directory, exactly as declared.
+    #[must_use]
+    pub fn dir(&self) -> &str {
+        match self {
+            Self::Go(t) => &t.dir,
+            Self::Python(t) => &t.dir,
+            Self::TypeScript(t) => &t.dir,
+        }
+    }
+
+    /// Whether the target writes its `README.md` and `reference.md` (`SdkDocs`).
+    #[must_use]
+    pub fn emits_docs(&self) -> bool {
+        let docs = match self {
+            Self::Go(t) => &t.docs,
+            Self::Python(t) => &t.docs,
+            Self::TypeScript(t) => &t.docs,
+        };
+        !docs.is_none()
+    }
+
+    /// The declaration's stage name, as host diagnostics spell it.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Go(_) => "GoSdk",
+            Self::Python(_) => "PySdk",
+            Self::TypeScript(_) => "TsSdk",
+        }
+    }
+}
+
+impl<'a> PlanTargets<'a> {
+    /// The built-in targets of one plan, with their plan positions, in plan order.
+    #[must_use]
+    pub fn new(targets: &'a [(usize, &'a BuiltinTarget)]) -> Self {
+        Self { targets }
+    }
+
+    /// Every Go/Python/TypeScript SDK declaration, in plan order.
+    pub fn sdks(&self) -> impl Iterator<Item = SiblingSdk<'a>> + 'a {
+        self.targets.iter().filter_map(|(_, spec)| match *spec {
+            BuiltinTarget::GoSdk(t) => Some(SiblingSdk::Go(t)),
+            BuiltinTarget::PySdk(t) => Some(SiblingSdk::Python(t)),
+            BuiltinTarget::TsSdk(t) => Some(SiblingSdk::TypeScript(t)),
+            BuiltinTarget::OpenApi31(_)
+            | BuiltinTarget::OpenApi31Json(_)
+            | BuiltinTarget::StaticFiles(_)
+            | BuiltinTarget::StaticDocs(_) => None,
+        })
+    }
+
+    /// Every schema patch an OpenAPI target declares, with that target's stage name, in plan
+    /// order. A docs output (`StaticDocs`, an SDK's `reference.md`) reads these only to refuse a
+    /// patch that would make the published document disagree with it; it never applies one.
+    pub fn openapi_schema_patches(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, &'a OpenApiSchemaPatch)> + 'a {
+        self.targets
+            .iter()
+            .flat_map(|(_, spec)| -> Box<dyn Iterator<Item = _> + 'a> {
+                match *spec {
+                    BuiltinTarget::OpenApi31(t) => {
+                        Box::new(t.schema_patches.iter().map(|patch| ("OpenApi31", patch)))
+                    }
+                    BuiltinTarget::OpenApi31Json(t) => Box::new(
+                        t.schema_patches
+                            .iter()
+                            .map(|patch| ("OpenApi31Json", patch)),
+                    ),
+                    BuiltinTarget::GoSdk(_)
+                    | BuiltinTarget::PySdk(_)
+                    | BuiltinTarget::TsSdk(_)
+                    | BuiltinTarget::StaticFiles(_)
+                    | BuiltinTarget::StaticDocs(_) => Box::new(std::iter::empty()),
+                }
+            })
+    }
+}
+
 /// Run a declared post-processor.
 pub trait PostExec {
     /// Rewrite `out` in place.
@@ -1276,6 +1389,7 @@ fn apply_typed_parameter_override(
         explode: requested.explode,
         allow_reserved: requested.allow_reserved,
         description: None,
+        example: None,
         openapi_content: None,
         openapi_fields: Vec::new(),
         provenance: span.clone(),
@@ -2739,6 +2853,25 @@ fn apply_openapi_schema_patch(
     // PUBLIC component name, and that name changes when a type's two directional contracts diverge —
     // the one case where "unknown schema" is a stale target rather than a typo.
     let split_into = directional_components(doc, &patch.schema);
+    // Whether each patched field is an array, read before the mutable borrow: `uniqueItems` is a
+    // keyword of arrays only.
+    let arrays: Vec<bool> = patch
+        .field_patches
+        .iter()
+        .map(|field_patch| {
+            doc.components
+                .schemas
+                .iter()
+                .find(|(name, _)| name == &patch.schema)
+                .and_then(|(_, schema)| {
+                    schema
+                        .properties
+                        .iter()
+                        .find(|(field, _)| field == &field_patch.field)
+                })
+                .is_some_and(|(_, prop)| schema_is_array(doc, prop, 0))
+        })
+        .collect();
     let Some((_, schema)) = doc
         .components
         .schemas
@@ -2762,10 +2895,37 @@ fn apply_openapi_schema_patch(
             },
         });
     };
-    for field_patch in &patch.field_patches {
-        apply_openapi_field_patch(&patch.schema, schema, field_patch)?;
+    for (field_patch, is_array) in patch.field_patches.iter().zip(arrays) {
+        apply_openapi_field_patch(&patch.schema, schema, field_patch, is_array)?;
     }
     Ok(())
+}
+
+/// Whether a published schema holds an array: `type: array`, a `$ref` to a component that does,
+/// or a `oneOf` whose every variant but `null` does (the nullable-`$ref` form included). `depth`
+/// bounds a chain of references that loops.
+fn schema_is_array(doc: &OpenApiDoc, schema: &SchemaObject, depth: usize) -> bool {
+    if depth > doc.components.schemas.len() {
+        return false;
+    }
+    if let Some(name) = &schema.schema_ref {
+        return doc
+            .components
+            .schemas
+            .iter()
+            .find(|(component, _)| component == name)
+            .is_some_and(|(_, target)| schema_is_array(doc, target, depth + 1));
+    }
+    if !schema.one_of.is_empty() {
+        let mut variants = schema
+            .one_of
+            .iter()
+            .filter(|variant| variant.type_name.as_deref() != Some("null"))
+            .peekable();
+        return variants.peek().is_some()
+            && variants.all(|variant| schema_is_array(doc, variant, depth + 1));
+    }
+    schema.type_name.as_deref() == Some("array")
 }
 
 /// The directional components the document carries in place of `name`, or empty when `name` was never
@@ -2783,10 +2943,13 @@ fn directional_components(doc: &OpenApiDoc, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// `is_array` says whether the field holds an array ([`schema_is_array`]), the only kind of value
+/// `uniqueItems` constrains.
 fn apply_openapi_field_patch(
     schema_name: &str,
     schema: &mut SchemaObject,
     patch: &OpenApiFieldPatch,
+    is_array: bool,
 ) -> Result<(), CoreError> {
     let Some((_, prop)) = schema
         .properties
@@ -2800,6 +2963,30 @@ fn apply_openapi_field_patch(
             ),
         });
     };
+    // `multipleOf` must be a number strictly greater than 0, and `uniqueItems` is a keyword of
+    // arrays: anything else would publish a keyword no validator can read.
+    if let Some(value) = &patch.constraints.multiple_of {
+        if !value
+            .parse::<f64>()
+            .is_ok_and(|divisor| divisor.is_finite() && divisor > 0.0)
+        {
+            return Err(CoreError::Config {
+                message: format!(
+                    "OpenAPI schema patch sets multipleOf {value:?} on {schema_name}.{}: \
+                     multipleOf must be a number greater than 0",
+                    patch.field
+                ),
+            });
+        }
+    }
+    if patch.constraints.unique_items && !is_array {
+        return Err(CoreError::Config {
+            message: format!(
+                "OpenAPI schema patch sets uniqueItems on {schema_name}.{}, which is not an array",
+                patch.field
+            ),
+        });
+    }
 
     if let Some(value) = patch.constraints.min_length {
         prop.min_length = Some(value);
@@ -2830,6 +3017,12 @@ fn apply_openapi_field_patch(
     }
     if let Some(value) = &patch.constraints.exclusive_maximum {
         prop.exclusive_maximum = Some(value.clone());
+    }
+    if let Some(value) = &patch.constraints.multiple_of {
+        prop.multiple_of = Some(value.clone());
+    }
+    if patch.constraints.unique_items {
+        prop.unique_items = true;
     }
     if let Some(value) = &patch.constraints.pattern {
         prop.pattern = Some(value.clone());
@@ -3064,7 +3257,7 @@ impl TargetExec for GoSdk {
                 )?;
             }
         }
-        write_sdk_docs(out, &self.dir, "Go", &model.package, ir, &model, &self.docs)?;
+        write_sdk_docs(out, SiblingSdk::Go(self), ir, &self.docs)?;
         if let Some(cli) = &self.cli {
             let cli_files =
                 crate::gosdk::generate_cli(ir, &self.module, &model.package, cli, &mut formatter)?;
@@ -3128,6 +3321,7 @@ impl TargetExec for GoSdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::gosdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            refused: plan.refused.len(),
             go_verification: Some(GoVerificationModule {
                 module: self.module.clone(),
                 go_version: self.go_version.clone(),
@@ -3223,15 +3417,7 @@ impl TargetExec for PySdk {
                 )?;
             }
         }
-        write_sdk_docs(
-            out,
-            &self.dir,
-            "Python",
-            &model.package,
-            ir,
-            &model,
-            &self.docs,
-        )?;
+        write_sdk_docs(out, SiblingSdk::Python(self), ir, &self.docs)?;
         Ok(())
     }
 
@@ -3274,6 +3460,7 @@ impl TargetExec for PySdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::pysdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            refused: plan.refused.len(),
             go_verification: None,
         }])
     }
@@ -3474,15 +3661,7 @@ impl TargetExec for TsSdk {
                 )?;
             }
         }
-        write_sdk_docs(
-            out,
-            &self.dir,
-            "TypeScript",
-            &model.package,
-            ir,
-            &model,
-            &self.docs,
-        )?;
+        write_sdk_docs(out, SiblingSdk::TypeScript(self), ir, &self.docs)?;
         Ok(())
     }
 
@@ -3525,6 +3704,7 @@ impl TargetExec for TsSdk {
             package: sdk_package(&self.module)?,
             test_file: format!("{dir}/{}", crate::tssdk::CONTRACT_TEST_FILE),
             cases: plan.len(),
+            refused: plan.refused.len(),
             go_verification: None,
         }])
     }
@@ -3761,7 +3941,7 @@ fn is_go_file(path: &str) -> bool {
 ///
 /// Returns [`CoreError::Config`] if `module`'s last segment yields no valid Go identifier (no ASCII
 /// letter to anchor it).
-fn sdk_package(module: &str) -> Result<String, CoreError> {
+pub(crate) fn sdk_package(module: &str) -> Result<String, CoreError> {
     let last = module.rsplit('/').next().unwrap_or("");
     let kept: String = last
         .chars()
@@ -4343,6 +4523,11 @@ pub fn apply_transform(
 
 /// Execute a declared target against the frozen `ir`.
 ///
+/// `plan` is every built-in target the same plan declares. `StaticDocs` reads it for the sibling
+/// SDK declarations its code samples cover, and every docs output — `StaticDocs` and an SDK that
+/// writes `reference.md` — for the OpenAPI schema patches it refuses; otherwise a target sees only
+/// its own declaration.
+///
 /// # Errors
 ///
 /// Propagates the target's own typed failure.
@@ -4352,14 +4537,25 @@ pub fn generate_target(
     out: &mut Artifacts,
     cx: &Cx,
     store: Option<&Store>,
+    plan: &PlanTargets<'_>,
 ) -> Result<(), CoreError> {
     match spec {
         BuiltinTarget::OpenApi31(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::OpenApi31Json(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::StaticFiles(t) => t.generate(ir, out, cx, store),
-        BuiltinTarget::GoSdk(t) => t.generate(ir, out, cx, store),
-        BuiltinTarget::PySdk(t) => t.generate(ir, out, cx, store),
-        BuiltinTarget::TsSdk(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::StaticDocs(t) => crate::staticdocs::generate(t, ir, out, plan),
+        BuiltinTarget::GoSdk(t) => {
+            crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::Go(t), plan)?;
+            t.generate(ir, out, cx, store)
+        }
+        BuiltinTarget::PySdk(t) => {
+            crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::Python(t), plan)?;
+            t.generate(ir, out, cx, store)
+        }
+        BuiltinTarget::TsSdk(t) => {
+            crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::TypeScript(t), plan)?;
+            t.generate(ir, out, cx, store)
+        }
     }
 }
 
@@ -4370,6 +4566,7 @@ pub fn target_output_anchors(spec: &BuiltinTarget) -> Vec<String> {
         BuiltinTarget::OpenApi31(t) => t.output_anchors(),
         BuiltinTarget::OpenApi31Json(t) => t.output_anchors(),
         BuiltinTarget::StaticFiles(t) => t.output_anchors(),
+        BuiltinTarget::StaticDocs(t) => crate::staticdocs::output_anchors(t),
         BuiltinTarget::GoSdk(t) => t.output_anchors(),
         BuiltinTarget::PySdk(t) => t.output_anchors(),
         BuiltinTarget::TsSdk(t) => t.output_anchors(),
@@ -4383,6 +4580,8 @@ pub fn target_readiness_targets(spec: &BuiltinTarget) -> Vec<ReadinessTarget> {
         BuiltinTarget::OpenApi31(t) => t.readiness_targets(),
         BuiltinTarget::OpenApi31Json(t) => t.readiness_targets(),
         BuiltinTarget::StaticFiles(t) => t.readiness_targets(),
+        // `ReadinessKind` is closed, and no readiness check exists for a Markdown tree.
+        BuiltinTarget::StaticDocs(_) => Vec::new(),
         BuiltinTarget::GoSdk(t) => t.readiness_targets(),
         BuiltinTarget::PySdk(t) => t.readiness_targets(),
         BuiltinTarget::TsSdk(t) => t.readiness_targets(),
@@ -4402,6 +4601,7 @@ pub fn target_contract_test_suites(
         BuiltinTarget::OpenApi31(t) => t.contract_test_suites(ir),
         BuiltinTarget::OpenApi31Json(t) => t.contract_test_suites(ir),
         BuiltinTarget::StaticFiles(t) => t.contract_test_suites(ir),
+        BuiltinTarget::StaticDocs(_) => Ok(Vec::new()),
         BuiltinTarget::GoSdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::PySdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::TsSdk(t) => t.contract_test_suites(ir),
@@ -4449,6 +4649,7 @@ pub fn target_cli_help_suites(
         BuiltinTarget::OpenApi31(_)
         | BuiltinTarget::OpenApi31Json(_)
         | BuiltinTarget::StaticFiles(_)
+        | BuiltinTarget::StaticDocs(_)
         | BuiltinTarget::TsSdk(_) => return Ok(Vec::new()),
     };
     let projected = crate::graph::projection::for_generation(ir)?;
@@ -4458,6 +4659,106 @@ pub fn target_cli_help_suites(
         target,
         plan: crate::verify::plan_cli_help(&projected, cli)?,
     }])
+}
+
+/// The docs code-sample suites a declared built-in target contributes: one per sibling SDK when
+/// the target is `StaticDocs`, none otherwise.
+///
+/// # Errors
+///
+/// Returns the sampler's or a call-site renderer's graph error, or a sibling's configuration error.
+pub fn target_docs_suites(
+    spec: &BuiltinTarget,
+    ir: &ApiGraph,
+    plan: &PlanTargets<'_>,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    let BuiltinTarget::StaticDocs(docs) = spec else {
+        return Ok(Vec::new());
+    };
+    // One docs model for the target, built exactly as its pages were: every unit reads it.
+    let sdks: Vec<SiblingSdk<'_>> = plan.sdks().collect();
+    let crate::docs::verify::PlanUnits {
+        cases,
+        refused,
+        units,
+    } = crate::docs::verify::plan_units(ir, &sdks, true)?;
+    docs_snippet_suites(docs.dir(), sdks, units, cases, refused)
+}
+
+/// The docs code-sample suites of a plan that declares no `StaticDocs` target: one per SDK target
+/// that writes its `README.md` and `reference.md` and has a consumer identity, whose samples those
+/// two files print. An SDK without an identity prints no sample, so it has no suite.
+///
+/// # Errors
+///
+/// Returns the sampler's or a call-site renderer's graph error, or a sibling's configuration error.
+pub fn sdk_docs_suites(
+    ir: &ApiGraph,
+    plan: &PlanTargets<'_>,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    let sdks: Vec<SiblingSdk<'_>> = plan.sdks().filter(SiblingSdk::emits_docs).collect();
+    if sdks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let crate::docs::verify::PlanUnits {
+        cases,
+        refused,
+        units,
+    } = crate::docs::verify::plan_units(ir, &sdks, false)?;
+    let (sdks, units): (Vec<_>, Vec<_>) = sdks
+        .into_iter()
+        .zip(units)
+        .filter(|(_, unit)| unit.is_some())
+        .unzip();
+    let mut suites = Vec::new();
+    for (sdk, unit) in sdks.into_iter().zip(units) {
+        suites.extend(docs_snippet_suites(
+            sdk.dir(),
+            vec![sdk],
+            vec![unit],
+            cases,
+            refused,
+        )?);
+    }
+    Ok(suites)
+}
+
+/// One docs suite per SDK and its compile unit, whose pages live under `docs_dir`.
+fn docs_snippet_suites(
+    docs_dir: &str,
+    sdks: Vec<SiblingSdk<'_>>,
+    units: Vec<Option<crate::docs::verify::CompileUnit>>,
+    cases: usize,
+    refused: usize,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
+    sdks.into_iter()
+        .zip(units)
+        .map(|(sdk, compile_unit)| {
+            let (dir, module, go_verification) = match sdk {
+                SiblingSdk::Go(t) => (
+                    &t.dir,
+                    &t.module,
+                    Some(GoVerificationModule {
+                        module: t.module.clone(),
+                        go_version: t.go_version.clone(),
+                        package_metadata: t.package_metadata,
+                    }),
+                ),
+                SiblingSdk::Python(t) => (&t.dir, &t.module, None),
+                SiblingSdk::TypeScript(t) => (&t.dir, &t.module, None),
+            };
+            Ok(crate::verify::DocsSnippetSuite {
+                language: sdk.language(),
+                docs_dir: docs_dir.trim_end_matches('/').to_string(),
+                sdk_output_path: dir.trim_end_matches('/').to_string(),
+                package: sdk_package(module)?,
+                compile_unit,
+                cases,
+                refused,
+                go_verification,
+            })
+        })
+        .collect()
 }
 
 /// Execute a declared post-processor over `out`.
@@ -4490,13 +4791,15 @@ mod tests {
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, SourceExec, StaticFiles,
         StaticFilesSources, TargetExec, TransformExec, TsSdk,
     };
+    use super::{PlanTargets, SiblingSdk, StaticDocs};
     use crate::analyze::facts::{Constraints, FieldMeta, LiteralValue};
     use crate::graph::{
         ApiGraph, Diagnostic, DiagnosticCategory, Field, Operation, PaginationMode,
         PaginationTermination, Param, Prim, Response, RuntimeHookKind, Schema, SchemaRef,
         SchemaUse, SourceSpan, Type,
     };
-    use gnr8::sdk::BuiltinSource;
+    use crate::verify::ContractTestLanguage;
+    use gnr8::sdk::{BuiltinSource, BuiltinTarget};
 
     use crate::sdk::layout::SdkFileLayout;
     use crate::sdk::model::SdkModel;
@@ -5153,6 +5456,7 @@ mod tests {
             explode: None,
             allow_reserved: false,
             description: None,
+            example: None,
             openapi_content: None,
             openapi_fields: Vec::new(),
             provenance: span(),
@@ -7151,6 +7455,87 @@ mod tests {
         assert_eq!(sort, &vec!["desc".to_string(), "asc".to_string()]);
     }
 
+    /// Every constraint a field patch carries is applied, `multipleOf` and `uniqueItems` included.
+    #[test]
+    fn an_openapi_field_patch_applies_multiple_of_and_unique_items() {
+        let field = |name: &str, schema: Type| Field {
+            json_name: name.to_string(),
+            serializer_may_omit: false,
+            deserializer_accepts_absent: false,
+            deserializer_accepts_null: false,
+            serializer_may_emit_null: false,
+            validator_requires_presence: true,
+            validator_rejects_null: false,
+            schema,
+            description: None,
+            example: None,
+            meta: FieldMeta::default(),
+        };
+        let ir = ApiGraph {
+            schemas: vec![Schema {
+                id: "app.Order".to_string(),
+                name: "Order".to_string(),
+                body: Type::Object(vec![
+                    field(
+                        "count",
+                        Type::Primitive(Prim::Int {
+                            bits: 64,
+                            signed: true,
+                        }),
+                    ),
+                    field("tags", Type::Array(Box::new(Type::Primitive(Prim::String)))),
+                ]),
+                enum_source_order: Vec::new(),
+                provenance: span(),
+            }],
+            ..ApiGraph::default()
+        };
+        let mut count = OpenApiFieldPatch::new("count");
+        count.constraints.multiple_of = Some("5".to_string());
+        let mut tags = OpenApiFieldPatch::new("tags");
+        tags.constraints.unique_items = true;
+        let mut out = Artifacts::new();
+        OpenApi31::new()
+            .to("openapi.yaml")
+            .schema_patch(OpenApiSchemaPatch::new("Order").field(count).field(tags))
+            .generate(&ir, &mut out, &cx(), None)
+            .unwrap();
+        let yaml = &out.files()[0].text;
+        assert!(yaml.contains("multipleOf: 5"), "{yaml}");
+        assert!(yaml.contains("uniqueItems: true"), "{yaml}");
+
+        // A `multipleOf` that is not a number greater than 0, or `uniqueItems` on a field that is
+        // not an array, is no valid schema keyword: a configuration error naming the field.
+        let refused = |patch: OpenApiFieldPatch| {
+            let mut out = Artifacts::new();
+            match OpenApi31::new()
+                .to("openapi.yaml")
+                .schema_patch(OpenApiSchemaPatch::new("Order").field(patch))
+                .generate(&ir, &mut out, &cx(), None)
+            {
+                Err(crate::CoreError::Config { message }) => message,
+                other => panic!("expected a configuration error, got {other:?}"),
+            }
+        };
+        for value in ["0", "-2", "abc", "NaN", "inf"] {
+            let mut count = OpenApiFieldPatch::new("count");
+            count.constraints.multiple_of = Some(value.to_string());
+            assert_eq!(
+                refused(count),
+                format!(
+                    "OpenAPI schema patch sets multipleOf {value:?} on Order.count: multipleOf \
+                     must be a number greater than 0"
+                )
+            );
+        }
+        let mut count = OpenApiFieldPatch::new("count");
+        count.constraints.unique_items = true;
+        assert_eq!(
+            refused(count),
+            "OpenAPI schema patch sets uniqueItems on Order.count, which is not an array"
+        );
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -8455,5 +8840,247 @@ func (s Server) create(c *gin.Context) {
             .run(&mut out, &cx())
             .unwrap_err();
         assert!(err.to_string().contains("undeclared artifact"), "{err}");
+    }
+
+    fn static_docs(dir: &str) -> BuiltinTarget {
+        BuiltinTarget::StaticDocs(StaticDocs::new().to(dir))
+    }
+
+    /// Run a `StaticDocs` declaration through its one entry point, the `generate_target` arm.
+    fn generate_static_docs(
+        docs: &BuiltinTarget,
+        siblings: &[(usize, &BuiltinTarget)],
+    ) -> Result<Artifacts, crate::CoreError> {
+        let mut out = Artifacts::new();
+        super::generate_target(
+            docs,
+            &ApiGraph::default(),
+            &mut out,
+            &cx(),
+            None,
+            &PlanTargets::new(siblings),
+        )?;
+        Ok(out)
+    }
+
+    #[test]
+    fn static_docs_without_dir_is_a_config_error() {
+        let docs = static_docs("");
+        let err = generate_static_docs(&docs, &[(0, &docs)]).unwrap_err();
+        assert!(
+            matches!(err, crate::CoreError::Config { .. }),
+            "an empty dir is a configuration error: {err:?}"
+        );
+        assert!(err.to_string().contains("StaticDocs"), "{err}");
+        assert!(err.to_string().contains(".to("), "{err}");
+    }
+
+    #[test]
+    fn static_docs_dir_inside_an_sdk_dir_is_refused_naming_both() {
+        let go = BuiltinTarget::GoSdk(
+            GoSdk::new()
+                .module("example.com/bookstore/sdk")
+                .to("generated/sdk"),
+        );
+        let py = BuiltinTarget::PySdk(PySdk::new().module("bookstore").to("generated/py/"));
+        for (dir, sdk, sdk_dir) in [
+            ("generated/sdk/docs", &go, "generated/sdk"),
+            ("generated/sdk", &go, "generated/sdk"),
+            ("generated/sdk/", &go, "generated/sdk"),
+            ("generated", &go, "generated/sdk"),
+            ("generated/py/reference", &py, "generated/py"),
+        ] {
+            let docs = static_docs(dir);
+            let err = generate_static_docs(&docs, &[(0, sdk), (1, &docs)]).unwrap_err();
+            let text = err.to_string();
+            assert!(
+                matches!(err, crate::CoreError::Config { .. }),
+                "{dir}: {err:?}"
+            );
+            assert!(text.contains("StaticDocs"), "{dir}: {text}");
+            assert!(text.contains(sdk.label()), "{dir}: {text}");
+            assert!(text.contains(sdk_dir), "{dir}: {text}");
+            assert!(text.contains(dir.trim_end_matches('/')), "{dir}: {text}");
+        }
+
+        // A sibling directory that merely shares a name prefix is not nested.
+        let docs = static_docs("generated/sdk-docs");
+        generate_static_docs(&docs, &[(0, &go), (1, &docs)])
+            .expect("a sibling directory with a shared name prefix is not inside the SDK");
+    }
+
+    /// A schema patch edits only the OpenAPI document it is declared on, while docs pages and their
+    /// samples read the graph. In one plan with `StaticDocs`, a patch that changes a fact a docs
+    /// page prints would make the two artifacts disagree, so it is refused and the user is pointed
+    /// to the one place every artifact reads: the graph.
+    #[test]
+    fn static_docs_refuses_a_schema_patch_that_changes_a_documented_field_fact() {
+        let docs = static_docs("generated/docs");
+        let mut pattern = OpenApiFieldPatch::new("title");
+        pattern.constraints.pattern = Some("^[a-z]+$".to_string());
+        let mut multiple_of = OpenApiFieldPatch::new("title");
+        multiple_of.constraints.multiple_of = Some("5".to_string());
+        let mut unique_items = OpenApiFieldPatch::new("title");
+        unique_items.constraints.unique_items = true;
+        let cases: [(OpenApiFieldPatch, &str); 8] = [
+            (OpenApiFieldPatch::new("title").min_length(3), "minLength"),
+            (
+                OpenApiFieldPatch::new("title").enum_values(["a", "b"]),
+                "enum",
+            ),
+            (
+                OpenApiFieldPatch::new("title").description("Shown in docs"),
+                "description",
+            ),
+            (
+                OpenApiFieldPatch::new("title").default_string("x"),
+                "default",
+            ),
+            (OpenApiFieldPatch::new("title").example_number(4), "example"),
+            (pattern, "pattern"),
+            (multiple_of, "multipleOf"),
+            (unique_items, "uniqueItems"),
+        ];
+        for (field, fact) in cases {
+            for (label, openapi) in [
+                (
+                    "OpenApi31",
+                    BuiltinTarget::OpenApi31(
+                        OpenApi31::new()
+                            .to("generated/openapi.yaml")
+                            .schema_patch(OpenApiSchemaPatch::new("Book").field(field.clone())),
+                    ),
+                ),
+                (
+                    "OpenApi31Json",
+                    BuiltinTarget::OpenApi31Json(
+                        OpenApi31Json::new()
+                            .to("generated/openapi.json")
+                            .schema_patch(OpenApiSchemaPatch::new("Book").field(field.clone())),
+                    ),
+                ),
+            ] {
+                let err = generate_static_docs(&docs, &[(0, &openapi), (1, &docs)]).unwrap_err();
+                let text = err.to_string();
+                assert!(
+                    matches!(err, crate::CoreError::Config { .. }),
+                    "{label} {fact}: {err:?}"
+                );
+                assert!(text.contains("StaticDocs"), "{text}");
+                assert!(text.contains(label), "{text}");
+                assert!(text.contains("Book.title"), "{text}");
+                assert!(text.contains(&format!("`{fact}`")), "{text}");
+                assert!(text.contains("Transform"), "{text}");
+            }
+        }
+
+        // Vendor extensions are not printed on a docs page, so a patch that only adds them leaves
+        // the two artifacts agreeing.
+        let extensions_only = BuiltinTarget::OpenApi31(
+            OpenApi31::new().to("generated/openapi.yaml").schema_patch(
+                OpenApiSchemaPatch::new("Book")
+                    .field(OpenApiFieldPatch::new("title").extension_bool("x-public", true)),
+            ),
+        );
+        generate_static_docs(&docs, &[(0, &extensions_only), (1, &docs)])
+            .expect("an extension-only patch changes nothing a docs page prints");
+    }
+
+    /// An SDK's `reference.md` prints the same field facts a `StaticDocs` page prints, from the
+    /// same docs model, so an SDK that writes its docs refuses the same patch even with no
+    /// `StaticDocs` in the plan; one declared `without_docs()` prints no field fact and is left
+    /// alone.
+    #[test]
+    fn sdk_docs_refuse_a_schema_patch_that_changes_a_documented_field_fact() {
+        let mut field = OpenApiFieldPatch::new("title");
+        field.constraints.multiple_of = Some("2".to_string());
+        field.constraints.unique_items = true;
+        let openapi = BuiltinTarget::OpenApi31(
+            OpenApi31::new()
+                .to("generated/openapi.yaml")
+                .schema_patch(OpenApiSchemaPatch::new("Book").field(field)),
+        );
+        for sdk in [
+            BuiltinTarget::PySdk(PySdk::new().module("bookstore").to("generated/py")),
+            BuiltinTarget::TsSdk(TsSdk::new().module("bookstore").to("generated/ts")),
+        ] {
+            let mut out = Artifacts::new();
+            let err = super::generate_target(
+                &sdk,
+                &ApiGraph::default(),
+                &mut out,
+                &cx(),
+                None,
+                &PlanTargets::new(&[(0, &openapi), (1, &sdk)]),
+            )
+            .unwrap_err();
+            let text = err.to_string();
+            assert!(matches!(err, crate::CoreError::Config { .. }), "{err:?}");
+            assert!(text.contains(sdk.label()), "{text}");
+            assert!(text.contains("reference.md"), "{text}");
+            assert!(text.contains("Book.title"), "{text}");
+            assert!(text.contains("`multipleOf`, `uniqueItems`"), "{text}");
+            assert!(text.contains("without_docs()"), "{text}");
+            assert!(
+                out.files().is_empty(),
+                "nothing is emitted before the refusal"
+            );
+        }
+        let quiet = BuiltinTarget::PySdk(
+            PySdk::new()
+                .module("bookstore")
+                .to("generated/py")
+                .without_docs(),
+        );
+        let mut out = Artifacts::new();
+        super::generate_target(
+            &quiet,
+            &ApiGraph::default(),
+            &mut out,
+            &cx(),
+            None,
+            &PlanTargets::new(&[(0, &openapi), (1, &quiet)]),
+        )
+        .expect("an SDK that writes no docs prints no field fact");
+    }
+
+    #[test]
+    fn plan_targets_yields_sibling_sdks_in_plan_order() {
+        let ts = BuiltinTarget::TsSdk(TsSdk::new().module("bookstore").to("generated/ts"));
+        let openapi = BuiltinTarget::OpenApi31(OpenApi31::new().to("generated/openapi.yaml"));
+        let go_one = BuiltinTarget::GoSdk(GoSdk::new().module("example.com/one").to("gen/one"));
+        let py = BuiltinTarget::PySdk(PySdk::new().module("bookstore").to("generated/py"));
+        let docs = static_docs("generated/docs");
+        let go_two = BuiltinTarget::GoSdk(GoSdk::new().module("example.com/two").to("gen/two"));
+        let targets = [
+            (0, &ts),
+            (1, &openapi),
+            (2, &go_one),
+            (4, &py),
+            (5, &docs),
+            (6, &go_two),
+        ];
+        let plan = PlanTargets::new(&targets);
+        let seen: Vec<(ContractTestLanguage, String)> = plan
+            .sdks()
+            .map(|sdk| {
+                let dir = match sdk {
+                    SiblingSdk::Go(t) => t.dir.clone(),
+                    SiblingSdk::Python(t) => t.dir.clone(),
+                    SiblingSdk::TypeScript(t) => t.dir.clone(),
+                };
+                (sdk.language(), dir)
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (ContractTestLanguage::TypeScript, "generated/ts".to_string()),
+                (ContractTestLanguage::Go, "gen/one".to_string()),
+                (ContractTestLanguage::Python, "generated/py".to_string()),
+                (ContractTestLanguage::Go, "gen/two".to_string()),
+            ]
+        );
+        assert_eq!(PlanTargets::new(&[]).sdks().count(), 0);
     }
 }

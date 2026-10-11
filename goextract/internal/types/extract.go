@@ -663,9 +663,6 @@ func applyDirectConstraints(c *facts.Constraints, tag reflect.StructTag, schema 
 	if pattern := firstTagValue(tag, "pattern"); pattern != "" {
 		c.Pattern = stringPtr(pattern)
 	}
-	if enumValues := firstTagValue(tag, "enums", "enum"); enumValues != "" {
-		c.EnumValues = splitEnumValues(enumValues)
-	}
 }
 
 func constraintsEmpty(c *facts.Constraints) bool {
@@ -843,20 +840,6 @@ func schemaTagValue(raw string, key string) string {
 		}
 	}
 	return ""
-}
-
-func splitEnumValues(value string) []string {
-	fields := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == '|' || r == ' '
-	})
-	out := make([]string, 0, len(fields))
-	for _, field := range fields {
-		field = strings.TrimSpace(field)
-		if field != "" {
-			out = append(out, field)
-		}
-	}
-	return out
 }
 
 func parseExtensions(value string) []facts.Extension {

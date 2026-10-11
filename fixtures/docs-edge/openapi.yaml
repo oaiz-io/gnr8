@@ -1,0 +1,121 @@
+openapi: 3.1.0
+info:
+  title: Edge
+  version: 1.0.0
+  description: Shapes the docs target has to get right end to end.
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    BearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Measure:
+      type: object
+      required: [ratio, dimensions]
+      properties:
+        ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Share of the whole.
+        dimensions: { $ref: "#/components/schemas/Dimensions" }
+    Dimensions:
+      type: object
+      required: [width]
+      properties:
+        width:
+          type: number
+          minimum: 0
+          maximum: 10
+          description: Width in metres.
+        note:
+          type: string
+          maxLength: 20
+    Avatar:
+      type: object
+      properties:
+        file:
+          type: string
+          format: binary
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+paths:
+  /measures:
+    get:
+      operationId: listMeasures
+      parameters:
+        - name: maxShare
+          in: query
+          required: true
+          schema: { type: number, minimum: 0, maximum: 1 }
+        - name: limit
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 5 }
+        - name: tag
+          in: query
+          required: true
+          schema: { type: string, minLength: 6 }
+        - name: session
+          in: cookie
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/hal+json:
+              schema: { $ref: "#/components/schemas/Measure" }
+    post:
+      operationId: createMeasure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Measure" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Measure" }
+  /codes/{code}:
+    get:
+      operationId: getCode
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[A-Z]{3}$" }
+      responses:
+        "204":
+          description: none
+  /avatars:
+    put:
+      operationId: uploadAvatar
+      parameters:
+        - name: dryRun
+          in: query
+          required: false
+          schema: { type: boolean }
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/Avatar" }
+      responses:
+        "204":
+          description: none
+  /reports/latest:
+    get:
+      operationId: getReport
+      responses:
+        "200":
+          description: The latest report.
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }

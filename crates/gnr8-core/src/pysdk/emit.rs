@@ -26,14 +26,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use super::ERROR_TYPE;
+
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{
     ApiGraph, Field, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Param,
     Prim, RuntimePolicy, Type,
 };
+use crate::sdk::emit_common::PaginationNames;
 use crate::sdk::emit_common::{
-    binary_value_shape, error_response_bodies_of, is_json_object_key, join_path,
-    operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
+    binary_value_shape, check_path_parameters, error_response_bodies_of, is_json_object_key,
+    join_path, operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
     quoted_string_literal, request_body_models_of, schema_is_multipart_request, split_words,
     success_responses_of, ApiKeyLocation, BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme,
     OperationAuthScheme, RequestBodyEncoding, RequestBodyModel, SuccessResponses,
@@ -108,7 +111,7 @@ fn typing_import_line(m: &ModelImports) -> Option<String> {
 /// import (`ruff` F401) — the divergence from the old fixed-header scheme. This is a bag of independent
 /// feature flags (one per importable symbol), so bools are the natural representation.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct ModelImports {
     /// `import enum` — a named `enum.Enum` class is emitted.
     enum_class: bool,
@@ -124,6 +127,9 @@ struct ModelImports {
     union: bool,
     /// The generated `MultipartFile` value type is used by a multipart request model.
     multipart_file: bool,
+    /// A field is both optional and nullable, which a dataclass defaults to `UNSET`
+    /// ([`defaults_to_unset`]).
+    unset: bool,
 }
 
 /// Accumulate the `typing` constructs a `Type` uses into [`ModelImports`] (recursing through
@@ -181,6 +187,9 @@ fn compute_model_imports(
                     if omittable || reached.field_is_nullable(field) {
                         m.optional = true;
                     }
+                    if defaults_to_unset(field, reached) {
+                        m.unset = true;
+                    }
                     if needs_alias(field, &emission.ident) || omittable {
                         m.field = true;
                     }
@@ -199,7 +208,15 @@ fn compute_model_imports(
 }
 
 /// Assemble the import header for a model file from its computed [`ModelImports`] and style.
-fn model_header(m: &ModelImports, model_style: PyModelStyle, multipart_module: &str) -> String {
+/// `multipart_module` and `unset_module` are the relative modules of the package's `multipart.py`
+/// and `unset.py`.
+fn model_header(
+    m: &ModelImports,
+    model_style: PyModelStyle,
+    multipart_module: &str,
+    unset_module: &str,
+) -> String {
+    let dataclass_unset = model_style == PyModelStyle::Dataclass && m.unset;
     let mut stdlib: Vec<String> = Vec::new();
     if m.enum_class {
         stdlib.push("import enum".to_string());
@@ -209,7 +226,12 @@ fn model_header(m: &ModelImports, model_style: PyModelStyle, multipart_module: &
             stdlib.push("from dataclasses import dataclass".to_string());
         }
     }
-    if let Some(line) = typing_import_line(m) {
+    // A dataclass field that defaults to `UNSET` is annotated `Union[<type>, Unset]`.
+    let typing = ModelImports {
+        union: m.union || dataclass_unset,
+        ..*m
+    };
+    if let Some(line) = typing_import_line(&typing) {
         stdlib.push(line);
     }
 
@@ -224,11 +246,13 @@ fn model_header(m: &ModelImports, model_style: PyModelStyle, multipart_module: &
         }
     }
 
-    let first_party = if m.multipart_file {
-        vec![format!("from {multipart_module} import MultipartFile")]
-    } else {
-        Vec::new()
-    };
+    let mut first_party = Vec::new();
+    if m.multipart_file {
+        first_party.push(format!("from {multipart_module} import MultipartFile"));
+    }
+    if dataclass_unset {
+        first_party.push(format!("from {unset_module} import UNSET, Unset"));
+    }
 
     import_block(&[
         vec!["from __future__ import annotations".to_string()],
@@ -681,7 +705,7 @@ pub(crate) fn emit_models_with_style(
         ));
     }
     let imports = compute_model_imports(&schema_refs, false)?;
-    let mut out = model_header(&imports, model_style, ".multipart");
+    let mut out = model_header(&imports, model_style, ".multipart", ".unset");
 
     // The first top-level item is separated from the import block by isort's `lines-after-imports`: two
     // blank lines before a class/enum def, but only one before a bare alias assignment (a simple
@@ -705,6 +729,7 @@ pub(crate) fn emit_models_with_style(
                     model_style,
                     *schema_directions,
                     *multipart_file_schema,
+                    None,
                 )?;
             }
             // A named NON-object/NON-enum schema (e.g. `BookOrError = Union[Book, OutOfStock]`, or a
@@ -745,6 +770,7 @@ pub(crate) fn emit_model_schema(
     dep_modules: &BTreeMap<String, String>,
     directions: SchemaDirections,
     multipart_module: &str,
+    unset_module: &str,
 ) -> Result<String, CoreError> {
     // Forward-ref imports are needed only for an object model's field types. Other aliases are
     // either the builtin `bytes` type or an opaque string literal.
@@ -757,7 +783,7 @@ pub(crate) fn emit_model_schema(
         &[(schema, directions, multipart_file_schema)],
         !deps.is_empty(),
     )?;
-    let mut out = model_header(&imports, model_style, multipart_module);
+    let mut out = model_header(&imports, model_style, multipart_module, unset_module);
     if deps.is_empty() {
         // No forward-ref block: separate the class/enum from the imports by two blank lines, but a bare
         // alias assignment by only one (isort `lines-after-imports`, matching the compact path).
@@ -790,6 +816,7 @@ pub(crate) fn emit_model_schema(
                 model_style,
                 directions,
                 multipart_file_schema,
+                Some(dep_modules),
             )?;
         }
         Type::Primitive(_)
@@ -928,96 +955,89 @@ fn resolve_named<'g>(schema: &Type, graph: &'g ApiGraph) -> Option<&'g crate::gr
     }
 }
 
-/// Build the Python expression that decodes a single from-dict value `v` into a field's advertised type.
+/// Where a field's type holds generated models: the one shape walk both halves of a model's dict
+/// conversion render from, so `from_dict` rebuilds a model exactly where `to_dict` encodes one.
 ///
-/// `v` is the bound raw JSON value for this field. The decode is RECURSIVE for nested dataclasses
-/// (CR-04 #2): a named object-schema field becomes `Model.from_dict(v)`, a list-of-named-object becomes
-/// a comprehension, and every other shape (scalar, enum value, union, map, Any) passes through unchanged
-/// (the str-enum mixin accepts the raw value; a union/map has no single concrete constructor). One
-/// deterministic mapping per field type, no fallback (rule 3).
-fn decode_expr(schema: &Type, graph: &ApiGraph, value_var: &str) -> String {
-    match schema {
-        // A named ref to an OBJECT schema → recurse via its from_dict; a named enum (str mixin) or any
-        // other named alias passes the raw value through.
-        Type::Named(_) => match resolve_named(schema, graph) {
-            Some(target) if matches!(target.body, Type::Object(_)) => {
-                format!("{}.from_dict({value_var})", target.name)
-            }
-            _ => value_var.to_string(),
-        },
-        // A list whose items are a named object schema → decode each element recursively.
-        Type::Array(items) => match resolve_named(items, graph) {
-            Some(target) if matches!(target.body, Type::Object(_)) => format!(
-                "[{}.from_dict(_item) for _item in {value_var}]",
-                target.name
-            ),
-            _ => value_var.to_string(),
-        },
-        // Scalars, well-known, maps, Any, inline enums/unions, inline objects: pass through. A union has
-        // no single constructor; an inline enum value is already the wire string.
-        _ => value_var.to_string(),
-    }
+/// The walk descends into the containers the style's `from_dict` rebuilds a model inside, and no
+/// further:
+///
+/// - **Dataclass.** The generated `from_dict` decides from the field's static type alone, so it
+///   reaches a model through list items and map values. A union is not walked: its static type
+///   does not say which variant a JSON object is, and the SDK does not invent a discriminator the
+///   source did not declare, so a union field holds its JSON value in both directions — `from_dict`
+///   keeps the decoded value, and `to_dict` sends what the field holds.
+/// - **Pydantic.** `from_dict` is `model_validate`, which also rebuilds a union's model variant, so
+///   the walk reaches one there too and tells it apart at runtime by `BaseModel`: the variants
+///   `model_validate` built a model for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NestedModels<'g> {
+    /// The value is the generated model class named here.
+    Model(&'g str),
+    /// Every item of a list holds models in this shape.
+    List(Box<NestedModels<'g>>),
+    /// Every value of a map holds models in this shape.
+    Map(Box<NestedModels<'g>>),
+    /// A union with model variants beside plain JSON ones (Pydantic only).
+    Union,
 }
 
-/// The Python expression that re-encodes every nested model below this field through its own
-/// `to_dict`, or `None` when nothing below it owns a rule of its own.
+/// The models `schema` holds, or `None` when it holds none the style's `from_dict` rebuilds.
 ///
-/// `model_dump` walks nested models itself, so [`emit_pydantic_model`]'s `to_dict` would otherwise
-/// apply its required-nullable repair only at the top level and hand back a dict its own `from_dict`
-/// rejects further down. What has to be reached is therefore whatever `model_validate` RECONSTRUCTS —
-/// `from_dict` is `model_validate` for a Pydantic model, and it builds nested models inside lists,
-/// dicts, and unions alike, so the encode has to descend through the same containers or the round trip
-/// stops being one. (This is not [`decode_expr`], which serves the dataclass style and stops where a
-/// hand-written constructor call stops.)
-fn encode_expr(schema: &Type, graph: &ApiGraph, value_var: &str) -> Option<String> {
-    encode_expr_at(schema, graph, value_var, 0)
-}
-
-/// `depth` scopes the comprehension bindings, so a container nested in a container does not iterate
-/// over the name its parent bound.
-fn encode_expr_at(
+/// A named schema that is not an object is a type alias, and the walk reads it as its body: an
+/// alias of a list of models holds models exactly as the list it names does.
+fn nested_models<'g>(
     schema: &Type,
-    graph: &ApiGraph,
-    value_var: &str,
-    depth: usize,
-) -> Option<String> {
+    graph: &'g ApiGraph,
+    model_style: PyModelStyle,
+) -> Option<NestedModels<'g>> {
+    nested_models_within(schema, graph, model_style, &mut Vec::new())
+}
+
+/// `aliases` is the chain of aliases being read, so an alias that reaches itself without passing
+/// through a model holds no model rather than recursing forever.
+fn nested_models_within<'g>(
+    schema: &Type,
+    graph: &'g ApiGraph,
+    model_style: PyModelStyle,
+    aliases: &mut Vec<&'g str>,
+) -> Option<NestedModels<'g>> {
     match schema {
-        Type::Named(_) => is_model_ref(schema, graph).then(|| format!("{value_var}.to_dict()")),
-        Type::Array(items) => {
-            let item = comprehension_binding("_item", depth);
-            let encoded = encode_expr_at(items, graph, &item, depth + 1)?;
-            Some(format!("[{encoded} for {item} in {value_var}]"))
+        Type::Named(_) => {
+            let target = resolve_named(schema, graph)?;
+            if matches!(target.body, Type::Object(_)) {
+                return Some(NestedModels::Model(&target.name));
+            }
+            if aliases.contains(&target.id.as_str()) {
+                return None;
+            }
+            aliases.push(&target.id);
+            let shape = nested_models_within(&target.body, graph, model_style, aliases);
+            aliases.pop();
+            shape
         }
-        Type::Map { value, .. } => {
-            let key = comprehension_binding("_key", depth);
-            let item = comprehension_binding("_value", depth);
-            let encoded = encode_expr_at(value, graph, &item, depth + 1)?;
-            Some(format!(
-                "{{{key}: {encoded} for {key}, {item} in {value_var}.items()}}"
-            ))
-        }
-        // A union is the one shape whose STATIC type does not say which variant a value holds, so the
-        // discriminator has to be a runtime one — and `BaseModel` is exactly the set of variants that
-        // own a `to_dict` (an enum member and a string alias are not one), and the single name every
-        // Pydantic model file already imports (`model_header`), so it needs no schema name in scope
-        // that a split layout keeps behind `TYPE_CHECKING`. A container variant would need its own
+        Type::Array(items) => nested_models_within(items, graph, model_style, aliases)
+            .map(|items| NestedModels::List(Box::new(items))),
+        Type::Map { value, .. } => nested_models_within(value, graph, model_style, aliases)
+            .map(|values| NestedModels::Map(Box::new(values))),
+        // Every model-bearing variant has to BE a model: a container variant would need its own
         // comprehension, which no single expression can select between, so a union carrying one is
-        // left alone rather than half-repaired.
-        Type::Union(variants) => {
-            let models = variants
-                .iter()
-                .filter(|variant| is_model_ref(variant, graph))
-                .count();
-            let encodable = variants
-                .iter()
-                .filter(|variant| encode_expr_at(variant, graph, value_var, depth).is_some())
-                .count();
-            (models > 0 && models == encodable).then(|| {
-                format!(
-                    "{value_var}.to_dict() if isinstance({value_var}, BaseModel) else {value_var}"
-                )
-            })
-        }
+        // left to `model_validate` and `model_dump` rather than half-repaired.
+        Type::Union(variants) => match model_style {
+            PyModelStyle::Dataclass => None,
+            PyModelStyle::Pydantic => {
+                let shapes: Vec<NestedModels<'g>> = variants
+                    .iter()
+                    .filter_map(|variant| {
+                        nested_models_within(variant, graph, model_style, aliases)
+                    })
+                    .collect();
+                (!shapes.is_empty()
+                    && shapes
+                        .iter()
+                        .all(|shape| matches!(shape, NestedModels::Model(_))))
+                .then_some(NestedModels::Union)
+            }
+        },
         Type::Primitive(_)
         | Type::WellKnown(_)
         | Type::Enum(_)
@@ -1026,10 +1046,77 @@ fn encode_expr_at(
     }
 }
 
-/// Whether `schema` is a `$ref` to an object schema — the shapes that get a generated model class, and
-/// so the only ones that own a `to_dict` of their own.
-fn is_model_ref(schema: &Type, graph: &ApiGraph) -> bool {
-    resolve_named(schema, graph).is_some_and(|target| matches!(target.body, Type::Object(_)))
+/// Build the Python expression that decodes a dataclass field's raw JSON value `value_var` into the
+/// field's advertised type: each model [`nested_models`] finds is rebuilt through its own
+/// `from_dict`, and a field holding none passes the value through unchanged (an enum's str mixin
+/// accepts the raw value). [`encode_expr`] renders the encode half from the same walk.
+fn decode_expr(schema: &Type, graph: &ApiGraph, value_var: &str) -> String {
+    nested_models(schema, graph, PyModelStyle::Dataclass).map_or_else(
+        || value_var.to_string(),
+        |shape| decode_nested(&shape, value_var, 0),
+    )
+}
+
+fn decode_nested(shape: &NestedModels<'_>, value_var: &str, depth: usize) -> String {
+    match shape {
+        NestedModels::Model(name) => format!("{name}.from_dict({value_var})"),
+        NestedModels::List(items) => {
+            let item = comprehension_binding("_item", depth);
+            let decoded = decode_nested(items, &item, depth + 1);
+            format!("[{decoded} for {item} in {value_var}]")
+        }
+        NestedModels::Map(values) => {
+            let key = comprehension_binding("_key", depth);
+            let item = comprehension_binding("_value", depth);
+            let decoded = decode_nested(values, &item, depth + 1);
+            format!("{{{key}: {decoded} for {key}, {item} in {value_var}.items()}}")
+        }
+        // The dataclass walk never yields a union: a union field keeps the JSON value as decoded.
+        NestedModels::Union => value_var.to_string(),
+    }
+}
+
+/// The Python expression that re-encodes every nested model below this field through its own
+/// `to_dict`, or `None` when nothing below it owns a rule of its own.
+///
+/// It is rendered from [`nested_models`], the walk `from_dict` decodes by, so a model's `to_dict`
+/// encodes exactly the positions its `from_dict` rebuilds a model in. For Pydantic that matters
+/// because `model_dump` walks nested models itself, so [`emit_pydantic_model`]'s `to_dict` would
+/// otherwise apply its required-nullable repair only at the top level and hand back a dict its own
+/// `from_dict` rejects further down. For a dataclass it is what sends a nested model by its own wire
+/// names, and what keeps `to_dict` from calling `to_dict` on a value `from_dict` left as JSON.
+fn encode_expr(
+    schema: &Type,
+    graph: &ApiGraph,
+    value_var: &str,
+    model_style: PyModelStyle,
+) -> Option<String> {
+    nested_models(schema, graph, model_style).map(|shape| encode_nested(&shape, value_var, 0))
+}
+
+/// `depth` scopes the comprehension bindings, so a container nested in a container does not iterate
+/// over the name its parent bound.
+fn encode_nested(shape: &NestedModels<'_>, value_var: &str, depth: usize) -> String {
+    match shape {
+        NestedModels::Model(_) => format!("{value_var}.to_dict()"),
+        NestedModels::List(items) => {
+            let item = comprehension_binding("_item", depth);
+            let encoded = encode_nested(items, &item, depth + 1);
+            format!("[{encoded} for {item} in {value_var}]")
+        }
+        NestedModels::Map(values) => {
+            let key = comprehension_binding("_key", depth);
+            let item = comprehension_binding("_value", depth);
+            let encoded = encode_nested(values, &item, depth + 1);
+            format!("{{{key}: {encoded} for {key}, {item} in {value_var}.items()}}")
+        }
+        // `BaseModel` is exactly the set of variants `model_validate` built a model for, and the one
+        // name every Pydantic model file already imports (`model_header`), so it needs no schema
+        // name in scope that a split layout keeps behind `TYPE_CHECKING`.
+        NestedModels::Union => {
+            format!("{value_var}.to_dict() if isinstance({value_var}, BaseModel) else {value_var}")
+        }
+    }
 }
 
 /// The name a comprehension at `depth` binds. Depth zero keeps the bare name, so the common one-level
@@ -1050,6 +1137,9 @@ fn comprehension_binding(base: &str, depth: usize) -> String {
 /// required (no default) first, optional (default `= None`) last — before emitting. `kw_only=True` is
 /// Python 3.10+ and unavailable on 3.9, so partitioning is the 3.9-safe fix. The reorder is a
 /// presentation concern only: json keys are name-addressed, so wire behavior is unchanged.
+/// `model_modules` maps every model to the module it lives in when each model has a module of its
+/// own (a split layout), and is `None` when every model shares this one.
+#[allow(clippy::too_many_arguments)]
 fn emit_model_class(
     out: &mut String,
     name: &str,
@@ -1058,14 +1148,21 @@ fn emit_model_class(
     model_style: PyModelStyle,
     directions: SchemaDirections,
     multipart_file_schema: bool,
+    model_modules: Option<&BTreeMap<String, String>>,
 ) -> Result<(), CoreError> {
     match model_style {
         PyModelStyle::Pydantic => {
             emit_pydantic_model(out, name, fields, graph, directions, multipart_file_schema)
         }
-        PyModelStyle::Dataclass => {
-            emit_dataclass(out, name, fields, graph, directions, multipart_file_schema)
-        }
+        PyModelStyle::Dataclass => emit_dataclass(
+            out,
+            name,
+            fields,
+            graph,
+            directions,
+            multipart_file_schema,
+            model_modules,
+        ),
     }
 }
 
@@ -1140,7 +1237,9 @@ fn emit_pydantic_model(
 /// most models need. Two repairs ride on top, and both exist so a model can read back what it wrote:
 ///
 /// - a REQUIRED nullable key is one the payload always carries, so its `null` is restored after the
-///   dump drops it; and
+///   dump drops it, and an OPTIONAL nullable key set to `None` (it is in `model_fields_set`) is an
+///   explicit `null` — the PATCH that clears a value — so its `null` is restored too, while one left
+///   unset stays out; and
 /// - a nested model is re-encoded through its OWN `to_dict`, because `model_dump` walks the nesting
 ///   itself and would otherwise apply the first repair only to the outermost model.
 ///
@@ -1208,30 +1307,38 @@ fn emit_pydantic_to_dict_body(
     for repair in repairs {
         let ident = repair.field.ident.as_str();
         let wire = py_string_literal(&repair.field.field.json_name);
-        match (
-            repair.encode,
-            repair.dump_may_drop_key,
-            repair.dropped_key_may_be_null,
-        ) {
+        let set = format!("{} in self.model_fields_set", py_string_literal(ident));
+        match (repair.encode, repair.dump_may_drop_key, repair.null) {
             // The dump kept the key, so the re-encode is unconditional.
             (Some(expr), false, _) => {
                 writeln!(out, "        _data[{wire}] = {expr}").map_err(sink)?;
             }
             // A dropped key is a key the caller may legitimately leave out, so there is nothing to
             // re-encode and no `null` to put back in its place.
-            (Some(expr), true, false) => {
+            (Some(expr), true, NullRestore::Never) => {
                 writeln!(out, "        if self.{ident} is not None:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = {expr}").map_err(sink)?;
             }
             // Both repairs land on one key: re-encode what is there, restore the `null` when it is not.
-            (Some(expr), true, true) => {
+            (Some(expr), true, NullRestore::Always) => {
                 writeln!(out, "        if self.{ident} is not None:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = {expr}").map_err(sink)?;
                 writeln!(out, "        else:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
             }
+            // Both repairs on an optional key: the `null` only when the caller set it.
+            (Some(expr), true, NullRestore::WhenSet) => {
+                writeln!(out, "        if self.{ident} is not None:").map_err(sink)?;
+                writeln!(out, "            _data[{wire}] = {expr}").map_err(sink)?;
+                writeln!(out, "        elif {set}:").map_err(sink)?;
+                writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
+            }
             // Nothing nested below this key, so the restored `null` is the whole repair.
-            (None, _, _) => {
+            (None, _, NullRestore::WhenSet) => {
+                writeln!(out, "        if self.{ident} is None and {set}:").map_err(sink)?;
+                writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
+            }
+            (None, _, NullRestore::Always | NullRestore::Never) => {
                 writeln!(out, "        if self.{ident} is None:").map_err(sink)?;
                 writeln!(out, "            _data[{wire}] = None").map_err(sink)?;
             }
@@ -1267,8 +1374,19 @@ struct ToDictRepair<'a> {
     encode: Option<String>,
     /// Whether `exclude_none` can drop this key, so a re-encode has to ask before touching it.
     dump_may_drop_key: bool,
-    /// Whether a dropped key is one the payload carries as an explicit `null`.
-    dropped_key_may_be_null: bool,
+    /// When a key the dump dropped is put back as an explicit `null`.
+    null: NullRestore,
+}
+
+/// When `to_dict` puts back a `null` that `model_dump(exclude_none=True)` dropped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NullRestore {
+    /// The key is not nullable: a dropped key is an absent one.
+    Never,
+    /// A required nullable key: the payload always carries it.
+    Always,
+    /// An optional nullable key: `null` when the caller set it (`model_fields_set`), absent when not.
+    WhenSet,
 }
 
 impl<'a> ToDictRepair<'a> {
@@ -1277,16 +1395,26 @@ impl<'a> ToDictRepair<'a> {
         graph: &ApiGraph,
         directions: SchemaDirections,
     ) -> Option<Self> {
-        let encode = encode_expr(&field.field.schema, graph, &format!("self.{}", field.ident));
+        let encode = encode_expr(
+            &field.field.schema,
+            graph,
+            &format!("self.{}", field.ident),
+            PyModelStyle::Pydantic,
+        );
         let optional = directions.model_field_is_optional(field.field);
         let nullable = directions.field_is_nullable(field.field);
+        let null = match (nullable, optional) {
+            (false, _) => NullRestore::Never,
+            (true, false) => NullRestore::Always,
+            (true, true) => NullRestore::WhenSet,
+        };
         let repair = Self {
             field,
             encode,
             dump_may_drop_key: optional || nullable,
-            dropped_key_may_be_null: !optional && nullable,
+            null,
         };
-        (repair.encode.is_some() || repair.dropped_key_may_be_null).then_some(repair)
+        (repair.encode.is_some() || repair.null != NullRestore::Never).then_some(repair)
     }
 }
 
@@ -1297,6 +1425,7 @@ fn emit_dataclass(
     graph: &ApiGraph,
     directions: SchemaDirections,
     multipart_file_schema: bool,
+    model_modules: Option<&BTreeMap<String, String>>,
 ) -> Result<(), CoreError> {
     writeln!(out, "@dataclass").map_err(sink)?;
     writeln!(out, "class {name}:").map_err(sink)?;
@@ -1309,6 +1438,9 @@ fn emit_dataclass(
         )
         .map_err(sink)?;
         writeln!(out, "        return cls()").map_err(sink)?;
+        writeln!(out).map_err(sink)?;
+        writeln!(out, "    def to_dict(self) -> dict[str, Any]:").map_err(sink)?;
+        writeln!(out, "        return {{}}").map_err(sink)?;
         return Ok(());
     }
     // Partition preserving each group's (already-sorted) relative order: required (no default) first,
@@ -1340,6 +1472,12 @@ fn emit_dataclass(
         // value is not itself nullable.
         let nullable = directions.field_is_nullable(field);
         let hint = py_model_field_type(&field.schema, nullable, graph, multipart_file_schema)?;
+        if defaults_to_unset(field, directions) {
+            // Optional AND nullable: `None` is the `null` the field may carry, so leaving the
+            // field out takes the separate `UNSET` default.
+            writeln!(out, "    {}: Union[{hint}, Unset] = UNSET", emission.ident).map_err(sink)?;
+            continue;
+        }
         let defaulted_hint = if nullable {
             hint
         } else {
@@ -1347,32 +1485,89 @@ fn emit_dataclass(
         };
         writeln!(out, "    {}: {defaulted_hint} = None", emission.ident).map_err(sink)?;
     }
+    emit_dataclass_from_dict(out, name, &emissions, graph, directions, model_modules)?;
+    emit_dataclass_to_dict(out, &emissions, graph, directions)
+}
 
+/// Emit a dataclass's `from_dict`. `model_modules` is [`emit_model_class`]'s.
+fn emit_dataclass_from_dict(
+    out: &mut String,
+    name: &str,
+    emissions: &[PyFieldEmission<'_>],
+    graph: &ApiGraph,
+    directions: SchemaDirections,
+    model_modules: Option<&BTreeMap<String, String>>,
+) -> Result<(), CoreError> {
     // A forward-compatible from_dict (CR-04): construct only from declared fields (ignore-unknown — a
     // newer server adding a response key no longer crashes the SDK), bind each by its ORIGINAL wire key
     // (json_name), and decode nested dataclasses recursively. Required fields read with `_data["key"]`
     // (a missing required key is a real protocol error → KeyError); omittable fields test for the key
-    // so an absent one keeps the None default.
+    // so an absent one keeps the None default. `ruff format` sets the method one blank line below
+    // the fields.
+    writeln!(out).map_err(sink)?;
     writeln!(out, "    @classmethod").map_err(sink)?;
     writeln!(
         out,
         "    def from_dict(cls, _data: dict[str, Any]) -> {name}:"
     )
     .map_err(sink)?;
+    if let Some(model_modules) = model_modules {
+        // In a split layout each model this one rebuilds lives in a module of its own, imported at
+        // module level only for type checkers. `from_dict` names it at run time, so it imports it
+        // here, when it runs: every model module is loaded by then, so two models that hold each
+        // other import without a cycle.
+        for model in decoded_models(emissions, graph, name) {
+            let module = model_modules.get(model).ok_or_else(|| CoreError::SdkGen {
+                message: format!(
+                    "schema '{name}' decodes model {model:?}, but no Python module was generated for it"
+                ),
+            })?;
+            writeln!(out, "        from {module} import {model}").map_err(sink)?;
+        }
+    }
     writeln!(out, "        return cls(").map_err(sink)?;
-    for emission in &emissions {
+    for emission in emissions {
         let field = emission.field;
         let ident = &emission.ident;
         let wire = &field.json_name;
-        if directions.model_field_is_optional(field) {
+        if defaults_to_unset(field, directions) {
+            // Optional and nullable: an absent key is `UNSET`, a `null` is `None`, so the model
+            // sends back exactly what it read.
+            let accessor = format!("_data[\"{wire}\"]");
+            let decoded = decode_expr(&field.schema, graph, &accessor);
+            if decoded == accessor {
+                write_keyword_argument(
+                    out,
+                    ident,
+                    &accessor,
+                    &[format!("if \"{wire}\" in _data"), "else UNSET".to_string()],
+                )?;
+            } else {
+                write_keyword_argument(
+                    out,
+                    ident,
+                    "UNSET",
+                    &[
+                        format!("if \"{wire}\" not in _data"),
+                        format!("else ({decoded})"),
+                        format!("if {accessor} is not None"),
+                        "else None".to_string(),
+                    ],
+                )?;
+            }
+        } else if directions.model_field_is_optional(field) {
             // Omittable: only decode when present (and non-null), else keep the None default. The
             // conditional expression evaluates the decode lazily so a nested model still recurses.
             let decoded_present = decode_expr(&field.schema, graph, &format!("_data[\"{wire}\"]"));
-            writeln!(
+            write_keyword_argument(
                 out,
-                "            {ident}=({decoded_present}) if \"{wire}\" in _data and _data[\"{wire}\"] is not None else None,"
-            )
-            .map_err(sink)?;
+                ident,
+                &format!("({decoded_present})"),
+                &[
+                    format!("if \"{wire}\" in _data and _data[\"{wire}\"] is not None"),
+                    "else None".to_string(),
+                ],
+            )?;
         } else {
             let accessor = format!("_data[\"{wire}\"]");
             let decoded = decode_expr(&field.schema, graph, &accessor);
@@ -1382,11 +1577,15 @@ fn emit_dataclass(
                 // list comprehension over None raises TypeError, and a nested `from_dict(None)` fails
                 // inside. Guard it the way the optional branch does. A passthrough decode needs no
                 // guard: it already yields None.
-                writeln!(
+                write_keyword_argument(
                     out,
-                    "            {ident}=({decoded}) if {accessor} is not None else None,"
-                )
-                .map_err(sink)?;
+                    ident,
+                    &format!("({decoded})"),
+                    &[
+                        format!("if {accessor} is not None"),
+                        "else None".to_string(),
+                    ],
+                )?;
             } else {
                 writeln!(out, "            {ident}={decoded},").map_err(sink)?;
             }
@@ -1396,18 +1595,196 @@ fn emit_dataclass(
     Ok(())
 }
 
+/// The column limit `ruff format` holds generated Python to.
+const PY_LINE_LIMIT: usize = 88;
+
+/// Write one keyword argument of a dataclass's `from_dict` call: `{ident}={value}` followed by the
+/// clauses of its conditional expression (`if …`, `else …`). It is one line when that fits
+/// [`PY_LINE_LIMIT`], and otherwise one line per clause, which is how `ruff format` splits a
+/// conditional expression that does not fit.
+fn write_keyword_argument(
+    out: &mut String,
+    ident: &str,
+    value: &str,
+    clauses: &[String],
+) -> Result<(), CoreError> {
+    const INDENT: &str = "            ";
+    let line = format!("{INDENT}{ident}={value} {},", clauses.join(" "));
+    if line.chars().count() <= PY_LINE_LIMIT {
+        writeln!(out, "{line}").map_err(sink)?;
+        return Ok(());
+    }
+    writeln!(out, "{INDENT}{ident}={value}").map_err(sink)?;
+    let last = clauses.len().saturating_sub(1);
+    for (index, clause) in clauses.iter().enumerate() {
+        let comma = if index == last { "," } else { "" };
+        writeln!(out, "{INDENT}{clause}{comma}").map_err(sink)?;
+    }
+    Ok(())
+}
+
+/// The models other than `self_name` a dataclass's `from_dict` rebuilds through their own
+/// `from_dict` ([`decode_expr`]), sorted and once each.
+fn decoded_models<'g>(
+    emissions: &[PyFieldEmission<'_>],
+    graph: &'g ApiGraph,
+    self_name: &str,
+) -> BTreeSet<&'g str> {
+    fn collect<'g>(shape: &NestedModels<'g>, out: &mut BTreeSet<&'g str>) {
+        match shape {
+            NestedModels::Model(name) => {
+                out.insert(name);
+            }
+            NestedModels::List(inner) | NestedModels::Map(inner) => collect(inner, out),
+            NestedModels::Union => {}
+        }
+    }
+    let mut models = BTreeSet::new();
+    for emission in emissions {
+        if let Some(shape) = nested_models(&emission.field.schema, graph, PyModelStyle::Dataclass) {
+            collect(&shape, &mut models);
+        }
+    }
+    models.remove(self_name);
+    models
+}
+
+/// Emit a dataclass's `to_dict`: the payload the client sends for it, keyed by each field's wire name
+/// (`class`, never the `class_` attribute), with an unset omittable field left out. A field the
+/// payload always carries keeps an explicit `None`; a nested model is encoded through its own
+/// `to_dict`.
+///
+/// An omittable field that is not nullable cannot carry `null`, so its `None` is the absent key. An
+/// omittable field that is nullable defaults to `UNSET` instead ([`defaults_to_unset`]): `UNSET` is
+/// the absent key and `None` is an explicit `null`, the PATCH that clears a value.
+fn emit_dataclass_to_dict(
+    out: &mut String,
+    emissions: &[PyFieldEmission<'_>],
+    graph: &ApiGraph,
+    directions: SchemaDirections,
+) -> Result<(), CoreError> {
+    let encoded = |emission: &PyFieldEmission<'_>| {
+        let attribute = format!("self.{}", emission.ident);
+        encode_expr(
+            &emission.field.schema,
+            graph,
+            &attribute,
+            PyModelStyle::Dataclass,
+        )
+        .map_or(attribute.clone(), |expr| {
+            if directions.field_is_nullable(emission.field) {
+                format!("{expr} if {attribute} is not None else None")
+            } else {
+                expr
+            }
+        })
+    };
+    let (required, optional): (Vec<&PyFieldEmission<'_>>, Vec<&PyFieldEmission<'_>>) = emissions
+        .iter()
+        .partition(|emission| !directions.model_field_is_optional(emission.field));
+    writeln!(out).map_err(sink)?;
+    writeln!(out, "    def to_dict(self) -> dict[str, Any]:").map_err(sink)?;
+    if required.is_empty() {
+        writeln!(out, "        _data: dict[str, Any] = {{}}").map_err(sink)?;
+    } else {
+        writeln!(out, "        _data: dict[str, Any] = {{").map_err(sink)?;
+        for emission in required {
+            writeln!(
+                out,
+                "            {}: {},",
+                py_string_literal(&emission.field.json_name),
+                encoded(emission)
+            )
+            .map_err(sink)?;
+        }
+        writeln!(out, "        }}").map_err(sink)?;
+    }
+    for emission in optional {
+        let attribute = format!("self.{}", emission.ident);
+        if defaults_to_unset(emission.field, directions) {
+            writeln!(out, "        if {attribute} is not UNSET:").map_err(sink)?;
+            writeln!(
+                out,
+                "            _data[{}] = {}",
+                py_string_literal(&emission.field.json_name),
+                encoded(emission)
+            )
+            .map_err(sink)?;
+            continue;
+        }
+        let value = encode_expr(
+            &emission.field.schema,
+            graph,
+            &attribute,
+            PyModelStyle::Dataclass,
+        )
+        .unwrap_or_else(|| attribute.clone());
+        writeln!(out, "        if {attribute} is not None:").map_err(sink)?;
+        writeln!(
+            out,
+            "            _data[{}] = {value}",
+            py_string_literal(&emission.field.json_name)
+        )
+        .map_err(sink)?;
+    }
+    writeln!(out, "        return _data").map_err(sink)?;
+    Ok(())
+}
+
+/// Whether a dataclass field defaults to `UNSET`: it may be left out AND may carry `null`, so `None`
+/// alone cannot say which. The Pydantic style keeps `None` and reads `model_fields_set` instead.
+pub(crate) fn defaults_to_unset(field: &Field, directions: SchemaDirections) -> bool {
+    directions.model_field_is_optional(field) && directions.field_is_nullable(field)
+}
+
+/// Emit `unset.py` (dataclass style): the `UNSET` default of a field that may be left out and may
+/// carry `null`. A model sends a field holding `UNSET` as no key, and `None` as `null`.
+pub(crate) fn emit_unset() -> String {
+    "\
+from __future__ import annotations
+
+import enum
+from typing import Literal
+
+
+class Unset(enum.Enum):
+    \"\"\"The value of an optional field the caller left out.
+
+    A model sends a field holding ``UNSET`` as no key at all, and ``None`` as an
+    explicit ``null``. Reading a reply, a key the server left out is ``UNSET`` and a
+    ``null`` is ``None``.
+    \"\"\"
+
+    UNSET = \"UNSET\"
+
+    def __bool__(self) -> Literal[False]:
+        return False
+
+    def __repr__(self) -> str:
+        return \"UNSET\"
+
+    def __str__(self) -> str:
+        return \"UNSET\"
+
+
+UNSET = Unset.UNSET
+"
+    .to_string()
+}
+
 /// Emit `errors.py`: the typed `ApiError(Exception)` with status, response metadata, and decoded body.
 ///
 /// `package` is unused in the body (no package clause in Python) but kept for call-site symmetry with
 /// the Go twin's `emit_errors`. The `from __future__ import annotations` header keeps annotations lazy.
 pub(crate) fn emit_errors(_package: &str) -> String {
-    "\
+    format!(
+        "\
 from __future__ import annotations
 
 from typing import Any, Optional
 
 
-class ApiError(Exception):
+class {ERROR_TYPE}(Exception):
     \"\"\"Raised by operation methods on a non-success response.
 
     Carries status, response metadata, raw body, parsed JSON, and decoded error body.
@@ -1426,9 +1803,9 @@ class ApiError(Exception):
         json_body: Any = None,
         body: Any = None,
     ) -> None:
-        super().__init__(f\"{status_code} {message} ({slug})\")
+        super().__init__(f\"{{status_code}} {{message}} ({{slug}})\")
         self.status_code = status_code
-        self.headers = headers or {}
+        self.headers = headers or {{}}
         self.request_id = request_id
         self.raw_body = raw_body
         self.json_body = json_body
@@ -1449,11 +1826,11 @@ class AuthConfigurationError(Exception):
         operation_id: str,
         alternatives: list[list[str]],
     ) -> None:
-        super().__init__(f\"No configured credentials satisfy operation {operation_id}\")
+        super().__init__(f\"No configured credentials satisfy operation {{operation_id}}\")
         self.operation_id = operation_id
         self.alternatives = alternatives
 "
-    .to_string()
+    )
 }
 
 /// Emit the public value object used for one named multipart file part.
@@ -1612,7 +1989,8 @@ pub(crate) fn client_referenced_models(
         for body in request_body_models_of(op, graph)? {
             names.push(body.model);
         }
-        if let Some(model) = success_responses_of(op, graph)?.body_model {
+        let success = success_responses_of(op, graph)?;
+        if let (Some(model), false) = (success.body_model, success.text_body) {
             names.push(model);
         }
         if let Some(item_model) = pagination_item_model_name(graph, op) {
@@ -1777,7 +2155,7 @@ pub(crate) fn emit_client_with_models(
 ) -> String {
     let body_value = match model_style {
         PyModelStyle::Pydantic => "        if isinstance(body, BaseModel):\n            mode = \"python\" if body_encoding == \"multipart\" else \"json\"\n            body = body.model_dump(mode=mode, by_alias=True, exclude_unset=True)\n        return self._wire_value(body)\n",
-        PyModelStyle::Dataclass => "        if body is not None and dataclasses.is_dataclass(body):\n            body = dataclasses.asdict(body)\n        return self._wire_value(body)\n",
+        PyModelStyle::Dataclass => "        if body is not None and dataclasses.is_dataclass(body):\n            body = body.to_dict()\n        return self._wire_value(body)\n",
     };
 
     // --- Import header, assembled per file in canonical isort order (no unused imports, F401-clean). ---
@@ -1821,9 +2199,9 @@ pub(crate) fn emit_client_with_models(
     // not emit — importing it there would be an unused import (ruff F401).
     let mut first_party: Vec<String> =
         vec![if has_api_key_auth || has_bearer_auth || has_basic_auth {
-            "from .errors import ApiError, AuthConfigurationError".to_string()
+            format!("from .errors import {ERROR_TYPE}, AuthConfigurationError")
         } else {
-            "from .errors import ApiError".to_string()
+            format!("from .errors import {ERROR_TYPE}")
         }];
     if !model_refs.is_empty() {
         // A parenthesized, one-name-per-line import with a trailing comma: the "magic trailing comma"
@@ -2120,11 +2498,46 @@ class Client:
             return {{key: self._wire_value(item) for key, item in value.items()}}
         return value
 
-    @staticmethod
-    def _parameter_scalar(value: Any) -> str:
+    @classmethod
+    def _parameter_scalar(cls, value: Any) -> str:
         if isinstance(value, bool):
             return \"true\" if value else \"false\"
+        if isinstance(value, float):
+            return cls._wire_number(value)
         return str(value)
+
+    @staticmethod
+    def _wire_number(value: float) -> str:
+        # The shortest decimal that reads back as `value`, laid out as JavaScript's
+        # Number#toString lays it out, as every generated SDK writes a parameter number.
+        if value != value:
+            return \"NaN\"
+        if value in (float(\"inf\"), float(\"-inf\")):
+            return \"Infinity\" if value > 0 else \"-Infinity\"
+        if value == 0:
+            return \"0\"
+        sign = \"-\" if value < 0 else \"\"
+        mantissa, _, exponent = repr(abs(value)).partition(\"e\")
+        whole, _, fraction = mantissa.partition(\".\")
+        spelled = whole + fraction
+        digits = spelled.strip(\"0\")
+        leading = len(spelled) - len(spelled.lstrip(\"0\"))
+        point = len(whole) + int(exponent or \"0\") - leading
+        if len(digits) <= point <= 21:
+            return sign + digits + \"0\" * (point - len(digits))
+        if 0 < point <= 21:
+            return sign + digits[:point] + \".\" + digits[point:]
+        if -6 < point <= 0:
+            return sign + \"0.\" + \"0\" * -point + digits
+        text = digits[:1] + (\".\" + digits[1:] if len(digits) > 1 else \"\")
+        if point > 0:
+            return f\"{{sign}}{{text}}e+{{point - 1}}\"
+        return f\"{{sign}}{{text}}e-{{1 - point}}\"
+
+    def _path_segment(self, value: Any) -> str:
+        return urllib.parse.quote(
+            self._parameter_scalar(self._wire_value(value)), safe=\"\"
+        )
 
     def _parameter_pairs(
         self,
@@ -2201,8 +2614,8 @@ class Client:
         if body_encoding == \"json\":
             return json.dumps(value).encode(), content_type
         if body_encoding == \"form\":
-            encoded = urllib.parse.urlencode(value, doseq=True).encode()
-            return encoded, content_type
+            encoded = urllib.parse.urlencode(self._form_fields(value), doseq=True)
+            return encoded.encode(), content_type
         if body_encoding == \"multipart\":
             boundary = f\"gnr8-{{secrets.token_hex(16)}}\"
             return (
@@ -2210,6 +2623,22 @@ class Client:
                 f\"multipart/form-data; boundary={{boundary}}\",
             )
         raise ValueError(f\"unsupported request body encoding: {{body_encoding}}\")
+
+    @classmethod
+    def _form_fields(cls, value: Any) -> Any:
+        # A `None` is no field, as it is no multipart part: never the text \"None\".
+        # A scalar is spelled as every generated SDK spells a parameter value.
+        if not isinstance(value, dict):
+            return value
+        fields = {{}}
+        for key, item in value.items():
+            if isinstance(item, (list, tuple)):
+                item = [cls._parameter_scalar(p) for p in item if p is not None]
+            elif item is not None:
+                item = cls._parameter_scalar(item)
+            if item is not None:
+                fields[key] = item
+        return fields
 
     def _encode_multipart(self, value: Any, boundary: str) -> bytes:
         if not isinstance(value, dict):
@@ -2247,7 +2676,7 @@ class Client:
                     out.extend(
                         f'Content-Disposition: form-data; name=\"{{key}}\"\\r\\n\\r\\n'.encode()
                     )
-                    out.extend(str(part).encode())
+                    out.extend(self._parameter_scalar(part).encode())
                     out.extend(b\"\\r\\n\")
         out.extend(f\"--{{boundary}}--\\r\\n\".encode())
         return bytes(out)
@@ -2338,7 +2767,7 @@ class Client:
                 if (status < 200 or status >= 300) and status not in success_statuses:
                     self._call_error_hooks(
                         context,
-                        ApiError(
+                        {ERROR_TYPE}(
                             status,
                             \"\",
                             \"\",
@@ -2400,7 +2829,7 @@ class Client:
         headers: dict[str, str],
         raw: bytes,
         error_model: Optional[type] = None,
-    ) -> ApiError:
+    ) -> {ERROR_TYPE}:
         try:
             json_body = json.loads(raw) if raw else None
         except ValueError:
@@ -2413,7 +2842,7 @@ class Client:
                 body = json_body
         decoded = json_body if isinstance(json_body, dict) else {{}}
         request_id = _header_value(headers, \"X-Request-ID\")
-        return ApiError(
+        return {ERROR_TYPE}(
             status,
             decoded.get(\"message\", \"\"),
             decoded.get(\"slug\", \"\"),
@@ -2433,7 +2862,7 @@ class Client:
 /// `ops` are all of the graph's operations, in graph order. Each method:
 /// - takes `self`, then path params as positional args, then a typed `body` arg for body-bearing ops,
 ///   then optional query params (each defaulting to `None`);
-/// - interpolates each path param through `urllib.parse.quote(str(value), safe="")` (V5 path-injection
+/// - interpolates each path param through `self._path_segment(value)` (V5 path-injection
 ///   mitigation — twin of Go `url.PathEscape`); builds the query with `urllib.parse.urlencode` over the
 ///   present optional params; joins `base_path` + `op.path`;
 /// - calls `self._do`, raises the `ApiError` built by `self._error` for rejected responses, and decodes
@@ -2473,8 +2902,17 @@ pub(crate) fn pagination_method_names(graph: &ApiGraph, op: &Operation) -> Vec<S
     if pagination_policy_for(graph, op).is_none() {
         return Vec::new();
     }
-    let method = operation_method_name(op);
-    vec![format!("{method}_pages"), format!("iter_{method}")]
+    let PaginationNames { pages, iterate } = pagination_names(&operation_method_name(op));
+    vec![pages, iterate]
+}
+
+/// The two helpers a paginated operation's method `method` gains: the page collector and the item
+/// iterator — the one spelling the emitter and the docs use.
+pub(crate) fn pagination_names(method: &str) -> PaginationNames {
+    PaginationNames {
+        pages: format!("{method}_pages"),
+        iterate: format!("iter_{method}"),
+    }
 }
 
 /// The keyword/digit-safe, collision-checked Python identifiers for one operation's arguments.
@@ -2778,6 +3216,7 @@ fn emit_operation(
             ),
         });
     }
+    check_path_parameters(op, graph)?;
 
     let body_models = request_body_models_of(op, graph)?;
     let success = success_responses_of(op, graph)?;
@@ -2815,6 +3254,13 @@ fn emit_operation(
             "Optional[bytes]".to_string()
         } else {
             "bytes".to_string()
+        }
+    } else if success.text_body {
+        // A `text/*` reply is returned as the text itself.
+        if success.has_bodyless_alternative() {
+            "Optional[str]".to_string()
+        } else {
+            "str".to_string()
         }
     } else {
         return_model.as_ref().map_or_else(
@@ -2894,11 +3340,10 @@ fn emit_operation(
                 .find(|(pp, _)| &pp.name == token)
                 .map_or_else(|| safe_ident(&snake(token)), |(_, id)| id.clone());
             let placeholder = format!("{{{token}}}");
-            // `safe=''` uses SINGLE quotes inside the double-quoted f-string: a backslash in an
-            // f-string expression part is a `SyntaxError` on Python 3.9-3.11 ("f-string expression
-            // part cannot include a backslash"), so escaped double-quotes (`safe=\"\"`) would not
-            // compile. Single quotes need no escape and are valid on every Python 3.x (PYSDK-02).
-            let escaped = format!("{{urllib.parse.quote(str({ident}), safe='')}}");
+            // `_path_segment` sends the value the way a query, header or cookie value goes out — an
+            // enum member as its wire value (never `str(Kind.A)`'s `Kind.A`), a boolean as
+            // `true`/`false` — percent-encoded by `urllib.parse.quote(safe="")`, the page's one rule.
+            let escaped = format!("{{self._path_segment({ident})}}");
             fstring = fstring.replace(&placeholder, &escaped);
         }
         writeln!(out, "        path = f\"{fstring}\"").map_err(sink)?;
@@ -3135,17 +3580,21 @@ fn emit_operation(
             py_status_tuple(&success.body_statuses)
         )
         .map_err(sink)?;
-        writeln!(
-            out,
-            "            _data = json.loads(_raw) if _raw else {{}}"
-        )
-        .map_err(sink)?;
-        writeln!(
-            out,
-            "            return {}",
-            py_decode_expr(model, graph, model_style)
-        )
-        .map_err(sink)?;
+        if success.text_body {
+            writeln!(out, "            return _raw.decode(\"utf-8\")").map_err(sink)?;
+        } else {
+            writeln!(
+                out,
+                "            _data = json.loads(_raw) if _raw else {{}}"
+            )
+            .map_err(sink)?;
+            writeln!(
+                out,
+                "            return {}",
+                py_decode_expr(model, graph, model_style)
+            )
+            .map_err(sink)?;
+        }
         if success.has_bodyless_alternative() {
             writeln!(out, "        return None").map_err(sink)?;
         } else {
@@ -3324,8 +3773,10 @@ fn emit_pagination_helpers(
         return Ok(());
     };
     let method_name = operation_method_name(op);
-    let pages_name = format!("{method_name}_pages");
-    let items_name = format!("iter_{method_name}");
+    let PaginationNames {
+        pages: pages_name,
+        iterate: items_name,
+    } = pagination_names(&method_name);
     let info = py_pagination_info(graph, op, policy, model_style)?;
     let (args, call_args) = py_pagination_args(op, graph)?;
 
@@ -3677,7 +4128,10 @@ pub(crate) fn emit_init_with_models(
     out.push_str("from __future__ import annotations\n\n");
     out.push_str("from .client import Client, ClientHooks, HookContext, RequestOptions\n");
     // Both error types are raised by generated operations, so both belong in the package barrel.
-    out.push_str("from .errors import ApiError, AuthConfigurationError\n");
+    let _ = writeln!(
+        out,
+        "from .errors import {ERROR_TYPE}, AuthConfigurationError"
+    );
 
     // Every named schema becomes a top-level symbol in models.py (class or alias) — re-export them all.
     let names: Vec<&str> = graph.schemas.iter().map(|s| s.name.as_str()).collect();
@@ -3695,7 +4149,7 @@ pub(crate) fn emit_init_with_models(
     out.push_str("    \"ClientHooks\",\n");
     out.push_str("    \"HookContext\",\n");
     out.push_str("    \"RequestOptions\",\n");
-    out.push_str("    \"ApiError\",\n");
+    let _ = writeln!(out, "    \"{ERROR_TYPE}\",");
     out.push_str("    \"AuthConfigurationError\",\n");
     out.push_str("    \"MultipartFile\",\n");
     for name in &names {
@@ -4111,10 +4565,11 @@ mod tests {
                 emit_models_with_style(&nullable_nested_graph(), "app", PyModelStyle::Dataclass)
                     .unwrap();
 
-            // A list of nested models: guarded, and the recursion is preserved.
+            // A list of nested models: guarded, and the recursion is preserved. The line would
+            // pass 88 columns, so it is split at its clauses as `ruff format` splits it.
             assert!(
                 out.contains(
-                    "items=([Item.from_dict(_item) for _item in _data[\"items\"]]) if _data[\"items\"] is not None else None,"
+                    "            items=([Item.from_dict(_item) for _item in _data[\"items\"]])\n            if _data[\"items\"] is not None\n            else None,\n"
                 ),
                 "nullable list-of-models decode must be null-guarded:\n{out}"
             );
@@ -4646,6 +5101,7 @@ mod tests {
                 explode: None,
                 allow_reserved: false,
                 description: None,
+                example: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: crate::graph::SourceSpan {
@@ -4700,12 +5156,12 @@ mod tests {
         }
 
         #[test]
-        fn templated_path_escapes_each_param_with_urllib_quote() {
+        fn templated_path_escapes_each_param_through_path_segment() {
             let g = ops_graph();
             let out = emit_operations(&g, "bookstore", "/", &ops_for(&g, "getBook")).unwrap();
             assert!(
                 out.contains(
-                    "path = f\"/books/{urllib.parse.quote(str(book_id), safe='')}\""
+                    "path = f\"/books/{self._path_segment(book_id)}\""
                 ),
                 "path param must be percent-escaped (V5) with a backslash-free f-string (PYSDK-02):\n{out}"
             );
@@ -5073,6 +5529,7 @@ mod tests {
                 explode: None,
                 allow_reserved: false,
                 description: None,
+                example: None,
                 openapi_content: None,
                 openapi_fields: Vec::new(),
                 provenance: SourceSpan {
@@ -5323,6 +5780,56 @@ mod tests {
             assert!(
                 !out.contains("(**_data)"),
                 "must not splat the raw dict:\n{out}"
+            );
+        }
+
+        // A dataclass sends what the Pydantic style sends: each key by its wire name (`class`, never
+        // the `class_` attribute), an unset omittable field left out rather than sent as `null`, and a
+        // nested model through its own `to_dict` — the client no longer reaches for `asdict`.
+        #[test]
+        fn dataclass_to_dict_uses_wire_names_and_omits_unset_optionals() {
+            let facts = br#"{
+              "module": "app", "routes": [],
+              "schemas": [
+                { "id": "app.models.Inner", "name": "Inner",
+                  "body": { "type": "object", "of": [] },
+                  "span": { "file": "/root/m.py", "start_line": 1, "end_line": 1 } },
+                { "id": "app.models.Thing", "name": "Thing",
+                  "body": { "type": "object", "of": [
+                    { "json_name": "class", "serializer_may_omit": false, "deserializer_accepts_absent": false, "deserializer_accepts_null": false, "serializer_may_emit_null": false, "validator_requires_presence": true, "validator_rejects_null": true,
+                      "schema": { "type": "primitive", "of": { "prim": "string" } },
+                      "description": null, "example": null },
+                    { "json_name": "from", "serializer_may_omit": true, "deserializer_accepts_absent": true, "deserializer_accepts_null": false, "serializer_may_emit_null": false, "validator_requires_presence": false, "validator_rejects_null": true,
+                      "schema": { "type": "primitive", "of": { "prim": "string" } },
+                      "description": null, "example": null },
+                    { "json_name": "inner", "serializer_may_omit": true, "deserializer_accepts_absent": true, "deserializer_accepts_null": false, "serializer_may_emit_null": false, "validator_requires_presence": false, "validator_rejects_null": true,
+                      "schema": { "type": "array", "of": { "type": "named", "of": "app.models.Inner" } },
+                      "description": null, "example": null }
+                  ] },
+                  "span": { "file": "/root/m.py", "start_line": 2, "end_line": 2 } }
+              ],
+              "diagnostics": [] }"#;
+            let out =
+                emit_models_with_style(&graph_from(facts), "pkg", PyModelStyle::Dataclass).unwrap();
+            assert!(
+                out.contains(
+                    "    def to_dict(self) -> dict[str, Any]:\n        _data: dict[str, Any] = {\n            \"class\": self.class_,\n        }\n"
+                ),
+                "{out}"
+            );
+            assert!(
+                out.contains("        if self.from_ is not None:\n            _data[\"from\"] = self.from_\n"),
+                "{out}"
+            );
+            assert!(
+                out.contains(
+                    "            _data[\"inner\"] = [_item.to_dict() for _item in self.inner]\n"
+                ),
+                "{out}"
+            );
+            assert!(
+                out.contains("    def to_dict(self) -> dict[str, Any]:\n        return {}\n"),
+                "an empty dataclass encodes as an empty object:\n{out}"
             );
         }
 

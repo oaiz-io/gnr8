@@ -197,11 +197,46 @@ class Client:
             return {key: self._wire_value(item) for key, item in value.items()}
         return value
 
-    @staticmethod
-    def _parameter_scalar(value: Any) -> str:
+    @classmethod
+    def _parameter_scalar(cls, value: Any) -> str:
         if isinstance(value, bool):
             return "true" if value else "false"
+        if isinstance(value, float):
+            return cls._wire_number(value)
         return str(value)
+
+    @staticmethod
+    def _wire_number(value: float) -> str:
+        # The shortest decimal that reads back as `value`, laid out as JavaScript's
+        # Number#toString lays it out, as every generated SDK writes a parameter number.
+        if value != value:
+            return "NaN"
+        if value in (float("inf"), float("-inf")):
+            return "Infinity" if value > 0 else "-Infinity"
+        if value == 0:
+            return "0"
+        sign = "-" if value < 0 else ""
+        mantissa, _, exponent = repr(abs(value)).partition("e")
+        whole, _, fraction = mantissa.partition(".")
+        spelled = whole + fraction
+        digits = spelled.strip("0")
+        leading = len(spelled) - len(spelled.lstrip("0"))
+        point = len(whole) + int(exponent or "0") - leading
+        if len(digits) <= point <= 21:
+            return sign + digits + "0" * (point - len(digits))
+        if 0 < point <= 21:
+            return sign + digits[:point] + "." + digits[point:]
+        if -6 < point <= 0:
+            return sign + "0." + "0" * -point + digits
+        text = digits[:1] + ("." + digits[1:] if len(digits) > 1 else "")
+        if point > 0:
+            return f"{sign}{text}e+{point - 1}"
+        return f"{sign}{text}e-{1 - point}"
+
+    def _path_segment(self, value: Any) -> str:
+        return urllib.parse.quote(
+            self._parameter_scalar(self._wire_value(value)), safe=""
+        )
 
     def _parameter_pairs(
         self,
@@ -278,8 +313,8 @@ class Client:
         if body_encoding == "json":
             return json.dumps(value).encode(), content_type
         if body_encoding == "form":
-            encoded = urllib.parse.urlencode(value, doseq=True).encode()
-            return encoded, content_type
+            encoded = urllib.parse.urlencode(self._form_fields(value), doseq=True)
+            return encoded.encode(), content_type
         if body_encoding == "multipart":
             boundary = f"gnr8-{secrets.token_hex(16)}"
             return (
@@ -287,6 +322,22 @@ class Client:
                 f"multipart/form-data; boundary={boundary}",
             )
         raise ValueError(f"unsupported request body encoding: {body_encoding}")
+
+    @classmethod
+    def _form_fields(cls, value: Any) -> Any:
+        # A `None` is no field, as it is no multipart part: never the text "None".
+        # A scalar is spelled as every generated SDK spells a parameter value.
+        if not isinstance(value, dict):
+            return value
+        fields = {}
+        for key, item in value.items():
+            if isinstance(item, (list, tuple)):
+                item = [cls._parameter_scalar(p) for p in item if p is not None]
+            elif item is not None:
+                item = cls._parameter_scalar(item)
+            if item is not None:
+                fields[key] = item
+        return fields
 
     def _encode_multipart(self, value: Any, boundary: str) -> bytes:
         if not isinstance(value, dict):
@@ -324,7 +375,7 @@ class Client:
                     out.extend(
                         f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode()
                     )
-                    out.extend(str(part).encode())
+                    out.extend(self._parameter_scalar(part).encode())
                     out.extend(b"\r\n")
         out.extend(f"--{boundary}--\r\n".encode())
         return bytes(out)
@@ -609,7 +660,7 @@ class Client:
 
         Returns the book when it is in stock, and an out-of-stock notice otherwise.
         """
-        path = f"/books/{urllib.parse.quote(str(book_id), safe='')}"
+        path = f"/books/{self._path_segment(book_id)}"
         _query: list[tuple[str, str]] = []
         _allow_reserved: set[int] = set()
         if fmt is not None:
@@ -643,7 +694,7 @@ class Client:
 
         Filters left unset in the payload keep their current values.
         """
-        path = f"/books/{urllib.parse.quote(str(book_id), safe='')}"
+        path = f"/books/{self._path_segment(book_id)}"
         _status, _headers, _raw = self._do(
             "PUT",
             path,

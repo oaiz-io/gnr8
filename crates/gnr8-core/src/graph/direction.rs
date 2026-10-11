@@ -161,12 +161,18 @@ pub(crate) fn schema_consumers(graph: &ApiGraph) -> SchemaConsumers<'_> {
         if let Some(body) = &operation.request_body {
             roots.push(body.ref_id.as_str());
         }
+        for variant in &operation.request_body_variants {
+            roots.push(variant.body.ref_id.as_str());
+        }
         for param in &operation.params {
             collect_parameter_refs(param, &bodies, &mut roots);
         }
         for response in &operation.responses {
             if let Some(body) = &response.body {
                 roots.push(body.ref_id.as_str());
+            }
+            for header in &response.headers {
+                collect_named_refs(&header.schema, &mut roots);
             }
         }
         for schema_id in reachable_schemas(roots, &bodies) {

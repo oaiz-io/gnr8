@@ -1,0 +1,22 @@
+swagger: "2.0"
+info: {title: Sw, version: "1"}
+host: api.example.com
+basePath: /v1
+schemes: [https, http]
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - {name: page, in: query, type: integer, minimum: 0, exclusiveMinimum: true}
+        - {name: n, in: query, type: integer, minimum: 0, exclusiveMinimum: true, multipleOf: 3}
+      responses:
+        "200":
+          description: ok
+          schema: {$ref: "#/definitions/Item"}
+definitions:
+  Item:
+    type: object
+    properties:
+      price: {type: number, minimum: 0, exclusiveMinimum: true, multipleOf: 0.5}
+      count: {type: integer, example: 7}

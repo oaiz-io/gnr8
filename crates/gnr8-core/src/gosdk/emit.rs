@@ -24,17 +24,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use super::ERROR_TYPE;
+
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{
     ApiGraph, Field, Operation, PaginationMode, PaginationPolicy, PaginationTermination, Prim,
     RuntimePolicy, Schema, Type, WellKnown,
 };
 use crate::sdk::emit_common::{
-    binary_value_shape, error_response_bodies_of, join_path, operation_auth_alternatives,
-    operation_prose, path_tokens, path_tokens_match, quoted_string_literal, request_body_models_of,
-    schema_is_multipart_request, split_words, success_responses_of, ApiKeyLocation,
-    BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme, OperationAuthScheme,
-    RequestBodyEncoding, RequestBodyModel, SuccessResponses, UniqueSchemaNames,
+    binary_value_shape, check_path_parameters, error_response_bodies_of, join_path,
+    operation_auth_alternatives, operation_prose, path_tokens, path_tokens_match,
+    quoted_string_literal, request_body_models_of, schema_is_multipart_request, split_words,
+    success_responses_of, ApiKeyLocation, BinaryValueShape, HttpAuthScheme, OperationApiKeyScheme,
+    OperationAuthScheme, PaginationNames, RequestBodyEncoding, RequestBodyModel, SuccessResponses,
+    UniqueSchemaNames,
 };
 use crate::CoreError;
 
@@ -116,6 +119,21 @@ pub(crate) fn go_type(
     nullable: bool,
     graph: &ApiGraph,
 ) -> Result<String, CoreError> {
+    go_type_in(schema, nullable, graph, "")
+}
+
+/// [`go_type`], with every generated SDK symbol spelled `{qualifier}{Name}`.
+///
+/// The one Go type speller: SDK emission calls it through [`go_type`] with an empty qualifier, so its
+/// bytes cannot move, and a consumer's code sample calls it with the package qualifier (`"sdk."`).
+/// Only the `Named` leaf is qualified — composites (`[]T`, `map[K]V`, pointers) reach it by
+/// recursion, and standard-library types (`time.Time`) are never generated symbols.
+pub(crate) fn go_type_in(
+    schema: &Type,
+    nullable: bool,
+    graph: &ApiGraph,
+    qualifier: &str,
+) -> Result<String, CoreError> {
     let base = match schema {
         // A base scalar maps to its Go type. Floating-point width is preserved so an OpenAPI number
         // (64-bit by default) is never silently narrowed.
@@ -125,17 +143,17 @@ pub(crate) fn go_type(
         Type::WellKnown(well_known) => go_well_known(well_known).to_string(),
         Type::Array(items) => {
             // Slice elements are never nullable-pointer-wrapped.
-            return Ok(format!("[]{}", go_type(items, false, graph)?));
+            return Ok(format!("[]{}", go_type_in(items, false, graph, qualifier)?));
         }
         Type::Map { key, value } => {
             let value_type = if matches!(value.as_ref(), Type::Any {}) {
                 "any".to_string()
             } else {
-                go_type(value, false, graph)?
+                go_type_in(value, false, graph, qualifier)?
             };
             return Ok(format!(
                 "map[{}]{}",
-                go_type(key, false, graph)?,
+                go_type_in(key, false, graph, qualifier)?,
                 value_type
             ));
         }
@@ -151,7 +169,7 @@ pub(crate) fn go_type(
             // Both objects and enum newtypes are referenced by their exported Go name; a NULLABLE
             // value ref becomes a pointer.
             return Ok(maybe_pointer(
-                target.name.clone(),
+                format!("{qualifier}{}", target.name),
                 nullable,
                 is_value_ref(target, graph),
             ));
@@ -925,7 +943,7 @@ return nil, err
 continue
 }}
 if (resp.StatusCode < 200 || resp.StatusCode >= 300) && !runtime.SuccessStatuses[resp.StatusCode] {{
-c.callErrorHooks(attemptReq.Context(), ctx, &APIError{{StatusCode: resp.StatusCode, Headers: resp.Header.Clone(), RequestID: resp.Header.Get(\"X-Request-ID\")}})
+c.callErrorHooks(attemptReq.Context(), ctx, &{ERROR_TYPE}{{StatusCode: resp.StatusCode, Headers: resp.Header.Clone(), RequestID: resp.Header.Get(\"X-Request-ID\")}})
 }}
 if cancel != nil {{
 resp.Body = &cancelOnCloseReadCloser{{ReadCloser: resp.Body, cancel: cancel}}
@@ -1041,6 +1059,7 @@ return nil
 }}
 "
     );
+    let body = format!("{body}{WIRE_ENCODING_HELPERS}");
     file(
         package,
         &[
@@ -1048,13 +1067,97 @@ return nil
             "encoding/json",
             "errors",
             "io",
+            "math",
             "net/http",
+            "net/url",
+            "sort",
             "strconv",
+            "strings",
             "time",
         ],
         &body,
     )
 }
+
+/// The one encoding rule every request URL and cookie a Go client sends is written with, emitted
+/// into `client.go` so every operation file can call it: each byte but an RFC 3986 unreserved one
+/// (`A-Z a-z 0-9 - . _ ~`) becomes `%XX`. It is the rule the docs page and the contract test spell
+/// a path and a query with (`verify::percent_encode`), so a space is `%20`, never `+`.
+const WIRE_ENCODING_HELPERS: &str = r##"
+// wireEscape percent-encodes one path segment, query name or value, or cookie name or value:
+// every byte but an unreserved one (A-Z a-z 0-9 - . _ ~) becomes %XX, so a space is %20.
+func wireEscape(value string) string {
+return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+}
+
+// encodeWireQuery writes a query string with wireEscape: names sorted, each name's values in
+// order. A value allowReserved marks keeps the reserved characters RFC 3986 lets it carry.
+func encodeWireQuery(values url.Values, allowReserved map[string]map[int]bool) string {
+keys := make([]string, 0, len(values))
+for key := range values {
+keys = append(keys, key)
+}
+sort.Strings(keys)
+parts := make([]string, 0)
+for _, key := range keys {
+for index, value := range values[key] {
+encoded := wireEscape(value)
+if allowReserved[key][index] {
+encoded = strings.NewReplacer(
+"%3A", ":", "%2F", "/", "%3F", "?", "%23", "#", "%5B", "[", "%5D", "]",
+"%40", "@", "%21", "!", "%24", "$", "%26", "&", "%27", "'", "%28", "(",
+"%29", ")", "%2A", "*", "%2B", "+", "%2C", ",", "%3B", ";", "%3D", "=",
+).Replace(encoded)
+}
+parts = append(parts, wireEscape(key)+"="+encoded)
+}
+}
+return strings.Join(parts, "&")
+}
+
+// wireNumber writes a float parameter value as every generated SDK writes it: the shortest
+// decimal that reads back as the same value, laid out as JavaScript's Number#toString lays it out
+// (3, not 3.0; 10000000000000000, not 1e+16; 1e-7 below a millionth).
+func wireNumber(value float64, bits int) string {
+if math.IsNaN(value) {
+return "NaN"
+}
+if math.IsInf(value, 0) {
+if value > 0 {
+return "Infinity"
+}
+return "-Infinity"
+}
+if value == 0 {
+return "0"
+}
+sign := ""
+if value < 0 {
+sign = "-"
+value = -value
+}
+mantissa, exponent, _ := strings.Cut(strconv.FormatFloat(value, 'e', -1, bits), "e")
+digits := strings.Replace(mantissa, ".", "", 1)
+power, _ := strconv.Atoi(exponent)
+point := power + 1
+switch {
+case len(digits) <= point && point <= 21:
+return sign + digits + strings.Repeat("0", point-len(digits))
+case 0 < point && point <= 21:
+return sign + digits[:point] + "." + digits[point:]
+case -6 < point && point <= 0:
+return sign + "0." + strings.Repeat("0", -point) + digits
+}
+text := digits[:1]
+if len(digits) > 1 {
+text += "." + digits[1:]
+}
+if point > 0 {
+return sign + text + "e+" + strconv.Itoa(point-1)
+}
+return sign + text + "e-" + strconv.Itoa(1-point)
+}
+"##;
 
 fn go_duration_ms(timeout_ms: u64) -> String {
     format!("{timeout_ms} * time.Millisecond")
@@ -1085,9 +1188,9 @@ fn go_retry_status_map(runtime: &RuntimePolicy) -> String {
 pub(crate) fn emit_errors(package: &str) -> String {
     let body = format!(
         "\
-// APIError is returned by operation methods on rejected HTTP responses. It exposes the
+// {ERROR_TYPE} is returned by operation methods on rejected HTTP responses. It exposes the
 // HTTP status, response metadata, raw body, parsed JSON body, and decoded error body.
-type APIError struct {{
+type {ERROR_TYPE} struct {{
 StatusCode int
 Headers http.Header
 RequestID string
@@ -1100,29 +1203,29 @@ Hints []string
 }}
 
 // Error implements the error interface.
-func (e *APIError) Error() string {{
+func (e *{ERROR_TYPE}) Error() string {{
 return fmt.Sprintf(\"{package}: %d %s (%s)\", e.StatusCode, e.Message, e.Slug)
 }}
 
 // IsNotFound reports whether the error is a 404.
-func (e *APIError) IsNotFound() bool {{
+func (e *{ERROR_TYPE}) IsNotFound() bool {{
 return e.StatusCode == 404
 }}
 
-// ErrorStatusCode returns the HTTP status carried by an APIError, or zero for
+// ErrorStatusCode returns the HTTP status carried by an {ERROR_TYPE}, or zero for
 // non-HTTP errors.
 func ErrorStatusCode(err error) int {{
-var apiError *APIError
+var apiError *{ERROR_TYPE}
 if errors.As(err, &apiError) {{
 return apiError.StatusCode
 }}
 return 0
 }}
 
-// ErrorRawBody returns the response body carried by an APIError, or nil for
+// ErrorRawBody returns the response body carried by an {ERROR_TYPE}, or nil for
 // non-HTTP errors. The returned bytes are a copy and may be modified by the caller.
 func ErrorRawBody(err error) []byte {{
-var apiError *APIError
+var apiError *{ERROR_TYPE}
 if !errors.As(err, &apiError) {{
 return nil
 }}
@@ -1261,7 +1364,7 @@ pub(crate) fn emit_shared_request_helpers(
 }
 
 /// Packages referenced by [`emit_wire_parameter_helpers`]'s emitted source.
-const WIRE_HELPER_IMPORTS: [&str; 6] = ["fmt", "net/url", "reflect", "sort", "strings", "time"];
+const WIRE_HELPER_IMPORTS: [&str; 5] = ["fmt", "reflect", "sort", "strings", "time"];
 
 /// Packages referenced by [`emit_request_body_helpers`]'s emitted source, for the given encodings.
 ///
@@ -1360,9 +1463,13 @@ fn emit_operations_inner(
         .iter()
         .any(|op| op.request_body.is_some() && !op.request_body_required);
     for op in ops {
-        if success_responses_of(op, graph)?.has_binary_body() {
+        let success = success_responses_of(op, graph)?;
+        if success.has_binary_body() {
             needs_io = true;
-            break;
+        }
+        // A text reply is checked to be UTF-8 before it is returned as a string.
+        if success.text_body && !success.has_binary_body() {
+            imports.extend(["fmt", "unicode/utf8"]);
         }
     }
     if needs_io {
@@ -1372,13 +1479,20 @@ fn emit_operations_inner(
     if include_shared_helpers && needs_wire_helpers {
         imports.extend(WIRE_HELPER_IMPORTS);
     }
-    // WR-04: any op with a templated path interpolates `url.PathEscape(...)`, which needs `net/url`.
+    // WR-04: any op with a templated path interpolates `wireEscape(...)` through `fmt.Sprintf`; a
+    // `date-time` segment is formatted with `time` first.
     if ops
         .iter()
         .any(|op| op.params.iter().any(|p| p.location == "path"))
     {
         imports.push("fmt");
-        imports.push("net/url");
+    }
+    for op in ops {
+        for param in op.params.iter().filter(|p| p.location == "path") {
+            if resolves_to_date_time(&param.schema, graph)? {
+                imports.push("time");
+            }
+        }
     }
     if include_facades {
         emit_group_facades(&mut body, graph, ops)?;
@@ -1680,9 +1794,12 @@ fn emit_operation(
             OperationAuthScheme::ApiKey(_) => None,
         })
         .collect();
-    // The return type is the success model when one exists, else an empty struct.
+    // The return type is the success model when one exists, else an empty struct. A `text/*`
+    // reply is returned as the text itself.
     let return_model = if success.has_binary_body() {
         "[]byte".to_string()
+    } else if success.text_body {
+        "string".to_string()
     } else {
         success
             .body_model
@@ -1751,6 +1868,8 @@ fn emit_operation(
 pub(super) struct GoPaginationInfo {
     page_type: String,
     item_type: String,
+    /// The item's schema, for code that spells the item type from outside the package.
+    pub(super) item_schema: Type,
     items_field: String,
     items_pointer_depth: usize,
     next_cursor_field: Option<String>,
@@ -1795,6 +1914,15 @@ fn emit_go_pagination_items(
     Ok(GO_PAGE_ITEMS_LOCAL.to_string())
 }
 
+/// The two helpers a paginated operation's method `method` gains: the page collector and the item
+/// iterator — the one spelling the emitter and the docs use.
+pub(crate) fn pagination_names(method: &str) -> PaginationNames {
+    PaginationNames {
+        pages: format!("{method}Pages"),
+        iterate: format!("Iterate{method}"),
+    }
+}
+
 fn emit_pagination_helpers(
     body: &mut String,
     op: &Operation,
@@ -1804,8 +1932,10 @@ fn emit_pagination_helpers(
         return Ok(());
     };
     let method_name = operation_method_name(op);
-    let pages_name = format!("{method_name}Pages");
-    let items_name = format!("Iterate{method_name}");
+    let PaginationNames {
+        pages: pages_name,
+        iterate: items_name,
+    } = pagination_names(&method_name);
     let info = go_pagination_info(graph, op, policy)?;
     let PaginationArgs { args, call_args } = go_pagination_args(op, graph)?;
 
@@ -2147,6 +2277,7 @@ pub(super) fn go_pagination_info(
     Ok(GoPaginationInfo {
         page_type,
         item_type: go_type(item_schema, false, graph)?,
+        item_schema: (**item_schema).clone(),
         items_field: exported(&items.json_name),
         items_pointer_depth,
         next_cursor_field,
@@ -2405,7 +2536,7 @@ fn emit_request_dispatch(
     }
 
     // URL construction: baseURL + absolute path with path params interpolated.
-    emit_url(body, op, base_path, path_params)?;
+    emit_url(body, op, graph, base_path, path_params)?;
     emit_go_auth_selection(body, &op.id, auth_alternatives)?;
 
     // Request build.
@@ -2535,15 +2666,14 @@ fn emit_request_dispatch(
             writeln!(body, "}}").map_err(sink)?;
             writeln!(body, "}}").map_err(sink)?;
         }
-        if has_allow_reserved {
-            writeln!(
-                body,
-                "req.URL.RawQuery = encodeWireQuery(q, wireAllowReserved)"
-            )
-            .map_err(sink)?;
+        // One encoder for every query string: `url.Values.Encode` writes a space as `+`, which is not
+        // the `%20` the page and the contract test spell it with.
+        let reserved = if has_allow_reserved {
+            "wireAllowReserved"
         } else {
-            writeln!(body, "req.URL.RawQuery = q.Encode()").map_err(sink)?;
-        }
+            "nil"
+        };
+        writeln!(body, "req.URL.RawQuery = encodeWireQuery(q, {reserved})").map_err(sink)?;
     }
 
     emit_header_and_cookie_params(body, header_params, cookie_params, graph)?;
@@ -2685,7 +2815,11 @@ fn emit_request_dispatch(
         writeln!(body, "return data, nil").map_err(sink)?;
         writeln!(body, "}}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
-            writeln!(body, "return out, &APIError{{StatusCode: resp.StatusCode}}").map_err(sink)?;
+            writeln!(
+                body,
+                "return out, &{ERROR_TYPE}{{StatusCode: resp.StatusCode}}"
+            )
+            .map_err(sink)?;
         }
     } else if has_decode {
         writeln!(
@@ -2694,17 +2828,38 @@ fn emit_request_dispatch(
             go_status_match("resp.StatusCode", &success.body_statuses)
         )
         .map_err(sink)?;
-        writeln!(
-            body,
-            "if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {{"
-        )
-        .map_err(sink)?;
-        writeln!(body, "return out, err").map_err(sink)?;
-        writeln!(body, "}}").map_err(sink)?;
-        writeln!(body, "return out, nil").map_err(sink)?;
+        if success.text_body {
+            writeln!(body, "data, err := io.ReadAll(resp.Body)").map_err(sink)?;
+            writeln!(body, "if err != nil {{").map_err(sink)?;
+            writeln!(body, "return out, err").map_err(sink)?;
+            writeln!(body, "}}").map_err(sink)?;
+            // The reply is UTF-8 text by declaration; bytes that are not fail the call, as a
+            // malformed JSON reply does, rather than coming back as a string no other SDK returns.
+            writeln!(body, "if !utf8.Valid(data) {{").map_err(sink)?;
+            writeln!(
+                body,
+                "return out, fmt.Errorf(\"HTTP %d: response decode failed (invalid_text)\", resp.StatusCode)"
+            )
+            .map_err(sink)?;
+            writeln!(body, "}}").map_err(sink)?;
+            writeln!(body, "return string(data), nil").map_err(sink)?;
+        } else {
+            writeln!(
+                body,
+                "if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {{"
+            )
+            .map_err(sink)?;
+            writeln!(body, "return out, err").map_err(sink)?;
+            writeln!(body, "}}").map_err(sink)?;
+            writeln!(body, "return out, nil").map_err(sink)?;
+        }
         writeln!(body, "}}").map_err(sink)?;
         if !success.has_bodyless_alternative() {
-            writeln!(body, "return out, &APIError{{StatusCode: resp.StatusCode}}").map_err(sink)?;
+            writeln!(
+                body,
+                "return out, &{ERROR_TYPE}{{StatusCode: resp.StatusCode}}"
+            )
+            .map_err(sink)?;
         }
     }
     Ok(())
@@ -2841,7 +2996,7 @@ fn emit_error_decode(body: &mut String, op: &Operation, graph: &ApiGraph) -> Res
     writeln!(body, "if typedBody == nil {{").map_err(sink)?;
     writeln!(body, "typedBody = jsonBody").map_err(sink)?;
     writeln!(body, "}}").map_err(sink)?;
-    writeln!(body, "return out, &APIError{{").map_err(sink)?;
+    writeln!(body, "return out, &{ERROR_TYPE}{{").map_err(sink)?;
     writeln!(body, "StatusCode: resp.StatusCode,").map_err(sink)?;
     writeln!(body, "Headers: resp.Header.Clone(),").map_err(sink)?;
     writeln!(body, "RequestID: resp.Header.Get(\"X-Request-ID\"),").map_err(sink)?;
@@ -2883,10 +3038,10 @@ fn query_string_expr(
     match value_ty {
         "string" => Ok(accessor.to_string()),
         "int64" => Ok(format!("strconv.FormatInt({accessor}, 10)")),
-        "float32" => Ok(format!("strconv.FormatFloat(float64({accessor}), 'g', -1, 32)")),
-        "float64" => Ok(format!("strconv.FormatFloat({accessor}, 'g', -1, 64)")),
+        "float32" => Ok(format!("wireNumber(float64({accessor}), 32)")),
+        "float64" => Ok(format!("wireNumber({accessor}, 64)")),
         "bool" => Ok(format!("strconv.FormatBool({accessor})")),
-        "time.Time" => Ok(format!("({accessor}).Format(time.RFC3339)")),
+        "time.Time" => Ok(format!("({accessor}).Format(time.RFC3339Nano)")),
         other => Err(CoreError::SdkGen {
             message: format!(
                 "unsupported query-param Go type '{other}': only string/int64/float32/float64/bool/time.Time \
@@ -2934,12 +3089,13 @@ fn type_resolves_to_enum(
 
 /// The stdlib import a query-param value of Go type `value_ty` needs to be URL-encoded (WR-02), if any.
 ///
-/// `string` needs nothing; the `strconv`-converted scalars need `strconv`; `time.Time` needs `time`.
+/// `string` needs nothing; the `strconv`-converted scalars need `strconv` (a float goes through
+/// `client.go`'s `wireNumber`, so it needs nothing here); `time.Time` needs `time`.
 /// Returns `None` for a type with no extra import (or an unsupported one — the error surfaces later in
 /// [`query_string_expr`] during emission, so this stays infallible for the import pre-scan).
 fn query_extra_import(value_ty: &str) -> Option<&'static str> {
     match value_ty {
-        "int64" | "float32" | "float64" | "bool" => Some("strconv"),
+        "int64" | "bool" => Some("strconv"),
         "time.Time" => Some("time"),
         _ => None,
     }
@@ -3034,7 +3190,7 @@ fn emit_non_query_parameter(
         } else {
             writeln!(
                 body,
-                "req.AddCookie(&http.Cookie{{Name: wireCookieEscape(pair.Name), Value: wireCookieEscape(pair.Value)}})"
+                "req.AddCookie(&http.Cookie{{Name: wireEscape(pair.Name), Value: wireEscape(pair.Value)}})"
             )
             .map_err(sink)?;
         }
@@ -3052,7 +3208,7 @@ fn emit_non_query_parameter(
         } else {
             writeln!(
                 body,
-                "req.AddCookie(&http.Cookie{{Name: wireCookieEscape({}), Value: wireCookieEscape({value})}})",
+                "req.AddCookie(&http.Cookie{{Name: wireEscape({}), Value: wireEscape({value})}})",
                 quoted_string_literal(&param.name)
             )
             .map_err(sink)?;
@@ -3066,7 +3222,7 @@ fn emit_non_query_parameter(
 
 fn emit_wire_parameter_helpers(body: &mut String) {
     body.push_str(
-        r##"
+        r#"
 
 type wireParameterPair struct {
 Name string
@@ -3135,39 +3291,18 @@ return []wireParameterPair{{Name: name, Value: wireParameterScalar(input)}}
 
 func wireParameterScalar(value any) string {
 if instant, ok := value.(time.Time); ok {
-return instant.Format(time.RFC3339)
+return instant.Format(time.RFC3339Nano)
+}
+switch number := reflect.ValueOf(value); number.Kind() {
+case reflect.Float32:
+return wireNumber(number.Float(), 32)
+case reflect.Float64:
+return wireNumber(number.Float(), 64)
 }
 return fmt.Sprint(value)
 }
 
-func encodeWireQuery(values url.Values, allowReserved map[string]map[int]bool) string {
-keys := make([]string, 0, len(values))
-for key := range values {
-keys = append(keys, key)
-}
-sort.Strings(keys)
-parts := make([]string, 0)
-for _, key := range keys {
-for index, value := range values[key] {
-encoded := strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
-if allowReserved[key][index] {
-encoded = strings.NewReplacer(
-"%3A", ":", "%2F", "/", "%3F", "?", "%23", "#", "%5B", "[", "%5D", "]",
-"%40", "@", "%21", "!", "%24", "$", "%26", "&", "%27", "'", "%28", "(",
-"%29", ")", "%2A", "*", "%2B", "+", "%2C", ",", "%3B", ";", "%3D", "=",
-).Replace(encoded)
-}
-encodedKey := strings.ReplaceAll(url.QueryEscape(key), "+", "%20")
-parts = append(parts, encodedKey+"="+encoded)
-}
-}
-return strings.Join(parts, "&")
-}
-
-func wireCookieEscape(value string) string {
-return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
-}
-"##,
+"#,
     );
 }
 
@@ -3346,6 +3481,12 @@ return ""
 }}
 return formValue(v.Elem().Interface())
 }}
+if v.Kind() == reflect.Float32 {{
+return wireNumber(v.Float(), 32)
+}}
+if v.Kind() == reflect.Float64 {{
+return wireNumber(v.Float(), 64)
+}}
 if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {{
 return fmt.Sprint(value)
 }}
@@ -3466,6 +3607,7 @@ return err
 fn emit_url(
     body: &mut String,
     op: &Operation,
+    graph: &ApiGraph,
     base_path: &str,
     path_params: &[&str],
 ) -> Result<(), CoreError> {
@@ -3482,6 +3624,7 @@ fn emit_url(
             ),
         });
     }
+    check_path_parameters(op, graph)?;
 
     if tokens.is_empty() {
         writeln!(body, "reqURL := c.baseURL + \"{abs}\"").map_err(sink)?;
@@ -3496,10 +3639,7 @@ fn emit_url(
         let placeholder = format!("{{{token}}}");
         format_str = format_str.replace(&placeholder, "%s");
         // WR-04: percent-encode the value so it cannot inject extra path/query segments.
-        args.push(format!(
-            "url.PathEscape(fmt.Sprint({}))",
-            lower_camel(token)
-        ));
+        args.push(path_segment_expr(op, token, graph)?);
     }
     writeln!(
         body,
@@ -3508,6 +3648,66 @@ fn emit_url(
     )
     .map_err(sink)?;
     Ok(())
+}
+
+/// The escaped text of one path segment: the argument as the wire spells it — a `date-time` in
+/// RFC 3339, the format the client sends a `date-time` query or header value in; any other value as
+/// `fmt.Sprint` prints it — percent-encoded by `wireEscape`, the rule the page prints the path with.
+fn path_segment_expr(op: &Operation, token: &str, graph: &ApiGraph) -> Result<String, CoreError> {
+    let param = op
+        .params
+        .iter()
+        .find(|param| param.location == "path" && param.name == token)
+        .ok_or_else(|| CoreError::SdkGen {
+            message: format!(
+                "operation '{}' path token '{token}' names no path parameter",
+                op.id
+            ),
+        })?;
+    let ident = lower_camel(token);
+    let text = match resolve_path_alias(&param.schema, graph)? {
+        Type::WellKnown(WellKnown::DateTime) => format!("{ident}.Format(time.RFC3339Nano)"),
+        Type::Primitive(Prim::Float { bits }) => {
+            format!(
+                "wireNumber(float64({ident}), {})",
+                if *bits == 32 { 32 } else { 64 }
+            )
+        }
+        _ => format!("fmt.Sprint({ident})"),
+    };
+    Ok(format!("wireEscape({text})"))
+}
+
+/// Whether `schema`, through any chain of named aliases, is a `date-time` — a `time.Time` in Go.
+fn resolves_to_date_time(schema: &Type, graph: &ApiGraph) -> Result<bool, CoreError> {
+    Ok(matches!(
+        resolve_path_alias(schema, graph)?,
+        Type::WellKnown(WellKnown::DateTime)
+    ))
+}
+
+/// The type `schema` names through any chain of named aliases.
+fn resolve_path_alias<'g>(schema: &'g Type, graph: &'g ApiGraph) -> Result<&'g Type, CoreError> {
+    let mut current = schema;
+    let mut visited = BTreeSet::new();
+    while let Type::Named(ref_id) = current {
+        if !visited.insert(ref_id.clone()) {
+            return Err(CoreError::SdkGen {
+                message: format!(
+                    "cyclic named schema reference '{ref_id}' while resolving a Go path parameter"
+                ),
+            });
+        }
+        current = &graph
+            .schemas
+            .iter()
+            .find(|schema| &schema.id == ref_id)
+            .ok_or_else(|| CoreError::SdkGen {
+                message: format!("dangling $ref '{ref_id}' is not among graph.schemas"),
+            })?
+            .body;
+    }
+    Ok(current)
 }
 
 /// Emit a `<Method>Params` struct for a query-bearing operation (required → value, optional → pointer).
@@ -4427,22 +4627,23 @@ mod tests {
         }
 
         #[test]
-        fn templated_path_escapes_each_arg_and_imports_net_url() {
-            // WR-04: a `{uuid}` path param must be interpolated through `url.PathEscape` so a value
-            // containing `/`, `?`, `#`, or `..` cannot restructure the request URL, and the file must
-            // import `net/url`. The local URL var is `reqURL` to avoid shadowing the `url` package.
+        fn templated_path_escapes_each_arg_with_wire_escape() {
+            // WR-04: a `{uuid}` path param must be interpolated through `wireEscape` so a value
+            // containing `/`, `?`, `#`, or `..` cannot restructure the request URL. `wireEscape`
+            // lives in client.go, so the operations file needs no `net/url` for a path. The local URL
+            // var is `reqURL` to avoid shadowing the `url` package.
             let graph = super::path_param_graph();
             let ops: Vec<&crate::graph::Operation> = graph.operations.iter().collect();
             let out = emit_operations(&graph, "goalservice", "/goal", &ops).unwrap();
             assert!(
                 out.contains(
-                    "reqURL := c.baseURL + fmt.Sprintf(\"/goal/%s\", url.PathEscape(fmt.Sprint(uuid)))"
+                    "reqURL := c.baseURL + fmt.Sprintf(\"/goal/%s\", wireEscape(fmt.Sprint(uuid)))"
                 ),
-                "path arg must be wrapped in url.PathEscape:\n{out}"
+                "path arg must be wrapped in wireEscape:\n{out}"
             );
             assert!(
-                out.contains("\"net/url\""),
-                "a templated path must import net/url:\n{out}"
+                !out.contains("url.PathEscape"),
+                "url.PathEscape leaves + $ & = @ : unescaped, unlike the page:\n{out}"
             );
         }
 
@@ -4460,8 +4661,44 @@ mod tests {
                 "integer path parameter must remain integer in the Go API:\n{out}"
             );
             assert!(
-                out.contains("url.PathEscape(fmt.Sprint(uuid))"),
+                out.contains("wireEscape(fmt.Sprint(uuid))"),
                 "typed path parameter must be converted to its wire string before escaping:\n{out}"
+            );
+        }
+
+        #[test]
+        fn date_time_path_parameter_is_formatted_as_rfc3339_and_imports_time() {
+            // A `time.Time` path argument is sent the way a `date-time` query or header value is —
+            // RFC 3339 — never as `fmt.Sprint` prints it, and its file imports `time`.
+            let mut graph = super::path_param_graph();
+            graph.operations[0].params[0].schema =
+                Type::WellKnown(crate::graph::WellKnown::DateTime);
+            let ops: Vec<&crate::graph::Operation> = graph.operations.iter().collect();
+            let out = emit_operations(&graph, "goalservice", "/goal", &ops).unwrap();
+            assert!(
+                out.contains("uuid time.Time,"),
+                "a date-time path parameter is a time.Time:\n{out}"
+            );
+            assert!(
+                out.contains("wireEscape(uuid.Format(time.RFC3339Nano))"),
+                "a date-time path segment is RFC 3339:\n{out}"
+            );
+            assert!(
+                out.contains("\"time\""),
+                "a date-time path imports time:\n{out}"
+            );
+        }
+
+        #[test]
+        fn query_string_is_written_by_the_one_wire_encoder() {
+            // `url.Values.Encode` writes a space as `+`; the page and the contract test print `%20`.
+            let graph = super::typed_query_graph();
+            let ops: Vec<&crate::graph::Operation> = graph.operations.iter().collect();
+            let out = emit_operations(&graph, "goalservice", "/goal", &ops).unwrap();
+            assert!(!out.contains("q.Encode()"), "{out}");
+            assert!(
+                out.contains("req.URL.RawQuery = encodeWireQuery(q, nil)"),
+                "{out}"
             );
         }
 
@@ -4607,7 +4844,7 @@ mod tests {
 
             assert!(
                 out.contains(
-                    "req.AddCookie(&http.Cookie{Name: wireCookieEscape(\"cursor\"), Value: wireCookieEscape(string(*params.Cursor))})"
+                    "req.AddCookie(&http.Cookie{Name: wireEscape(\"cursor\"), Value: wireEscape(string(*params.Cursor))})"
                 ),
                 "optional named enum cookie must use its string wire value:\n{out}"
             );

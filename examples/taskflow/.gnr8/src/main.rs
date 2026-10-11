@@ -129,6 +129,7 @@ fn main() -> std::process::ExitCode {
             // Targets: the standard OpenAPI + Go SDK (built-ins) AND our own Markdown generator.
             .target(OpenApi31::new().to("generated/openapi.yaml"))
             .target(GoSdk::new().module("example.com/taskflow/sdk").to("generated/sdk"))
+            .target(StaticDocs::new().to("generated/docs"))
             .target(Custom(ApiMarkdown {
                 path: "generated/API.md".to_string(),
             })) // <-- yours: write API.md

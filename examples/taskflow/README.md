@@ -98,6 +98,7 @@ fn main() -> std::process::ExitCode {
             )
             .target(OpenApi31::new().to("generated/openapi.yaml"))               // built-in targets
             .target(GoSdk::new().module("example.com/taskflow/sdk").to("generated/sdk"))
+            .target(StaticDocs::new().to("generated/docs"))                      // built-in docs
             .target(Custom(ApiMarkdown { path: "generated/API.md".into() }))  // <-- YOUR generator
             .post(Header::generated()),                                          // built-in post-process
     )

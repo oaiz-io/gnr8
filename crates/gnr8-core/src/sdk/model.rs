@@ -170,8 +170,6 @@ pub enum SdkSchemaKind {
 /// Shared error response plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdkErrorPlan {
-    /// Neutral base error concept all SDK targets map to their idiomatic exported error type.
-    pub base_error_type: String,
     /// Error responses discovered on operations.
     pub responses: Vec<SdkErrorResponse>,
 }
@@ -443,7 +441,6 @@ impl SdkModel {
                 })
                 .collect(),
             errors: SdkErrorPlan {
-                base_error_type: "ApiError".to_string(),
                 responses: error_responses,
             },
             runtime: SdkRuntimePolicy {
@@ -848,7 +845,6 @@ mod tests {
     fn sdk_model_carries_error_runtime_and_docs_boundaries() {
         let model = SdkModel::build(&graph(), "books", "/api", &SdkFileLayout::compact()).unwrap();
 
-        assert_eq!(model.errors.base_error_type, "ApiError");
         assert_eq!(model.errors.responses.len(), 1);
         assert_eq!(model.errors.responses[0].operation_id, "createBook");
         assert_eq!(model.errors.responses[0].status, 404);
