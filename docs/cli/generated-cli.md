@@ -294,6 +294,9 @@ The enum column lists non-null members (or an array's element members); null is 
 type separately. A field constraint narrows the enum's members, and an empty intersection prints
 `no enum members`. Values containing whitespace, quotes, or `|` are quoted and escaped so each row
 stays on one line. Machine help retains the original member strings and an explicit empty enum.
+Each field is one row, never wrapped: a row with an enum and a description is wider than 80
+columns, and the terminal wraps it. `help --json` carries the same fields for a reader that lays
+them out itself.
 
 ```text
 Body:

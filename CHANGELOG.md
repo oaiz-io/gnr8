@@ -15,7 +15,9 @@ must move the minor version.
   ambiguous enum labels, and distinguishes container element unions from nullable containers.
   Body help no longer recalculates whole-graph directions for every command.
 - OpenAPI output intersects inline enums with field constraints, retains empty enum sets, and
-  includes null in nullable enums.
+  includes null in nullable enums. In 3.1 `enum` constrains every value, so a nullable property's
+  member list without `null` rejected the null it admits. Consumers that read `enum` members as
+  strings must now skip `null`.
 - Fixed the generated CLI documentation's Body example closing fence.
 - Go extraction reports a field-scope `oneof` rule on a slice or map field as
   `schema.metadata.unresolved` instead of publishing an `enum` on the collection itself, which no
