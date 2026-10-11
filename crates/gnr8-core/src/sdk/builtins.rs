@@ -2853,6 +2853,25 @@ fn apply_openapi_schema_patch(
     // PUBLIC component name, and that name changes when a type's two directional contracts diverge —
     // the one case where "unknown schema" is a stale target rather than a typo.
     let split_into = directional_components(doc, &patch.schema);
+    // Whether each patched field is an array, read before the mutable borrow: `uniqueItems` is a
+    // keyword of arrays only.
+    let arrays: Vec<bool> = patch
+        .field_patches
+        .iter()
+        .map(|field_patch| {
+            doc.components
+                .schemas
+                .iter()
+                .find(|(name, _)| name == &patch.schema)
+                .and_then(|(_, schema)| {
+                    schema
+                        .properties
+                        .iter()
+                        .find(|(field, _)| field == &field_patch.field)
+                })
+                .is_some_and(|(_, prop)| schema_is_array(doc, prop, 0))
+        })
+        .collect();
     let Some((_, schema)) = doc
         .components
         .schemas
@@ -2876,10 +2895,37 @@ fn apply_openapi_schema_patch(
             },
         });
     };
-    for field_patch in &patch.field_patches {
-        apply_openapi_field_patch(&patch.schema, schema, field_patch)?;
+    for (field_patch, is_array) in patch.field_patches.iter().zip(arrays) {
+        apply_openapi_field_patch(&patch.schema, schema, field_patch, is_array)?;
     }
     Ok(())
+}
+
+/// Whether a published schema holds an array: `type: array`, a `$ref` to a component that does,
+/// or a `oneOf` whose every variant but `null` does (the nullable-`$ref` form included). `depth`
+/// bounds a chain of references that loops.
+fn schema_is_array(doc: &OpenApiDoc, schema: &SchemaObject, depth: usize) -> bool {
+    if depth > doc.components.schemas.len() {
+        return false;
+    }
+    if let Some(name) = &schema.schema_ref {
+        return doc
+            .components
+            .schemas
+            .iter()
+            .find(|(component, _)| component == name)
+            .is_some_and(|(_, target)| schema_is_array(doc, target, depth + 1));
+    }
+    if !schema.one_of.is_empty() {
+        let mut variants = schema
+            .one_of
+            .iter()
+            .filter(|variant| variant.type_name.as_deref() != Some("null"))
+            .peekable();
+        return variants.peek().is_some()
+            && variants.all(|variant| schema_is_array(doc, variant, depth + 1));
+    }
+    schema.type_name.as_deref() == Some("array")
 }
 
 /// The directional components the document carries in place of `name`, or empty when `name` was never
@@ -2897,10 +2943,13 @@ fn directional_components(doc: &OpenApiDoc, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// `is_array` says whether the field holds an array ([`schema_is_array`]), the only kind of value
+/// `uniqueItems` constrains.
 fn apply_openapi_field_patch(
     schema_name: &str,
     schema: &mut SchemaObject,
     patch: &OpenApiFieldPatch,
+    is_array: bool,
 ) -> Result<(), CoreError> {
     let Some((_, prop)) = schema
         .properties
@@ -2914,6 +2963,30 @@ fn apply_openapi_field_patch(
             ),
         });
     };
+    // `multipleOf` must be a number strictly greater than 0, and `uniqueItems` is a keyword of
+    // arrays: anything else would publish a keyword no validator can read.
+    if let Some(value) = &patch.constraints.multiple_of {
+        if !value
+            .parse::<f64>()
+            .is_ok_and(|divisor| divisor.is_finite() && divisor > 0.0)
+        {
+            return Err(CoreError::Config {
+                message: format!(
+                    "OpenAPI schema patch sets multipleOf {value:?} on {schema_name}.{}: \
+                     multipleOf must be a number greater than 0",
+                    patch.field
+                ),
+            });
+        }
+    }
+    if patch.constraints.unique_items && !is_array {
+        return Err(CoreError::Config {
+            message: format!(
+                "OpenAPI schema patch sets uniqueItems on {schema_name}.{}, which is not an array",
+                patch.field
+            ),
+        });
+    }
 
     if let Some(value) = patch.constraints.min_length {
         prop.min_length = Some(value);
@@ -7430,6 +7503,37 @@ mod tests {
         let yaml = &out.files()[0].text;
         assert!(yaml.contains("multipleOf: 5"), "{yaml}");
         assert!(yaml.contains("uniqueItems: true"), "{yaml}");
+
+        // A `multipleOf` that is not a number greater than 0, or `uniqueItems` on a field that is
+        // not an array, is no valid schema keyword: a configuration error naming the field.
+        let refused = |patch: OpenApiFieldPatch| {
+            let mut out = Artifacts::new();
+            match OpenApi31::new()
+                .to("openapi.yaml")
+                .schema_patch(OpenApiSchemaPatch::new("Order").field(patch))
+                .generate(&ir, &mut out, &cx(), None)
+            {
+                Err(crate::CoreError::Config { message }) => message,
+                other => panic!("expected a configuration error, got {other:?}"),
+            }
+        };
+        for value in ["0", "-2", "abc", "NaN", "inf"] {
+            let mut count = OpenApiFieldPatch::new("count");
+            count.constraints.multiple_of = Some(value.to_string());
+            assert_eq!(
+                refused(count),
+                format!(
+                    "OpenAPI schema patch sets multipleOf {value:?} on Order.count: multipleOf \
+                     must be a number greater than 0"
+                )
+            );
+        }
+        let mut count = OpenApiFieldPatch::new("count");
+        count.constraints.unique_items = true;
+        assert_eq!(
+            refused(count),
+            "OpenAPI schema patch sets uniqueItems on Order.count, which is not an array"
+        );
     }
 
     #[test]

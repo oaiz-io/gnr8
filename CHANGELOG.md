@@ -359,7 +359,9 @@ must move the minor version.
 - **`multipleOf` and `uniqueItems` are typed constraints.** An imported field dropped both from
   `openapi.yaml`, and the sampler ignored them on a parameter, so a sample could break them. They
   are imported on fields and parameters, published from the typed fact, written by an
-  `OpenApiFieldPatch` that sets them, and checked against declared examples. An integer or float
+  `OpenApiFieldPatch` that sets them, and checked against declared examples. A patch whose
+  `multipleOf` is not a number greater than 0, or that sets `uniqueItems` on a field that is not an
+  array, is a configuration error naming the field. An integer or float
   sample is a multiple of its `multipleOf`, or a typed refusal when the bounds admit none; an
   integer under a decimal `multipleOf` is a multiple of the smallest positive integer the divisor
   divides (`3` for `1.5`, `1` for `0.5` or `0.00001`). A float `multipleOf: 1` admits only whole
