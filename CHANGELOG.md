@@ -64,15 +64,16 @@ must move the minor version.
   absent key. The generated CLI prints `UNSET` as `null`. A Pydantic model's field still reads
   `None`, and `to_dict` sends `null` when the field was set (`model_fields_set`) and omits it
   otherwise. An optional field that is not nullable is unchanged: its `None` is the absent key.
-  Generated dataclass `models.py`, the generated CLI's `output.py` and `contract_test.py` change for
-  such fields, and Pydantic `models.py` changes for every model with one.
+  Generated dataclass `models.py` and `contract_test.py` change for such fields, the generated CLI's
+  `output.py` changes in every dataclass SDK with an object schema (it imports `UNSET`), and
+  Pydantic `models.py` changes for every model with one.
 - **Each SDK's `README.md` and `reference.md` are rewritten from the docs model** that `StaticDocs`
   renders its pages from, built for that one SDK. `README.md` replaces the `Package/module` line
   with `Import` (the Go module path, the Python import package, the `package.json` name) and
   `Install` (`go get`, `pip install` with the distribution name `pyproject.toml` lists, `npm
   install`), and its `<Language> quick start` placeholder with `## Quick start`: the first sampled
-  operation's call, byte for byte as `reference.md` prints it, or `No operation has a sample call;
-  reference.md says why under each operation.` when none has one. An SDK with no package metadata
+  operation's call, byte for byte as `reference.md` prints it, or, when none has one, a line saying
+  that no operation has a sample call and that `reference.md` says why under each operation. An SDK with no package metadata
   says why it has no import and no quick start. Its Agent workflow's first step now points to
   `reference.md` for every operation, schema, error and credential, each with its sample.
   `reference.md` is one file holding every docs page as a section, one heading level down: the
@@ -87,8 +88,15 @@ must move the minor version.
   `StaticDocs` fails on — `CoreError::InvalidExample` for an invalid declared example,
   `CoreError::DocsGen` for a blank API title or group name or prose that breaks `reference.md`'s
   structure — and refuses an `OpenApiSchemaPatch` that changes a field fact `reference.md` prints
-  (see Added). `.without_docs()` writes neither file. Tools that parse either file must follow the
-  new layout.
+  (see the next entry). `.without_docs()` writes neither file. Tools that parse either file must
+  follow the new layout.
+- **An existing `OpenApi31` schema patch that sets a documented field fact now fails generation**
+  in any pipeline with an SDK target that writes its docs (the default) or a `StaticDocs` target: a
+  constraint (`multipleOf` and `uniqueItems` included), enum, description, default or example set
+  by an `OpenApiFieldPatch` is a configuration error naming the docs output, the target, the field
+  and the facts, because the docs and their samples read the graph and would disagree with the
+  published spec. Set the fact in the source or with a `Transform` that edits the field, or declare
+  each SDK `.without_docs()`. A patch that only adds `x-*` extensions is unaffected.
 - **`gnr8 verify` checks the samples an SDK's `README.md` and `reference.md` print**, whether or
   not the pipeline declares `StaticDocs`: an SDK target that writes docs and has a package manifest
   gains a docs suite (`<Language> docs samples`), which compiles and runs each sample and fails when
@@ -115,11 +123,13 @@ must move the minor version.
   or writes its docs — both on by default. gnr8 does not check a declared value against `pattern`;
   the author's example is taken as matching it, and it is the only way a pattern-bound input gets a
   sample on a page. A valid example that no call can state prints `No sample call: …` and names
-  the value: a `null` in a request, a whole number in a float field, a request float that Go,
-  Python and TypeScript would print differently (held to the 32-bit narrowing only in a `float32`
-  field), or a request date-time — an example or an enum member — not spelled the way Go sends it
-  (`…05.120Z`, `+00:00`). A reply example is decoded, never spelled by a generated language, so its
-  numbers may print any way. An operation page prints a declared example's value once, in the
+  the value: a `null` in a request, an integer beyond ±(2^53 − 1) (which a TypeScript `number`
+  does not carry exactly), a request free-form value other than `{}`, a whole number in a float
+  field, a request float that Go, Python and TypeScript would print differently (held to the
+  32-bit narrowing only in a `float32` field), or a request date-time — an example or an enum
+  member — not spelled the way Go sends it (`…05.120Z`, `+00:00`). A reply example is decoded,
+  never spelled by a generated language, so its floats and date-times may be spelled any way; its
+  integers beyond ±(2^53 − 1) are refused as a request's are. An operation page prints a declared example's value once, in the
   Example section; where the example is declared, the page keeps its name and prose. An example an
   imported OpenAPI document declares is checked the same way, so a document whose example breaks
   its schema now fails generation.
@@ -134,8 +144,8 @@ must move the minor version.
   `application/*` admit JSON and keep returning the model, and `text/*` returns text. A response
   that declares several media types answers in the first of them in sorted order, for the SDKs, the
   contract tests and the docs alike, so a reply declared as `application/cbor` and
-  `application/json` now returns bytes. A text return type is optional when the operation also
-  declares a bodyless success. A returned text reply whose media type declares a charset other
+  `application/json` now returns bytes. In Python and TypeScript a text return type is optional
+  when the operation also declares a bodyless success; Go returns `string`. A returned text reply whose media type declares a charset other
   than UTF-8 is a generation error. Generated TypeScript `ResponseDecodeFailure` gains
   `"invalid_text"`, so a `switch` over it that is checked for exhaustiveness needs the new case.
   Code that used the model type there must use the new one.
@@ -148,7 +158,8 @@ must move the minor version.
 ### Added
 
 - **`StaticDocs::new().to(dir)`** writes a deterministic Markdown reference: `index.md`, a page per
-  group, operation and schema, `errors.md`, `authentication.md` and `llms.txt`. Every page is
+  group, operation and schema, `errors.md` and `authentication.md` when there are errors or
+  credentials to document, and `llms.txt`. Every page is
   rendered from one docs model built from the same final graph as `openapi.yaml` and the SDKs.
   A declaration with no directory, or whose directory equals, contains or lies inside a `GoSdk`,
   `PySdk` or `TsSdk` directory, is a configuration error naming both targets. Generation fails
@@ -165,10 +176,11 @@ must move the minor version.
   - The **Example** section prints the HTTP exchange its sample produces — credentials as
     placeholders, named in a note that lists exactly the ones the exchange prints, and the reply
     in its declared media type's wire form (JSON, or the text itself for `text/*`) — then, per
-    sibling SDK target that emits package metadata, a section headed by the language and the
-    package a consumer imports, with the call; a typed-error sample, when the operation declares a
+    sibling SDK target, a section headed by the language. A target that emits package metadata
+    names the package a consumer imports in the heading, and its section carries the call; a typed-error sample, when the operation declares a
     JSON error body, that handles its lowest such status, whose reply the exchange prints; and the
-    SDK's pagination iterator, when the operation is paginated. The iterator leaves an optional
+    SDK's pagination iterator, when the operation is paginated. A target with no package metadata
+    prints a note that it has no published import name instead. The iterator leaves an optional
     cursor out, so it walks every item of every page; a required cursor, a page number or an
     offset is passed as sampled, under `Iterating over every item from the sampled page on:`. A
     generated CLI's invocation and declared examples follow, printed verbatim. Every call is
@@ -181,12 +193,13 @@ must move the minor version.
     is sampled only when it is its location's default, spelled out or not. `pattern` is never
     synthesized. A body with several representations prints the first that meets every
     constraint. An input or reply with no sample prints `No sample call: …` or `No sample response
-    body: …` with the reason: an unmet `pattern` or `uniqueItems`, bounds no value meets (a bound
+    body: …` with the reason, for example an unmet `pattern` or `uniqueItems`, bounds no value meets (a bound
     beyond the type's range is named), a valid declared example no call can state, or a `text/*`
     reply whose sample is not a string.
-  - `errors.md` names each declared SDK's own typed error; `authentication.md` shows how each SDK
-    configures each scheme and which operations require it, together with which other schemes;
-    `index.md` lists the errors and authentication pages under `## Reference` and prints the
+  - `errors.md`, written when an operation declares an error response, names each declared SDK's
+    own typed error; `authentication.md`, written when the graph declares a security scheme, shows
+    how each SDK configures each scheme and which operations require it, together with which other
+    schemes. `index.md` lists whichever of the two pages exist under `## Reference` and prints the
     diagnostics that name no operation.
 - **A pipeline whose docs print field facts refuses an `OpenApiSchemaPatch` that changes one.** Docs
   print field facts wherever the docs model is rendered: a `StaticDocs` target, and an SDK target
@@ -212,9 +225,9 @@ must move the minor version.
   directory too when one SDK is checked against two `StaticDocs` targets.
 - **Contract suites and docs suites count what they cannot sample.** Every refused sample — a
   required input, an optional body, a request representation, a success reply, a declared error
-  model — is counted with its operation, scope and reason. `gnr8 verify` prints `N cases, M
-  refused samples counted, not run` under a contract suite, and `--json` carries `refused` for
-  contract and docs suites alike.
+  model — is counted with its operation, scope and reason. Under a contract suite with any refused
+  sample, `gnr8 verify` prints `N cases, M refused samples counted, not run`, and `--json` carries
+  `refused` for contract and docs suites alike.
 
 ### Changed
 
@@ -267,9 +280,10 @@ must move the minor version.
   `exactOptionalPropertyTypes`.
 - The operations a schema reaches now include those that reach it through an alternative request
   body or a response header, as the schema's own direction analysis already did.
-- **Every generated client encodes a path segment, a query name and value, and a cookie with the
-  rule the docs page and the contract test spell them with**: every byte but an RFC 3986 unreserved
-  one becomes `%XX`. Go used `url.PathEscape` (leaving `+ $ & = @ :`) and wrote a query space as
+- **Every generated client encodes a path segment and a query name and value, and the Go and Python
+  clients a cookie, with the rule the docs page and the contract test spell them with**: every byte
+  but an RFC 3986 unreserved one becomes `%XX`. The TypeScript client sends no cookie parameter;
+  cookies are left to the fetch transport. Go used `url.PathEscape` (leaving `+ $ & = @ :`) and wrote a query space as
   `+`; TypeScript used `encodeURIComponent` (leaving `! ' ( ) *`) and `URLSearchParams.toString()`
   (a space as `+`, `*` bare). Generated Go and TypeScript operation files change for every operation
   with a path or query parameter.
@@ -391,8 +405,9 @@ must move the minor version.
   `version: {default: v1}` gives the base path `/v1` instead of a `/{version}` segment no
   operation declares. A path variable with no default is reported, and its server is not used for
   the base path. A server's `variables` are not carried into the graph, and `openapi.yaml`
-  publishes the server URL without them. A version 1 artifact never held server variables, so a
-  first server whose path is templated reports its operations' paths once after upgrading.
+  publishes the server URL without them. A version 1 artifact never held server variables, so the
+  first `gnr8 changes` after upgrading a document whose first server's path is templated reports one
+  `document.base_path.changed`, from `/{version}` to `/v1`.
 - **An imported field that names a schema admitting null is nullable.** A field `{$ref: Color}`
   with `Color: {type: string, enum: [red, null]}` (or a `type` that lists `null`, or `nullable:
   true`) imported as non-nullable, though an inline enum listing `null` already made its field
