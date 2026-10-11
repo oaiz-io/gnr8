@@ -195,11 +195,44 @@
     ],
     "schemas": [
       {
+        "id": "Color",
+        "name": "Color",
+        "body": {
+          "type": "enum",
+          "of": [
+            "red"
+          ]
+        },
+        "enum_source_order": [
+          "red"
+        ],
+        "provenance": {
+          "file": "openapi.yaml",
+          "start_line": 1,
+          "end_line": 1
+        }
+      },
+      {
         "id": "Item",
         "name": "Item",
         "body": {
           "type": "object",
           "of": [
+            {
+              "json_name": "color",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "named",
+                "of": "Color"
+              },
+              "description": null,
+              "example": null
+            },
             {
               "json_name": "count",
               "serializer_may_omit": true,

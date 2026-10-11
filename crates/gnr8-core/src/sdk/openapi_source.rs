@@ -2122,8 +2122,13 @@ impl Importer {
     )]
     fn type_from_schema(&mut self, schema: &Value) -> ImportedType {
         if let Some(ref_value) = schema.get("$ref").and_then(Value::as_str) {
-            if let Some((id, _)) = self.resolve_ref_schema(ref_value) {
-                return ImportedType::new(Type::Named(id));
+            if let Some((id, target)) = self.resolve_ref_schema(ref_value) {
+                // A graph schema has no nullability of its own, so a schema that admits null
+                // (`Color: {type: string, enum: [red, null]}`) makes the value naming it nullable.
+                return ImportedType {
+                    ty: Type::Named(id),
+                    nullable: scalar_admits_null(&target),
+                };
             }
             self.warn(format!(
                 "schema reference '{ref_value}' could not be resolved"
@@ -2164,18 +2169,13 @@ impl Importer {
             };
         }
 
-        let (schema_type, nullable_from_type_array) = schema_type(schema);
-        let nullable = schema
-            .get("nullable")
-            .and_then(Value::as_bool)
-            .or_else(|| schema.get("x-nullable").and_then(Value::as_bool))
-            .unwrap_or(false)
-            || nullable_from_type_array;
+        let schema_type = schema_type(schema).0;
+        let nullable = scalar_admits_null(schema);
 
         if let Some(enum_values) = string_enum_values(schema) {
             return ImportedType {
                 ty: Type::Enum(enum_values.values),
-                nullable: nullable || enum_values.nullable,
+                nullable,
             };
         }
 
@@ -2654,6 +2654,20 @@ fn schema_type(schema: &Value) -> (Option<String>, bool) {
 struct EnumValues {
     values: Vec<String>,
     nullable: bool,
+}
+
+/// Whether a schema that is neither a `$ref` nor composed admits `null`: by its `nullable` (or
+/// Swagger 2 `x-nullable`) flag, a `type` that lists `null`, or a string enum that lists `null`
+/// ([`string_enum_values`]). The value of such a schema is nullable, and so is a value that names
+/// it with `$ref`.
+fn scalar_admits_null(schema: &Value) -> bool {
+    schema
+        .get("nullable")
+        .and_then(Value::as_bool)
+        .or_else(|| schema.get("x-nullable").and_then(Value::as_bool))
+        .unwrap_or(false)
+        || schema_type(schema).1
+        || string_enum_values(schema).is_some_and(|values| values.nullable)
 }
 
 /// A schema's enum as a string enum type: its string members, sorted and once each, and whether a
@@ -6745,5 +6759,58 @@ components:
             "the example `yes` of field `ratio` in schema `Item`, declared in `openapi.yaml`"
         );
         assert_eq!(problem, "field `ratio` is not a number");
+    }
+
+    /// An enum that lists `null` admits null wherever it is used: inline on a field, as it already
+    /// did, and through a `$ref` to a named enum, whose graph schema has no nullability of its own.
+    /// A named schema whose `type` lists `null` is read the same way, and a reference to a schema
+    /// that admits no null stays non-nullable.
+    #[test]
+    fn a_field_naming_an_enum_that_lists_null_is_nullable() {
+        for version in ["3.0.3", "3.1.0"] {
+            let graph = import_yaml(&format!(
+                r##"
+openapi: {version}
+info: {{ title: P, version: "1" }}
+paths: {{}}
+components:
+  schemas:
+    Color: {{ type: string, enum: [red, null] }}
+    Shade: {{ type: [string, "null"], enum: [dark] }}
+    Size: {{ type: string, enum: [s, m] }}
+    Holder:
+      type: object
+      properties:
+        inline: {{ type: string, enum: [red, null] }}
+        color: {{ $ref: "#/components/schemas/Color" }}
+        shade: {{ $ref: "#/components/schemas/Shade" }}
+        size: {{ $ref: "#/components/schemas/Size" }}
+"##
+            ));
+            let nullable = |graph: &crate::graph::ApiGraph| -> Vec<(String, bool)> {
+                let holder = graph
+                    .schemas
+                    .iter()
+                    .find(|schema| schema.id == "Holder")
+                    .expect("Holder");
+                let Type::Object(fields) = &holder.body else {
+                    panic!("Holder is an object");
+                };
+                fields
+                    .iter()
+                    .map(|field| (field.json_name.clone(), field.deserializer_accepts_null))
+                    .collect()
+            };
+            let expected: Vec<(String, bool)> = [
+                ("color", true),
+                ("inline", true),
+                ("shade", true),
+                ("size", false),
+            ]
+            .into_iter()
+            .map(|(name, nullable)| (name.to_string(), nullable))
+            .collect();
+            assert_eq!(nullable(&graph), expected, "{version}");
+        }
     }
 }

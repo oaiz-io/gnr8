@@ -24,6 +24,7 @@ components:
     Limit: {type: integer, minimum: 1, maximum: 100}
     Lvl: {type: integer, enum: [1, 2]}
     Mode: {type: string, enum: [p, 3, q]}
+    Color: {type: string, enum: [red, null]}
     Item:
       type: object
       required: [price]
@@ -34,6 +35,7 @@ components:
         kind: {type: string, enum: [a, 1, b]}
         kind2: {type: string, enum: [c, null, 1]}
         mode: {$ref: "#/components/schemas/Mode"}
+        color: {$ref: "#/components/schemas/Color"}
         count: {type: integer, example: 7}
         label: {type: integer, example: "8"}
         ratio: {type: number, example: 0.5}

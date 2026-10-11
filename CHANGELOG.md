@@ -42,6 +42,8 @@ must move the minor version.
     string that is now a string enum. Every fact the base states is still compared. So on that
     first comparison, an enum or example newly added to an imported field whose base had none is
     not reported.
+  - An imported field that names the same schema as before with `$ref` and now accepts null is
+    unknown, not changed: 0.18.0 dropped the null such a schema admits (see Fixed).
   - A version 1 artifact never held the bounds of the schema an imported parameter names with
     `$ref`. A keyword the current graph holds tighter than the base states reads as the base's
     value, and so does an enum that is a subset of the base's; a keyword loosened or removed is
@@ -382,6 +384,11 @@ must move the minor version.
   the base path. A server's `variables` are not carried into the graph, and `openapi.yaml`
   publishes the server URL without them. A version 1 artifact never held server variables, so a
   first server whose path is templated reports its operations' paths once after upgrading.
+- **An imported field that names a schema admitting null is nullable.** A field `{$ref: Color}`
+  with `Color: {type: string, enum: [red, null]}` (or a `type` that lists `null`, or `nullable:
+  true`) imported as non-nullable, though an inline enum listing `null` already made its field
+  nullable. Such a field is now nullable, so its SDK type is optional and `openapi.yaml` publishes
+  it as `oneOf: [{$ref: …}, {type: 'null'}]`.
 - A non-string parameter enum (`type: integer, enum: [1, 2, 3]`) imports as a constraint, so samples
   and docs pick a member; a mixed enum keeps its members of the declared type instead of losing all
   of them. A string enum stays the parameter's type. That includes a `type: string` enum with

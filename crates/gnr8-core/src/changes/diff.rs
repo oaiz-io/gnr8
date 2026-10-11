@@ -2217,6 +2217,19 @@ fn enum_unknown_on_version_1(base: &Type, current: &Type, version_1_import: bool
         && matches!(current, Type::Enum(_))
 }
 
+/// Whether a version 1 base's import cannot say if a field naming a schema with `$ref` admitted
+/// null.
+///
+/// gnr8 0.18.0 kept no nullability for a value that names a schema, so a field naming one that
+/// admits null (`Color: {type: string, enum: [red, null]}`, or a `type` listing `null`) imported as
+/// non-nullable. This graph imports it as nullable. On a version 1 base imported from an OpenAPI
+/// document (`version_1_import`), a field naming the same schema as before that now accepts null is
+/// unknown there, not changed. A field extracted from source code is compared as it is.
+fn null_unknown_on_version_1(base: &Type, current: &Type, version_1_import: bool) -> bool {
+    version_1_import
+        && matches!((base, current), (Type::Named(was), Type::Named(now)) if was == now)
+}
+
 fn enum_constraints_mirror_type(field: &Field) -> bool {
     let Type::Enum(type_values) = &field.schema else {
         return false;
@@ -2280,9 +2293,15 @@ fn compare_field_axes(
     }
     let base_nullable = nullable_on(base, directions.base);
     let current_nullable = nullable_on(current, directions.current);
-    // The `null` member of an enum a version 1 base dropped is as unknown as the enum.
+    // The `null` member of an enum a version 1 base dropped is as unknown as the enum, and so is
+    // the null a schema named with `$ref` admits ([`null_unknown_on_version_1`]).
     let null_unknown = !base_nullable
-        && enum_unknown_on_version_1(&base.schema, &current.schema, out.version_1_import(scope));
+        && (enum_unknown_on_version_1(&base.schema, &current.schema, out.version_1_import(scope))
+            || null_unknown_on_version_1(
+                &base.schema,
+                &current.schema,
+                out.version_1_import(scope),
+            ));
     if base_nullable != current_nullable && !null_unknown {
         let added = current_nullable;
         let breaking = directions.unconsumed()
@@ -4755,9 +4774,13 @@ mod tests {
     }
 
     /// A response schema `Book` with a string `kind`, an integer `count` and a string `label`, read
-    /// from `file`; `added` gives `kind` an enum, `count` a `multipleOf`, `label` an example and the
-    /// string `code` the enum type.
+    /// from `file`; `added` gives `kind` an enum, `count` a `multipleOf`, `label` an example, the
+    /// string `code` the enum type, and `tone`, naming the schema `Tone`, null.
     fn version_1_field_graph(file: &str, added: bool) -> ApiGraph {
+        let mut tone = field("tone");
+        tone.schema = Type::Named("Tone".to_string());
+        tone.deserializer_accepts_null = added;
+        tone.serializer_may_emit_null = added;
         let mut kind = field("kind");
         let mut count = field("count");
         count.schema = Type::Primitive(Prim::Int {
@@ -4772,9 +4795,13 @@ mod tests {
             label.example = Some("x".to_string());
             code.schema = Type::Enum(vec!["p".to_string(), "q".to_string()]);
         }
-        let mut book = schema("Book", vec![kind, count, label, code]);
+        let mut book = schema("Book", vec![kind, count, label, code, tone]);
         book.provenance = span(file);
         let mut graph = response_graph(book);
+        let mut tones = schema("Tone", Vec::new());
+        tones.body = Type::Enum(vec!["dark".to_string()]);
+        tones.provenance = span(file);
+        graph.schemas.push(tones);
         graph.operations[0].provenance = span(file);
         graph
     }
@@ -4801,6 +4828,7 @@ mod tests {
                 "response enum value `a` added to `Book.kind`".to_string(),
                 "response enum value `b` added to `Book.kind`".to_string(),
                 "response field `count` constraints changed".to_string(),
+                "response field `tone` now accepts null".to_string(),
                 "response type `Book.code` changed".to_string(),
             ]
         );
