@@ -2633,7 +2633,7 @@ class Client:
         fields = {{}}
         for key, item in value.items():
             if isinstance(item, (list, tuple)):
-                item = [cls._parameter_scalar(part) for part in item if part is not None]
+                item = [cls._parameter_scalar(p) for p in item if p is not None]
             elif item is not None:
                 item = cls._parameter_scalar(item)
             if item is not None:
