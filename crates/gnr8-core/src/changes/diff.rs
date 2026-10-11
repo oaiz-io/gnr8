@@ -174,7 +174,7 @@ struct Scope {
     protected: Sides<bool>,
     checked: bool,
     current_span: Option<SourceSpan>,
-    /// Whether the base node compared here was imported from an OpenAPI document
+    /// Whether the base node compared here was imported from an `OpenAPI` document
     /// ([`imported_document`]): the operation, parameter or schema, or for the document itself,
     /// any of the base graph's operations and schemas.
     base_imported: bool,
@@ -353,15 +353,15 @@ impl<'a> GraphIndex<'a> {
 
 struct Collector {
     changes: Vec<Change>,
-    /// Whether the base was read from a version 1 artifact, which held less of an imported OpenAPI
-    /// document than this graph does: no bounds of the schema a parameter names with `$ref`
+    /// Whether the base was read from a version 1 artifact, which held less of an imported
+    /// `OpenAPI` document than this graph does: no bounds of the schema a parameter names with `$ref`
     /// ([`comparable_parameter_constraints`]), not every field fact ([`version_1_field_facts`],
     /// [`enum_unknown_on_version_1`]), and the base path on a server ([`version_1_servers`]).
     base_from_version_1: bool,
 }
 
 impl Collector {
-    /// Whether the base node `scope` compares is a version 1 artifact's import of an OpenAPI
+    /// Whether the base node `scope` compares is a version 1 artifact's import of an `OpenAPI`
     /// document, read for what that artifact held of it. A node gnr8 extracted from source code, or
     /// any node of a version 2 base, is compared whole.
     const fn version_1_import(&self, scope: &Scope) -> bool {
@@ -598,7 +598,7 @@ fn compare_document(base: &GraphIndex<'_>, current: &GraphIndex<'_>, out: &mut C
     }
 }
 
-/// The servers of a version 1 base imported from an OpenAPI document, as the current ones can be
+/// The servers of a version 1 base imported from an `OpenAPI` document, as the current ones can be
 /// compared with them.
 ///
 /// The version 1 importer kept the base path on each server it imported
@@ -2157,8 +2157,8 @@ fn compare_existing_field(
 /// The current field's example and constraints as a base can be compared with them.
 ///
 /// Comparing two version 2 graphs, they are the field's own. A version 1 artifact (gnr8 0.18.0 and
-/// earlier) could not hold every fact of a field imported from an OpenAPI document that this graph
-/// holds, so on such a base (`version_1_import`) a fact it could not hold is unknown, not added:
+/// earlier) could not hold every fact of a field imported from an `OpenAPI` document that this
+/// graph holds, so on such a base (`version_1_import`) a fact it could not hold is unknown, not added:
 ///
 /// - `multipleOf` and `uniqueItems`, which no version 1 field carried;
 /// - an enum the base states none of: 0.18.0 dropped a field enum with a member of another kind than
@@ -2198,7 +2198,7 @@ fn version_1_field_facts<'f>(
 ///
 /// gnr8 0.18.0 imported `type: string, enum: [a, 1]` — an enum with a member of another kind — as a
 /// plain string, dropping the enum and any `null` member with it. This graph imports it as the enum
-/// of its string members. A version 1 base imported from an OpenAPI document (`version_1_import`)
+/// of its string members. A version 1 base imported from an `OpenAPI` document (`version_1_import`)
 /// cannot say which it held, so the enum, and the null its members admit, are unknown on it rather
 /// than a changed type. A type extracted from source code is compared as it is.
 fn enum_unknown_on_version_1(base: &Type, current: &Type, version_1_import: bool) -> bool {
@@ -2222,7 +2222,7 @@ fn enum_unknown_on_version_1(base: &Type, current: &Type, version_1_import: bool
 ///
 /// gnr8 0.18.0 kept no nullability for a value that names a schema, so a field naming one that
 /// admits null (`Color: {type: string, enum: [red, null]}`, or a `type` listing `null`) imported as
-/// non-nullable. This graph imports it as nullable. On a version 1 base imported from an OpenAPI
+/// non-nullable. This graph imports it as nullable. On a version 1 base imported from an `OpenAPI`
 /// document (`version_1_import`), a field naming the same schema as before that now accepts null is
 /// unknown there, not changed. A field extracted from source code is compared as it is.
 fn null_unknown_on_version_1(base: &Type, current: &Type, version_1_import: bool) -> bool {
@@ -4806,8 +4806,8 @@ mod tests {
         graph
     }
 
-    /// A version 1 artifact could not hold some field facts of an imported OpenAPI document, so on
-    /// a base read from one they are unknown there. A field gnr8 extracted from source code held
+    /// A version 1 artifact could not hold some field facts of an imported `OpenAPI` document, so
+    /// on a base read from one they are unknown there. A field gnr8 extracted from source code held
     /// every one of them in version 1 too, so each fact added to it is reported.
     #[test]
     fn a_version_1_base_hides_only_the_field_facts_an_import_could_not_hold() {

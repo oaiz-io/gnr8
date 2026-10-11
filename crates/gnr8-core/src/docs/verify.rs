@@ -236,20 +236,7 @@ fn unit_of(
         .into_iter()
         .flatten()
         {
-            let mut blocks = vec![
-                (EmbedRole::Request, request_block.clone()),
-                (EmbedRole::Sample, render::sample_block(sample)),
-            ];
-            // The reply the sample's harness answers with, as the page prints it.
-            match (sample.kind, reply, error_reply) {
-                (SampleKind::TypedError, _, Some(ErrorReplyDoc::Printed { reply, .. })) => {
-                    blocks.push((EmbedRole::ErrorReply, render::reply_block(reply)));
-                }
-                (SampleKind::Call | SampleKind::Iterate, ReplyDoc::Printed(reply), _) => {
-                    blocks.push((EmbedRole::Reply, render::reply_block(reply)));
-                }
-                _ => {}
-            }
+            let blocks = sample_blocks(&request_block, sample, reply, error_reply.as_ref());
             let mut embeds = Vec::new();
             for (wanted, root, page) in [
                 (site, PageRoot::Docs, page.as_str()),
@@ -309,6 +296,30 @@ fn unit_of(
         text,
         entries,
     }))
+}
+
+/// Every block one sample relies on, each with its role: the HTTP request, the sample's code and
+/// the reply its harness answers with, as the page prints it.
+fn sample_blocks(
+    request_block: &str,
+    sample: &CodeSample,
+    reply: &ReplyDoc,
+    error_reply: Option<&ErrorReplyDoc>,
+) -> Vec<(EmbedRole, String)> {
+    let mut blocks = vec![
+        (EmbedRole::Request, request_block.to_string()),
+        (EmbedRole::Sample, render::sample_block(sample)),
+    ];
+    match (sample.kind, reply, error_reply) {
+        (SampleKind::TypedError, _, Some(ErrorReplyDoc::Printed { reply, .. })) => {
+            blocks.push((EmbedRole::ErrorReply, render::reply_block(reply)));
+        }
+        (SampleKind::Call | SampleKind::Iterate, ReplyDoc::Printed(reply), _) => {
+            blocks.push((EmbedRole::Reply, render::reply_block(reply)));
+        }
+        _ => {}
+    }
+    blocks
 }
 
 /// What one `StaticDocs` target's docs model gives `gnr8 verify`: how many operations have a

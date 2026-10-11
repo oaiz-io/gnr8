@@ -1485,7 +1485,19 @@ fn emit_dataclass(
         };
         writeln!(out, "    {}: {defaulted_hint} = None", emission.ident).map_err(sink)?;
     }
+    emit_dataclass_from_dict(out, name, &emissions, graph, directions, model_modules)?;
+    emit_dataclass_to_dict(out, &emissions, graph, directions)
+}
 
+/// Emit a dataclass's `from_dict`. `model_modules` is [`emit_model_class`]'s.
+fn emit_dataclass_from_dict(
+    out: &mut String,
+    name: &str,
+    emissions: &[PyFieldEmission<'_>],
+    graph: &ApiGraph,
+    directions: SchemaDirections,
+    model_modules: Option<&BTreeMap<String, String>>,
+) -> Result<(), CoreError> {
     // A forward-compatible from_dict (CR-04): construct only from declared fields (ignore-unknown — a
     // newer server adding a response key no longer crashes the SDK), bind each by its ORIGINAL wire key
     // (json_name), and decode nested dataclasses recursively. Required fields read with `_data["key"]`
@@ -1504,7 +1516,7 @@ fn emit_dataclass(
         // module level only for type checkers. `from_dict` names it at run time, so it imports it
         // here, when it runs: every model module is loaded by then, so two models that hold each
         // other import without a cycle.
-        for model in decoded_models(&emissions, graph, name) {
+        for model in decoded_models(emissions, graph, name) {
             let module = model_modules.get(model).ok_or_else(|| CoreError::SdkGen {
                 message: format!(
                     "schema '{name}' decodes model {model:?}, but no Python module was generated for it"
@@ -1514,7 +1526,7 @@ fn emit_dataclass(
         }
     }
     writeln!(out, "        return cls(").map_err(sink)?;
-    for emission in &emissions {
+    for emission in emissions {
         let field = emission.field;
         let ident = &emission.ident;
         let wire = &field.json_name;
@@ -1580,7 +1592,7 @@ fn emit_dataclass(
         }
     }
     writeln!(out, "        )").map_err(sink)?;
-    emit_dataclass_to_dict(out, &emissions, graph, directions)
+    Ok(())
 }
 
 /// The column limit `ruff format` holds generated Python to.
