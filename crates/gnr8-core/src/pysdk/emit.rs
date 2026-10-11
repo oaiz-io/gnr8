@@ -729,6 +729,7 @@ pub(crate) fn emit_models_with_style(
                     model_style,
                     *schema_directions,
                     *multipart_file_schema,
+                    None,
                 )?;
             }
             // A named NON-object/NON-enum schema (e.g. `BookOrError = Union[Book, OutOfStock]`, or a
@@ -815,6 +816,7 @@ pub(crate) fn emit_model_schema(
                 model_style,
                 directions,
                 multipart_file_schema,
+                Some(dep_modules),
             )?;
         }
         Type::Primitive(_)
@@ -1135,6 +1137,9 @@ fn comprehension_binding(base: &str, depth: usize) -> String {
 /// required (no default) first, optional (default `= None`) last — before emitting. `kw_only=True` is
 /// Python 3.10+ and unavailable on 3.9, so partitioning is the 3.9-safe fix. The reorder is a
 /// presentation concern only: json keys are name-addressed, so wire behavior is unchanged.
+/// `model_modules` maps every model to the module it lives in when each model has a module of its
+/// own (a split layout), and is `None` when every model shares this one.
+#[allow(clippy::too_many_arguments)]
 fn emit_model_class(
     out: &mut String,
     name: &str,
@@ -1143,14 +1148,21 @@ fn emit_model_class(
     model_style: PyModelStyle,
     directions: SchemaDirections,
     multipart_file_schema: bool,
+    model_modules: Option<&BTreeMap<String, String>>,
 ) -> Result<(), CoreError> {
     match model_style {
         PyModelStyle::Pydantic => {
             emit_pydantic_model(out, name, fields, graph, directions, multipart_file_schema)
         }
-        PyModelStyle::Dataclass => {
-            emit_dataclass(out, name, fields, graph, directions, multipart_file_schema)
-        }
+        PyModelStyle::Dataclass => emit_dataclass(
+            out,
+            name,
+            fields,
+            graph,
+            directions,
+            multipart_file_schema,
+            model_modules,
+        ),
     }
 }
 
@@ -1413,6 +1425,7 @@ fn emit_dataclass(
     graph: &ApiGraph,
     directions: SchemaDirections,
     multipart_file_schema: bool,
+    model_modules: Option<&BTreeMap<String, String>>,
 ) -> Result<(), CoreError> {
     writeln!(out, "@dataclass").map_err(sink)?;
     writeln!(out, "class {name}:").map_err(sink)?;
@@ -1484,6 +1497,20 @@ fn emit_dataclass(
         "    def from_dict(cls, _data: dict[str, Any]) -> {name}:"
     )
     .map_err(sink)?;
+    if let Some(model_modules) = model_modules {
+        // In a split layout each model this one rebuilds lives in a module of its own, imported at
+        // module level only for type checkers. `from_dict` names it at run time, so it imports it
+        // here, when it runs: every model module is loaded by then, so two models that hold each
+        // other import without a cycle.
+        for model in decoded_models(&emissions, graph, name) {
+            let module = model_modules.get(model).ok_or_else(|| CoreError::SdkGen {
+                message: format!(
+                    "schema '{name}' decodes model {model:?}, but no Python module was generated for it"
+                ),
+            })?;
+            writeln!(out, "        from {module} import {model}").map_err(sink)?;
+        }
+    }
     writeln!(out, "        return cls(").map_err(sink)?;
     for emission in &emissions {
         let field = emission.field;
@@ -1537,6 +1564,32 @@ fn emit_dataclass(
     }
     writeln!(out, "        )").map_err(sink)?;
     emit_dataclass_to_dict(out, &emissions, graph, directions)
+}
+
+/// The models other than `self_name` a dataclass's `from_dict` rebuilds through their own
+/// `from_dict` ([`decode_expr`]), sorted and once each.
+fn decoded_models<'g>(
+    emissions: &[PyFieldEmission<'_>],
+    graph: &'g ApiGraph,
+    self_name: &str,
+) -> BTreeSet<&'g str> {
+    fn collect<'g>(shape: &NestedModels<'g>, out: &mut BTreeSet<&'g str>) {
+        match shape {
+            NestedModels::Model(name) => {
+                out.insert(name);
+            }
+            NestedModels::List(inner) | NestedModels::Map(inner) => collect(inner, out),
+            NestedModels::Union => {}
+        }
+    }
+    let mut models = BTreeSet::new();
+    for emission in emissions {
+        if let Some(shape) = nested_models(&emission.field.schema, graph, PyModelStyle::Dataclass) {
+            collect(&shape, &mut models);
+        }
+    }
+    models.remove(self_name);
+    models
 }
 
 /// Emit a dataclass's `to_dict`: the payload the client sends for it, keyed by each field's wire name

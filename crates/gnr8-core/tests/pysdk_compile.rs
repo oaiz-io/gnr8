@@ -2662,12 +2662,23 @@ paths:
 /// Generate the Python SDK for `spec` in `style` into a fresh dir as the importable `bookstore`
 /// package, returning the dir.
 fn materialize_spec_sdk(label: &str, spec: &str, style: PyModelStyle) -> PathBuf {
+    materialize_spec_sdk_with_layout(label, spec, style, SdkFileLayout::compact())
+}
+
+/// [`materialize_spec_sdk`] in the file `layout`.
+fn materialize_spec_sdk_with_layout(
+    label: &str,
+    spec: &str,
+    style: PyModelStyle,
+    layout: SdkFileLayout,
+) -> PathBuf {
     use gnr8_engine::sdk::prelude::*;
 
     let dir = unique_temp_dir(label);
     std::fs::write(dir.join("openapi.yaml"), spec).expect("write spec");
     let target = PySdk::new()
         .module(format!("example.com/{PACKAGE}"))
+        .layout(layout)
         .to(PACKAGE);
     let target = match style {
         PyModelStyle::Dataclass => target.dataclasses(),
@@ -2791,6 +2802,37 @@ fn nested_models_round_trip_through_every_shape_in_both_styles() {
     assert!(
         result.is_ok(),
         "Pydantic nested models must round trip: {result:?}\n{models}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A split dataclass SDK puts each model in its own module. A model whose fields name another
+/// model rebuilds and encodes it at run time, so it imports that model at run time too, not only
+/// for type checkers.
+#[test]
+fn split_dataclass_models_round_trip_through_every_shape() {
+    if !python_available() {
+        eprintln!("skipping split dataclass round trip: python3 toolchain unavailable");
+        return;
+    }
+    let dir = materialize_spec_sdk_with_layout(
+        "nested-dataclass-split",
+        NESTED_MODELS_SPEC,
+        PyModelStyle::Dataclass,
+        SdkFileLayout::split(),
+    );
+    let driver = dir.join("nested_driver.py");
+    std::fs::write(
+        &driver,
+        format!("{NESTED_PAYLOAD}{NESTED_DATACLASS_DRIVER}"),
+    )
+    .expect("write driver");
+    let result = run_python(&[driver.to_str().expect("utf-8 path")], &dir);
+    let holder = std::fs::read_to_string(dir.join(PACKAGE).join("models").join("holder.py"))
+        .unwrap_or_default();
+    assert!(
+        result.is_ok(),
+        "split dataclass nested models must round trip: {result:?}\n{holder}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

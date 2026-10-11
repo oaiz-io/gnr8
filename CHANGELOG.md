@@ -298,6 +298,12 @@ must move the minor version.
   multipart body already did. It sent the text `None` (`a=x&b=None`) for a nullable field holding
   `None`, required or optional, in both model styles; a `None` list item is left out too. Generated
   `client.py` gains `Client._form_fields`.
+- **A split-layout Python dataclass model decodes the models it holds.** With each model in its own
+  module (`SdkFileLayout::split()`), a model imported the models its fields name only for type
+  checkers, so its `from_dict` raised `NameError` at run time on the first nested model, and so did
+  every call that decoded such a reply. `from_dict` now imports each model it rebuilds when it runs,
+  which also lets two models that hold each other import. Generated split dataclass model modules
+  change for every model whose fields name another model.
 - **A Pydantic model's `to_dict` re-encodes a nested model reached through a named alias** (a field
   typed `Inners`, where `Inners` is a list of `Inner`). It stopped at the alias, so `model_dump`
   dropped a required nullable key inside each item, and the model's own `from_dict` rejected the
