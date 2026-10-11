@@ -307,10 +307,12 @@ fn dataclass_models_and_their_decoders_agree_on_the_direction() {
         "a request-validated field must decode from the key directly:\n{}",
         decoder.join("\n")
     );
+    // A keyword argument past 88 columns is split at its clauses, as `ruff format` splits it, so
+    // the condition may sit on the line below the value.
     assert!(
-        decoder
-            .iter()
-            .any(|line| line.starts_with("plain=(") && line.contains("if \"plain\" in _data")),
+        decoder.windows(2).any(|pair| pair[0].starts_with("plain=(")
+            && (pair[0].contains("if \"plain\" in _data")
+                || pair[1].starts_with("if \"plain\" in _data"))),
         "a field no rule validates must decode only when the key is present:\n{}",
         decoder.join("\n")
     );
