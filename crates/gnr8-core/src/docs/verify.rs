@@ -136,8 +136,36 @@ pub struct PageEmbed {
     pub root: PageRoot,
     /// The page's path inside [`Self::root`].
     pub page: String,
+    /// What the block is to the sample.
+    pub role: EmbedRole,
     /// The block, fences included.
     pub block: String,
+}
+
+/// What a block a page must print is to the sample it serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedRole {
+    /// The HTTP request the sample sends.
+    Request,
+    /// The sample's code.
+    Sample,
+    /// The success reply the sample is answered with.
+    Reply,
+    /// The error reply a typed-error sample is answered with.
+    ErrorReply,
+}
+
+impl EmbedRole {
+    /// The block as a sentence names it: `the HTTP request block`.
+    #[must_use]
+    pub const fn phrase(self) -> &'static str {
+        match self {
+            Self::Request => "the HTTP request block",
+            Self::Sample => "the sample's code block",
+            Self::Reply => "the reply block",
+            Self::ErrorReply => "the error reply block",
+        }
+    }
 }
 
 /// Where a page a sample is printed on lives.
@@ -208,12 +236,17 @@ fn unit_of(
         .into_iter()
         .flatten()
         {
-            let mut blocks = vec![request_block.clone(), render::sample_block(sample)];
+            let mut blocks = vec![
+                (EmbedRole::Request, request_block.clone()),
+                (EmbedRole::Sample, render::sample_block(sample)),
+            ];
             // The reply the sample's harness answers with, as the page prints it.
             match (sample.kind, reply, error_reply) {
-                (SampleKind::TypedError, _, Some(ErrorReplyDoc::Printed { reply, .. }))
-                | (SampleKind::Call | SampleKind::Iterate, ReplyDoc::Printed(reply), _) => {
-                    blocks.push(render::reply_block(reply));
+                (SampleKind::TypedError, _, Some(ErrorReplyDoc::Printed { reply, .. })) => {
+                    blocks.push((EmbedRole::ErrorReply, render::reply_block(reply)));
+                }
+                (SampleKind::Call | SampleKind::Iterate, ReplyDoc::Printed(reply), _) => {
+                    blocks.push((EmbedRole::Reply, render::reply_block(reply)));
                 }
                 _ => {}
             }
@@ -223,9 +256,10 @@ fn unit_of(
                 (sdk_docs, PageRoot::Sdk, SDK_REFERENCE),
             ] {
                 if wanted {
-                    embeds.extend(blocks.iter().map(|block| PageEmbed {
+                    embeds.extend(blocks.iter().map(|(role, block)| PageEmbed {
                         root,
                         page: page.to_string(),
+                        role: *role,
                         block: block.clone(),
                     }));
                 }
@@ -236,6 +270,7 @@ fn unit_of(
                 embeds.push(PageEmbed {
                     root: PageRoot::Sdk,
                     page: SDK_README.to_string(),
+                    role: EmbedRole::Sample,
                     block: render::sample_block(sample),
                 });
             }

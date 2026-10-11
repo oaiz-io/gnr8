@@ -266,12 +266,12 @@ fn check_pages(
                 return Err(reason);
             };
             if !embeds(&page.text, &embed.block) {
-                let first = embed.block.lines().next().unwrap_or_default();
                 let mut reason = DocsReason::new(
                     DocsFailure::SnippetNotInPage,
                     format!(
-                        "the page does not print the `{first}` block verbatim, as whole lines; a \
-                         post-processor rewrote it"
+                        "the page does not print {} verbatim, as whole lines; a post-processor \
+                         rewrote it",
+                        embed.role.phrase()
                     ),
                 );
                 reason.operation = Some(entry.operation_id.clone());
@@ -698,8 +698,8 @@ mod tests {
     use super::{run_with_runner, DocsFailure, DocsStatus};
     use crate::verify::cli_help::ProcessRunner;
     use gnr8_engine::docs::verify::{
-        CompileEntry, CompileUnit, CredentialSlot, EntryKind, HttpRequest, PageEmbed, PageRoot,
-        WireValue,
+        CompileEntry, CompileUnit, CredentialSlot, EmbedRole, EntryKind, HttpRequest, PageEmbed,
+        PageRoot, WireValue,
     };
     use gnr8_engine::sdk::Artifact;
     use gnr8_engine::verify::{ContractTestLanguage, DocsSnippetSuite, GoVerificationModule};
@@ -811,11 +811,13 @@ mod tests {
                 PageEmbed {
                     root: PageRoot::Docs,
                     page: page.to_string(),
+                    role: EmbedRole::Request,
                     block: REQUEST_BLOCK.to_string(),
                 },
                 PageEmbed {
                     root: PageRoot::Docs,
                     page: page.to_string(),
+                    role: EmbedRole::Sample,
                     block: sample_block(snippet),
                 },
             ],
@@ -967,6 +969,12 @@ mod tests {
         );
         assert_eq!(reason.operation.as_deref(), Some("createBook"));
         assert!(reason.explain().contains("docs/operations/create-book.md"));
+        // The reason names the block by its role, not by a fence line it cannot quote.
+        assert_eq!(
+            reason.message,
+            "the page does not print the sample's code block verbatim, as whole lines; a \
+             post-processor rewrote it"
+        );
     }
 
     /// A sample the SDK's own README prints is held to it in the SDK's directory: a README whose
@@ -979,6 +987,7 @@ mod tests {
         unit.entries[0].embeds.push(PageEmbed {
             root: PageRoot::Sdk,
             page: "README.md".to_string(),
+            role: EmbedRole::Sample,
             block: sample_block(CREATE),
         });
         let mut artifacts = artifacts();
@@ -1026,7 +1035,11 @@ mod tests {
         let reason = report.reason.unwrap();
         assert_eq!(reason.code, DocsFailure::SnippetNotInPage);
         assert_eq!(reason.operation.as_deref(), Some("createBook"));
-        assert!(reason.message.contains("```http"), "{}", reason.message);
+        assert!(
+            reason.message.contains("the HTTP request block"),
+            "{}",
+            reason.message
+        );
     }
 
     #[test]
