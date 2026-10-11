@@ -14,89 +14,105 @@ must move the minor version.
 - **`BuiltinTarget` gains `StaticDocs`.** Rust code that matches `BuiltinTarget` exhaustively needs
   an arm. The host/worker protocol is now version 9, so a worker and CLI cannot silently disagree
   about the stage-plan shape.
+- **`gnr8::facts::Constraints` gains `multiple_of` and `unique_items`, and `gnr8::graph::Param`
+  gains `example`.** Code that builds either struct with a literal, an `OpenApiFieldPatch`'s
+  `constraints` included, must set the new fields or finish with `..Default::default()`.
 - **Go extraction no longer reads `enums:"…"` / `enum:"…"` struct tags.** That spelling belongs to
   another generator, and no Go runtime consumes it. A field or bound parameter that stated its enum
   only that way now publishes a plain string, with no enum and no diagnostic. State the enum with
   the validator's own rule instead: `binding:"oneof=a b"` or `validate:"oneof=a b"`. Separate the
   members with spaces. That rule is the one source of an enum constraint.
 - **`generated/gnr8.graph.json` is schema version 2.** An imported parameter's validation keywords
-  now live in its typed constraints instead of the raw schema the graph keeps, and an imported
-  server no longer repeats the base path. Tools that read the artifact must accept version 2.
-  `gnr8 changes --base <ref>` still reads a version 1 base: it applies the importer's rules to it,
-  so the first comparison after upgrading reports no change the API did not make. A version 1 base
-  server whose URL is a current server's URL followed by the base path (`https://api.example.com/v1`
-  beside `/v1`) is compared as that server, whoever wrote the graph, and a server set with
-  `OpenApiMetadata::server` beside `SetBasePath` keeps its URL in both. A version 1 artifact never held the bounds of
-  a schema an imported parameter names with `$ref`, so such a parameter is compared only on the
-  constraint keywords the base states: the referenced bounds are not reported as added. A
-  parameter's example moves into the new typed `Param::example` the same way. `BaseGraph` gains
-  `upgraded_from_version_1`, and `gnr8_engine::changes::diff_base_graph` compares a `BaseGraph`
-  with that reading.
-- On a version 1 base, a `$ref` parameter's keyword that the current graph holds tighter than the
-  base states is not reported: the referenced schema may have tightened it (`maximum: 500` beside a
-  `$ref` whose schema says `maximum: 100`, or an enum beside it that the schema's enum narrows). A
-  keyword loosened or removed beside the `$ref` is still reported.
-- On a version 1 base, a schema field is read the way the importer reads it now, so the first
-  comparison reports no field change the API did not make. A field bound kept as the OpenAPI 3.0
-  flag (`minimum: 0` with `exclusiveMinimum: "true"`) reads as the exclusive bound. A field fact a
-  version 1 artifact could not hold is unknown, not added: `multipleOf` and `uniqueItems`; an enum
-  or an example where the base states none (0.18.0 dropped an enum with a member of another kind,
-  and a number or boolean example); and a plain string that is now a string enum, with the `null`
-  its members admit. Every fact the base states is compared.
+  now live in its typed constraints instead of the raw schema the graph keeps, its scalar
+  `example` moves into the new `Param::example`, `Constraints` carries `multiple_of` and
+  `unique_items`, and an imported server no longer repeats the base path. Tools that read the
+  artifact must accept version 2. `gnr8 changes --base <ref>` still reads a version 1 base, by the
+  importer's own rules, so the first comparison after upgrading reports no change the API did not
+  make:
+  - A parameter is read through the importer's parameter rules. A field bound kept as the OpenAPI
+    3.0 flag (`minimum: 0` with `exclusiveMinimum: "true"`, in a schema, a parameter's type or a
+    response header's type) reads as the exclusive bound.
+  - A field fact a version 1 artifact could not hold is unknown, not added: `multipleOf` and
+    `uniqueItems`, an enum or an example the base does not state, and a plain string that is now a
+    string enum. Every fact the base states is still compared. So on that first comparison, an
+    enum or example newly added to a field whose base had none is not reported.
+  - A version 1 artifact never held the bounds of the schema an imported parameter names with
+    `$ref`. A keyword the current graph holds tighter than the base states reads as the base's
+    value, and so does an enum that is a subset of the base's; a keyword loosened or removed is
+    still reported, and `pattern` and `multipleOf` are compared as they are. So on that first
+    comparison, a real tightening stated beside the `$ref` is not reported.
+  - A base server whose URL is a current server's URL followed by the base graph's base path
+    (`https://api.example.com/v1` beside `/v1`, trailing slashes ignored) is the same server,
+    whoever wrote the graph. A server set with `OpenApiMetadata::server` beside `SetBasePath` keeps
+    its URL in both.
 - **A Python field that is optional and nullable can be sent as an explicit `null` again**, the
-  PATCH that clears a value. A dataclass field of that kind now defaults to `UNSET`, defined in the
-  new `unset.py` every dataclass SDK carries (`from <package>.unset import UNSET`). `UNSET` is
-  sent as no key and `None` as `null`. Its `from_dict` reads an absent key as `UNSET` and a `null`
-  as `None`, where both used to read `None`. Code that tests such a field with `is None` after
-  decoding a reply must test `is UNSET` for an absent key (`UNSET` is falsy). A Pydantic model's
-  field still reads `None`, and `to_dict` sends `null` when the field was set (`model_fields_set`).
-  An optional field that is not nullable is unchanged: its `None` is the absent key. Generated
-  dataclass `models.py`, the generated CLI's `output.py` and `contract_test.py` change for such
-  fields, and Pydantic `models.py` changes for every model with one.
+  PATCH that clears a value. A dataclass field of that kind is typed `Union[T, Unset]` and defaults
+  to `UNSET`, defined in the new `unset.py` every dataclass SDK carries (`from <package>.unset
+  import UNSET`; falsy, `repr` `UNSET`). `to_dict` sends `UNSET` as no key and `None` as `null`, and
+  `from_dict` reads an absent key as `UNSET` and a `null` as `None`, where both used to read `None`.
+  Code that tests such a field with `is None` after decoding a reply must test `is UNSET` for an
+  absent key. The generated CLI prints `UNSET` as `null`. A Pydantic model's field still reads
+  `None`, and `to_dict` sends `null` when the field was set (`model_fields_set`) and omits it
+  otherwise. An optional field that is not nullable is unchanged: its `None` is the absent key.
+  Generated dataclass `models.py`, the generated CLI's `output.py` and `contract_test.py` change for
+  such fields, and Pydantic `models.py` changes for every model with one.
 - **Each SDK's `README.md` and `reference.md` are rewritten from the docs model** that `StaticDocs`
   renders its pages from, built for that one SDK. `README.md` replaces the `Package/module` line
   with `Import` (the Go module path, the Python import package, the `package.json` name) and
   `Install` (`go get`, `pip install` with the distribution name `pyproject.toml` lists, `npm
   install`), and its `<Language> quick start` placeholder with `## Quick start`: the first sampled
-  operation's call, byte for byte as `reference.md` prints it. An SDK with no package metadata says
-  why it has no import and no quick start. `reference.md` is one file holding every docs page as a
-  section, one heading level down: the index, each operation (parameters, bodies, responses, the
-  call, typed-error and iterator samples for this SDK, the CLI invocation), each schema, the error
-  catalog and authentication. Its `Operations`, `Operation Documentation` and `Schemas` tables are
-  gone; it links only `README.md`, and a diagnostic is printed under its operation, or under the
-  index section when it names none. Writing these files now builds the docs model, so with docs on
-  (the default) an SDK target fails generation on what `StaticDocs` fails on: an invalid declared
-  example, a blank API title or group name, prose that breaks `reference.md`'s structure, or an
-  `OpenApiSchemaPatch` that changes a field fact `reference.md` prints (see Added). Tools that
-  parse either file must follow the new layout.
+  operation's call, byte for byte as `reference.md` prints it, or `No operation has a sample call;
+  reference.md says why under each operation.` when none has one. An SDK with no package metadata
+  says why it has no import and no quick start. Its Agent workflow's first step now points to
+  `reference.md` for every operation, schema, error and credential, each with its sample.
+  `reference.md` is one file holding every docs page as a section, one heading level down: the
+  index (which lists every operation and schema, and the Errors and Authentication sections by
+  name), each operation (parameters, bodies, responses, the call, typed-error and iterator samples
+  for this SDK, the CLI invocation), each schema, the error catalog (`The generated SDK surfaces a
+  non-success status as its typed error, …`) and authentication. Its `Operations`, `Operation
+  Documentation` and `Schemas` tables are gone; it links only `README.md`, and a diagnostic is
+  printed under its operation, or under the index section when it names none. The API title is
+  printed as itself in both files, with any Markdown syntax in it escaped. Writing these files now
+  builds the docs model, so with docs on (the default) an SDK target fails generation on what
+  `StaticDocs` fails on — `CoreError::InvalidExample` for an invalid declared example,
+  `CoreError::DocsGen` for a blank API title or group name or prose that breaks `reference.md`'s
+  structure — and refuses an `OpenApiSchemaPatch` that changes a field fact `reference.md` prints
+  (see Added). `.without_docs()` writes neither file. Tools that parse either file must follow the
+  new layout.
 - **`gnr8 verify` checks the samples an SDK's `README.md` and `reference.md` print**, whether or
   not the pipeline declares `StaticDocs`: an SDK target that writes docs and has a package manifest
   gains a docs suite (`<Language> docs samples`), which compiles and runs each sample and fails when
   either file no longer prints it. A target with neither contract tests nor docs leaves `verify`
-  nothing to check, as before.
-- `gnr8_engine::verify`: `ContractTestSuite` gains `refused` and `ContractTestPlan` gains `refused`
-  (each refused sample, with its operation, scope and reason); `SampleParam` gains `required` and
-  `unmet`, and `SampleBody` gains `unmet`. Code that builds these structs literally needs the new
-  fields.
+  nothing to check, as before. With nothing to check, `verify` now says `no SDK contract tests or
+  generated CLI help checks to run, and no docs samples — add an SDK, CLI or StaticDocs target to
+  .gnr8/src/main.rs`, and a run in which every suite skipped says `no checks executed: every
+  generated check was skipped`.
 - **Declared examples are the sample, and an invalid one stops generation.** A field's `example`,
-  and an operation's first request or response `MediaExample` for the JSON media type the sample
-  uses, are now the values the docs pages and the contract tests send and reply with. A body or
-  reply that declares an example is that example, and is not built from its fields. Each declared
-  example is checked against its input before anything is sampled, whether a sample uses it or not:
-  its type, the required fields, fields the schema does not declare, nullability and every
-  constraint except `pattern`. A field example is read as a value of the field's type, so it can
-  state only a scalar: `example:"a,b"` on a `[]string` field is not a list. An example that breaks
-  its input fails generation with `CoreError::InvalidExample`, which names where the example is
-  declared and the type or constraint it breaks. This happens in any pipeline that samples:
-  `StaticDocs`, or an SDK target with contract tests, which are on by default. gnr8 does not check
-  a declared value against `pattern`; the author's example is taken as matching it, and it is now
-  the only way a pattern-bound input gets a sample on a page. A valid example that no call can
-  state, such as a `null` in a request, a whole number in a float field, or a request date-time not
-  spelled the way Go sends it (`…05.120Z`, `+00:00`), prints `No sample call: …` and names the
-  value. An operation page prints a declared example's value once, in the Example section. Where
-  the example is declared, the page keeps its name and prose. An example an imported OpenAPI
-  document declares is checked the same way, so a document whose example breaks its schema now
-  fails generation. `SampleBody` gains `example` and `CoreError` gains `InvalidExample`.
+  a parameter's `example`, and an operation's first request or response `MediaExample` for the JSON
+  media type the sample uses, are now the values the docs pages and the contract tests send and
+  reply with. A body or reply that declares an example is that example, and is not built from its
+  fields. Each declared example is checked against its input before anything is sampled, whether a
+  sample uses it or not: its type (an integer within its type's width and sign, a float32 within
+  the float32 range), the required fields, fields the schema does not declare, nullability and
+  every constraint except `pattern`. An integral number is an integer: a declared `5.0` is accepted
+  for an integer input and stated as `5`. A field example is read as a value of the field's type,
+  so it can state only a scalar: `example:"a,b"` on a `[]string` field is not a list, and an
+  imported array, object or `null` property example is reported as a diagnostic and not imported.
+  An example that breaks its input fails generation with `CoreError::InvalidExample`, which names
+  the file and place the example is declared in and the type, range or constraint it breaks
+  (`example: -300` on a `uint8` is outside the range of an unsigned 8-bit integer). This happens in
+  any pipeline that samples: one with `StaticDocs`, or with an SDK target that has contract tests
+  or writes its docs — both on by default. gnr8 does not check a declared value against `pattern`;
+  the author's example is taken as matching it, and it is the only way a pattern-bound input gets a
+  sample on a page. A valid example that no call can state prints `No sample call: …` and names
+  the value: a `null` in a request, a whole number in a float field, a request float that Go,
+  Python and TypeScript would print differently (held to the 32-bit narrowing only in a `float32`
+  field), or a request date-time — an example or an enum member — not spelled the way Go sends it
+  (`…05.120Z`, `+00:00`). A reply example is decoded, never spelled by a generated language, so its
+  numbers may print any way. An operation page prints a declared example's value once, in the
+  Example section; where the example is declared, the page keeps its name and prose. An example an
+  imported OpenAPI document declares is checked the same way, so a document whose example breaks
+  its schema now fails generation.
 - **An SDK target refuses a path parameter that is not one scalar segment.** A path parameter
   that is an array, map, object or free-form value, or that declares the `label` or `matrix` style,
   is now a generation error naming it. The three SDKs sent three different segments for a list
@@ -105,8 +121,14 @@ must move the minor version.
 - **A generated SDK method whose success reply has a schema but a non-JSON media type changes its
   return type**: a `text/*` reply returns `string` / `str`, any other returns bytes, instead of the
   schema's model (see Fixed). A media range is classified by what it admits: `*/*` and
-  `application/*` admit JSON and keep returning the model, and `text/*` returns text. Code that
-  used the model type there must use the new one.
+  `application/*` admit JSON and keep returning the model, and `text/*` returns text. A response
+  that declares several media types answers in the first of them in sorted order, for the SDKs, the
+  contract tests and the docs alike, so a reply declared as `application/cbor` and
+  `application/json` now returns bytes. A text return type is optional when the operation also
+  declares a bodyless success. A returned text reply whose media type declares a charset other
+  than UTF-8 is a generation error. Generated TypeScript `ResponseDecodeFailure` gains
+  `"invalid_text"`, so a `switch` over it that is checked for exhaustiveness needs the new case.
+  Code that used the model type there must use the new one.
 - **New warnings can fail a `DiagnosticPolicy` that denies them.** An imported `$ref` parameter
   schema that does not resolve is now `request.parameter.unresolved`, two incompatible constraints
   on one parameter are `request.parameter.constraints.conflict`, and an imported server whose path
@@ -118,33 +140,44 @@ must move the minor version.
 - **`StaticDocs::new().to(dir)`** writes a deterministic Markdown reference: `index.md`, a page per
   group, operation and schema, `errors.md`, `authentication.md` and `llms.txt`. Every page is
   rendered from one docs model built from the same final graph as `openapi.yaml` and the SDKs.
-  Generation fails before writing anything on a missing page, a broken link, a page name that
-  collides or cannot be written, an empty heading, or user prose that leaves a code fence or HTML
-  block open over the sections after it. Prose is printed verbatim and never rewritten.
+  A declaration with no directory, or whose directory equals, contains or lies inside a `GoSdk`,
+  `PySdk` or `TsSdk` directory, is a configuration error naming both targets. Generation fails
+  before writing anything on a missing page, a broken link, a page name that collides or cannot be
+  written (no ASCII letter or digit, or a name Windows reserves such as `con`), an empty heading,
+  or user prose that leaves a code fence or HTML block open over the sections after it, read in
+  CommonMark's block grammar; the error names the prose's operation, group or the API description.
+  Prose is printed verbatim and never rewritten. The API title and group names are names, printed
+  as themselves with any Markdown syntax in them escaped.
   - An operation page carries its request line, group, tags and deprecation, its prose,
     authentication, parameter, request-body and response tables, declared examples, the
     **Example** section, pagination and diagnostics. A table prints only the columns some row
     fills. A parameter row prints its declared example and every constraint, as a field row does.
   - The **Example** section prints the HTTP exchange its sample produces — credentials as
-    placeholders, the reply in its declared media type's wire form (JSON, or the text itself for
-    `text/*`) — then, per sibling SDK target that emits package metadata, a section headed by the
-    language and the package a consumer imports, with the call; a typed-error sample, when the
-    operation declares a JSON error body, that handles its lowest such status, whose reply the
-    exchange prints; and the SDK's pagination iterator, when the operation is paginated. A
-    generated CLI's invocation and declared examples follow. Every call is spelled by the SDK's own
-    call-site renderer, the one its contract test uses. A Go SDK whose package name collides with
-    a name a sample binds is imported under an alias.
+    placeholders, named in a note that lists exactly the ones the exchange prints, and the reply
+    in its declared media type's wire form (JSON, or the text itself for `text/*`) — then, per
+    sibling SDK target that emits package metadata, a section headed by the language and the
+    package a consumer imports, with the call; a typed-error sample, when the operation declares a
+    JSON error body, that handles its lowest such status, whose reply the exchange prints; and the
+    SDK's pagination iterator, when the operation is paginated. The iterator leaves an optional
+    cursor out, so it walks every item of every page; a required cursor, a page number or an
+    offset is passed as sampled, under `Iterating over every item from the sampled page on:`. A
+    generated CLI's invocation and declared examples follow, printed verbatim. Every call is
+    spelled by the SDK's own call-site renderer, the one its contract test uses. A Go SDK whose
+    package name collides with a name a sample binds is imported under an alias.
   - Every sample value satisfies every constraint declared on its input — enum, length, range,
     `multipleOf`, item and property counts — and a format gnr8 maps to a well-known scalar; a
     declared example is the value. A float sample prints alike in Go, Python and TypeScript, an
-    integer sample stays within ±(2^53 − 1), and a parameter's serialization is sampled only when
-    it is its location's default, spelled out or not. `pattern` is never synthesized. An input or
-    reply with no sample prints `No sample call: …` or `No sample response body: …` with the
-    reason: an unmet `pattern` or `uniqueItems`, bounds no value meets, a valid declared example
-    no call can state, or a `text/*` reply whose sample is not a string.
+    integer sample stays within its type's range and ±(2^53 − 1), and a parameter's serialization
+    is sampled only when it is its location's default, spelled out or not. `pattern` is never
+    synthesized. A body with several representations prints the first that meets every
+    constraint. An input or reply with no sample prints `No sample call: …` or `No sample response
+    body: …` with the reason: an unmet `pattern` or `uniqueItems`, bounds no value meets (a bound
+    beyond the type's range is named), a valid declared example no call can state, or a `text/*`
+    reply whose sample is not a string.
   - `errors.md` names each declared SDK's own typed error; `authentication.md` shows how each SDK
     configures each scheme and which operations require it, together with which other schemes;
-    `index.md` prints the diagnostics that name no operation.
+    `index.md` lists the errors and authentication pages under `## Reference` and prints the
+    diagnostics that name no operation.
 - **A pipeline whose docs print field facts refuses an `OpenApiSchemaPatch` that changes one.** Docs
   print field facts wherever the docs model is rendered: a `StaticDocs` target, and an SDK target
   that writes its `README.md` and `reference.md` — the default, so a pipeline with any SDK target
@@ -156,28 +189,34 @@ must move the minor version.
   `.without_docs()`. Patches that only add `x-*` extensions are unaffected.
 - **`gnr8 verify` checks every docs sample against the SDK it documents.** Rung 2 compiles Go
   (`go vet`) and TypeScript (`tsc`, strict) samples and executes Python ones against a stub
-  transport, and holds every block a sample relies on to its page, `reference.md` and the README
-  quick start, byte for byte as whole lines, after post-processors. Rung 3 runs each call against
-  a recording transport and compares the one request it sends with the page's exchange, field by
-  field and the query string as encoded text; the call must succeed on the printed reply, a
-  typed-error sample must raise the typed error carrying the printed status and body, and an
-  iterator must stop after one page. A missing toolchain, an SDK with no package metadata, or a
-  suite whose every operation is refused is reported `skipped` with the reason.
+  transport, and holds every block a sample relies on — its code, the HTTP request and the reply it
+  is answered with — to its page, `reference.md` and the README quick start, byte for byte as
+  whole lines, after post-processors. Rung 3 runs each call against a recording transport and
+  compares the one request it sends with the page's exchange (an iterator's, without the cursor it
+  leaves out), field by field and the query string as encoded text; the call must succeed on the
+  printed reply, a typed-error sample must raise the typed error carrying the printed status and
+  body, and an iterator must stop after one page. A missing toolchain (`go`, `python3`, `node`, or
+  a `typescript` compiler), an SDK with no package metadata, or a suite whose every operation is
+  refused is reported `skipped` with the reason. `--json` reports the suites in a new
+  `docs_suites` array. A label two suites would share names the SDK directory, and the docs
+  directory too when one SDK is checked against two `StaticDocs` targets.
 - **Contract suites and docs suites count what they cannot sample.** Every refused sample — a
   required input, an optional body, a request representation, a success reply, a declared error
-  model — is counted with its operation, scope and reason; `gnr8 verify` prints `N cases, M refused
-  samples counted, not run` under the suite and carries `refused` in `--json`.
+  model — is counted with its operation, scope and reason. `gnr8 verify` prints `N cases, M
+  refused samples counted, not run` under a contract suite, and `--json` carries `refused` for
+  contract and docs suites alike.
 
 ### Changed
 
-- **Generated Go `client.go` carries `wireEscape` and `encodeWireQuery`**, and imports `net/url`,
-  `sort` and `strings`. The shared wire helpers no longer define `encodeWireQuery` or
-  `wireCookieEscape`. Generated TypeScript operation files define `wireEscape` and
-  `wireQueryString` whenever an operation has a path or query parameter.
-- **Generated TypeScript `client.ts` carries `_decodeText`**, and `ResponseDecodeFailure` gains
-  `"invalid_text"`. A `switch` over `ResponseDecodeFailure` that is checked for exhaustiveness
-  needs the new case. Generated Go operation files that return a text reply import `fmt` and
+- **Generated Go `client.go` carries the wire helpers `wireEscape`, `encodeWireQuery` and
+  `wireNumber`**, and imports `math`, `net/url`, `sort` and `strings`. The shared wire helpers no
+  longer define `encodeWireQuery` or `wireCookieEscape`. Go operation files format float
+  parameters through `wireNumber`, and no longer import `net/url` for a templated path or
+  `strconv` for a float query parameter; one that returns a text reply imports `fmt` and
   `unicode/utf8`.
+- **Generated TypeScript operation files define the wire helpers they call**: `wireEscape` when an
+  operation has a path or query parameter or a query API key, and `wireQueryString` when it has a
+  query parameter or a query API key. `client.ts` carries `_decodeText`.
 
 ### Fixed
 
@@ -192,8 +231,8 @@ must move the minor version.
   and docs page checks that sub-second precision survives the trip.
   A `pattern` is never synthesized: a case sends a sample drawn from the input's other
   constraints, which no generated SDK checks against the pattern, so a pattern costs no case. An
-  integer sample stays within ±(2^53 − 1), the range a TypeScript `number` carries exactly; bounds
-  that admit no such integer are a refused sample, counted.
+  integer sample stays inside its type's range and within ±(2^53 − 1), the range a TypeScript
+  `number` carries exactly; bounds that admit no such integer are a refused sample, counted.
 - **Parameters imported from an OpenAPI document keep their validation keywords as typed
   constraints** (`minimum`, `maxLength`, `pattern`, a non-string `enum`, …), held once: the graph's
   kept copy of the parameter's raw schema no longer repeats them, and `openapi.yaml` writes them
@@ -201,9 +240,10 @@ must move the minor version.
   constraints changes `openapi.yaml` exactly as it changes the docs and the samples. OpenAPI 3.0 /
   Swagger 2 `exclusiveMinimum: true` / `exclusiveMaximum: true` import as the exclusive bound
   instead of the string `"true"` and are published in the 3.1 spelling (`exclusiveMinimum: 5`). The
-  published parameter schemas change in two more ways: members of a parameter enum that can never
-  validate (another kind than the declared `type`, or `null`) are left out, and a parameter whose
-  schema is a `$ref` publishes the referenced schema's bounds beside the `$ref` (below).
+  published parameter schemas change in two more ways: members of a non-string parameter enum that
+  can never validate (another kind than the declared `type`, or `null`) are left out, while a
+  string enum is published as declared; and a parameter whose schema is a `$ref` publishes the
+  referenced schema's bounds beside the `$ref` (below).
 - **The generated TypeScript contract test compiles under `--strict` when the method may return
   `undefined`** (a JSON model beside a bodyless success, a redirect, or a reply the method does not
   return). A case that read a decoded field off the result failed with TS18048; it now asserts the
@@ -220,11 +260,11 @@ must move the minor version.
   with a path or query parameter.
 - **A Go SDK with a `date-time` path parameter builds**: the segment is sent as RFC 3339, as a
   `date-time` query or header value already was, and the file imports `time`.
-- **Go keeps sub-second precision in a `date-time` path, query or header value.** It formatted
-  them with `time.RFC3339`, which drops the fraction, so `…05.123+02:00` went out as `…05+02:00`
-  while Python and TypeScript sent the string as written. Every Go date-time wire value now uses
-  `time.RFC3339Nano`, as its JSON bodies already did. Generated Go operation files change for every
-  operation with a date-time parameter.
+- **Go keeps sub-second precision in a `date-time` path, query, header or cookie value.** It
+  formatted them with `time.RFC3339`, which drops the fraction, so `…05.123+02:00` went out as
+  `…05+02:00` while Python and TypeScript sent the string as written. Every Go date-time wire value
+  now uses `time.RFC3339Nano`, as its JSON bodies already did. Generated Go operation files change
+  for every operation with a date-time parameter.
 - **The Go contract test records the path as sent** (`URL.EscapedPath()`), which is what its expected
   path spells; a path value that needs escaping no longer fails it.
 - **Go samples and contract tests compile for an optional enum, date-time or scalar body**: the call
@@ -232,20 +272,22 @@ must move the minor version.
 - **A number in a path, query, header or cookie parameter is the same text from every SDK**: the
   shortest decimal that reads back as the value, laid out as JavaScript's `Number#toString` lays it
   out. Go printed `1e+16` and `1.23456789e+08`, and Python printed `3.0` where TypeScript sent `3`.
-  Generated Go `client.go` gains `wireNumber` and imports `math`, Go operations format float
-  parameters through it, and Python's `client.py` gains `Client._wire_number`.
+  Go formats it with `wireNumber` (see Changed), and Python's `client.py` gains
+  `Client._wire_number`.
 - **A Python path parameter is sent as its wire value**: a named-enum argument went out as
   `Kind._1ST` and a boolean as `True`. Path segments now go through `Client._path_segment`, which
   converts the value as query, header and cookie values already were. Generated `client.py` changes
-  for every operation with a path parameter.
+  for every operation with a path parameter, and so does each `OperationFileSplit` module, which
+  imports `urllib.parse` only when it uses it.
 - **Python dataclass models send their wire names and leave unset optional fields out.** Every
   generated dataclass owns a `to_dict`, and the client sends it instead of `dataclasses.asdict`, which
   sent `class_` for `class` and `null` for every unset optional. `to_dict` and `from_dict` follow
   one walk of each field's type, so each reads back what the other writes: `from_dict` now rebuilds
   a nested model in map values and nested lists too, where it used to stop at a model or a list of
   models, and both read a named alias as the type it names. A union field holds its JSON value both
-  ways, because nothing in its type says which variant a JSON object is. Generated dataclass
-  `models.py` changes for every object model.
+  ways, because nothing in its type says which variant a JSON object is. An optional nullable field
+  can still send `null` (see Breaking). Generated dataclass `models.py` changes for every object
+  model.
 - **A Pydantic model's `to_dict` re-encodes a nested model reached through a named alias** (a field
   typed `Inners`, where `Inners` is a list of `Inner`). It stopped at the alias, so `model_dump`
   dropped a required nullable key inside each item, and the model's own `from_dict` rejected the
@@ -257,22 +299,22 @@ must move the minor version.
   decoded it as JSON, so a `text/plain` reply of `gnr8` failed the call (TypeScript refused the
   media type outright). The method now reads the body as UTF-8 text and returns `string` (Go,
   TypeScript) or `str` (Python), whatever schema describes the content; Python's `client.py` no
-  longer imports that schema. The decode is strict in all three: a body that is not valid UTF-8
-  fails the call with the SDK's decode error (a Go `error`, a Python `UnicodeDecodeError`, a
-  TypeScript `ResponseDecodeError` with `failure: "invalid_text"`), and a returned text reply whose
-  media type declares a charset other than UTF-8 is a generation error. A schema-backed reply in a
-  media type that is neither JSON nor text (`application/xml`, say) was decoded as JSON too; it is
-  now returned as bytes (`[]byte`, `bytes`, `Blob`), as a download is. One classification of a
-  media type — JSON for `application/json`, `+json` and a range that admits JSON (`*/*`,
-  `application/*`), text for `text/*`, anything else neither — now serves the SDKs, the contract
-  tests and the docs page. A schema-backed reply under `*/*` or `application/*` still returns its
-  model, as before, and the contract tests and the docs check send it as `application/json`. A
-  text reply is the return type only when the operation declares no JSON model; beside one it is
-  a status the method does not return, read from a response hook, and opaque bytes beside a text
-  reply are too. Contract tests answer a text reply with the text under its declared media type
-  (`content-type: text/plain`, body `gnr8`), and a text reply whose sample is not a string drives
-  no case and is counted as a refused sample. Generated operations and `contract_test.*` files
-  change for every operation with a non-JSON schema-backed success reply.
+  longer imports that schema, and the generated CLI no longer reads a text reply as a list or page
+  result. The decode is strict in all three: a body that is not valid UTF-8 fails the call with the
+  SDK's decode error (a Go `error`, a Python `UnicodeDecodeError`, a TypeScript
+  `ResponseDecodeError` with `failure: "invalid_text"`). A schema-backed reply in a media type that
+  is neither JSON nor text (`application/xml`, say) was decoded as JSON too; it is now returned as
+  bytes (`[]byte`, `bytes`, `Blob`), as a download is. One classification of a media type — JSON
+  for `application/json`, `+json` and a range that admits JSON (`*/*`, `application/*`), text for
+  `text/*`, anything else neither — now serves the SDKs, the contract tests and the docs page. A
+  schema-backed reply under `*/*` or `application/*` still returns its model, as before, and the
+  contract tests and the docs check send it as `application/json`. A text reply is the return type
+  only when the operation declares no JSON model; beside one it is a status the method does not
+  return, read from a response hook, and opaque bytes beside a text reply are too. Contract tests
+  answer a text reply with the text under its declared media type (`content-type: text/plain`,
+  body `gnr8`), and a text reply whose sample is not a string drives no case and is counted as a
+  refused sample. Generated operations and `contract_test.*` files change for every operation with
+  a non-JSON schema-backed success reply.
 - An operation with several request representations no longer loses its body-selection cases when
   one representation cannot be sampled. Each representation with a sample gets its case, and each
   without one (a refused JSON body, or a representation that is not JSON) is counted as a refused
@@ -280,29 +322,37 @@ must move the minor version.
 - **An imported example of any scalar JSON type is imported.** A property `example: 7` on an integer
   was dropped while `example: "7"` was kept; a string, number or boolean `example` is now read by one
   rule (its text, read back as a value of the field's type), and an array, object or `null` field
-  example is reported as a diagnostic instead of vanishing. `openapi.yaml` publishes a field example
-  in the JSON kind of its integer, number or boolean type (`example: 7`, not `'7'`).
-- **A scalar parameter's `example` is its sample.** `Param` gains `example`; an imported scalar
-  parameter's Parameter Object `example` moves into it (an array or object parameter's stays as
-  declared), and `openapi.yaml` writes it back. The sampler takes it as the parameter's value, so a
-  patterned path parameter with an example gets a sample a docs page prints, and an example that
-  breaks the parameter's type or constraints fails generation with `CoreError::InvalidExample`. That
-  error, for a field or a parameter example, now names the file the example is declared in.
+  example is reported as a diagnostic instead of vanishing. Every field example, whatever its
+  source, is published in the JSON kind of its integer, number or boolean type (`example: 7`, not
+  `'7'`), and so is one on a field typed by a named scalar alias (`example: 3` for a field typed
+  `Size`, an integer).
+- **A scalar parameter's `example` is its sample.** An imported scalar parameter's Parameter
+  Object `example` moves into `Param::example` (an array or object parameter's stays as declared),
+  and `openapi.yaml` writes it back. The sampler takes it as the parameter's value, so a patterned
+  path parameter with an example gets a sample a docs page prints, and an example that breaks the
+  parameter's type or constraints fails generation with `CoreError::InvalidExample`.
 - **`multipleOf` and `uniqueItems` are typed constraints.** An imported field dropped both from
-  `openapi.yaml`, and the sampler ignored them on a parameter, so a sample could break them.
-  `Constraints` gains `multiple_of` and `unique_items`. They are imported on fields and parameters,
-  published from the typed fact, and checked against declared examples. An integer or float sample
-  is a multiple of its `multipleOf`, or a typed refusal when the bounds admit none. A float
-  `multipleOf: 1` admits only whole numbers, which the languages print differently. A sampled array
-  repeats one item, so a `uniqueItems` array above one element records the constraint as unmet.
-  The contract test still sends it, and the docs page refuses. Any other validation keyword left
-  in an imported parameter's schema is recorded as unmet too, so the page refuses instead of
-  printing a value that may break it. That covers keywords gnr8 does not model (`const`, `not`, …)
-  and keywords it could not type (an enum with no scalar `type`).
+  `openapi.yaml`, and the sampler ignored them on a parameter, so a sample could break them. They
+  are imported on fields and parameters, published from the typed fact, written by an
+  `OpenApiFieldPatch` that sets them, and checked against declared examples. An integer or float
+  sample is a multiple of its `multipleOf`, or a typed refusal when the bounds admit none; an
+  integer under a decimal `multipleOf` is a multiple of the smallest positive integer the divisor
+  divides (`3` for `1.5`, `1` for `0.5` or `0.00001`). A float `multipleOf: 1` admits only whole
+  numbers, which the languages print differently. A sampled array repeats one item, so a
+  `uniqueItems` array above one element records the constraint as unmet. The contract test still
+  sends it, and the docs page refuses. Any other validation keyword left in an imported parameter's
+  schema is recorded as unmet too, so the page refuses instead of printing a value that may break
+  it. That covers keywords gnr8 does not model (`const`, `not`, …) and keywords it could not type
+  (an enum with no scalar `type`).
 - **A declared error response example is the typed-error case's body.** Contract tests built the
   error reply from the model even when the operation declared an example for that status, though
   the example was already checked against the model. An error reply now follows the rule every
   reply follows, and generated `contract_test.*` files change for operations that declare one.
+- A declared error model with no sample (recursive, too deep, or holding an empty enum or union)
+  skips its typed-error contract case and is counted as a refused sample. It used to be answered
+  with the generic `contract_test_error` envelope, a body the model does not describe; that
+  envelope now answers only a status that declares no body. A refused error model is counted only
+  when no other operation supplies a case for that status.
 - An imported document's base path is no longer stated twice. The first server's path (or Swagger
   2's `basePath`) becomes the graph's base path, which every generated path, the SDKs and the docs
   request line already carry; the imported servers now drop it (`https://api.example.com/v1` is
@@ -313,8 +363,9 @@ must move the minor version.
   variable replaced by its declared `default`, so `https://api.example.com/{version}` with
   `version: {default: v1}` gives the base path `/v1` instead of a `/{version}` segment no
   operation declares. A path variable with no default is reported, and its server is not used for
-  the base path. A version 1 artifact never held server variables, so a first server whose path
-  is templated reports its operations' paths once after upgrading.
+  the base path. A server's `variables` are not carried into the graph, and `openapi.yaml`
+  publishes the server URL without them. A version 1 artifact never held server variables, so a
+  first server whose path is templated reports its operations' paths once after upgrading.
 - A non-string parameter enum (`type: integer, enum: [1, 2, 3]`) imports as a constraint, so samples
   and docs pick a member; a mixed enum keeps its members of the declared type instead of losing all
   of them. A string enum stays the parameter's type. That includes a `type: string` enum with
@@ -328,46 +379,11 @@ must move the minor version.
   stated on both sides is combined by one rule, never won silently: an enum beside the `$ref` is a
   constraint whatever kind it takes from the referenced schema, and is intersected with that
   schema's enum, so `{$ref: Lvl, enum: [2, 3]}` with `Lvl: {enum: [1, 2]}` publishes `enum: [2]`
-  instead of Lvl's wider `[1, 2]`. Two different patterns, or two enums with no member in common,
-  are a `request.parameter.constraints.conflict` diagnostic, and the keyword stated beside the
-  `$ref` is the one carried. A parameter whose schema is a `$ref` to an array or map keeps the
-  referenced items' constraints too, and `openapi.yaml` publishes them beside the `$ref`
-  (`{$ref: IdList, maxItems: 4, items: {minimum: 0}}`).
-- A declared reply example is the reply however its numbers print: a reply is decoded, never
-  spelled by a generated language, so only a request float has to print alike in Go, Python and
-  TypeScript. A float is held to the 32-bit narrowing only in a `float32` field, so a `float64`
-  sample or example such as `1.23456789` is no longer refused.
-- A request date-time enum member is the sample only when it is spelled the way Go sends it, as a
-  declared request date-time example is. A member such as `…05.120Z` is skipped for a canonical
-  one, or refused with the same `No sample call: …` reason when no member is canonical, instead of
-  a sample Go would send in different bytes.
-- An `OpenApiFieldPatch` whose `constraints` set `multiple_of` or `unique_items` now writes them to
-  the published field. Both were ignored.
-- A declared error model with no sample (recursive, too deep, or holding an empty enum or union)
-  skips its typed-error contract case and is counted, as every other refused error model is. It
-  used to be answered with the generic `contract_test_error` envelope, a body the model does not
-  describe; that envelope now answers only a status that declares no body. A refused error model
-  is counted only when no other operation supplies a case for that status.
-- An integer under a decimal `multipleOf` is read exactly: it must be a multiple of the smallest
-  positive integer the divisor divides (`3` for `1.5`, `1` for `0.5` or `0.00001`). An integer
-  sample under `multipleOf: 0.00001` used to be refused, because a divisor below `0.0001` found no
-  step.
-- A declared integer is checked against its type's width and sign, and a float32 value against
-  the float32 range: `example: -300` on a `uint8`, or `3000000000` on an `int32`, is
-  `CoreError::InvalidExample` naming the range, where it used to reach a Go literal that does not
-  compile. A built integer sample stays inside the type's range, and a bound beyond it is refused
-  naming that bound. An integral number is an integer: a declared `5.0` (a media example's value, a
-  field or parameter example's text, an enum member) is accepted for an integer input and stated
-  as `5`, which every SDK decodes into its integer type, where it used to be an error.
-- A field typed by a named scalar alias publishes its example in the alias's JSON kind
-  (`example: 3` for a field typed `Size`, an integer), as a parameter's example already was. It
-  was published as the string `'3'`.
-- A docs page whose first request representation leaves a constraint unmet (an unmet `pattern`,
-  say) takes the first representation that meets every constraint instead of refusing the
-  operation or dropping the body.
-- The OpenAPI source documentation now states that a server's `variables` are not carried: the
-  importer reads a server's path with each variable's `default`, and `openapi.yaml` publishes the
-  server URL without `variables`.
+  instead of Lvl's wider `[1, 2]`. Two different patterns, two different `multipleOf`, or two enums
+  with no member in common are a `request.parameter.constraints.conflict` diagnostic, and the
+  keyword stated beside the `$ref` is the one carried. A parameter whose schema is a `$ref` to an
+  array or map keeps the referenced items' constraints too, and `openapi.yaml` publishes them
+  beside the `$ref` (`{$ref: IdList, maxItems: 4, items: {minimum: 0}}`).
 
 ## 0.18.0 — 2026-10-10
 
