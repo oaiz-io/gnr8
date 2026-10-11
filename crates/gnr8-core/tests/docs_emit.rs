@@ -1294,6 +1294,44 @@ fn typed_error_and_iterator_samples_follow_the_call() {
     assert!(!created.contains("Handling the"), "{created}");
 }
 
+/// An optional cursor the sampled call already left out (its `pattern` gets no sample) is left out
+/// of the iterator too, so the iterator still starts at the first page and its lead-in says so.
+#[test]
+fn an_iterator_whose_call_left_the_cursor_out_walks_every_page() {
+    let mut value = bookstore_json();
+    value["operations"][0]["params"]
+        .as_array_mut()
+        .unwrap()
+        .push(
+            json!({"name": "cursor", "location": "query", "required": false,
+                     "schema": string(), "constraints": {"pattern": "^c"},
+                     "provenance": span()}),
+        );
+    value["schemas"][1]["body"]["of"]
+        .as_array_mut()
+        .unwrap()
+        .push(field("next_cursor", &string(), false));
+    value["pagination"] = json!([{
+        "operation_id": "listBooks", "mode": "cursor", "items_field": "books",
+        "cursor_param": "cursor", "next_cursor_field": "next_cursor",
+        "termination": "no_next_cursor"
+    }]);
+    let pages = render(&graph_of(value), &[go_sdk(), py_sdk(), ts_sdk(true)]);
+    let listed = section(page(&pages, "operations/list-books.md"), "Example");
+    assert!(
+        !listed.contains("cursor=") && !listed.contains("ursor: "),
+        "{listed}"
+    );
+    assert_eq!(
+        listed
+            .matches("Iterating over every item of every page:")
+            .count(),
+        3,
+        "{listed}"
+    );
+    assert!(!listed.contains("from the sampled page on"), "{listed}");
+}
+
 /// A page number is the position every generated iterator starts from, so the iterator passes it
 /// as sampled, and its lead-in says it starts there rather than at the first page.
 #[test]

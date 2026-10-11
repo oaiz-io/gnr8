@@ -530,7 +530,9 @@ pub(crate) fn sdk_samples(
 /// The inputs the iterator sample is called with: the call's, without an optional cursor
 /// parameter, so the iteration starts at the first page — the sampled cursor names no page the
 /// API ever returned. A required cursor, a page number or an offset is the position every
-/// generated iterator starts from, so it stays as sampled. Returns whether the cursor was left out.
+/// generated iterator starts from, so it stays as sampled. Returns whether the iteration starts at
+/// the first page: whether the iterator passes no cursor, whether the call had left an optional
+/// one out already or this left it out.
 fn iteration_inputs(
     graph: &ApiGraph,
     op: &Operation,
@@ -545,12 +547,12 @@ fn iteration_inputs(
     let Some(cursor) = cursor else {
         return (inputs, false);
     };
-    let before = inputs.params.len();
+    let names_cursor = |param: &SampleParam| param.location == "query" && param.name == cursor;
     inputs
         .params
-        .retain(|param| param.required || param.location != "query" || param.name != cursor);
-    let omitted = inputs.params.len() < before;
-    (inputs, omitted)
+        .retain(|param| param.required || !names_cursor(param));
+    let from_first_page = !inputs.params.iter().any(names_cursor);
+    (inputs, from_first_page)
 }
 
 /// The sampled call: construction, call and one use of the result.
