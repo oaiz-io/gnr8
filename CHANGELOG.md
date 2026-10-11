@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.18.1 — 2026-10-11
+
 ### Breaking
 
 - **`BuiltinTarget` gains `StaticDocs`.** Rust code that matches `BuiltinTarget` exhaustively needs
