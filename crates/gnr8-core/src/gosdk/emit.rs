@@ -3481,6 +3481,12 @@ return ""
 }}
 return formValue(v.Elem().Interface())
 }}
+if v.Kind() == reflect.Float32 {{
+return wireNumber(v.Float(), 32)
+}}
+if v.Kind() == reflect.Float64 {{
+return wireNumber(v.Float(), 64)
+}}
 if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {{
 return fmt.Sprint(value)
 }}

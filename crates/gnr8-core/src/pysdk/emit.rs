@@ -2624,15 +2624,18 @@ class Client:
             )
         raise ValueError(f\"unsupported request body encoding: {{body_encoding}}\")
 
-    @staticmethod
-    def _form_fields(value: Any) -> Any:
+    @classmethod
+    def _form_fields(cls, value: Any) -> Any:
         # A `None` is no field, as it is no multipart part: never the text \"None\".
+        # A scalar is spelled as every generated SDK spells a parameter value.
         if not isinstance(value, dict):
             return value
         fields = {{}}
         for key, item in value.items():
             if isinstance(item, (list, tuple)):
-                item = [part for part in item if part is not None]
+                item = [cls._parameter_scalar(part) for part in item if part is not None]
+            elif item is not None:
+                item = cls._parameter_scalar(item)
             if item is not None:
                 fields[key] = item
         return fields
@@ -2673,7 +2676,7 @@ class Client:
                     out.extend(
                         f'Content-Disposition: form-data; name=\"{{key}}\"\\r\\n\\r\\n'.encode()
                     )
-                    out.extend(str(part).encode())
+                    out.extend(self._parameter_scalar(part).encode())
                     out.extend(b\"\\r\\n\")
         out.extend(f\"--{{boundary}}--\\r\\n\".encode())
         return bytes(out)

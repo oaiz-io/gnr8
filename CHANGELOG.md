@@ -321,6 +321,11 @@ must move the minor version.
   multipart body already did. It sent the text `None` (`a=x&b=None`) for a nullable field holding
   `None`, required or optional, in both model styles; a `None` list item is left out too. Generated
   `client.py` gains `Client._form_fields`.
+- **Form and multipart text values are spelled as every generated SDK spells a parameter value.**
+  Python sent a boolean as `True` and a float as `3.0`, and Go sent a float with `fmt.Sprint`
+  (`1e-06`); both now write `true` / `false` and the JavaScript `Number#toString` spelling (`3`,
+  `0.000001`) the TypeScript client sends. Generated Python `client.py` and the Go shared helpers
+  change.
 - **A split-layout Python dataclass model decodes the models it holds.** With each model in its own
   module (`SdkFileLayout::split()`), a model imported the models its fields name only for type
   checkers, so its `from_dict` raised `NameError` at run time on the first nested model, and so did

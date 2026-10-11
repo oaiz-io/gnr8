@@ -2985,6 +2985,8 @@ components:
         b: { type: string, nullable: true }
         c: { type: string, nullable: true }
         tags: { type: array, items: { type: string } }
+        flag: { type: boolean }
+        ratio: { type: number }
 paths:
   /f:
     post:
@@ -3034,9 +3036,11 @@ try:
     )
     client.post_f(bookstore.FormIn(a="x", b=None, c=None))
     client.post_f(bookstore.FormIn(a="x", b="y", c="z", tags=["p", "q"]))
+    client.post_f(bookstore.FormIn(a="x", b=None, c=None, flag=True, ratio=3.0))
     assert _Handler.bodies == [
         {"a": ["x"]},
         {"a": ["x"], "b": ["y"], "c": ["z"], "tags": ["p", "q"]},
+        {"a": ["x"], "flag": ["true"], "ratio": ["3"]},
     ], _Handler.bodies
 finally:
     server.shutdown()
@@ -3044,7 +3048,8 @@ finally:
 "#;
 
 /// A `None` in a form body is no field in both model styles, as the Go and TypeScript clients send
-/// it, rather than the four characters `None`.
+/// it, rather than the four characters `None`; a boolean is `true` and a number is spelled as every
+/// generated SDK spells one (`3`, not `True` or `3.0`).
 #[test]
 fn a_none_form_field_is_not_sent_in_both_styles() {
     if !python_available() {
