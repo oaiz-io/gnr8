@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.18.3 — 2026-10-12
+
 ### Fixed
 
 - Generated CLI body help preserves field-level enum restrictions and request nullability, quotes
