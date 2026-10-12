@@ -142,8 +142,9 @@ Recognized route facts include:
   `force_nullable(..., SchemaUse::Input)` or `force_non_nullable(..., SchemaUse::Input)`; either one
   retires the diagnostic. A pointer field's null is `encoding/json`'s own (it sets nil without calling
   the pointee's decoder), and so are `json.RawMessage` that is not required and `time.Time`. The
-  diagnostic is dropped, after the source and after every transform, once only responses reach its
-  schema or a transform removes the schema.
+  diagnostic counts only while its schema publishes an input answer, judged on the graph a
+  `DiagnosticPolicy` runs on and on the finished graph: it is dropped once only responses reach the
+  schema or a transform removes it, and it follows a `RenameType`.
 
   On a `form:`-tagged field a form/multipart binder owns it, and the rules differ: a part is present
   or absent with no `null` to write, so such a field is never nullable, and it is optional when the

@@ -1801,11 +1801,18 @@ fn unresolved_null_fields(diagnostics: &[gnr8_engine::graph::Diagnostic]) -> Vec
 fn decoder_pipeline(
     overrides: ApiOverrides,
 ) -> Result<gnr8_engine::pipeline::PipelineOutcome, gnr8_engine::CoreError> {
+    decoder_pipeline_after(|pipeline| pipeline, overrides)
+}
+
+/// [`decoder_pipeline`] with `before` adding transforms between the source and the overrides.
+fn decoder_pipeline_after(
+    before: impl FnOnce(Pipeline) -> Pipeline,
+    overrides: ApiOverrides,
+) -> Result<gnr8_engine::pipeline::PipelineOutcome, gnr8_engine::CoreError> {
     let fixture = unique_temp_dir("decoders");
     copy_fixture(Path::new(FIXTURE_DIR), &fixture);
     let store = gnr8_engine::store::Store::at(fixture.join("cache-store"));
-    let pipeline = Pipeline::new()
-        .source(GoGin::new().inputs(["."]))
+    let pipeline = before(Pipeline::new().source(GoGin::new().inputs(["."])))
         .transform(overrides.sse_response("GET", "/v1/items/raw-stream"))
         .transform(DiagnosticPolicy::new().deny(NULL_ACCEPTANCE_UNRESOLVED))
         .target(OpenApi31::new().to("generated/openapi.yaml"))
@@ -1970,5 +1977,83 @@ fn a_nullability_declaration_without_an_unresolved_null_stays_checked() {
             .to_string()
             .contains("redundant Input nullability override"),
         "{error}"
+    );
+}
+
+/// Every unresolved null of the fixture but `MoveFolderRequest`'s, declared.
+fn declare_all_but_move_folder() -> ApiOverrides {
+    ApiOverrides::new()
+        .force_non_nullable("MoveFolderParent", "folderId", SchemaUse::Input)
+        .force_non_nullable("RenameFolderRequest", "name", SchemaUse::Input)
+        .force_nullable("RenameFolderRequest", "proof", SchemaUse::Input)
+        .force_non_nullable("ValidatedRequest", "raw", SchemaUse::Input)
+}
+
+/// A renamed type keeps its unresolved nulls: the diagnostic follows the new id, so the policy still
+/// sees it and a declaration under the new name still retires it.
+#[test]
+fn a_renamed_type_keeps_its_unresolved_null_acceptance() {
+    if !go_available() {
+        eprintln!("skipping: go unavailable");
+        return;
+    }
+    let rename =
+        |pipeline: Pipeline| pipeline.transform(RenameType::new("MoveFolderRequest", "MoveFolder"));
+    match decoder_pipeline_after(rename, declare_all_but_move_folder()) {
+        Err(gnr8_engine::CoreError::DiagnosticsDenied { codes }) => {
+            assert_eq!(codes, vec![NULL_ACCEPTANCE_UNRESOLVED.to_string()]);
+        }
+        other => panic!("the renamed type's unresolved nulls must trip the policy: {other:?}"),
+    }
+
+    let outcome = decoder_pipeline_after(
+        rename,
+        declare_all_but_move_folder()
+            .force_nullable("MoveFolder", "note", SchemaUse::Input)
+            .force_non_nullable("MoveFolder", "parentFolder", SchemaUse::Input),
+    )
+    .expect("the renamed type's nulls are declared under its new name");
+    assert!(
+        unresolved_null_fields(&outcome.diagnostics).is_empty(),
+        "{:?}",
+        outcome.diagnostics
+    );
+    let move_folder = component_section(artifact(&outcome, "generated/openapi.yaml"), "MoveFolder");
+    assert!(
+        property_section(move_folder, "note").contains("null")
+            && !property_section(move_folder, "parentFolder").contains("null"),
+        "{move_folder}"
+    );
+}
+
+/// A reply is out of scope only while only responses reach it. Registering it as an input root
+/// after the source publishes its input null, so its diagnostic is still there to deny and to
+/// retire, in the same `ApiOverrides` that registers it.
+#[test]
+fn a_reply_registered_as_input_keeps_its_unresolved_null_acceptance() {
+    if !go_available() {
+        eprintln!("skipping: go unavailable");
+        return;
+    }
+    let declared = || {
+        declare_all_but_move_folder()
+            .force_nullable("MoveFolderRequest", "note", SchemaUse::Input)
+            .force_non_nullable("MoveFolderRequest", "parentFolder", SchemaUse::Input)
+            .register_input_schema("DecodedReply")
+    };
+    match decoder_pipeline(declared()) {
+        Err(gnr8_engine::CoreError::DiagnosticsDenied { codes }) => {
+            assert_eq!(codes, vec![NULL_ACCEPTANCE_UNRESOLVED.to_string()]);
+        }
+        other => panic!("DecodedReply's input null must trip the policy: {other:?}"),
+    }
+
+    let outcome =
+        decoder_pipeline(declared().force_non_nullable("DecodedReply", "label", SchemaUse::Input))
+            .expect("DecodedReply's input null is declared");
+    assert!(
+        unresolved_null_fields(&outcome.diagnostics).is_empty(),
+        "{:?}",
+        outcome.diagnostics
     );
 }

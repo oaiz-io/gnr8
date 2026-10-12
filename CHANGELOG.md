@@ -28,9 +28,12 @@ must move the minor version.
     refuses its nil.
 
   The diagnostic names the type and the JSON field and is raised only where `encoding/json`'s rules
-  would have published the null; its `schema` is the schema id and its `subject` the JSON name. It is
-  dropped once its schema publishes no input answer, after the source and after every transform: when
-  only responses reach the schema, or a transform removes it. State the answer in `.gnr8` with
+  would have published the null; its `schema` is the schema id and its `subject` the JSON name. It
+  counts only while its schema publishes an input answer: a `DiagnosticPolicy` asks of the graph it
+  runs on, and the run reports it only if the finished graph still does, so it is dropped when only
+  responses reach the schema or a transform removes it. It stays through every transform, so a later
+  `register_input_schema` or request body brings it back into scope, and it follows a `RenameType`
+  to the new name. State the answer in `.gnr8` with
   `ApiOverrides::force_nullable(schema, field, SchemaUse::Input)` or `force_non_nullable` with the same
   arguments: on such a field either one is accepted, neither is redundant, and the diagnostic is
   retired. A `DiagnosticPolicy` that denies the code fails the pipeline on every null left unstated.

@@ -5,7 +5,7 @@
 //! what decoding, validation, and serialization each do; this module selects the facts for the
 //! schema's payload position. Nullability never changes presence.
 
-use super::{ApiGraph, Field, Param, Type};
+use super::{ApiGraph, Diagnostic, Field, Param, Type};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The HTTP positions a component schema is reached from.
@@ -200,26 +200,57 @@ pub(crate) fn schema_consumers(graph: &ApiGraph) -> SchemaConsumers<'_> {
 /// and its `subject` the field's JSON name.
 pub(crate) const NULL_ACCEPTANCE_UNRESOLVED: &str = "schema.nullability.unresolved";
 
-/// Drop each [`NULL_ACCEPTANCE_UNRESOLVED`] diagnostic whose schema is gone or only responses reach.
+/// The ids of the schemas that publish an input null answer: those a request reaches, and those
+/// nothing reaches.
 ///
-/// The diagnostic is about decoding. A schema only responses reach publishes output nullability
-/// alone ([`SchemaDirections::field_is_nullable`]), and a schema no longer in the graph publishes
-/// nothing, so in either case its input null acceptance is in no artifact and there is nothing to
-/// state. A schema reached from a request, or from nothing, publishes the input answer and keeps its
-/// diagnostic. A diagnostic is only ever dropped here, never restored.
-pub(crate) fn retain_decoded_null_acceptance_diagnostics(graph: &mut ApiGraph) {
-    let decoded: BTreeSet<String> = schema_directions(graph)
+/// A schema only responses reach publishes output nullability alone
+/// ([`SchemaDirections::field_is_nullable`]), and a schema no longer in the graph publishes nothing,
+/// so neither puts an input null acceptance in any artifact.
+pub(crate) fn decoded_schemas(graph: &ApiGraph) -> BTreeSet<String> {
+    schema_directions(graph)
         .into_iter()
         .filter(|(_, directions)| directions.request || !directions.response)
         .map(|(id, _)| id.to_string())
-        .collect();
-    graph.diagnostics.retain(|diagnostic| {
-        diagnostic.code != NULL_ACCEPTANCE_UNRESOLVED
-            || diagnostic
-                .schema
-                .as_deref()
-                .is_some_and(|schema| decoded.contains(schema))
-    });
+        .collect()
+}
+
+/// Whether `diagnostic` names something a graph whose [`decoded_schemas`] are `decoded` still
+/// publishes. Every diagnostic does, except a [`NULL_ACCEPTANCE_UNRESOLVED`] one whose schema is not
+/// among them: its input null acceptance is in no artifact, so there is nothing to state.
+///
+/// The answer belongs to one graph. The diagnostic itself stays in the graph through every
+/// transform, because a later one can still reach its schema from a request — an input root
+/// registered on it, or a request body a custom transform adds — and a dropped diagnostic could not
+/// come back for it. A `DiagnosticPolicy` asks against the graph it runs on, and the finished graph
+/// keeps only the ones still in scope ([`retain_decoded_null_acceptance_diagnostics`]).
+pub(crate) fn diagnostic_in_scope(diagnostic: &Diagnostic, decoded: &BTreeSet<String>) -> bool {
+    diagnostic.code != NULL_ACCEPTANCE_UNRESOLVED
+        || diagnostic
+            .schema
+            .as_deref()
+            .is_some_and(|schema| decoded.contains(schema))
+}
+
+/// Point each [`NULL_ACCEPTANCE_UNRESOLVED`] diagnostic on schema `old_id` at `new_id`. The
+/// diagnostic names its schema by id, the id a nullability declaration resolves and its scope is
+/// judged by, so a renamed schema keeps it as it keeps every reference to it.
+pub(crate) fn rename_null_acceptance_schema(graph: &mut ApiGraph, old_id: &str, new_id: &str) {
+    for diagnostic in &mut graph.diagnostics {
+        if diagnostic.code == NULL_ACCEPTANCE_UNRESOLVED
+            && diagnostic.schema.as_deref() == Some(old_id)
+        {
+            diagnostic.schema = Some(new_id.to_string());
+        }
+    }
+}
+
+/// Drop each [`NULL_ACCEPTANCE_UNRESOLVED`] diagnostic the finished graph publishes no input answer
+/// for ([`diagnostic_in_scope`]). Run once, after the last transform.
+pub(crate) fn retain_decoded_null_acceptance_diagnostics(graph: &mut ApiGraph) {
+    let decoded = decoded_schemas(graph);
+    graph
+        .diagnostics
+        .retain(|diagnostic| diagnostic_in_scope(diagnostic, &decoded));
 }
 
 /// The positions `schema_id` is reached from, or [`SchemaDirections::default`] for an id the map does

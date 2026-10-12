@@ -935,12 +935,15 @@ impl TransformExec for DiagnosticPolicy {
                 message: "diagnostic policy codes must be non-empty".to_string(),
             });
         }
+        // A diagnostic the graph as it stands publishes nothing for is not this policy's to deny.
+        let decoded = crate::graph::direction::decoded_schemas(ir);
         let codes: BTreeSet<String> = ir
             .diagnostics
             .iter()
             .filter(|diagnostic| {
-                self.denied_codes.contains(&diagnostic.code)
-                    || self.denied_categories.contains(&diagnostic.category)
+                crate::graph::direction::diagnostic_in_scope(diagnostic, &decoded)
+                    && (self.denied_codes.contains(&diagnostic.code)
+                        || self.denied_categories.contains(&diagnostic.category))
             })
             .map(|diagnostic| diagnostic.code.clone())
             .collect();

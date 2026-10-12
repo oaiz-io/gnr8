@@ -382,18 +382,17 @@ pub fn build_ir(
     anchors.push(crate::lifecycle::WORKSPACE_DIR.to_string());
     let anchor_refs: Vec<&str> = anchors.iter().map(String::as_str).collect();
     crate::lifecycle::exclude_output_anchors(&mut ir, &anchor_refs);
-    // A null-acceptance diagnostic follows the graph: once a transform prunes its schema or leaves
-    // only responses reaching it, it names nothing left to state. Re-scoping after every span means
-    // a `DiagnosticPolicy` reads exactly the ones a declaration could still retire.
-    crate::graph::direction::retain_decoded_null_acceptance_diagnostics(&mut ir);
 
     for span in stage_spans(&plan.transforms) {
         match span {
             StageSpan::Builtin(_, spec) => builtins::apply_transform(spec, &mut ir, cx)?,
             StageSpan::Custom(indices) => ir = runner.apply_transforms(&indices, ir)?,
         }
-        crate::graph::direction::retain_decoded_null_acceptance_diagnostics(&mut ir);
     }
+    // A null-acceptance diagnostic is scoped by the finished graph, not by any graph before it: a
+    // transform may still reach its schema from a request, so it is only dropped here, once only
+    // responses reach the schema or the schema is gone.
+    crate::graph::direction::retain_decoded_null_acceptance_diagnostics(&mut ir);
     resolve_security_diagnostics(&mut ir);
     Ok(ir)
 }
