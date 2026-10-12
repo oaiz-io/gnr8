@@ -261,8 +261,9 @@ pub(crate) struct SchemaObject {
     /// Optional human description (from a field/param annotation); omitted when `None`. Emitted
     /// beside a `$ref` too: in JSON Schema 2020-12 a `$ref`'s sibling keywords apply alongside it.
     pub description: Option<String>,
-    /// Closed string value set, in sorted order. `None` is unrestricted; `Some([])` admits no
-    /// non-null values. A nullable schema also permits null independently of these string members.
+    /// Closed string value set: an enum type's members in graph order, narrowed by any constraint,
+    /// else a constraint's members sorted. `None` is unrestricted; `Some([])` admits no non-null
+    /// values. A nullable schema also permits null independently of these string members.
     pub enum_values: Option<Vec<String>>,
     /// String minimum length (`minLength`).
     pub min_length: Option<u64>,

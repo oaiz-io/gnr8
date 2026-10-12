@@ -252,6 +252,78 @@ fn field_constraints_cannot_add_values_to_an_inline_enum() {
     );
 }
 
+/// `SetEnumOrder` decides how a type's members read in every artifact. A constraint narrows that
+/// list; it never re-sorts it.
+#[test]
+fn configured_enum_order_survives_narrowing() {
+    use gnr8_engine::sdk::TransformExec as _;
+    if skip_go() {
+        return;
+    }
+    let mut graph = graph();
+    input_fields(&mut graph)[0].schema = Type::Enum(vec![
+        "archived".to_string(),
+        "draft".to_string(),
+        "published".to_string(),
+    ]);
+    input_fields(&mut graph)[0].meta.constraints.enum_values =
+        vec!["draft".to_string(), "published".to_string()];
+    input_fields(&mut graph)[1]
+        .meta
+        .constraints
+        .enum_values
+        .clear();
+    let cx = Cx::new(std::env::temp_dir());
+    SetEnumOrder::explicit("Input.mode", ["published", "archived", "draft"])
+        .apply(&mut graph, &cx)
+        .unwrap();
+    SetEnumOrder::explicit("Status", ["published", "draft"])
+        .apply(&mut graph, &cx)
+        .unwrap();
+
+    let ordered = serde_json::json!(["published", "draft"]);
+    let help = go_help_spec(&graph);
+    let spec = openapi(&graph);
+    assert_eq!(body_field(&help, "mode")["enum"], ordered);
+    assert_eq!(body_field(&help, "status")["enum"], ordered);
+    assert_eq!(
+        spec["components"]["schemas"]["Input"]["properties"]["mode"]["enum"],
+        ordered
+    );
+    assert_eq!(spec["components"]["schemas"]["Status"]["enum"], ordered);
+    let cli = go_cli(&graph);
+    let rows = cli
+        .files()
+        .iter()
+        .filter(|file| file.text.contains("one of: published|draft"))
+        .count();
+    assert_eq!(rows, 1, "both rows live in the one command file");
+}
+
+/// A constraint on a field with no enum type lists its members as the source wrote them, the
+/// order a bound flag, the TypeScript model, and the reference docs all show.
+#[test]
+fn a_constraint_alone_keeps_its_source_order_in_help() {
+    if skip_go() {
+        return;
+    }
+    let mut graph = graph();
+    input_fields(&mut graph)[2].meta.constraints.enum_values = vec![
+        "pending".to_string(),
+        "active".to_string(),
+        "pending".to_string(),
+    ];
+    let help = go_help_spec(&graph);
+    assert_eq!(
+        body_field(&help, "title")["enum"],
+        serde_json::json!(["pending", "active"])
+    );
+    assert!(go_cli(&graph)
+        .files()
+        .iter()
+        .any(|file| file.text.contains("one of: pending|active")));
+}
+
 #[test]
 fn disjoint_and_empty_enums_stay_closed() {
     if skip_go() {

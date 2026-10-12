@@ -1168,10 +1168,17 @@ fn apply_constraints(constraints: &Constraints, prop: &mut SchemaObject) {
     prop.multiple_of.clone_from(&constraints.multiple_of);
     prop.unique_items = constraints.unique_items;
     prop.pattern.clone_from(&constraints.pattern);
-    prop.enum_values = intersect_enum_values(
-        prop.enum_values.as_deref(),
+    let declared = prop.enum_values.take();
+    let mut enum_values = intersect_enum_values(
+        declared.as_deref(),
         (!constraints.enum_values.is_empty()).then_some(constraints.enum_values.as_slice()),
     );
+    // An enum type's members keep the graph's order (`SetEnumOrder`); a constraint alone has no
+    // configured order and is published sorted.
+    if let (None, Some(members)) = (&declared, &mut enum_values) {
+        members.sort();
+    }
+    prop.enum_values = enum_values;
 }
 
 /// Lower a field's neutral [`Type`] applying the field's `nullable` axis: a nullable scalar/array/map
@@ -2322,7 +2329,7 @@ mod tests {
                 "          type: object\n",
                 "          additionalProperties:\n",
                 "            type: string\n",
-                "            enum: [green, red]\n",
+                "            enum: [red, green]\n",
             )),
             "{yaml}"
         );

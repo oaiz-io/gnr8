@@ -17,19 +17,37 @@ pub use gnr8::graph::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Combine closed value sets without giving either declaration precedence. `None` is unrestricted;
-/// `Some([])` admits no values. Preserve that distinction in every generated artifact.
+/// Combine an enum type's members with a validation constraint's closed set without giving either
+/// declaration precedence: a value must be in both. `None` is unrestricted; `Some([])` admits no
+/// values. Preserve that distinction in every generated artifact.
+///
+/// Members keep their declared order, once each: the type's, which `SetEnumOrder` decides, else the
+/// constraint's as the source wrote it.
 pub(crate) fn intersect_enum_values(
-    left: Option<&[String]>,
-    right: Option<&[String]>,
+    declared: Option<&[String]>,
+    constraint: Option<&[String]>,
 ) -> Option<Vec<String>> {
-    let mut sets = [left, right].into_iter().flatten();
-    let first = sets.next()?;
-    let mut allowed: BTreeSet<&String> = first.iter().collect();
-    for set in sets {
-        allowed.retain(|member| set.contains(member));
+    match (declared, constraint) {
+        (None, None) => None,
+        (Some(declared), None) => Some(declared.to_vec()),
+        (None, Some(constraint)) => {
+            let mut seen = BTreeSet::new();
+            Some(
+                constraint
+                    .iter()
+                    .filter(|member| seen.insert(member.as_str()))
+                    .cloned()
+                    .collect(),
+            )
+        }
+        (Some(declared), Some(constraint)) => Some(
+            declared
+                .iter()
+                .filter(|member| constraint.contains(member))
+                .cloned()
+                .collect(),
+        ),
     }
-    Some(allowed.into_iter().cloned().collect())
 }
 
 /// Indexed resolver for the standard tags that classify operations in one graph.

@@ -2127,7 +2127,7 @@ impl Importer {
                 // (`Color: {type: string, enum: [red, null]}`) makes the value naming it nullable.
                 return ImportedType {
                     ty: Type::Named(id),
-                    nullable: scalar_admits_null(&target),
+                    nullable: ref_target_admits_null(&target),
                 };
             }
             self.warn(format!(
@@ -2148,11 +2148,7 @@ impl Importer {
             };
         }
 
-        if let Some(one_of) = schema
-            .get("oneOf")
-            .or_else(|| schema.get("anyOf"))
-            .and_then(Value::as_array)
-        {
+        if let Some(one_of) = composition_arms(schema) {
             let mut nullable = schema
                 .get("nullable")
                 .and_then(Value::as_bool)
@@ -2632,6 +2628,23 @@ fn resolve_pointer(doc: &Value, pointer: &str) -> Option<Value> {
 
 fn decode_pointer_segment(segment: &str) -> String {
     segment.replace("~1", "/").replace("~0", "~")
+}
+
+/// The arms of a `oneOf`, else of an `anyOf`; `None` when `schema` composes neither.
+fn composition_arms(schema: &Value) -> Option<&Vec<Value>> {
+    schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(Value::as_array)
+}
+
+/// Whether a value naming `target` with `$ref` is nullable. A graph schema has no nullability of
+/// its own, so null the target admits belongs to the value naming it: by the target's own keywords
+/// ([`scalar_admits_null`]), or by a `{type: 'null'}` arm of its `oneOf`/`anyOf`, which the import
+/// reads as the null axis and drops from the target's type.
+fn ref_target_admits_null(target: &Value) -> bool {
+    scalar_admits_null(target)
+        || composition_arms(target).is_some_and(|arms| arms.iter().any(is_null_schema))
 }
 
 /// Whether `schema` admits exactly null: `type: 'null'`, or a type array naming only null.
@@ -4573,6 +4586,73 @@ components:
             "a null arm is understood, not an unsupported type: {:?}",
             graph.diagnostics
         );
+    }
+
+    /// A component whose null is a `oneOf`/`anyOf` arm imports as the other arm, and a graph
+    /// schema has no nullability of its own, so the null moves onto every value naming it.
+    #[test]
+    fn a_ref_to_a_component_with_a_null_arm_is_nullable() {
+        let text = r"
+openapi: 3.1.0
+info: { title: Books API, version: 1.0.0 }
+paths:
+  /books:
+    post:
+      operationId: createBook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookInput' }
+      responses:
+        '204': { description: created }
+components:
+  schemas:
+    BookInput:
+      type: object
+      properties:
+        owner: { $ref: '#/components/schemas/MaybeOwner' }
+        format: { $ref: '#/components/schemas/MaybeFormat' }
+        author: { $ref: '#/components/schemas/Owner' }
+    MaybeOwner:
+      oneOf: [{ $ref: '#/components/schemas/Owner' }, { type: 'null' }]
+    MaybeFormat:
+      anyOf: [{ type: ['null'] }, { type: string, enum: [ebook, print] }]
+    Owner:
+      type: object
+      properties: { name: { type: string } }
+";
+        let graph = import_openapi_document(
+            std::path::Path::new("."),
+            std::path::PathBuf::from("openapi.yaml"),
+            text,
+        )
+        .unwrap();
+        let schema = |name: &str| {
+            graph
+                .schemas
+                .iter()
+                .find(|schema| schema.name == name)
+                .unwrap()
+        };
+        assert!(
+            matches!(&schema("MaybeOwner").body, Type::Named(id) if id.ends_with("Owner")),
+            "{:?}",
+            schema("MaybeOwner").body
+        );
+        let Type::Object(fields) = &schema("BookInput").body else {
+            panic!("BookInput is an object");
+        };
+        let field = |name: &str| fields.iter().find(|field| field.json_name == name).unwrap();
+        for name in ["owner", "format"] {
+            let field = field(name);
+            assert!(
+                field.deserializer_accepts_null && field.serializer_may_emit_null,
+                "{name} names a component that admits null: {field:?}"
+            );
+        }
+        let author = field("author");
+        assert!(!author.deserializer_accepts_null && !author.serializer_may_emit_null);
     }
 
     #[test]
