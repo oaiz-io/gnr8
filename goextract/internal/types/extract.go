@@ -38,6 +38,7 @@ const (
 func Extract(res *load.Result, diags *diag.Accumulator) []facts.SchemaFact {
 	modulePath := mainModulePath(res)
 	schemas := make([]facts.SchemaFact, 0)
+	decoders := enclosingDecoders(res, modulePath)
 
 	for _, pkg := range res.Packages {
 		if !isTargetPackage(pkg.PkgPath, modulePath) || pkg.Types == nil {
@@ -45,21 +46,93 @@ func Extract(res *load.Result, diags *diag.Accumulator) []facts.SchemaFact {
 		}
 		scope := pkg.Types.Scope()
 		for _, name := range scope.Names() {
-			obj := scope.Lookup(name)
-			tn, ok := obj.(*gotypes.TypeName)
-			if !ok || tn.IsAlias() {
-				continue
-			}
-			named, ok := gotypes.Unalias(tn.Type()).(*gotypes.Named)
+			named, ok := declaredNamed(scope.Lookup(name))
 			if !ok {
 				continue
 			}
-			if fact, ok := schemaFor(named, modulePath, res.Fset, scope, diags); ok {
+			if fact, ok := schemaFor(named, modulePath, res.Fset, scope, decoders, diags); ok {
 				schemas = append(schemas, fact)
 			}
 		}
 	}
 	return schemas
+}
+
+// declaredNamed returns the named type a package-scope object declares, or
+// ok=false for anything else, an alias included.
+func declaredNamed(obj gotypes.Object) (*gotypes.Named, bool) {
+	tn, ok := obj.(*gotypes.TypeName)
+	if !ok || tn.IsAlias() {
+		return nil, false
+	}
+	named, ok := gotypes.Unalias(tn.Type()).(*gotypes.Named)
+	return named, ok
+}
+
+// enclosingDecoders maps each target-module type to the names of the
+// target-module types whose UnmarshalJSON decodes it: every type a decoder's
+// value holds, at any depth. Once encoding/json hands such a decoder its bytes,
+// what becomes of a nested field's explicit null is that method's to decide,
+// whether it calls encoding/json again or not.
+//
+// A type is listed whatever else decodes it. Its schema has one answer to
+// whether a field accepts null, and a decoder that may refuse the null leaves
+// gnr8 no answer it can prove.
+func enclosingDecoders(res *load.Result, modulePath string) map[*gotypes.TypeName][]string {
+	decoders := make(map[*gotypes.TypeName][]string)
+	for _, pkg := range res.Packages {
+		if !isTargetPackage(pkg.PkgPath, modulePath) || pkg.Types == nil {
+			continue
+		}
+		scope := pkg.Types.Scope()
+		for _, name := range scope.Names() {
+			named, ok := declaredNamed(scope.Lookup(name))
+			if !ok || !hasJSONUnmarshaler(named) {
+				continue
+			}
+			seen := map[*gotypes.TypeName]bool{named.Obj(): true}
+			collectDecodedTypes(named.Underlying(), modulePath, seen)
+			for reached := range seen {
+				if reached != named.Obj() {
+					decoders[reached] = append(decoders[reached], named.Obj().Name())
+				}
+			}
+		}
+	}
+	for reached := range decoders {
+		sort.Strings(decoders[reached])
+	}
+	return decoders
+}
+
+// collectDecodedTypes adds to seen every target-module named type a value of t
+// holds. A type outside the module is not a schema, so the walk stops there.
+func collectDecodedTypes(t gotypes.Type, modulePath string, seen map[*gotypes.TypeName]bool) {
+	switch current := gotypes.Unalias(t).(type) {
+	case *gotypes.Named:
+		obj := current.Obj()
+		if obj.Pkg() == nil || !isTargetPackage(obj.Pkg().Path(), modulePath) || seen[obj] {
+			return
+		}
+		seen[obj] = true
+		collectDecodedTypes(current.Underlying(), modulePath, seen)
+	case *gotypes.Pointer:
+		collectDecodedTypes(current.Elem(), modulePath, seen)
+	case *gotypes.Slice:
+		collectDecodedTypes(current.Elem(), modulePath, seen)
+	case *gotypes.Array:
+		collectDecodedTypes(current.Elem(), modulePath, seen)
+	case *gotypes.Map:
+		collectDecodedTypes(current.Key(), modulePath, seen)
+		collectDecodedTypes(current.Elem(), modulePath, seen)
+	case *gotypes.Struct:
+		for i := 0; i < current.NumFields(); i++ {
+			if _, _, _, skip := parsePayloadTag(reflect.StructTag(current.Tag(i)), current.Field(i).Name()); skip {
+				continue
+			}
+			collectDecodedTypes(current.Field(i).Type(), modulePath, seen)
+		}
+	}
 }
 
 // schemaFor lowers one named type to a SchemaFact, or reports ok=false if the
@@ -69,6 +142,7 @@ func schemaFor(
 	modulePath string,
 	fset *token.FileSet,
 	scope *gotypes.Scope,
+	decoders map[*gotypes.TypeName][]string,
 	diags *diag.Accumulator,
 ) (facts.SchemaFact, bool) {
 	switch under := named.Underlying().(type) {
@@ -77,9 +151,15 @@ func schemaFor(
 			return facts.SchemaFact{}, false
 		}
 		span := spanOf(fset, named.Obj().Pos())
-		fields := extractFields(named.Obj().Name(), under, modulePath, fset, diags)
+		owner := schemaOwner{
+			id:            schemaID(named, modulePath),
+			name:          named.Obj().Name(),
+			customDecoder: hasJSONUnmarshaler(named),
+			decodedBy:     decoders[named.Obj()],
+		}
+		fields := extractFields(named.Obj().Name(), under, owner, modulePath, fset, diags)
 		return facts.SchemaFact{
-			ID:   schemaID(named, modulePath),
+			ID:   owner.id,
 			Name: named.Obj().Name(),
 			Body: facts.ObjectType(fields),
 			Span: span,
@@ -127,10 +207,26 @@ func namedSchemaCtx(
 	}
 }
 
+// schemaOwner is the named struct whose schema a field is published on. An
+// embedded struct's promoted fields belong to the embedding schema, so they carry
+// its identity, and its decoder, rather than the embedded type's.
+type schemaOwner struct {
+	id   string
+	name string
+	// customDecoder: the struct implements json.Unmarshaler, its own method or a
+	// promoted one. encoding/json then hands the whole object to that method, and
+	// none of its own rules say what happens to a field's explicit null.
+	customDecoder bool
+	// decodedBy: the types whose UnmarshalJSON decodes this struct inside their
+	// own value (enclosingDecoders), sorted.
+	decodedBy []string
+}
+
 // extractFields walks struct fields, flattening embedded structs (Pattern 5).
 func extractFields(
 	structName string,
 	st *gotypes.Struct,
+	owner schemaOwner,
 	modulePath string,
 	fset *token.FileSet,
 	diags *diag.Accumulator,
@@ -145,7 +241,7 @@ func extractFields(
 				// Promote the embedded struct's fields, but attribute diagnostics
 				// to the embedded type's own name (its float64 fields belong to it).
 				fields = append(fields, extractFields(
-					embeddedTypeName(f.Type()), embedded, modulePath, fset, diags)...)
+					embeddedTypeName(f.Type()), embedded, owner, modulePath, fset, diags)...)
 			}
 			continue
 		}
@@ -170,6 +266,19 @@ func extractFields(
 		serializerMayOmit, deserializerAcceptsNull := presenceAndNullability(wire, omitOpt, f.Type())
 		serializerMayEmitNull := outputMayEmitNull(wire, omitOpt, f.Type())
 		validatorRejectsNull := validatorRequiresPresence && validationRejectsNull(f.Type())
+		if reason := unprovenNullAcceptance(wire, owner, f.Type(), validatorRequiresPresence); reason != "" {
+			// Code gnr8 does not read decides this null, and a method body is not a
+			// typed fact. Publishing encoding/json's answer would claim an
+			// acceptance nobody proved, so the field is published as not accepting
+			// null until the user states it. The diagnostic is raised only where
+			// that withholds something: a field the validator already refuses null
+			// for is not nullable under either reading.
+			if deserializerAcceptsNull && !validatorRejectsNull {
+				diags.NullAcceptanceUnresolved(
+					owner.id, owner.name, jsonName, typeString(f.Type()), reason, file, line)
+			}
+			deserializerAcceptsNull = false
+		}
 		if wire == wireJSON && omitOpt == optOmitEmpty && !serializerMayOmit {
 			diags.IneffectiveOmitEmpty(structName, f.Name(), typeString(f.Type()), file, line)
 		}
@@ -1205,10 +1314,10 @@ func parseWireTag(raw string, goName string, wire payloadWire) (name string, omi
 // Each wire has exactly one rule per fact (AGENTS.md rule 3).
 //
 // `encoding/json` accepts a JSON null for every ordinary Go destination. Nilable values become nil;
-// non-nilable values are left unchanged. A custom unmarshaler may reject null, but its method body is
-// not a typed fact the extractor can prove; `force_non_nullable(..., SchemaUse::Input)` is the checked
-// correction for that application-specific behavior. Serializer presence remains independently
-// derived from the omission option.
+// non-nilable values are left unchanged. That is encoding/json's rule only for the null it decodes
+// itself: a null it hands to a custom unmarshaler is that method's to accept or refuse, and
+// unprovenNullAcceptance withdraws the answer given here for exactly those fields. Serializer presence
+// remains independently derived from the omission option.
 //
 // The form/multipart wire is left as it was. Its binder is not `encoding/json`
 // and nothing here has established what it does with a bare pointer, so this
@@ -1221,6 +1330,75 @@ func presenceAndNullability(wire payloadWire, omitOpt string, t gotypes.Type) (o
 		return isPointer(t) || omitOpt != "", false
 	}
 	return omitOptionOmits(t, omitOpt), true
+}
+
+// unprovenNullAcceptance explains why encoding/json's rules do not settle
+// whether a field accepts an explicit null, or returns "" when they do. Each
+// reason hands the null to code gnr8 does not read:
+//
+//   - the owning struct implements json.Unmarshaler, so its method decodes every
+//     field;
+//   - the owning struct is decoded inside another type's UnmarshalJSON
+//     (enclosingDecoders);
+//   - the field's own type implements json.Unmarshaler and is handed the null
+//     (unmarshalerReceivesNull);
+//   - the field is a required json.RawMessage. encoding/json keeps the null as
+//     the bytes `null`, which `required` passes, so whatever reads the raw JSON
+//     decides. Required raw JSON that may be null is almost always an
+//     over-claim.
+//
+// The first that applies is the reason given: once a decoder owns the object,
+// whether a field's own type is ever asked is up to that decoder.
+func unprovenNullAcceptance(wire payloadWire, owner schemaOwner, t gotypes.Type, required bool) string {
+	if wire != wireJSON {
+		return ""
+	}
+	switch {
+	case owner.customDecoder:
+		return owner.name + " implements json.Unmarshaler, so its UnmarshalJSON decodes every field, " +
+			"this field's explicit null included"
+	case len(owner.decodedBy) > 0:
+		methods := make([]string, len(owner.decodedBy))
+		for i, decoder := range owner.decodedBy {
+			methods[i] = decoder + ".UnmarshalJSON"
+		}
+		return owner.name + " is decoded inside " + strings.Join(methods, ", ") +
+			", so that code decides this field's explicit null"
+	case unmarshalerReceivesNull(t):
+		return typeString(t) + " implements json.Unmarshaler, so encoding/json passes this field's " +
+			"explicit null to " + typeString(t) + ".UnmarshalJSON"
+	case required && isJSONRawMessage(t) && !isPointer(gotypes.Unalias(t)):
+		return "encoding/json keeps an explicit null as the raw JSON `null`, which `required` passes, " +
+			"so the code that reads the raw JSON decides whether null is accepted"
+	default:
+		return ""
+	}
+}
+
+// unmarshalerReceivesNull reports whether encoding/json passes a field's
+// explicit null to the field type's own UnmarshalJSON. It does for a value
+// whose type, or whose pointer type, has the method. It does not for a pointer
+// field, which it sets to nil without calling the pointee's method, nor for an
+// interface, which it sets to nil. A type parameter is the instantiation's
+// question, which the declaration does not answer.
+//
+// json.RawMessage and time.Time are the two standard-library decoders this
+// extractor already reads by name, and both accept null: RawMessage keeps the
+// four bytes, and time.Time leaves its value unchanged, as encoding/json does
+// for an ordinary value.
+func unmarshalerReceivesNull(t gotypes.Type) bool {
+	unaliased := gotypes.Unalias(t)
+	switch unaliased.(type) {
+	case *gotypes.Pointer, *gotypes.TypeParam:
+		return false
+	}
+	if _, isInterface := unaliased.Underlying().(*gotypes.Interface); isInterface {
+		return false
+	}
+	if isJSONRawMessage(t) || isNamedType(t, timePkgPath, "Time") {
+		return false
+	}
+	return hasJSONUnmarshaler(t)
 }
 
 func isPointer(t gotypes.Type) bool {

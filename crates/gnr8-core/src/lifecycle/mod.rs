@@ -2621,31 +2621,43 @@ pub fn apply_naming(
                 root.schema_id.clone_from(new_name);
             }
         }
+        crate::graph::direction::rename_null_acceptance_schema(graph, old_id, new_name);
         for op in &mut graph.operations {
-            if let Some(body) = op.request_body.as_mut() {
-                if &body.ref_id == old_id {
-                    body.ref_id.clone_from(new_name);
-                }
-            }
-            for resp in &mut op.responses {
-                if let Some(body) = resp.body.as_mut() {
-                    if &body.ref_id == old_id {
-                        body.ref_id.clone_from(new_name);
-                    }
-                }
-            }
-            for param in &mut op.params {
-                rewrite_schema_type_ref(&mut param.schema, old_id, new_name);
-                for (_, field) in &mut param.openapi_fields {
-                    rewrite_openapi_component_ref(field, old_id, old_name, new_name);
-                }
-                if let Some(content) = &mut param.openapi_content {
-                    rewrite_openapi_component_ref(content, old_id, old_name, new_name);
-                }
-            }
+            rewrite_operation_schema_refs(op, old_id, old_name, new_name);
         }
     }
     Ok(())
+}
+
+/// Point every reference `op` makes to schema `old_id` (or, in preserved OpenAPI, `old_name`) at
+/// `new_name`: its request and response bodies and each parameter's schema.
+fn rewrite_operation_schema_refs(
+    op: &mut crate::graph::Operation,
+    old_id: &str,
+    old_name: &str,
+    new_name: &str,
+) {
+    if let Some(body) = op.request_body.as_mut() {
+        if body.ref_id == old_id {
+            body.ref_id = new_name.to_string();
+        }
+    }
+    for resp in &mut op.responses {
+        if let Some(body) = resp.body.as_mut() {
+            if body.ref_id == old_id {
+                body.ref_id = new_name.to_string();
+            }
+        }
+    }
+    for param in &mut op.params {
+        rewrite_schema_type_ref(&mut param.schema, old_id, new_name);
+        for (_, field) in &mut param.openapi_fields {
+            rewrite_openapi_component_ref(field, old_id, old_name, new_name);
+        }
+        if let Some(content) = &mut param.openapi_content {
+            rewrite_openapi_component_ref(content, old_id, old_name, new_name);
+        }
+    }
 }
 
 fn rewrite_openapi_component_ref(

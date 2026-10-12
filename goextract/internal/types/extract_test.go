@@ -554,10 +554,14 @@ type Matrix struct {
 		{"req_str", false, false},
 		{"req_time", false, false},
 		{"req_struct", false, false},
+		// A value whose type has UnmarshalJSON is handed the null, so the null is
+		// that method's to accept; see TestCustomDecoderNullAcceptanceIsUnresolved.
 		{"req_custom", false, false},
 		{"req_custom_ptr", false, true},
 		{"req_ptr", false, true},
 		{"req_slice", false, true},
+		// A required RawMessage keeps the null as bytes for code gnr8 does not
+		// read; see TestCustomDecoderNullAcceptanceIsUnresolved.
 		{"req_raw", false, true},
 		{"req_raw_ptr", false, true},
 	} {
@@ -565,10 +569,11 @@ type Matrix struct {
 		if !found {
 			t.Fatalf("field %q not found", tc.field)
 		}
-		if field.SerializerMayOmit != tc.optional || !field.DeserializerAcceptsNull {
+		acceptsNull := tc.field != "req_custom" && tc.field != "req_raw"
+		if field.SerializerMayOmit != tc.optional || field.DeserializerAcceptsNull != acceptsNull {
 			t.Errorf(
-				"%s: want serializer optional=%v and deserializer null acceptance, got optional=%v accepts-null=%v",
-				tc.field, tc.optional, field.SerializerMayOmit, field.DeserializerAcceptsNull,
+				"%s: want serializer optional=%v and deserializer null acceptance=%v, got optional=%v accepts-null=%v",
+				tc.field, tc.optional, acceptsNull, field.SerializerMayOmit, field.DeserializerAcceptsNull,
 			)
 		}
 		if field.SerializerMayEmitNull != tc.outputNullable {
@@ -629,6 +634,295 @@ type Matrix struct {
 	want := []string{"OmitArr", "OmitStruct", "OmitTime"}
 	if !reflect.DeepEqual(reported, want) {
 		t.Errorf("ineffective-omitempty diagnostics: want %v, got %v", want, reported)
+	}
+}
+
+// refusesNull is the decoder shape the extractor must not publish as accepting
+// null: its UnmarshalJSON refuses the null encoding/json hands it.
+type refusesNull string
+
+var errNullRefused = fmt.Errorf("null refused")
+
+func (r *refusesNull) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return errNullRefused
+	}
+	return json.Unmarshal(data, (*string)(r))
+}
+
+// TestEncodingJSONHandsNullToAValueUnmarshalerOnly pins the decoding rule
+// unmarshalerReceivesNull relies on to what encoding/json does: a value field's null goes to
+// the type's UnmarshalJSON, which may refuse it, while a pointer field's null
+// sets the pointer to nil and never reaches the method.
+func TestEncodingJSONHandsNullToAValueUnmarshalerOnly(t *testing.T) {
+	var value struct {
+		Label refusesNull `json:"label"`
+	}
+	if err := json.Unmarshal([]byte(`{"label":null}`), &value); err != errNullRefused {
+		t.Fatalf("a value field's null must reach its UnmarshalJSON, got %v", err)
+	}
+	var pointer struct {
+		Label *refusesNull `json:"label"`
+	}
+	if err := json.Unmarshal([]byte(`{"label":null}`), &pointer); err != nil || pointer.Label != nil {
+		t.Fatalf("a pointer field's null must set nil without the method, got %v, %v", err, pointer.Label)
+	}
+	var raw struct {
+		Raw json.RawMessage `json:"raw"`
+	}
+	if err := json.Unmarshal([]byte(`{"raw":null}`), &raw); err != nil || string(raw.Raw) != "null" {
+		t.Fatalf("RawMessage keeps the literal null, got %v, %q", err, raw.Raw)
+	}
+}
+
+// A type whose UnmarshalJSON refuses null must not be published as accepting it:
+// only an explicit declaration in .gnr8 may say it does. The extractor publishes
+// such a field as not accepting null and raises schema.nullability.unresolved,
+// naming the schema and field, wherever encoding/json's own rules would have
+// published the null as accepted.
+func TestCustomDecoderNullAcceptanceIsUnresolved(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/decoderfixture\n\ngo 1.24\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, "models.go"),
+		[]byte(`package decoderfixture
+
+import (
+	"encoding/json"
+	"errors"
+	"time"
+)
+
+// StrictLabel refuses an explicit null.
+type StrictLabel string
+
+func (l *StrictLabel) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return errors.New("label must not be null")
+	}
+	return json.Unmarshal(data, (*string)(l))
+}
+
+// ValueDecoded has a value-receiver decoder, which a field's address also has.
+type ValueDecoded string
+
+func (ValueDecoded) UnmarshalJSON([]byte) error { return nil }
+
+// Decoder is an interface that names the method; a field of it is set to nil.
+type Decoder interface {
+	UnmarshalJSON([]byte) error
+}
+
+type Labels struct {
+	Label    StrictLabel       `+"`json:\"label\"`"+`
+	Optional StrictLabel       `+"`json:\"optional,omitempty\"`"+`
+	Required StrictLabel       `+"`json:\"required\" binding:\"required\"`"+`
+	Value    ValueDecoded      `+"`json:\"value\"`"+`
+	Pointer  *StrictLabel      `+"`json:\"pointer\"`"+`
+	Iface    Decoder           `+"`json:\"iface\"`"+`
+	Plain    string            `+"`json:\"plain\"`"+`
+	When     time.Time         `+"`json:\"when\"`"+`
+	Raw      json.RawMessage   `+"`json:\"raw\"`"+`
+	ReqRaw   json.RawMessage   `+"`json:\"reqRaw\" binding:\"required\"`"+`
+	ReqMap   map[string]any    `+"`json:\"reqMap\" binding:\"required\"`"+`
+	Form     StrictLabel       `+"`form:\"form\"`"+`
+}
+
+type Base struct {
+	Note string `+"`json:\"note\"`"+`
+}
+
+// FolderParent has no decoder of its own; UpdateFolder's decodes it.
+type FolderParent struct {
+	Mode     string  `+"`json:\"mode\" binding:\"required\"`"+`
+	FolderID *string `+"`json:\"folderId,omitempty\"`"+`
+	Leaf     []Leaf  `+"`json:\"leaves\"`"+`
+}
+
+type Leaf struct {
+	Value *int `+"`json:\"value\"`"+`
+}
+
+// Standalone is decoded by encoding/json alone.
+type Standalone struct {
+	Value *int `+"`json:\"value\"`"+`
+}
+
+// UpdateFolder decodes itself and refuses a null name.
+type UpdateFolder struct {
+	Base
+	Name     string        `+"`json:\"name\"`"+`
+	ParentID *string       `+"`json:\"parentId\"`"+`
+	Tag      string        `+"`json:\"tag\" binding:\"required\"`"+`
+	Parent   *FolderParent `+"`json:\"parentFolder,omitempty\"`"+`
+	Skipped  *Standalone   `+"`json:\"-\"`"+`
+}
+
+func (u *UpdateFolder) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if string(raw["name"]) == "null" {
+		return errors.New("name must not be null")
+	}
+	type plain UpdateFolder
+	return json.Unmarshal(data, (*plain)(u))
+}
+
+// Decoding's method is promoted to every struct that embeds it, so encoding/json
+// hands Outer's whole object to it.
+type Decoding struct {
+	A string `+"`json:\"a\"`"+`
+}
+
+func (d *Decoding) UnmarshalJSON([]byte) error { return nil }
+
+type Outer struct {
+	Decoding
+	B string `+"`json:\"b\"`"+`
+}
+`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write models.go: %v", err)
+	}
+
+	res, err := load.Load(dir)
+	if err != nil {
+		t.Fatalf("load decoder fixture: %v", err)
+	}
+	if len(res.Errors) != 0 {
+		t.Fatalf("load decoder fixture errors: %+v", res.Errors)
+	}
+	diags := diag.New()
+	schemas := types.Extract(res, diags)
+
+	for _, tc := range []struct {
+		schema        string
+		field         string
+		acceptsNull   bool
+		inputNullable bool
+	}{
+		// The field type's own UnmarshalJSON is handed the null.
+		{"Labels", "label", false, false},
+		{"Labels", "optional", false, false},
+		{"Labels", "required", false, false},
+		{"Labels", "value", false, false},
+		// encoding/json decides these itself.
+		{"Labels", "pointer", true, true},
+		{"Labels", "iface", true, true},
+		{"Labels", "plain", true, true},
+		{"Labels", "when", true, true},
+		{"Labels", "raw", true, true},
+		// A required RawMessage or map is not published nullable: the first
+		// keeps the null as bytes for code gnr8 does not read, and `required`
+		// refuses the second's nil.
+		{"Labels", "reqRaw", false, false},
+		{"Labels", "reqMap", true, false},
+		// A form part has no null.
+		{"Labels", "form", false, false},
+		// The struct's own UnmarshalJSON decodes every field, promoted ones too.
+		{"UpdateFolder", "name", false, false},
+		{"UpdateFolder", "parentId", false, false},
+		{"UpdateFolder", "note", false, false},
+		{"UpdateFolder", "tag", false, false},
+		{"UpdateFolder", "parentFolder", false, false},
+		// Decoded inside UpdateFolder.UnmarshalJSON, at any depth.
+		{"FolderParent", "mode", false, false},
+		{"FolderParent", "folderId", false, false},
+		{"FolderParent", "leaves", false, false},
+		{"Leaf", "value", false, false},
+		{"Base", "note", false, false},
+		// A `json:"-"` field is not decoded, so its type is not reached.
+		{"Standalone", "value", true, true},
+		{"Decoding", "a", false, false},
+		{"Outer", "a", false, false},
+		{"Outer", "b", false, false},
+	} {
+		s, ok := schemaByName(schemas, tc.schema)
+		if !ok {
+			t.Fatalf("%s not found", tc.schema)
+		}
+		field, ok := fieldByJSON(s, tc.field)
+		if !ok {
+			t.Fatalf("%s.%s not found", tc.schema, tc.field)
+		}
+		if field.DeserializerAcceptsNull != tc.acceptsNull {
+			t.Errorf("%s.%s: want deserializer null acceptance=%v, got %+v", tc.schema, tc.field, tc.acceptsNull, field)
+		}
+		if inputNullable := field.DeserializerAcceptsNull && !field.ValidatorRejectsNull; inputNullable != tc.inputNullable {
+			t.Errorf("%s.%s: want input nullable=%v, got %+v", tc.schema, tc.field, tc.inputNullable, field)
+		}
+	}
+
+	// A diagnostic for every field whose null encoding/json would have published as
+	// accepted, and for no other: UpdateFolder.tag is refused by its validator under
+	// either reading, so nothing was withheld from it.
+	var reported []string
+	for _, d := range diags.Items() {
+		if d.Code != "schema.nullability.unresolved" {
+			continue
+		}
+		if d.Severity != "WARN" || d.Category != "schema" {
+			t.Errorf("want a WARN schema diagnostic, got %+v", d)
+		}
+		if !strings.Contains(d.Message, d.Schema+"."+d.Subject+" (") {
+			t.Errorf("message must name the type and field %s.%s: %s", d.Schema, d.Subject, d.Message)
+		}
+		reported = append(reported, d.Schema+"."+d.Subject)
+	}
+	sort.Strings(reported)
+	want := []string{
+		"Base.note",
+		"Decoding.a",
+		"FolderParent.folderId",
+		"FolderParent.leaves",
+		"Labels.label",
+		"Labels.optional",
+		"Labels.reqRaw",
+		"Labels.required",
+		"Labels.value",
+		"Leaf.value",
+		"Outer.a",
+		"Outer.b",
+		"UpdateFolder.name",
+		"UpdateFolder.note",
+		"UpdateFolder.parentFolder",
+		"UpdateFolder.parentId",
+	}
+	if !reflect.DeepEqual(reported, want) {
+		t.Errorf("null-acceptance diagnostics: want %v, got %v", want, reported)
+	}
+	for _, d := range diags.Items() {
+		if d.Code != "schema.nullability.unresolved" {
+			continue
+		}
+		switch d.Schema + "." + d.Subject {
+		case "Labels.label":
+			if !strings.Contains(d.Message, "StrictLabel.UnmarshalJSON") {
+				t.Errorf("a field-type decoder must be named: %s", d.Message)
+			}
+		case "FolderParent.folderId":
+			if !strings.Contains(d.Message, "FolderParent is decoded inside UpdateFolder.UnmarshalJSON") {
+				t.Errorf("an enclosing decoder must be named: %s", d.Message)
+			}
+		case "Labels.reqRaw":
+			if !strings.Contains(d.Message, "which `required` passes") {
+				t.Errorf("a required RawMessage must say why: %s", d.Message)
+			}
+		case "UpdateFolder.parentId":
+			if !strings.Contains(d.Message, "UpdateFolder implements json.Unmarshaler") ||
+				!strings.Contains(d.Message, `force_nullable("UpdateFolder", "parentId", SchemaUse::Input)`) {
+				t.Errorf("the owning decoder and the declaration must be named: %s", d.Message)
+			}
+		}
 	}
 }
 

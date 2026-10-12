@@ -389,6 +389,10 @@ pub fn build_ir(
             StageSpan::Custom(indices) => ir = runner.apply_transforms(&indices, ir)?,
         }
     }
+    // A null-acceptance diagnostic is scoped by the finished graph, not by any graph before it: a
+    // transform may still reach its schema from a request, so it is only dropped here, once only
+    // responses reach the schema or the schema is gone.
+    crate::graph::direction::retain_decoded_null_acceptance_diagnostics(&mut ir);
     resolve_security_diagnostics(&mut ir);
     Ok(ir)
 }

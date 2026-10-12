@@ -5,7 +5,7 @@
 //! what decoding, validation, and serialization each do; this module selects the facts for the
 //! schema's payload position. Nullability never changes presence.
 
-use super::{ApiGraph, Field, Param, Type};
+use super::{ApiGraph, Diagnostic, Field, Param, Type};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The HTTP positions a component schema is reached from.
@@ -195,6 +195,64 @@ pub(crate) fn schema_consumers(graph: &ApiGraph) -> SchemaConsumers<'_> {
     }
 }
 
+/// The diagnostic a source raises for a field whose explicit `null` code gnr8 does not read decides
+/// (a custom `UnmarshalJSON`, or the handler reading required raw JSON). Its `schema` is the schema id
+/// and its `subject` the field's JSON name.
+pub(crate) const NULL_ACCEPTANCE_UNRESOLVED: &str = "schema.nullability.unresolved";
+
+/// The ids of the schemas that publish an input null answer: those a request reaches, and those
+/// nothing reaches.
+///
+/// A schema only responses reach publishes output nullability alone
+/// ([`SchemaDirections::field_is_nullable`]), and a schema no longer in the graph publishes nothing,
+/// so neither puts an input null acceptance in any artifact.
+pub(crate) fn decoded_schemas(graph: &ApiGraph) -> BTreeSet<String> {
+    schema_directions(graph)
+        .into_iter()
+        .filter(|(_, directions)| directions.request || !directions.response)
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+/// Whether `diagnostic` names something a graph whose [`decoded_schemas`] are `decoded` still
+/// publishes. Every diagnostic does, except a [`NULL_ACCEPTANCE_UNRESOLVED`] one whose schema is not
+/// among them: its input null acceptance is in no artifact, so there is nothing to state.
+///
+/// The answer belongs to one graph. The diagnostic itself stays in the graph through every
+/// transform, because a later one can still reach its schema from a request — an input root
+/// registered on it, or a request body a custom transform adds — and a dropped diagnostic could not
+/// come back for it. A `DiagnosticPolicy` asks against the graph it runs on, and the finished graph
+/// keeps only the ones still in scope ([`retain_decoded_null_acceptance_diagnostics`]).
+pub(crate) fn diagnostic_in_scope(diagnostic: &Diagnostic, decoded: &BTreeSet<String>) -> bool {
+    diagnostic.code != NULL_ACCEPTANCE_UNRESOLVED
+        || diagnostic
+            .schema
+            .as_deref()
+            .is_some_and(|schema| decoded.contains(schema))
+}
+
+/// Point each [`NULL_ACCEPTANCE_UNRESOLVED`] diagnostic on schema `old_id` at `new_id`. The
+/// diagnostic names its schema by id, the id a nullability declaration resolves and its scope is
+/// judged by, so a renamed schema keeps it as it keeps every reference to it.
+pub(crate) fn rename_null_acceptance_schema(graph: &mut ApiGraph, old_id: &str, new_id: &str) {
+    for diagnostic in &mut graph.diagnostics {
+        if diagnostic.code == NULL_ACCEPTANCE_UNRESOLVED
+            && diagnostic.schema.as_deref() == Some(old_id)
+        {
+            diagnostic.schema = Some(new_id.to_string());
+        }
+    }
+}
+
+/// Drop each [`NULL_ACCEPTANCE_UNRESOLVED`] diagnostic the finished graph publishes no input answer
+/// for ([`diagnostic_in_scope`]). Run once, after the last transform.
+pub(crate) fn retain_decoded_null_acceptance_diagnostics(graph: &mut ApiGraph) {
+    let decoded = decoded_schemas(graph);
+    graph
+        .diagnostics
+        .retain(|diagnostic| diagnostic_in_scope(diagnostic, &decoded));
+}
+
 /// The positions `schema_id` is reached from, or [`SchemaDirections::default`] for an id the map does
 /// not carry — a schema outside the graph occupies no position, the same answer an unwired one gets.
 pub(crate) fn directions_of(
@@ -363,9 +421,80 @@ fn collect_json_schema_refs<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::SchemaDirections;
+    #![allow(clippy::expect_used)]
+
+    use super::{retain_decoded_null_acceptance_diagnostics, SchemaDirections};
     use crate::analyze::facts::FieldMeta;
-    use crate::graph::{Field, Prim, Type};
+    use crate::graph::{ApiGraph, Field, Prim, SchemaUse, SchemaUseRoot, Type};
+
+    /// One object schema with a single string field, as a sidecar emits it.
+    fn schema_fact(name: &str) -> String {
+        format!(
+            r#"{{ "id": "app.{name}", "name": "{name}",
+                 "body": {{ "type": "object", "of": [ {{
+                   "json_name": "value", "serializer_may_omit": false,
+                   "deserializer_accepts_absent": true, "deserializer_accepts_null": false,
+                   "serializer_may_emit_null": false, "validator_requires_presence": false,
+                   "validator_rejects_null": false,
+                   "schema": {{ "type": "primitive", "of": {{ "prim": "string" }} }},
+                   "description": null, "example": null }} ] }},
+                 "span": {{ "file": "/root/models.go", "start_line": 1, "end_line": 1 }} }}"#
+        )
+    }
+
+    fn null_acceptance_fact(name: &str) -> String {
+        format!(
+            r#"{{ "code": "schema.nullability.unresolved", "severity": "WARN", "category": "schema",
+                 "message": "null acceptance unresolved", "file": "/root/models.go", "line": 1,
+                 "schema": "app.{name}", "subject": "value" }}"#
+        )
+    }
+
+    /// `Request` is a request body, `Reply` a response body, `Loose` reached by nothing, and
+    /// `Event` a registered output root; `Gone` has a diagnostic but no schema.
+    fn graph_with_null_acceptance_diagnostics() -> ApiGraph {
+        let schemas = ["Request", "Reply", "Loose", "Event"]
+            .map(schema_fact)
+            .join(",");
+        let diagnostics = ["Request", "Reply", "Loose", "Event", "Gone"]
+            .map(null_acceptance_fact)
+            .join(",");
+        let facts = serde_json::from_str(&format!(
+            r#"{{
+              "module": "app",
+              "routes": [{{
+                "method": "POST", "path": "/requests", "handler": "create",
+                "operation_id": "create", "params": [],
+                "request_body": {{ "ref_id": "app.Request" }},
+                "responses": [ {{ "status": 200, "body": {{ "ref_id": "app.Reply" }} }} ],
+                "span": {{ "file": "/root/http.go", "start_line": 1, "end_line": 1 }}
+              }}],
+              "schemas": [{schemas}],
+              "diagnostics": [{diagnostics}]
+            }}"#
+        ))
+        .expect("null-acceptance facts");
+        let mut graph = ApiGraph::from_facts(facts, "/root");
+        graph.schema_uses.push(SchemaUseRoot {
+            schema_id: "app.Event".to_string(),
+            use_: SchemaUse::Output,
+        });
+        graph
+    }
+
+    /// A null-acceptance diagnostic stays only for a schema whose input answer is published: one a
+    /// request reaches, or one nothing reaches.
+    #[test]
+    fn null_acceptance_diagnostics_follow_the_decoded_schemas() {
+        let mut graph = graph_with_null_acceptance_diagnostics();
+        retain_decoded_null_acceptance_diagnostics(&mut graph);
+        let kept: Vec<&str> = graph
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| diagnostic.schema.as_deref())
+            .collect();
+        assert_eq!(kept, ["app.Loose", "app.Request"]);
+    }
 
     fn field() -> Field {
         Field {

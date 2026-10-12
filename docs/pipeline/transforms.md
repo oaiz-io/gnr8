@@ -124,6 +124,14 @@ ordinary Go destination, so input nullability is already true for most Go fields
 is the redundant case above; what a serializer can *write* is narrower, and that is where an assertion
 in either direction most often has something to say.
 
+The exception is a null that code gnr8 does not read decides: a field of a type that implements
+`json.Unmarshaler`, of a type decoded inside one, of a value type that implements it, or a required
+`json.RawMessage`. gnr8 publishes such a field as not accepting null and raises
+`schema.nullability.unresolved` (see [the diagnostics reference](../diagnostics/reference.md)). An
+input assertion on that field states the answer rather than correcting one, so either assertion is
+accepted, neither is redundant, and the diagnostic is retired. A `DiagnosticPolicy` that denies the code
+placed after the overrides fails the pipeline on any such null left unstated.
+
 A schema an HTTP operation never reaches has no payload position, and gets the input answer by default.
 Register the direction outright when a type is a payload for something other than a route — a tool
 call, a queue message, an event:
