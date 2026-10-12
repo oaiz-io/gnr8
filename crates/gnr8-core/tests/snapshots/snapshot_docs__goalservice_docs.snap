@@ -59,8 +59,8 @@ The generated SDK surfaces a non-success status as its typed error, including a 
 
 ## Diagnostics
 
-- INFO: free-form map field: GoalResponse.Metadata (map[string]any) lowers to additionalProperties: true (TARGET-API.md §5.1) (internal/common/dto/goal.go:62)
-- WARN: unsupported Gin route pattern: dynamic Gin group prefix; prefix skipped rather than guessed (GO-04) (internal/goal/ports/http.go:52)
+- INFO: free-form map field: GoalResponse.Metadata (map[string]any) lowers to additionalProperties: true (TARGET-API.md §5.1) (internal/common/dto/goal.go)
+- WARN: unsupported Gin route pattern: dynamic Gin group prefix; prefix skipped rather than guessed (GO-04) (internal/goal/ports/http.go)
 --- llms.txt ---
 # goalservice
 
@@ -389,9 +389,9 @@ fmt.Printf("%+v\n", result)
 
 ## Diagnostics
 
-- WARN: untyped query param 'cursor' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:46)
-- WARN: untyped query param 'page_size' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:47)
-- WARN: untyped query param 'aggregation' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go:48)
+- WARN: untyped query param 'aggregation' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go)
+- WARN: untyped query param 'cursor' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go)
+- WARN: untyped query param 'page_size' on GET /list: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (internal/goal/ports/handlers.go)
 --- operations/update-goal.md ---
 # `updateGoal`
 

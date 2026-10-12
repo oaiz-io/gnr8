@@ -60,4 +60,4 @@ print(result)
 
 ## Diagnostics
 
-- WARN: untyped query param 'q' on GET /orders/: read via request.args.get with no annotation; param type/required-ness under-specified, type inferred as string only (app/routes.py:37)
+- WARN: untyped query param 'q' on GET /orders/: read via request.args.get with no annotation; param type/required-ness under-specified, type inferred as string only (app/routes.py)

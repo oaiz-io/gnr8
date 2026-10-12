@@ -98,7 +98,9 @@ components:
   schemas:
     Author:
       type: object
-      required: [bio, name]
+      required:
+        - bio
+        - name
       properties:
         bio:
           type: [string, 'null']
@@ -106,7 +108,11 @@ components:
           type: string
     Book:
       type: object
-      required: [author, format, id, title]
+      required:
+        - author
+        - format
+        - id
+        - title
       properties:
         author:
           $ref: '#/components/schemas/Author'
@@ -128,7 +134,9 @@ components:
           type: string
     BookFilters:
       type: object
-      required: [genre, published]
+      required:
+        - genre
+        - published
       properties:
         genre:
           type: string
@@ -138,17 +146,24 @@ components:
           type: [integer, 'null']
         sort:
           type: [string, 'null']
-          enum: [asc, desc, null]
+          enum:
+            - asc
+            - desc
+            - null
     BookFormat:
       type: string
-      enum: [hardcover, paperback]
+      enum:
+        - hardcover
+        - paperback
     BookOrError:
       oneOf:
       - $ref: '#/components/schemas/Book'
       - $ref: '#/components/schemas/OutOfStock'
     CreatedMessage:
       type: object
-      required: [id, message]
+      required:
+        - id
+        - message
       properties:
         id:
           type: integer
@@ -156,7 +171,10 @@ components:
           type: string
     ListBooksResponse:
       type: object
-      required: [books, next_cursor, total]
+      required:
+        - books
+        - next_cursor
+        - total
       properties:
         books:
           type: array
@@ -168,7 +186,8 @@ components:
           type: integer
     OutOfStock:
       type: object
-      required: [reason]
+      required:
+        - reason
       properties:
         reason:
           type: string

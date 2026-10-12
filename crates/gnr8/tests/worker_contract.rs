@@ -965,6 +965,68 @@ fn assert_exact_change_gate_selector(root: &Path) {
 }
 
 #[test]
+fn changes_reads_a_schema_v2_base_ref_and_reports_current_source_lines() {
+    if !cargo_available() || !git_available() {
+        eprintln!("skipping worker_contract: cargo or git unavailable");
+        return;
+    }
+    let root = unique_dir("changes-v2");
+    write_project(&root, "", OPENAPI_PIPELINE);
+    assert!(gnr8(&root, &["generate"], None).status.success());
+    let artifact_path = root.join("generated/gnr8.graph.json");
+    let mut artifact: gnr8_engine::graph_artifact::GraphArtifact =
+        serde_json::from_slice(&std::fs::read(&artifact_path).unwrap()).unwrap();
+    artifact.schema_version = 2;
+    artifact.graph.operations[0].provenance.start_line = 777;
+    artifact.graph.operations[0].provenance.end_line = 799;
+    std::fs::write(&artifact_path, artifact.to_json().unwrap()).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_AUTHOR_NAME", "gnr8 test")
+            .env("GIT_AUTHOR_EMAIL", "gnr8-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "gnr8 test")
+            .env("GIT_COMMITTER_EMAIL", "gnr8-test@example.invalid")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", combined(&output));
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "generated/gnr8.graph.json"]);
+    git(&[
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "schema v2 base",
+    ]);
+    git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let unchanged = gnr8(&root, &["--json", "changes", "--base", "origin/main"], None);
+    assert!(unchanged.status.success(), "{}", combined(&unchanged));
+    let report: serde_json::Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    assert_eq!(report["changes"], serde_json::json!([]));
+    std::fs::write(
+        root.join("openapi.yaml"),
+        OPENAPI_SOURCE.replace("listThings", "findThings"),
+    )
+    .unwrap();
+    let changed = gnr8(&root, &["--json", "changes", "--base", "origin/main"], None);
+    assert_eq!(changed.status.code(), Some(1), "{}", combined(&changed));
+    let report: serde_json::Value = serde_json::from_slice(&changed.stdout).unwrap();
+    let finding = report["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "operation.name.changed")
+        .unwrap();
+    assert_eq!(finding["file"], "openapi.yaml");
+    assert_eq!(finding["line"], 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn changes_uses_exit_one_only_for_a_gating_break() {
     if !cargo_available() || !git_available() {
         eprintln!("skipping worker_contract: cargo or git unavailable");

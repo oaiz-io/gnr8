@@ -7389,7 +7389,7 @@ mod tests {
             .unwrap();
 
         let yaml = crate::lower::to_openapi(&ir, "profiles", "/", &ir.security).unwrap();
-        assert!(yaml.contains("required: [nickname]"), "{yaml}");
+        assert!(yaml.contains("required:\n        - nickname"), "{yaml}");
     }
 
     #[test]
@@ -7642,7 +7642,10 @@ mod tests {
             .text
             .as_str();
         assert!(yaml.contains("description: Display title"), "{yaml}");
-        assert!(yaml.contains("enum: [beta, alpha]"), "{yaml}");
+        assert!(
+            yaml.contains("enum:\n            - beta\n            - alpha"),
+            "{yaml}"
+        );
         assert!(yaml.contains("minLength: 3"), "{yaml}");
         assert!(yaml.contains("default: Untitled"), "{yaml}");
         assert!(yaml.contains("example: Example Book"), "{yaml}");

@@ -122,13 +122,16 @@ components:
   schemas:
     CommandMessage:
       type: object
-      required: [message]
+      required:
+        - message
       properties:
         message:
           type: string
     CommandMessageWithUUID:
       type: object
-      required: [message, uuid]
+      required:
+        - message
+        - uuid
       properties:
         message:
           type: string
@@ -137,7 +140,9 @@ components:
           format: uuid
     CreateGoalInput:
       type: object
-      required: [analyticsQuery, name]
+      required:
+        - analyticsQuery
+        - name
       properties:
         analyticsQuery:
           oneOf:
@@ -162,7 +167,8 @@ components:
             format: uuid
     GoalAnalyticsQueryInput:
       type: object
-      required: [metric]
+      required:
+        - metric
       properties:
         includePast:
           type: [boolean, 'null']
@@ -175,7 +181,9 @@ components:
           description: Rolling window size in days
     GoalAnalyticsQueryOutput:
       type: object
-      required: [metric, windowDays]
+      required:
+        - metric
+        - windowDays
       properties:
         includePast:
           type: boolean
@@ -188,7 +196,11 @@ components:
           description: Rolling window size in days
     GoalResponse:
       type: object
-      required: [analyticsQuery, createdAt, name, uuid]
+      required:
+        - analyticsQuery
+        - createdAt
+        - name
+        - uuid
       properties:
         analyticsQuery:
           $ref: '#/components/schemas/GoalAnalyticsQueryOutput'
@@ -211,7 +223,8 @@ components:
           format: uuid
     HttpError:
       type: object
-      required: [message]
+      required:
+        - message
       properties:
         hints:
           type: array
@@ -225,7 +238,10 @@ components:
           example: error-slug
     ListGoalsOutput:
       type: object
-      required: [goals, pageSize, total]
+      required:
+        - goals
+        - pageSize
+        - total
       properties:
         goals:
           type: [array, 'null']
@@ -240,7 +256,9 @@ components:
           type: integer
     TargetDirection:
       type: string
-      enum: [gte, lte]
+      enum:
+        - gte
+        - lte
     UpdateGoalInput:
       type: object
       properties:

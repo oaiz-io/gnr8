@@ -166,6 +166,8 @@ fn no_custom_span(kind: &str, indices: &[usize]) -> CoreError {
 /// Everything one pipeline run produced.
 #[derive(Debug, Clone)]
 pub struct PipelineOutcome {
+    /// The generation-projected graph with live source locations, for current-source reports.
+    pub graph: ApiGraph,
     /// The generated files, sorted by path.
     pub artifacts: Vec<Artifact>,
     /// Diagnostics the graph carried after transforms.
@@ -483,6 +485,7 @@ pub fn run(
     let artifacts = artifacts.into_files();
     validate_artifact_paths(&artifacts)?;
     Ok(PipelineOutcome {
+        graph: generation_ir,
         artifacts,
         diagnostics,
         output_anchors: output_anchors(plan),

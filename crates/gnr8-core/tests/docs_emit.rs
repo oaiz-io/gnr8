@@ -798,7 +798,7 @@ fn windows_and_posix_module_paths_render_identically() {
     let posix = render(&graph_of(posix), &[go_sdk()]);
     assert!(
         page(&posix, "operations/list-books.md")
-            .contains("- WARN: type inferred as string only (internal/books.go:49)\n"),
+            .contains("- WARN: type inferred as string only (internal/books.go)\n"),
         "{}",
         page(&posix, "operations/list-books.md")
     );
@@ -1111,7 +1111,7 @@ fn diagnostic_attaches_to_its_operation_page() {
     let listed = page(&pages, "operations/list-books.md");
     assert!(
         listed.ends_with(
-            "## Diagnostics\n\n- WARN: untyped query param 'genre' on GET /books (main.go:49)\n"
+            "## Diagnostics\n\n- WARN: untyped query param 'genre' on GET /books (main.go)\n"
         ),
         "{listed}"
     );
@@ -1154,7 +1154,7 @@ fn unscoped_diagnostic_is_printed_on_the_index() {
     let index = page(&pages, "index.md");
     assert!(
         index.ends_with(
-            "## Diagnostics\n\n- WARN: server path cannot be represented (internal/http/routes.go:49)\n- WARN: names an operation the graph does not carry (main.go:49)\n"
+            "## Diagnostics\n\n- WARN: server path cannot be represented (internal/http/routes.go)\n- WARN: names an operation the graph does not carry (main.go)\n"
         ),
         "{index}"
     );

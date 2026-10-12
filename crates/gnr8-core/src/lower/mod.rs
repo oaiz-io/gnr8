@@ -1717,10 +1717,12 @@ mod tests {
             .split(&format!("    {component}:\n"))
             .nth(1)
             .expect("component present");
-        block
-            .lines()
-            .take_while(|line| line.starts_with("      "))
-            .find_map(|line| line.trim().strip_prefix("required: ").map(str::to_string))
+        let mut lines = block.lines().take_while(|line| line.starts_with("      "));
+        lines.find(|line| *line == "      required:")?;
+        let fields: Vec<_> = lines
+            .map_while(|line| line.strip_prefix("        - "))
+            .collect();
+        Some(format!("[{}]", fields.join(", ")))
     }
 
     /// The two axes on one pair of fields, so the only thing that changes between this test and
@@ -1946,7 +1948,7 @@ mod tests {
             "nullable field must render the 3.1 type array form:\n{block}"
         );
         assert!(
-            block.contains("required: [label]"),
+            block.contains("required:\n        - label"),
             "a nullable-not-optional field must still be in required:\n{block}"
         );
     }
@@ -2123,7 +2125,7 @@ mod tests {
         let block = block.split("GoalResponse:").next().unwrap_or(block);
         assert!(
             block.contains(
-                "sort:\n          type: [string, 'null']\n          enum: [asc, desc, null]\n"
+                "sort:\n          type: [string, 'null']\n          enum:\n            - asc\n            - desc\n            - null\n"
             ),
             "nullable enum must render the 3.1 type-array form with enum keys:\n{block}"
         );
@@ -2329,7 +2331,7 @@ mod tests {
                 "          type: object\n",
                 "          additionalProperties:\n",
                 "            type: string\n",
-                "            enum: [red, green]\n",
+                "            enum:\n              - red\n              - green\n",
             )),
             "{yaml}"
         );
@@ -2571,7 +2573,10 @@ mod tests {
         assert!(block.contains("minItems: 1"), "{block}");
         assert!(block.contains("maxItems: 5"), "{block}");
         assert!(block.contains("format: slug"), "{block}");
-        assert!(block.contains("enum: [alpha, beta]"), "{block}");
+        assert!(
+            block.contains("enum:\n            - alpha\n            - beta"),
+            "{block}"
+        );
         assert!(block.contains("default: alpha"), "{block}");
         assert!(block.contains("example: alpha example"), "{block}");
         assert!(block.contains("x-gnr8-render: textarea"), "{block}");
@@ -2842,7 +2847,10 @@ mod tests {
         let block = yaml.split("CreateGoalInput:").nth(1).expect("schema block");
         let block = block.split("GoalResponse:").next().unwrap_or(block);
         assert!(block.contains("default: 'true'"), "{block}");
-        assert!(block.contains("enum: ['123', 'true']"), "{block}");
+        assert!(
+            block.contains("enum:\n            - '123'\n            - 'true'"),
+            "{block}"
+        );
         assert!(block.contains("x-gnr8-placeholder: '123'"), "{block}");
     }
 
@@ -2856,7 +2864,7 @@ mod tests {
             .nth(1)
             .expect("TargetDirection schema");
         assert!(
-            td.contains("enum: [gte, lte]"),
+            td.contains("enum:\n        - gte\n        - lte"),
             "code enum preserved:\n{td}"
         );
     }

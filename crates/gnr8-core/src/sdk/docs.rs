@@ -84,10 +84,8 @@ fn sdk_readme(model: &DocsModel, sdk: SiblingSdk<'_>) -> String {
     }
     let _ = write!(
         text,
-        "- Base path: `{base_path}`\n- Operations: {operations}\n- Schemas: {schemas}\n\n",
+        "- Base path: `{base_path}`\n\n",
         base_path = model.api.base_path.as_deref().unwrap_or("/"),
-        operations = model.operations.len(),
-        schemas = model.schemas.len(),
     );
     if identity.is_none() {
         let _ = writeln!(text, "{NO_IDENTITY_NOTE}\n");
@@ -239,6 +237,43 @@ mod tests {
         )
     }
 
+    #[test]
+    fn published_diagnostics_sort_by_identity_and_deduplicate_without_lines() {
+        let mut first = diagnostic("schema.a", "WARN", "First field", "models.go").subject("a");
+        first.line = 90;
+        first.span.start_line = 90;
+        let mut duplicate = first.clone();
+        duplicate.line = 2;
+        duplicate.span.start_line = 2;
+        let graph = ApiGraph {
+            diagnostics: vec![
+                diagnostic("schema.z", "WARN", "Other field", "models.go"),
+                first,
+                duplicate,
+                diagnostic("schema.z", "WARN", "Earlier file", "a.go"),
+            ],
+            ..ApiGraph::default()
+        };
+        let reference = sdk_reference("go", "sdk", &graph);
+        assert!(
+            reference.contains(concat!(
+                "- WARN: Earlier file (a.go)\n",
+                "- WARN: First field (models.go)\n",
+                "- WARN: Other field (models.go)\n"
+            )),
+            "{reference}"
+        );
+        assert_eq!(reference.matches("First field").count(), 1);
+        let mut shifted = graph.clone();
+        for diagnostic in &mut shifted.diagnostics {
+            diagnostic.line += 100;
+            diagnostic.span.start_line += 100;
+            diagnostic.span.end_line += 100;
+        }
+        shifted.diagnostics.reverse();
+        assert_eq!(reference, sdk_reference("go", "sdk", &shifted));
+    }
+
     /// A diagnostic about the API surface, which is what the section is for.
     fn contract_diagnostic(severity: &str, message: &str, file: &str) -> Diagnostic {
         diagnostic("request.parameter.unresolved", severity, message, file)
@@ -336,7 +371,7 @@ mod tests {
         assert!(reference.contains("## Diagnostics"), "{reference}");
         assert!(
             reference.contains(
-                "- WARN: untyped query param 'genre' on GET /books (internal/http/handlers.go:1)"
+                "- WARN: untyped query param 'genre' on GET /books (internal/http/handlers.go)"
             ),
             "{reference}"
         );
@@ -402,7 +437,7 @@ mod tests {
         );
         assert!(reference.contains("## Diagnostics"), "{reference}");
         assert!(
-            reference.contains("- WARN: dynamic response in handler listBooks (main.go:1)"),
+            reference.contains("- WARN: dynamic response in handler listBooks (main.go)"),
             "{reference}"
         );
         assert!(!reference.contains("/home/runner"), "{reference}");
@@ -600,7 +635,7 @@ mod tests {
         );
         assert_eq!(
             reference
-                .matches("- WARN: server path dropped (api/spec.yaml:3)\n")
+                .matches("- WARN: server path dropped (api/spec.yaml)\n")
                 .count(),
             1,
             "{reference}"

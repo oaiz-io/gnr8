@@ -80,4 +80,4 @@ fmt.Printf("%+v\n", result)
 
 ## Diagnostics
 
-- WARN: untyped query param 'status' on GET /tasks: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (main.go:57)
+- WARN: untyped query param 'status' on GET /tasks: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (main.go)
