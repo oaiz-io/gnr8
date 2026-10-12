@@ -50,7 +50,7 @@ fn example(name: &str) -> PathBuf {
         ".target(OpenApi31::new().to(\"generated/openapi.yaml\"))",
         concat!(
             ".target(OpenApi31::new().to(\"generated/openapi.yaml\"))\n",
-            ".target(OpenApi31::new().to(\"generated/openapi.json\"))\n",
+            ".target(OpenApi31Json::new().to(\"generated/openapi.json\"))\n",
             ".target(PySdk::new().module(\"sample_sdk\").to(\"generated/python\"))\n",
             ".target(TsSdk::new().module(\"sample-sdk\").to(\"generated/typescript\"))"
         ),
@@ -123,6 +123,8 @@ fn bookstore_and_taskflow_outputs_are_invariant_under_go_line_shifts() {
         let root = example(name);
         generate(&root);
         let before = files(&root);
+        serde_json::from_slice::<serde_json::Value>(&before[Path::new("generated/openapi.json")])
+            .expect("generated/openapi.json is JSON");
         for path in [
             "generated/gnr8.graph.json",
             "generated/openapi.yaml",

@@ -20,6 +20,12 @@ must move the minor version.
   rendered diagnostics deduplicated. OpenAPI YAML enums and required fields use one block-sequence
   item per line, preserving value order. These outputs no longer change when source lines move.
 
+### Fixed
+
+- OpenAPI YAML quotes strings a YAML reader would otherwise resolve to a number or a merge: radix
+  integers (`0x1F`, `0o17`, `0b101`), underscore-grouped digits (`1_000`) and `<<`, whether they
+  appear as enum members, required fields or schema keys.
+
 ## 0.19.0 — 2026-10-12
 
 ### Breaking

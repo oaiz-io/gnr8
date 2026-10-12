@@ -703,9 +703,11 @@ fn needs_quoting(value: &str) -> bool {
     // Quote these everywhere rather than trying to depend on a parser's YAML 1.1/1.2 mode. This is
     // deliberately more conservative than the grammar: it keeps colons, comments and values such as
     // `=` portable across noyalib, PyYAML and Ruby Psych.
+    // `<<` is YAML 1.1's merge key: as a plain mapping key it merges instead of naming a member.
     value.contains(':')
         || value.contains('#')
         || value.contains('=')
+        || value == "<<"
         || looks_like_yaml_non_string(value)
 }
 
@@ -737,7 +739,27 @@ fn looks_like_yaml_non_string(value: &str) -> bool {
     ) || value.parse::<i64>().is_ok()
         || value.parse::<u64>().is_ok()
         || value.parse::<f64>().is_ok()
+        || looks_like_yaml_number(value)
         || looks_like_yaml_date(value)
+}
+
+/// Number spellings YAML 1.1 or 1.2 resolves that Rust's own parsers reject: radix-prefixed
+/// integers (`0x1F`, `0o17`, `0b101`) and underscore-grouped digits (`1_000`, `1_000.5`).
+fn looks_like_yaml_number(value: &str) -> bool {
+    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let radix = unsigned
+        .get(..2)
+        .is_some_and(|prefix| matches!(prefix.to_ascii_lowercase().as_str(), "0x" | "0o" | "0b"))
+        && unsigned.len() > 2
+        && unsigned[2..]
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    let grouped = unsigned.starts_with(|ch: char| ch.is_ascii_digit() || ch == '.')
+        && unsigned.contains('_')
+        && unsigned
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '_' | '.' | 'e' | 'E' | '+' | '-'));
+    radix || grouped
 }
 
 fn looks_like_yaml_date(value: &str) -> bool {
@@ -1147,6 +1169,13 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             "x]",
             "{y}",
             "c[d",
+            "0x1F",
+            "-0X1f",
+            "0o17",
+            "0b101",
+            "1_000",
+            "+1_000.5",
+            "<<",
         ];
         let mut doc = sample_doc();
         let schema = &mut doc.components.schemas[0].1;
@@ -1168,11 +1197,14 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             .collect();
         assert_eq!(round_trip, ambiguous);
 
+        // Both are YAML 1.1 readers, which resolve more plain scalars to numbers than YAML 1.2 does.
+        let expected = serde_json::to_string(&ambiguous).unwrap();
         assert_external_yaml_parser(
             "python3",
             &[
                 "-c",
-                "import sys, yaml; assert isinstance(yaml.safe_load(sys.stdin.read()), dict)",
+                "import json, sys, yaml; members = yaml.safe_load(sys.stdin.read())['components']['schemas']['Foo']['enum']; assert members == json.loads(sys.argv[1]), members",
+                &expected,
             ],
             &yaml,
         );
@@ -1180,7 +1212,8 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             "ruby",
             &[
                 "-e",
-                "require 'yaml'; value = YAML.safe_load(STDIN.read, permitted_classes: [], permitted_symbols: [], aliases: false); raise unless value.is_a?(Hash)",
+                "require 'json'; require 'yaml'; value = YAML.safe_load(STDIN.read, permitted_classes: [], permitted_symbols: [], aliases: false); members = value['components']['schemas']['Foo']['enum']; raise members.inspect unless members == JSON.parse(ARGV[0])",
+                &expected,
             ],
             &yaml,
         );
@@ -1211,7 +1244,10 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
     fn imported_parameter_schema_lists_use_blocks_and_preserve_json_values() {
         let value = serde_json::json!({
             "type": "object", "required": ["kind"],
-            "properties": { "kind": { "enum": ["a", "null", null, 3, true] } },
+            "properties": {
+                "kind": { "enum": ["a", "null", null, 3, true] },
+                "0x1F": { "type": "integer" }, "1_000": {}, "<<": { "type": "string" }
+            },
             "oneOf": [{"type": "null"}, {"enum": []}]
         });
         let mut yaml = String::new();
@@ -1223,6 +1259,15 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             crate::sdk::openapi_source::parse_json_or_yaml(&yaml, Path::new("schema.yaml"))
                 .unwrap();
         assert_eq!(parsed["schema"], value);
+        assert_external_yaml_parser(
+            "python3",
+            &[
+                "-c",
+                "import json, sys, yaml; schema = yaml.safe_load(sys.stdin.read())['schema']; assert schema == json.loads(sys.argv[1]), schema",
+                &value.to_string(),
+            ],
+            &yaml,
+        );
     }
 
     fn assert_external_yaml_parser(program: &str, args: &[&str], yaml: &str) {
