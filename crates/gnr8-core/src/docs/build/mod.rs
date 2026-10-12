@@ -80,10 +80,11 @@ impl DocsModel {
                 ))
             })
             .collect::<Result<Vec<_>, CoreError>>()?;
+        let published_diagnostics: Vec<_> = operation::published_diagnostics(graph).collect();
         let operations = graph
             .operations
             .iter()
-            .map(|op| operation::operation_doc(graph, &nav, &sdks, op))
+            .map(|op| operation::operation_doc(graph, &nav, &sdks, &published_diagnostics, op))
             .collect::<Result<Vec<_>, CoreError>>()?;
         if operations.len() != graph.operations.len()
             || nav.operation_count() != graph.operations.len()
@@ -119,7 +120,8 @@ impl DocsModel {
             .iter()
             .map(operation::diagnostic_identity)
             .collect();
-        let api_diagnostics = operation::published_diagnostics(graph)
+        let api_diagnostics = published_diagnostics
+            .into_iter()
             .filter(|diagnostic| {
                 diagnostic
                     .operation

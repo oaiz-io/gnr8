@@ -150,7 +150,10 @@ components:
           type: [string, 'null']
     AssigneeOutput:
       type: object
-      required: [email, id, name]
+      required:
+        - email
+        - id
+        - name
       properties:
         email:
           type: string
@@ -160,7 +163,9 @@ components:
           type: string
     CreateTaskRequest:
       type: object
-      required: [status, title]
+      required:
+        - status
+        - title
       properties:
         assignee:
           oneOf:
@@ -183,7 +188,9 @@ components:
           type: string
     ErrorResponse:
       type: object
-      required: [code, message]
+      required:
+        - code
+        - message
       properties:
         code:
           type: string
@@ -191,10 +198,20 @@ components:
           type: string
     Status:
       type: string
-      enum: [done, in_progress, open]
+      enum:
+        - done
+        - in_progress
+        - open
     Task:
       type: object
-      required: [assignee, dueAt, id, labels, priority, status, title]
+      required:
+        - assignee
+        - dueAt
+        - id
+        - labels
+        - priority
+        - status
+        - title
       properties:
         assignee:
           $ref: '#/components/schemas/AssigneeOutput'
@@ -217,7 +234,8 @@ components:
           type: string
     TaskList:
       type: object
-      required: [tasks]
+      required:
+        - tasks
       properties:
         tasks:
           type: [array, 'null']

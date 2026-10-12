@@ -9,6 +9,16 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- Committed graph artifacts use schema version 3: provenance keeps the source file, and the graph
+  retains its existing symbol identities. Source line spans and diagnostic line numbers are omitted. `gnr8 changes`
+  upgrades schema-v1 and schema-v2 base artifacts before comparison. Live diagnostics retain lines.
+- Generated SDK READMEs no longer include aggregate operation and schema counters. Published
+  diagnostics show file paths only and sort by file, code, message and symbol, with identical
+  rendered diagnostics deduplicated. OpenAPI YAML enums and required fields use one block-sequence
+  item per line, preserving value order. These outputs no longer change when source lines move.
+
 ## 0.19.0 — 2026-10-12
 
 ### Breaking

@@ -39,4 +39,4 @@ print(result)
 
 ## Diagnostics
 
-- WARN: untyped request body on POST /orders/raw: read via request.json with no typed DTO; body shape under-specified, no schema inferred (app/routes.py:66)
+- WARN: untyped request body on POST /orders/raw: read via request.json with no typed DTO; body shape under-specified, no schema inferred (app/routes.py)

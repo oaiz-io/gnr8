@@ -563,13 +563,15 @@ fn diagnostics(w: &mut Writer<'_>, diagnostics: &[DiagnosticDoc]) {
         return;
     }
     w.heading(2, &Inline::text(DIAGNOSTICS));
+    let mut rendered = std::collections::BTreeSet::new();
     let items: Vec<Inline> = diagnostics
         .iter()
-        .map(|diagnostic| {
-            Inline::text(format!(
+        .filter_map(|diagnostic| {
+            let text = format!(
                 "{}: {} ({})",
                 diagnostic.severity, diagnostic.message, diagnostic.location
-            ))
+            );
+            rendered.insert(text.clone()).then_some(Inline::text(text))
         })
         .collect();
     w.list(&items);

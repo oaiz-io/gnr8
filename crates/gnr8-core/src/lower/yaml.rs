@@ -212,16 +212,40 @@ fn write_parameter(out: &mut String, param: &Parameter, depth: usize) {
             if param.openapi_content.is_some() {
                 continue;
             }
+            write_source_value(out, "schema:", value, depth + 1);
+            continue;
         }
         let value = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
         let _ = writeln!(out, "{pad}  {}: {value}", map_key(name));
     }
     if let Some(content) = &param.openapi_content {
-        let content = serde_json::to_string(content).unwrap_or_else(|_| "null".to_string());
-        let _ = writeln!(out, "{pad}  content: {content}");
+        write_source_value(out, "content:", content, depth + 1);
     } else if !has_source_schema {
         let _ = writeln!(out, "{pad}  schema:");
         write_schema(out, &param.schema, depth + 2);
+    }
+}
+
+/// Imported parameter schemas and media objects retain their exact JSON values, but their
+/// collections use YAML blocks too, so a nested enum or required field never becomes an inline list.
+fn write_source_value(out: &mut String, prefix: &str, value: &serde_json::Value, depth: usize) {
+    let pad = INDENT.repeat(depth);
+    match value {
+        serde_json::Value::Object(fields) if !fields.is_empty() => {
+            let _ = writeln!(out, "{pad}{prefix}");
+            for (name, value) in fields {
+                write_source_value(out, &format!("{}:", map_key(name)), value, depth + 1);
+            }
+        }
+        serde_json::Value::Array(items) if !items.is_empty() => {
+            let _ = writeln!(out, "{pad}{prefix}");
+            for value in items {
+                write_source_value(out, "-", value, depth + 1);
+            }
+        }
+        _ => {
+            let _ = writeln!(out, "{pad}{prefix} {value}");
+        }
     }
 }
 
@@ -454,11 +478,17 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
         let _ = writeln!(out, "{pad}description: {}", scalar(description));
     }
     if let Some(members) = &schema.enum_values {
-        let mut values: Vec<String> = members.iter().map(|member| flow_scalar(member)).collect();
-        if schema.nullable {
-            values.push("null".to_string());
+        if members.is_empty() && !schema.nullable {
+            let _ = writeln!(out, "{pad}enum: []");
+        } else {
+            let _ = writeln!(out, "{pad}enum:");
+            for member in members {
+                let _ = writeln!(out, "{pad}{INDENT}- {}", flow_scalar(member));
+            }
+            if schema.nullable {
+                let _ = writeln!(out, "{pad}{INDENT}- null");
+            }
         }
-        let _ = writeln!(out, "{pad}enum: [{}]", values.join(", "));
     }
     write_schema_constraints(out, schema, &pad);
     if let Some(default_value) = &schema.default_value {
@@ -476,7 +506,10 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
         );
     }
     if !schema.required.is_empty() {
-        let _ = writeln!(out, "{pad}required: {}", flow_seq(&schema.required));
+        let _ = writeln!(out, "{pad}required:");
+        for name in &schema.required {
+            let _ = writeln!(out, "{pad}{INDENT}- {}", flow_scalar(name));
+        }
     }
     if !schema.properties.is_empty() {
         let _ = writeln!(out, "{pad}properties:");
@@ -1151,6 +1184,45 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             ],
             &yaml,
         );
+    }
+
+    #[test]
+    fn adding_an_enum_member_adds_one_yaml_line_and_json_keeps_item_lines() {
+        let mut doc = sample_doc();
+        doc.components.schemas[0].1.enum_values = Some(vec!["zebra".into(), "apple".into()]);
+        let before = write(&doc);
+        doc.components.schemas[0]
+            .1
+            .enum_values
+            .as_mut()
+            .unwrap()
+            .insert(1, "new".into());
+        let after = write(&doc);
+        assert_eq!(after.replace("        - new\n", ""), before);
+        assert!(after.contains("enum:\n        - zebra\n        - new\n        - apple\n"));
+        assert!(after.contains("required:\n        - id\n"));
+        let json = serde_json::to_string_pretty(&crate::lower::json::write(&doc)).unwrap();
+        assert!(json.contains(
+            "\"enum\": [\n          \"zebra\",\n          \"new\",\n          \"apple\"\n"
+        ));
+    }
+
+    #[test]
+    fn imported_parameter_schema_lists_use_blocks_and_preserve_json_values() {
+        let value = serde_json::json!({
+            "type": "object", "required": ["kind"],
+            "properties": { "kind": { "enum": ["a", "null", null, 3, true] } },
+            "oneOf": [{"type": "null"}, {"enum": []}]
+        });
+        let mut yaml = String::new();
+        super::write_source_value(&mut yaml, "schema:", &value, 0);
+        assert!(yaml.contains("required:\n    - \"kind\"\n"), "{yaml}");
+        assert!(yaml.contains("enum:\n        - \"a\"\n        - \"null\"\n        - null\n        - 3\n        - true\n"), "{yaml}");
+        assert!(yaml.contains("enum: []"), "{yaml}");
+        let parsed =
+            crate::sdk::openapi_source::parse_json_or_yaml(&yaml, Path::new("schema.yaml"))
+                .unwrap();
+        assert_eq!(parsed["schema"], value);
     }
 
     fn assert_external_yaml_parser(program: &str, args: &[&str], yaml: &str) {

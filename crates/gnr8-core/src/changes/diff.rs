@@ -390,7 +390,10 @@ impl Collector {
             gating: kind == ChangeKind::Breaking && scope.checked,
             message,
             file: span.as_ref().map(|span| span.file.clone()),
-            line: span.as_ref().map(|span| span.start_line),
+            line: span
+                .as_ref()
+                .map(|span| span.start_line)
+                .filter(|line| *line != 0),
             span,
         });
     }

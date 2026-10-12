@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "graph": {
     "module": "example.com/taskflow",
     "operations": [
@@ -23,9 +23,7 @@
               }
             },
             "provenance": {
-              "file": "main.go",
-              "start_line": 57,
-              "end_line": 57
+              "file": "main.go"
             }
           }
         ],
@@ -42,9 +40,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 28,
-          "end_line": 28
+          "file": "main.go"
         }
       },
       {
@@ -59,9 +55,7 @@
         "request_body": {
           "ref_id": "CreateTaskRequest",
           "provenance": {
-            "file": "main.go",
-            "start_line": 45,
-            "end_line": 45
+            "file": "main.go"
           }
         },
         "request_body_content_type": "application/json",
@@ -86,9 +80,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 27,
-          "end_line": 27
+          "file": "main.go"
         }
       },
       {
@@ -113,9 +105,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 35,
-          "end_line": 35
+          "file": "main.go"
         }
       },
       {
@@ -137,9 +127,7 @@
               }
             },
             "provenance": {
-              "file": "main.go",
-              "start_line": 87,
-              "end_line": 87
+              "file": "main.go"
             }
           }
         ],
@@ -156,9 +144,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 31,
-          "end_line": 31
+          "file": "main.go"
         }
       },
       {
@@ -180,9 +166,7 @@
               }
             },
             "provenance": {
-              "file": "main.go",
-              "start_line": 64,
-              "end_line": 64
+              "file": "main.go"
             }
           }
         ],
@@ -208,9 +192,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 29,
-          "end_line": 29
+          "file": "main.go"
         }
       },
       {
@@ -233,18 +215,14 @@
               }
             },
             "provenance": {
-              "file": "main.go",
-              "start_line": 76,
-              "end_line": 76
+              "file": "main.go"
             }
           }
         ],
         "request_body": {
           "ref_id": "UpdateTaskRequest",
           "provenance": {
-            "file": "main.go",
-            "start_line": 78,
-            "end_line": 78
+            "file": "main.go"
           }
         },
         "request_body_content_type": "application/json",
@@ -269,9 +247,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 30,
-          "end_line": 30
+          "file": "main.go"
         }
       }
     ],
@@ -336,9 +312,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 18,
-          "end_line": 18
+          "file": "models.go"
         }
       },
       {
@@ -401,9 +375,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 18,
-          "end_line": 18
+          "file": "models.go"
         }
       },
       {
@@ -533,9 +505,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 40,
-          "end_line": 40
+          "file": "models.go"
         }
       },
       {
@@ -581,9 +551,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 65,
-          "end_line": 65
+          "file": "models.go"
         }
       },
       {
@@ -603,9 +571,7 @@
           "open"
         ],
         "provenance": {
-          "file": "models.go",
-          "start_line": 8,
-          "end_line": 8
+          "file": "models.go"
         }
       },
       {
@@ -752,9 +718,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 27,
-          "end_line": 27
+          "file": "models.go"
         }
       },
       {
@@ -784,9 +748,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 60,
-          "end_line": 60
+          "file": "models.go"
         }
       },
       {
@@ -886,9 +848,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 51,
-          "end_line": 51
+          "file": "models.go"
         }
       }
     ],
@@ -899,11 +859,8 @@
         "category": "request_parameter",
         "message": "untyped query param 'status' on GET /tasks: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4)",
         "file": "main.go",
-        "line": 57,
         "span": {
-          "file": "main.go",
-          "start_line": 57,
-          "end_line": 57
+          "file": "main.go"
         },
         "operation": "GET /tasks",
         "subject": "status"

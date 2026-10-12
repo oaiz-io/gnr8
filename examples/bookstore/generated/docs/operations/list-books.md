@@ -88,4 +88,4 @@ bookstore books list
 
 ## Diagnostics
 
-- WARN: untyped query param 'genre' on GET /books: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (main.go:49)
+- WARN: untyped query param 'genre' on GET /books: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4) (main.go)

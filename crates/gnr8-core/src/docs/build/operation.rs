@@ -47,6 +47,7 @@ pub(super) fn operation_doc(
     graph: &ApiGraph,
     nav: &Nav<'_>,
     sdks: &[(SiblingSdk<'_>, SdkDoc)],
+    published_diagnostics: &[&crate::graph::Diagnostic],
     op: &Operation,
 ) -> Result<OperationDoc, CoreError> {
     let page = nav.operation(&op.id)?;
@@ -85,7 +86,7 @@ pub(super) fn operation_doc(
         example,
         cli,
         pagination: pagination(graph, op),
-        diagnostics: diagnostics(graph, op),
+        diagnostics: diagnostics(published_diagnostics, op),
     })
 }
 
@@ -524,9 +525,11 @@ pub(super) fn diagnostic_identity(op: &Operation) -> String {
 }
 
 /// What extraction could not state about this operation, matched by its `METHOD path` identity.
-fn diagnostics(graph: &ApiGraph, op: &Operation) -> Vec<DiagnosticDoc> {
+fn diagnostics(published: &[&crate::graph::Diagnostic], op: &Operation) -> Vec<DiagnosticDoc> {
     let identity = diagnostic_identity(op);
-    published_diagnostics(graph)
+    published
+        .iter()
+        .copied()
         .filter(|diagnostic| diagnostic.operation.as_deref() == Some(identity.as_str()))
         .map(diagnostic_doc)
         .collect()
@@ -537,10 +540,13 @@ fn diagnostics(graph: &ApiGraph, op: &Operation) -> Vec<DiagnosticDoc> {
 pub(super) fn published_diagnostics(
     graph: &ApiGraph,
 ) -> impl Iterator<Item = &crate::graph::Diagnostic> {
-    graph
+    let mut diagnostics: Vec<_> = graph
         .diagnostics
         .iter()
         .filter(|diagnostic| crate::sdk::docs::is_publishable(diagnostic))
+        .collect();
+    diagnostics.sort_by(|a, b| crate::diagnostics::compare_stable(a, b));
+    diagnostics.into_iter()
 }
 
 /// One diagnostic as a page prints it.
@@ -550,7 +556,7 @@ pub(super) fn diagnostic_doc(diagnostic: &crate::graph::Diagnostic) -> Diagnosti
         message: one_line(&diagnostic.message),
         // A module-relative path printed with `/`, so the same source extracted on Windows and on a
         // POSIX system prints one page.
-        location: format!("{}:{}", diagnostic.file.replace('\\', "/"), diagnostic.line),
+        location: diagnostic.file.replace('\\', "/"),
     }
 }
 

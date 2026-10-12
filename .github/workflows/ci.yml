@@ -66,7 +66,7 @@ jobs:
             needs_go: "true"
             needs_python: "true"
             needs_node: "true"
-          # gnr8-cli is split into three entries. A cold 2-4 core runner rebuilds the engine,
+          # gnr8-cli is split into four entries. A cold 2-4 core runner rebuilds the engine,
           # links the host binary, then cargo-builds a `.gnr8/` worker per compiling test; one
           # combined job exceeds the 5-minute cap on a cache miss (lockfile/version bump).
           # Unit tests + verify_e2e compile/run ~2-3m; generate_e2e's host binary + 2 worker
@@ -91,6 +91,12 @@ jobs:
             needs_python: "false"
             needs_node: "false"
             test_args: "--test worker_contract"
+          - package: gnr8-cli
+            name: gnr8-cli committed outputs
+            needs_go: "true"
+            needs_python: "false"
+            needs_node: "false"
+            test_args: "--test committed_outputs"
     steps:
       - uses: actions/checkout@v7
 

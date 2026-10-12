@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "graph": {
     "module": "src",
     "operations": [
@@ -22,9 +22,7 @@
               }
             },
             "provenance": {
-              "file": "books.controller.ts",
-              "start_line": 51,
-              "end_line": 51
+              "file": "books.controller.ts"
             }
           },
           {
@@ -38,9 +36,7 @@
               }
             },
             "provenance": {
-              "file": "books.controller.ts",
-              "start_line": 49,
-              "end_line": 49
+              "file": "books.controller.ts"
             }
           },
           {
@@ -54,9 +50,7 @@
               }
             },
             "provenance": {
-              "file": "books.controller.ts",
-              "start_line": 50,
-              "end_line": 50
+              "file": "books.controller.ts"
             }
           }
         ],
@@ -73,9 +67,7 @@
           }
         ],
         "provenance": {
-          "file": "books.controller.ts",
-          "start_line": 48,
-          "end_line": 48
+          "file": "books.controller.ts"
         }
       },
       {
@@ -102,9 +94,7 @@
           }
         ],
         "provenance": {
-          "file": "books.controller.ts",
-          "start_line": 61,
-          "end_line": 61
+          "file": "books.controller.ts"
         }
       },
       {
@@ -127,9 +117,7 @@
               }
             },
             "provenance": {
-              "file": "books.controller.ts",
-              "start_line": 71,
-              "end_line": 71
+              "file": "books.controller.ts"
             }
           },
           {
@@ -141,9 +129,7 @@
               "of": "books.dto.BookFormat"
             },
             "provenance": {
-              "file": "books.controller.ts",
-              "start_line": 72,
-              "end_line": 72
+              "file": "books.controller.ts"
             }
           }
         ],
@@ -160,9 +146,7 @@
           }
         ],
         "provenance": {
-          "file": "books.controller.ts",
-          "start_line": 70,
-          "end_line": 70
+          "file": "books.controller.ts"
         }
       },
       {
@@ -185,9 +169,7 @@
               }
             },
             "provenance": {
-              "file": "books.controller.ts",
-              "start_line": 83,
-              "end_line": 83
+              "file": "books.controller.ts"
             }
           }
         ],
@@ -207,9 +189,7 @@
           }
         ],
         "provenance": {
-          "file": "books.controller.ts",
-          "start_line": 82,
-          "end_line": 82
+          "file": "books.controller.ts"
         }
       }
     ],
@@ -257,9 +237,7 @@
           ]
         },
         "provenance": {
-          "file": "books.dto.ts",
-          "start_line": 41,
-          "end_line": 41
+          "file": "books.dto.ts"
         }
       },
       {
@@ -374,9 +352,7 @@
           ]
         },
         "provenance": {
-          "file": "books.dto.ts",
-          "start_line": 47,
-          "end_line": 47
+          "file": "books.dto.ts"
         }
       },
       {
@@ -458,9 +434,7 @@
           ]
         },
         "provenance": {
-          "file": "books.dto.ts",
-          "start_line": 56,
-          "end_line": 56
+          "file": "books.dto.ts"
         }
       },
       {
@@ -478,9 +452,7 @@
           "paperback"
         ],
         "provenance": {
-          "file": "books.dto.ts",
-          "start_line": 36,
-          "end_line": 36
+          "file": "books.dto.ts"
         }
       },
       {
@@ -500,9 +472,7 @@
           ]
         },
         "provenance": {
-          "file": "books.dto.ts",
-          "start_line": 73,
-          "end_line": 73
+          "file": "books.dto.ts"
         }
       },
       {
@@ -549,9 +519,7 @@
           ]
         },
         "provenance": {
-          "file": "books.dto.ts",
-          "start_line": 75,
-          "end_line": 75
+          "file": "books.dto.ts"
         }
       },
       {
@@ -616,9 +584,7 @@
           ]
         },
         "provenance": {
-          "file": "books.dto.ts",
-          "start_line": 80,
-          "end_line": 80
+          "file": "books.dto.ts"
         }
       },
       {
@@ -647,9 +613,7 @@
           ]
         },
         "provenance": {
-          "file": "books.dto.ts",
-          "start_line": 70,
-          "end_line": 70
+          "file": "books.dto.ts"
         }
       }
     ],

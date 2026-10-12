@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "graph": {
     "module": "example.com/bookstore",
     "operations": [
@@ -23,9 +23,7 @@
               }
             },
             "provenance": {
-              "file": "main.go",
-              "start_line": 49,
-              "end_line": 49
+              "file": "main.go"
             }
           }
         ],
@@ -42,9 +40,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 25,
-          "end_line": 25
+          "file": "main.go"
         }
       },
       {
@@ -59,9 +55,7 @@
         "request_body": {
           "ref_id": "CreateBookRequest",
           "provenance": {
-            "file": "main.go",
-            "start_line": 37,
-            "end_line": 37
+            "file": "main.go"
           }
         },
         "request_body_content_type": "application/json",
@@ -86,9 +80,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 24,
-          "end_line": 24
+          "file": "main.go"
         }
       },
       {
@@ -110,9 +102,7 @@
               }
             },
             "provenance": {
-              "file": "main.go",
-              "start_line": 79,
-              "end_line": 79
+              "file": "main.go"
             }
           }
         ],
@@ -129,9 +119,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 28,
-          "end_line": 28
+          "file": "main.go"
         }
       },
       {
@@ -153,9 +141,7 @@
               }
             },
             "provenance": {
-              "file": "main.go",
-              "start_line": 56,
-              "end_line": 56
+              "file": "main.go"
             }
           }
         ],
@@ -181,9 +167,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 26,
-          "end_line": 26
+          "file": "main.go"
         }
       },
       {
@@ -206,18 +190,14 @@
               }
             },
             "provenance": {
-              "file": "main.go",
-              "start_line": 68,
-              "end_line": 68
+              "file": "main.go"
             }
           }
         ],
         "request_body": {
           "ref_id": "UpdateBookRequest",
           "provenance": {
-            "file": "main.go",
-            "start_line": 70,
-            "end_line": 70
+            "file": "main.go"
           }
         },
         "request_body_content_type": "application/json",
@@ -242,9 +222,7 @@
           }
         ],
         "provenance": {
-          "file": "main.go",
-          "start_line": 27,
-          "end_line": 27
+          "file": "main.go"
         }
       }
     ],
@@ -409,9 +387,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 27,
-          "end_line": 27
+          "file": "models.go"
         }
       },
       {
@@ -441,9 +417,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 62,
-          "end_line": 62
+          "file": "models.go"
         }
       },
       {
@@ -574,9 +548,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 41,
-          "end_line": 41
+          "file": "models.go"
         }
       },
       {
@@ -622,9 +594,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 67,
-          "end_line": 67
+          "file": "models.go"
         }
       },
       {
@@ -648,9 +618,7 @@
           "scifi"
         ],
         "provenance": {
-          "file": "models.go",
-          "start_line": 7,
-          "end_line": 7
+          "file": "models.go"
         }
       },
       {
@@ -696,9 +664,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 19,
-          "end_line": 19
+          "file": "models.go"
         }
       },
       {
@@ -744,9 +710,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 19,
-          "end_line": 19
+          "file": "models.go"
         }
       },
       {
@@ -862,9 +826,7 @@
           ]
         },
         "provenance": {
-          "file": "models.go",
-          "start_line": 52,
-          "end_line": 52
+          "file": "models.go"
         }
       }
     ],
@@ -875,11 +837,8 @@
         "category": "request_parameter",
         "message": "untyped query param 'genre' on GET /books: read via c.Query with no binding struct; param type/required-ness under-specified, type inferred as string only (TARGET-API.md §5.4)",
         "file": "main.go",
-        "line": 49,
         "span": {
-          "file": "main.go",
-          "start_line": 49,
-          "end_line": 49
+          "file": "main.go"
         },
         "operation": "GET /books",
         "subject": "genre"

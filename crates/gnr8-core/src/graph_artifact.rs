@@ -13,17 +13,16 @@ pub const GRAPH_ARTIFACT_PATH: &str = "generated/gnr8.graph.json";
 
 /// Current on-disk graph artifact schema.
 ///
-/// Bumped whenever the same API is represented differently. Version 2: an imported parameter's
-/// validation keywords live in its typed constraints, no longer in the raw schema the graph keeps
-/// for it, and an imported server no longer repeats the base path. `gnr8 changes` reads a version 1
-/// base through one upgrade step (`upgrade_graph_from_artifact_v1`) and refuses any other version.
-pub const GRAPH_ARTIFACT_SCHEMA_VERSION: u32 = 2;
+/// Bumped whenever the same API is represented differently. Version 3 keeps file provenance and
+/// graph symbol identities, but omits source lines and orders diagnostics by stable identity.
+/// `gnr8 changes` reads versions 1 and 2 through sequential upgrade steps.
+pub const GRAPH_ARTIFACT_SCHEMA_VERSION: u32 = 3;
 
 /// Stable on-disk envelope for one projected [`ApiGraph`].
 ///
 /// The envelope version belongs to the artifact format rather than the worker protocol or the graph
 /// itself. This lets readers reject a graph written by a different artifact schema explicitly.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct GraphArtifact {
     /// Version of this envelope and its embedded graph representation.
     pub schema_version: u32,
@@ -53,10 +52,8 @@ impl GraphArtifact {
 
     /// The same bytes [`Self::to_json`] writes, for a caller that only BORROWS the graph.
     ///
-    /// The pipeline renders this artifact beside the built-in targets, which all hold the frozen
-    /// graph by reference, so wrapping a copy of it first would copy megabytes to serialize them.
-    /// [`GraphArtifactRef`] carries the same fields in the same order, so this is one serialization
-    /// rather than a second one that has to be kept in step.
+    /// Both entry points use [`GraphArtifactRef`], which projects source locations for the artifact
+    /// without changing the live graph used by diagnostics and custom stages.
     ///
     /// # Errors
     ///
@@ -64,6 +61,16 @@ impl GraphArtifact {
     /// cannot be serialized.
     pub fn json_for(graph: &ApiGraph) -> Result<String, crate::CoreError> {
         json_of(GRAPH_ARTIFACT_SCHEMA_VERSION, graph)
+    }
+}
+
+impl serde::Serialize for GraphArtifact {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        GraphArtifactRef {
+            schema_version: self.schema_version,
+            graph: &self.graph,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -88,10 +95,71 @@ fn json_of(schema_version: u32, graph: &ApiGraph) -> Result<String, crate::CoreE
 }
 
 /// The write side of [`GraphArtifact`], borrowing the graph it serializes.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug)]
 struct GraphArtifactRef<'graph> {
     schema_version: u32,
     graph: &'graph ApiGraph,
+}
+
+impl serde::Serialize for GraphArtifactRef<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+
+        let graph = if self.schema_version >= 3 {
+            let mut graph = self.graph.clone();
+            upgrade_graph_from_artifact_v2(&mut graph);
+            std::borrow::Cow::Owned(graph)
+        } else {
+            std::borrow::Cow::Borrowed(self.graph)
+        };
+        let mut envelope = serializer.serialize_struct("GraphArtifact", 2)?;
+        envelope.serialize_field("schema_version", &self.schema_version)?;
+        envelope.serialize_field("graph", &graph)?;
+        envelope.end()
+    }
+}
+
+/// Project schema-v2 source locations to schema v3. Zero means no historical line is available;
+/// the graph's serializer omits it. Node ids, field names, handlers and routes already identify the
+/// subjects, so no second symbol name is introduced. Raw user JSON is left untouched.
+pub(crate) fn upgrade_graph_from_artifact_v2(graph: &mut ApiGraph) {
+    fn clear_span(span: &mut crate::graph::SourceSpan) {
+        span.start_line = 0;
+        span.end_line = 0;
+    }
+    fn clear_ref(reference: &mut crate::graph::SchemaRef) {
+        if let Some(span) = &mut reference.provenance {
+            clear_span(span);
+        }
+    }
+    for operation in &mut graph.operations {
+        clear_span(&mut operation.provenance);
+        for parameter in &mut operation.params {
+            clear_span(&mut parameter.provenance);
+        }
+        if let Some(body) = &mut operation.request_body {
+            clear_ref(body);
+        }
+        for variant in &mut operation.request_body_variants {
+            clear_ref(&mut variant.body);
+        }
+        for response in &mut operation.responses {
+            if let Some(body) = &mut response.body {
+                clear_ref(body);
+            }
+        }
+    }
+    for schema in &mut graph.schemas {
+        clear_span(&mut schema.provenance);
+    }
+    for diagnostic in &mut graph.diagnostics {
+        diagnostic.line = 0;
+        clear_span(&mut diagnostic.span);
+    }
+    graph
+        .diagnostics
+        .sort_by(crate::diagnostics::compare_stable);
+    graph.diagnostics.dedup();
 }
 
 /// Reject graph identities that would otherwise collapse when a committed artifact is compared.
@@ -238,10 +306,10 @@ fn validate_type_fields(ty: &Type, context: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{GraphArtifact, GRAPH_ARTIFACT_SCHEMA_VERSION};
-    use crate::graph::{ApiGraph, Operation, SourceSpan};
+    use crate::graph::{ApiGraph, Operation, SourceSpan, Type};
 
     #[test]
     fn graph_artifact_is_deterministic_and_round_trips() {
@@ -260,6 +328,67 @@ mod tests {
             serde_json::from_str(&first).expect("deserialize graph artifact");
         assert_eq!(decoded.schema_version, GRAPH_ARTIFACT_SCHEMA_VERSION);
         assert_eq!(decoded.graph, graph);
+    }
+
+    #[test]
+    fn graph_artifact_omits_lines_without_changing_the_live_graph() {
+        use crate::graph::{Diagnostic, DiagnosticCategory, Schema};
+        let span = SourceSpan {
+            file: "models.go".into(),
+            start_line: 20,
+            end_line: 30,
+        };
+        let first = Diagnostic::new(
+            "schema.a",
+            DiagnosticCategory::Schema,
+            "WARN",
+            "A",
+            span.clone(),
+        )
+        .schema("Book")
+        .subject("title");
+        let mut duplicate = first.clone();
+        duplicate.line = 60;
+        duplicate.span.start_line = 60;
+        duplicate.span.end_line = 70;
+        let mut graph = ApiGraph {
+            schemas: vec![Schema {
+                id: "Book".into(),
+                name: "Book".into(),
+                body: Type::string(),
+                enum_source_order: Vec::new(),
+                provenance: span.clone(),
+            }],
+            diagnostics: vec![
+                Diagnostic::new("schema.z", DiagnosticCategory::Schema, "WARN", "Z", span),
+                duplicate,
+                first,
+            ],
+            ..ApiGraph::default()
+        };
+        let before = graph.clone();
+        let text = GraphArtifact::json_for(&graph).unwrap();
+        assert_eq!(graph, before);
+        assert!(!text.contains("start_line"));
+        assert!(!text.contains("end_line"));
+        assert!(!text.contains("\"line\""));
+        let decoded: GraphArtifact = serde_json::from_str(&text).unwrap();
+        assert_eq!(decoded.graph.diagnostics.len(), 2);
+        assert_eq!(decoded.graph.diagnostics[0].code, "schema.a");
+        assert_eq!(
+            decoded.graph.diagnostics[0].subject.as_deref(),
+            Some("title")
+        );
+        assert_eq!(decoded.graph.schemas[0].provenance.file, "models.go");
+        for diagnostic in &mut graph.diagnostics {
+            diagnostic.line += 100;
+            diagnostic.span.start_line += 100;
+            diagnostic.span.end_line += 100;
+        }
+        graph.schemas[0].provenance.start_line += 100;
+        graph.schemas[0].provenance.end_line += 100;
+        graph.diagnostics.reverse();
+        assert_eq!(text, GraphArtifact::json_for(&graph).unwrap());
     }
 
     /// The envelope version an artifact was READ at is the one it writes back. `json_for` renders a
