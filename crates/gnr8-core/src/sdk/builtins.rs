@@ -1564,33 +1564,7 @@ fn override_target_field<'a>(
     field_name: &str,
     label: &str,
 ) -> Result<&'a mut Field, CoreError> {
-    let matches: Vec<usize> = ir
-        .schemas
-        .iter()
-        .enumerate()
-        .filter_map(|(index, schema)| {
-            (schema.id == schema_match || schema.name == schema_match).then_some(index)
-        })
-        .collect();
-    let schema_index = match matches.as_slice() {
-        [single] => *single,
-        [] => {
-            return Err(CoreError::Config {
-                message: format!(
-                    "{label} schema {schema_match:?} does not match any graph schema id or name"
-                ),
-            });
-        }
-        many => {
-            return Err(CoreError::Config {
-                message: format!(
-                    "{label} schema {schema_match:?} matches {} schemas; use the full schema id",
-                    many.len()
-                ),
-            });
-        }
-    };
-
+    let schema_index = override_target_schema(ir, schema_match, label)?;
     let schema = &mut ir.schemas[schema_index];
     let Type::Object(fields) = &mut schema.body else {
         return Err(CoreError::Config {
@@ -1606,6 +1580,36 @@ fn override_target_field<'a>(
                 "{label} did not find field {field_name:?} on schema {schema_match:?}"
             ),
         })
+}
+
+/// The index of the ONE schema a field-level override names by id or bare name.
+fn override_target_schema(
+    ir: &ApiGraph,
+    schema_match: &str,
+    label: &str,
+) -> Result<usize, CoreError> {
+    let matches: Vec<usize> = ir
+        .schemas
+        .iter()
+        .enumerate()
+        .filter_map(|(index, schema)| {
+            (schema.id == schema_match || schema.name == schema_match).then_some(index)
+        })
+        .collect();
+    match matches.as_slice() {
+        [single] => Ok(*single),
+        [] => Err(CoreError::Config {
+            message: format!(
+                "{label} schema {schema_match:?} does not match any graph schema id or name"
+            ),
+        }),
+        many => Err(CoreError::Config {
+            message: format!(
+                "{label} schema {schema_match:?} matches {} schemas; use the full schema id",
+                many.len()
+            ),
+        }),
+    }
 }
 
 fn apply_field_presence_override(
@@ -1627,16 +1631,37 @@ fn apply_field_presence_override(
     Ok(())
 }
 
+/// Apply one checked nullability override.
+///
+/// An input override on a field whose `schema.nullability.unresolved` diagnostic is still in the
+/// graph is not a correction but the statement of a fact the source left open: code gnr8 does not
+/// read owns the field's explicit null. Either answer is accepted there, and stating it retires that
+/// diagnostic. Everywhere else the override corrects an extracted answer, so asserting the answer
+/// the field already has is an error.
 fn apply_field_nullability_override(
     ir: &mut ApiGraph,
     override_: &FieldNullabilityOverride,
 ) -> Result<(), CoreError> {
-    let field = override_target_field(
-        ir,
-        &override_.schema,
-        &override_.field,
-        "nullability override",
-    )?;
+    const LABEL: &str = "nullability override";
+    let schema_id = ir.schemas[override_target_schema(ir, &override_.schema, LABEL)?]
+        .id
+        .clone();
+    let unresolved = (override_.use_ == SchemaUse::Input).then(|| {
+        ir.diagnostics.iter().position(|diagnostic| {
+            diagnostic.code == crate::graph::direction::NULL_ACCEPTANCE_UNRESOLVED
+                && diagnostic.schema.as_deref() == Some(schema_id.as_str())
+                && diagnostic.subject.as_deref() == Some(override_.field.as_str())
+        })
+    });
+    let field = override_target_field(ir, &override_.schema, &override_.field, LABEL)?;
+    if let Some(Some(index)) = unresolved {
+        field.deserializer_accepts_null = override_.nullable;
+        if override_.nullable {
+            field.validator_rejects_null = false;
+        }
+        ir.diagnostics.remove(index);
+        return Ok(());
+    }
     let current = match override_.use_ {
         SchemaUse::Input => field.deserializer_accepts_null && !field.validator_rejects_null,
         SchemaUse::Output => field.serializer_may_emit_null,

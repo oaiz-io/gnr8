@@ -339,6 +339,32 @@ func (a *Accumulator) IneffectiveOmitEmpty(structName, fieldName, goType, file s
 	})
 }
 
+// NullAcceptanceUnresolved records a field whose explicit null code gnr8 does
+// not read decides, so encoding/json's rules do not say whether it is accepted.
+// The field is published as not accepting null; reason says which code owns the
+// answer, and the message says how to state it.
+//
+// Schema is the schema id and Subject the JSON name, the two a nullability
+// declaration in .gnr8 resolves, so stating the fact retires exactly this
+// diagnostic.
+func (a *Accumulator) NullAcceptanceUnresolved(schemaID, structName, jsonName, goType, reason, file string, line uint32) {
+	a.items = append(a.items, facts.DiagnosticFact{
+		Code:     "schema.nullability.unresolved",
+		Severity: severityWarn,
+		Category: categorySchema,
+		Message: "null acceptance unresolved: " + structName + "." + jsonName + " (" + goType + "): " +
+			reason + "; that is not a typed fact, so the field is published as not accepting null. " +
+			"State it in .gnr8 with ApiOverrides force_nullable(\"" + structName + "\", \"" + jsonName +
+			"\", SchemaUse::Input) if null is accepted, or force_non_nullable with the same arguments " +
+			"if it is refused",
+		File:    file,
+		Line:    line,
+		EndLine: line,
+		Schema:  schemaID,
+		Subject: jsonName,
+	})
+}
+
 // UnknownHandler records a recognized route whose handler declaration/body is
 // unavailable. This is an error because emitting empty request/response facts
 // would make extraction coverage look complete when it is not.

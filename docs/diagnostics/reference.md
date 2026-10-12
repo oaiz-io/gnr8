@@ -67,6 +67,7 @@ keys; message is explanatory text. Results are deterministically sorted.
 | `schema.metadata.unresolved` | schema constraint/metadata could not be preserved | type source or add target patch |
 | `schema.numeric.narrowing` | numeric shape required a lossy narrowing | choose an explicit graph type |
 | `schema.free_form_map` | source contains a fully represented but unconstrained free-form map (`INFO`) | accept `additionalProperties: true` or model a narrower schema |
+| `schema.nullability.unresolved` | a request field's explicit null is decided by code gnr8 does not read: its type's `UnmarshalJSON`, an enclosing type's, or the handler reading a required `json.RawMessage`, so the field is published as not accepting null. `schema` is the schema id and `subject` the JSON name. Dropped after the source and after every transform once only responses reach the schema or the schema is removed | state the answer with `ApiOverrides::force_nullable` or `force_non_nullable` and `SchemaUse::Input`, which retires it |
 | `schema.omit_option.ineffective` | Go field is tagged `,omitempty` on a type `encoding/json` never omits — a struct, a `time.Time`, or a non-zero-length array (`INFO`) | use `,omitzero`, or accept that the key is always present |
 | `security.unresolved` | security/auth fact was incomplete | use `ApplySecurity`/`SecurityOverride` |
 | `security.requirement.missing` | the handler reads `Authorization` but typed source cannot state the scheme | apply an `Authorization`-carrying scheme with `ApplySecurity` |

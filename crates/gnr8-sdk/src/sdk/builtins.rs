@@ -875,6 +875,10 @@ impl ApiOverrides {
 
     /// Assert that a field which extraction currently marks nullable is non-null in one direction.
     /// The transform fails if the schema/field disappears or the correction is already redundant.
+    ///
+    /// On a field that raised `schema.nullability.unresolved`, an input assertion states that the
+    /// custom decoder refuses an explicit null, and retires the diagnostic. It is never redundant
+    /// there, though the field is already published as non-null.
     #[must_use]
     pub fn force_non_nullable(
         mut self,
@@ -893,6 +897,10 @@ impl ApiOverrides {
 
     /// Assert that a field which extraction currently marks non-null is nullable in one direction.
     /// The transform fails if the schema/field disappears or the correction is already redundant.
+    ///
+    /// On a field that raised `schema.nullability.unresolved`, an input assertion states that the
+    /// custom decoder accepts an explicit null, publishes the field as nullable, and retires the
+    /// diagnostic.
     #[must_use]
     pub fn force_nullable(
         mut self,

@@ -420,8 +420,16 @@ Nullability never changes these answers. A bare `*T`, slice, or map with no omis
 required nullable response property. With `omitempty`/`omitzero`, a nil value is omitted; when present,
 an ordinary pointer/slice/map is non-null. Request nullability is selected independently:
 `encoding/json` accepts null into ordinary destinations, and a required validator rejects the
-resulting zero or nil value where its rule applies. `json.RawMessage` instead retains literal null as
-non-nil bytes and is not narrowed by that rule.
+resulting zero or nil value where its rule applies.
+
+gnr8 publishes a request null only where those rules decide it. It does not publish one that code it
+cannot read decides: a field of a type that implements `json.Unmarshaler`, a field of a type decoded
+inside another type's `UnmarshalJSON`, a value field whose own type implements it, and a required
+`json.RawMessage`, which keeps a literal null as the bytes `null` that `required` passes. Each such
+field is published as not accepting null and raises `schema.nullability.unresolved`, which names the
+type and the field, until the pipeline states the fact with `force_nullable` or `force_non_nullable`
+(see below). A pointer field is not among them, because `encoding/json` sets it to nil without
+calling the pointee's decoder; neither is `time.Time`.
 
 A nullable property with an `enum` lists `null` among the members: `type: [string, 'null']` with
 `enum: [asc, desc, null]`, or a nullable `$ref`'s `oneOf` wrapper with `enum: [draft, null]`. In
@@ -446,7 +454,17 @@ ApiOverrides::new()
 ```
 
 A nullability correction fails when its schema or field disappears, when the extracted pre-change
-shape no longer matches the assertion, or when it has become redundant.
+shape no longer matches the assertion, or when it has become redundant. An input assertion on a field
+that raised `schema.nullability.unresolved` is never redundant: it states the answer the source left
+open, publishes it, and retires the diagnostic.
+
+```rust
+ApiOverrides::new()
+    // UpdateBook.UnmarshalJSON reads a null subtitle as clearing it...
+    .force_nullable("UpdateBook", "subtitle", SchemaUse::Input)
+    // ...and refuses a null title.
+    .force_non_nullable("UpdateBook", "title", SchemaUse::Input)
+```
 
 ### Validation rules apply at the scope they are written in
 

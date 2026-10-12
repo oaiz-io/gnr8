@@ -69,12 +69,26 @@ func TestGinContractRegressionFacts(t *testing.T) {
 		"request.body.unresolved\x00POST /v1/files/form-file/request-dynamic": true,
 		"request.body.unresolved\x00POST /v1/items/raw-ambiguous":             true,
 		"security.requirement.missing\x00GET /v1/items/request-observations":  true,
+		// Keyed by schema and field rather than operation. The sidecar raises one for every field
+		// whose null code it does not read decides; the host drops DecodedReply's, which only a
+		// response reaches.
+		"schema.nullability.unresolved\x00ValidatedRequest.raw":           true,
+		"schema.nullability.unresolved\x00MoveFolderParent.folderId":      true,
+		"schema.nullability.unresolved\x00MoveFolderRequest.note":         true,
+		"schema.nullability.unresolved\x00MoveFolderRequest.parentFolder": true,
+		"schema.nullability.unresolved\x00RenameFolderRequest.name":       true,
+		"schema.nullability.unresolved\x00RenameFolderRequest.proof":      true,
+		"schema.nullability.unresolved\x00DecodedReply.label":             true,
 	}
 	if len(doc.Diagnostics) != len(wantDiagnostics) {
 		t.Fatalf("gin contract fixture diagnostics: got %+v", doc.Diagnostics)
 	}
 	for _, diagnostic := range doc.Diagnostics {
-		if !wantDiagnostics[diagnostic.Code+"\x00"+diagnostic.Operation] {
+		identity := diagnostic.Operation
+		if identity == "" {
+			identity = diagnostic.Schema + "." + diagnostic.Subject
+		}
+		if !wantDiagnostics[diagnostic.Code+"\x00"+identity] {
 			t.Fatalf("unexpected diagnostic: %+v", diagnostic)
 		}
 	}

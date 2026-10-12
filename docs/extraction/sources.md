@@ -130,9 +130,20 @@ Recognized route facts include:
   no option is required and can emit null. An omission-tagged ordinary pointer/slice/map is optional
   and non-null when present. Inbound null acceptance is recorded separately: `encoding/json` accepts
   null for every ordinary destination, leaving a non-nilable value unchanged. A field-level required
-  validator can reject the resulting zero/nil value; required `json.RawMessage` is the important
-  exception because literal null becomes non-nil bytes. A custom unmarshaler owns its behavior, so an
-  application that rejects null there states that checked correction with `force_non_nullable`.
+  validator can reject the resulting zero/nil value.
+
+  Those rules decide only the null `encoding/json` decodes itself. A null it hands to code gnr8 does
+  not read is not published as accepted: every field of a type that implements `json.Unmarshaler`
+  (its own method or a promoted one), every field of a type decoded inside such a type's value at any
+  depth, a value field whose own type implements it, and a required `json.RawMessage`, which keeps a
+  literal null as the bytes `null` that `required` passes. Such a field is published as not
+  accepting null and raises `schema.nullability.unresolved`, naming the type and the field, wherever
+  `encoding/json`'s rules would have published the null. State the answer with
+  `force_nullable(..., SchemaUse::Input)` or `force_non_nullable(..., SchemaUse::Input)`; either one
+  retires the diagnostic. A pointer field's null is `encoding/json`'s own (it sets nil without calling
+  the pointee's decoder), and so are `json.RawMessage` that is not required and `time.Time`. The
+  diagnostic is dropped, after the source and after every transform, once only responses reach its
+  schema or a transform removes the schema.
 
   On a `form:`-tagged field a form/multipart binder owns it, and the rules differ: a part is present
   or absent with no `null` to write, so such a field is never nullable, and it is optional when the

@@ -9,6 +9,38 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **Go extraction no longer publishes a request null that a custom decoder decides.**
+  `encoding/json`'s rules say whether a field accepts an explicit `null` only for the null it
+  decodes itself. gnr8 used them for every field, so a field whose `UnmarshalJSON` refuses null was
+  published as nullable, and the SDKs offered a null the server rejects. A field is now published as
+  not accepting null, and raises the new `WARN` diagnostic `schema.nullability.unresolved`, when its
+  null goes to code gnr8 does not read:
+  - every field of a type that implements `json.Unmarshaler`, its own method or one promoted from an
+    embedded struct;
+  - every field of a type decoded inside such a type's value, at any depth, whatever else decodes
+    it;
+  - a value field whose own type implements `json.Unmarshaler` (a pointer field is not: `encoding/json`
+    sets it to nil without calling the pointee's method, and neither is `time.Time`);
+  - a `binding:"required"` / `validate:"required"` `json.RawMessage`, which keeps a literal null as the
+    bytes `null` that `required` passes. A required map was already not nullable, since `required`
+    refuses its nil.
+
+  The diagnostic names the type and the JSON field and is raised only where `encoding/json`'s rules
+  would have published the null; its `schema` is the schema id and its `subject` the JSON name. It is
+  dropped once its schema publishes no input answer, after the source and after every transform: when
+  only responses reach the schema, or a transform removes it. State the answer in `.gnr8` with
+  `ApiOverrides::force_nullable(schema, field, SchemaUse::Input)` or `force_non_nullable` with the same
+  arguments: on such a field either one is accepted, neither is redundant, and the diagnostic is
+  retired. A `DiagnosticPolicy` that denies the code fails the pipeline on every null left unstated.
+  There is no struct tag for this fact. A field that is no longer nullable keeps 0.18.1's rule: a
+  Python `None` in an optional field is the absent key, so the SDK never sends the null.
+  `openapi.yaml` drops `null` from each such property, and every generated model changes for it as
+  for any field that stops accepting null: TypeScript drops `| null`, a required Python field drops
+  `Optional[…]` and an optional one defaults to `None` instead of `UNSET`. Regenerate, then declare
+  each field the diagnostic names.
+
 ## 0.18.3 — 2026-10-12
 
 ### Fixed
