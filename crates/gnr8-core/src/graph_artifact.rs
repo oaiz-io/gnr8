@@ -105,6 +105,11 @@ impl serde::Serialize for GraphArtifactRef<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct as _;
 
+        // Version 3 drops source lines, which the live graph keeps for custom stages and current
+        // reports, so the projection works on a copy. Measured on a 2,400-operation graph (10 MB of
+        // JSON, release build): the copy takes about 2 ms of an 11.6 ms render, and the pipeline
+        // renders the artifact on its own thread beside the targets. Skipping the copy would need a
+        // second serialization of the graph that has to be kept in step with the derived one.
         let graph = if self.schema_version >= 3 {
             let mut graph = self.graph.clone();
             upgrade_graph_from_artifact_v2(&mut graph);

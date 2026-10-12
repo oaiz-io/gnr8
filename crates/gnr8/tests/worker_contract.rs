@@ -966,6 +966,10 @@ fn assert_exact_change_gate_selector(root: &Path) {
 
 #[test]
 fn changes_reads_a_schema_v2_base_ref_and_reports_current_source_lines() {
+    if !cargo_available() || !git_available() {
+        eprintln!("skipping worker_contract: cargo or git unavailable");
+        return;
+    }
     let root = unique_dir("changes-v2");
     write_project(&root, "", OPENAPI_PIPELINE);
     assert!(gnr8(&root, &["generate"], None).status.success());
