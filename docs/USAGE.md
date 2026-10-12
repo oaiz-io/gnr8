@@ -423,6 +423,12 @@ an ordinary pointer/slice/map is non-null. Request nullability is selected indep
 resulting zero or nil value where its rule applies. `json.RawMessage` instead retains literal null as
 non-nil bytes and is not narrowed by that rule.
 
+A nullable property with an `enum` lists `null` among the members: `type: [string, 'null']` with
+`enum: [asc, desc, null]`, or a nullable `$ref`'s `oneOf` wrapper with `enum: [draft, null]`. In
+OpenAPI 3.1 `enum` constrains every value, null included, so a member list without `null` would
+reject the null the property admits. A consumer that reads `enum` as a list of strings must skip the
+`null` member.
+
 Go value types use a pointer when the projected model must represent absence or null. Optional value
 types pair that pointer with `,omitempty`, preserving explicit zero values; required nullable value
 types omit the tag, so nil is serialized as a present null. When both axes apply, an additional

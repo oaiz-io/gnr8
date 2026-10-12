@@ -453,8 +453,12 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
     if let Some(description) = &schema.description {
         let _ = writeln!(out, "{pad}description: {}", scalar(description));
     }
-    if !schema.enum_values.is_empty() {
-        let _ = writeln!(out, "{pad}enum: {}", flow_seq(&schema.enum_values));
+    if let Some(members) = &schema.enum_values {
+        let mut values: Vec<String> = members.iter().map(|member| flow_scalar(member)).collect();
+        if schema.nullable {
+            values.push("null".to_string());
+        }
+        let _ = writeln!(out, "{pad}enum: [{}]", values.join(", "));
     }
     write_schema_constraints(out, schema, &pad);
     if let Some(default_value) = &schema.default_value {
@@ -573,8 +577,19 @@ fn ref_pointer(name: &str) -> String {
 
 /// Render a flow-style sequence `[a, b, c]`. Each item is scalar-escaped.
 fn flow_seq(items: &[String]) -> String {
-    let rendered: Vec<String> = items.iter().map(|item| scalar(item)).collect();
+    let rendered: Vec<String> = items.iter().map(|item| flow_scalar(item)).collect();
     format!("[{}]", rendered.join(", "))
+}
+
+/// Render one item of a flow sequence. Inside `[...]` a `,` ends the item, `]` ends the sequence,
+/// and `[`/`{`/`}` open or close a nested collection, so those characters force quoting anywhere
+/// in the value, not only where they would lead a block scalar.
+fn flow_scalar(value: &str) -> String {
+    if needs_key_quoting(value) {
+        quote(value)
+    } else {
+        value.to_string()
+    }
 }
 
 fn flow_type_seq(items: &[String]) -> String {
@@ -1095,10 +1110,14 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             "2026-07-16",
             "value # comment",
             "key: value",
+            "a, b",
+            "x]",
+            "{y}",
+            "c[d",
         ];
         let mut doc = sample_doc();
         let schema = &mut doc.components.schemas[0].1;
-        schema.enum_values = ambiguous.iter().map(|value| (*value).to_string()).collect();
+        schema.enum_values = Some(ambiguous.iter().map(|value| (*value).to_string()).collect());
         schema.example = Some(LiteralValue::String("=".to_string()));
         let yaml = write(&doc);
 

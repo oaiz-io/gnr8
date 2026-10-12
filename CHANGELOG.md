@@ -9,6 +9,28 @@ must move the minor version.
 
 ## Unreleased
 
+### Fixed
+
+- Generated CLI body help preserves field-level enum restrictions and request nullability, quotes
+  ambiguous enum labels, and distinguishes container element unions from nullable containers.
+  Body help no longer recalculates whole-graph directions for every command.
+- OpenAPI output intersects inline enums with field constraints, retains empty enum sets, and
+  includes null in nullable enums. In 3.1 `enum` constrains every value, so a nullable property's
+  member list without `null` rejected the null it admits. Consumers that read `enum` members as
+  strings must now skip `null`. A constraint narrows an inline enum without discarding the
+  member order `SetEnumOrder` gave it.
+- Fixed the generated CLI documentation's Body example closing fence.
+- Go extraction reports a field-scope `oneof` rule on a slice or map field as
+  `schema.metadata.unresolved` instead of publishing an `enum` on the collection itself, which no
+  non-null value satisfied (the validator panics on that rule). A `oneof` past `dive` and the element
+  type's own values are unaffected.
+- OpenAPI import reads a `{type: 'null'}` arm of `oneOf`/`anyOf` as nullability. The 3.1
+  nullable-`$ref` form gnr8 emits now imports as the referenced type, nullable, instead of a union
+  with an untyped member that the Go SDK rejected. A `$ref` to a component written that way is
+  nullable too.
+- OpenAPI YAML quotes `,`, `[`, `]`, `{` and `}` anywhere in a flow-sequence item (enum members,
+  tags, `required`, scopes), so a member such as `a, b` no longer splits in two.
+
 ## 0.18.2 — 2026-10-11
 
 ### Added

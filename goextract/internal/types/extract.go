@@ -467,6 +467,13 @@ func constraintsFromTag(
 			if !fieldScope {
 				continue
 			}
+			if collectionKindOf(schema) != collectionKindNone {
+				// The validator compares the field's own value with these members, and a slice
+				// or map is never one of them: go-playground panics on it. An element's values
+				// belong to the element type or to a rule past `dive`.
+				unsupportedConstraintTag(diags, tagKind, structName, fieldName, token, file, line)
+				continue
+			}
 			constraints.EnumValues = values
 		default:
 			unsupportedConstraintTag(diags, tagKind, structName, fieldName, token, file, line)

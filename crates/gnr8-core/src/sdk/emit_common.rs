@@ -14,8 +14,8 @@ use std::fmt::Write as _;
 use gnr8::facts::LiteralValue;
 use gnr8::sdk::SdkCli;
 
-use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
-use crate::graph::{ApiGraph, Field, Operation, Param, Prim, Schema, Type};
+use crate::graph::direction::SchemaDirections;
+use crate::graph::{intersect_enum_values, ApiGraph, Field, Operation, Param, Prim, Schema, Type};
 use crate::sdk::layout::SdkFileLayout;
 use crate::CoreError;
 
@@ -280,8 +280,8 @@ pub(crate) struct BodyHelpField {
     pub type_name: String,
     /// Whether the request schema lists the field as required.
     pub required: bool,
-    /// Allowed values, for an enum field or an array of one.
-    pub enum_values: Vec<String>,
+    /// Non-null enum members, for a field or an array's elements; `None` means unrestricted.
+    pub enum_values: Option<Vec<String>>,
     /// The path already listing this field's object shape, when the shape repeats.
     pub same_shape_as: Option<String>,
     /// Field prose on one line; empty when the schema states none.
@@ -294,7 +294,8 @@ pub(crate) struct BodyHelpField {
 /// array of objects as `parent.child` or `parent[].child`. A field whose named object shape is
 /// already listed — a recursive filter's `or`, or a second field of the same type — names that path
 /// instead of listing the shape again. Top-level fields the command binds as flags via
-/// `CliCommand::body_fields` are left out: `--help` already lists them under Flags.
+/// `CliCommand::body_fields` are left out: `--help` already lists them under Flags. The SDK target
+/// supplies the direction-projected graph, and every field here occupies a request position.
 pub(crate) fn body_help(
     cli: &SdkCli,
     op: &Operation,
@@ -317,17 +318,16 @@ pub(crate) fn body_help(
     let root = Type::Named(body.schema_id.clone());
     let mut walk = BodyHelpWalk {
         graph,
-        directions: schema_directions(graph),
         visited: BTreeMap::new(),
         fields: Vec::new(),
     };
-    if let Some(shape) = walk.object_shape(&root, SchemaDirections::REQUEST)? {
+    if let Some(shape) = walk.object_shape(&root)? {
         let prefix = if shape.arrays.is_empty() {
             String::new()
         } else {
             format!("{}.", shape.arrays)
         };
-        walk.push_fields(&prefix, shape.fields, shape.directions, &flagged, 0)?;
+        walk.push_fields(&prefix, shape.fields, &flagged, 0)?;
     }
     Ok(Some(BodyHelp {
         schema: body.model.clone(),
@@ -340,15 +340,12 @@ struct ObjectShape<'a> {
     /// `[]` once per array between the field and the object.
     arrays: String,
     fields: &'a [Field],
-    /// The positions the enclosing named schema is reached from, which decide requiredness.
-    directions: SchemaDirections,
     /// The named schema the object is, when it is not inline.
     schema_id: Option<&'a str>,
 }
 
 struct BodyHelpWalk<'a> {
     graph: &'a ApiGraph,
-    directions: BTreeMap<&'a str, SchemaDirections>,
     /// Named object schemas already listed, keyed to the path that lists them.
     visited: BTreeMap<&'a str, String>,
     fields: Vec<BodyHelpField>,
@@ -369,7 +366,6 @@ impl<'a> BodyHelpWalk<'a> {
         &mut self,
         prefix: &str,
         fields: &'a [Field],
-        directions: SchemaDirections,
         flagged: &BTreeSet<String>,
         depth: usize,
     ) -> Result<(), CoreError> {
@@ -378,10 +374,14 @@ impl<'a> BodyHelpWalk<'a> {
                 continue;
             }
             let name = format!("{prefix}{}", field.json_name);
+            let mut type_name = self.type_name(&field.schema, &mut Vec::new())?;
+            if SchemaDirections::REQUEST.field_is_nullable(field) && type_name != "any" {
+                type_name.push_str(" or null");
+            }
             let mut row = BodyHelpField {
                 name: name.clone(),
-                type_name: self.type_name(&field.schema, &mut Vec::new())?,
-                required: directions.field_is_required(field),
+                type_name,
+                required: SchemaDirections::REQUEST.field_is_required(field),
                 enum_values: self.enum_values(field)?,
                 same_shape_as: None,
                 help: field
@@ -390,7 +390,7 @@ impl<'a> BodyHelpWalk<'a> {
                     .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
                     .unwrap_or_default(),
             };
-            let Some(shape) = self.object_shape(&field.schema, directions)? else {
+            let Some(shape) = self.object_shape(&field.schema)? else {
                 self.fields.push(row);
                 continue;
             };
@@ -409,25 +409,14 @@ impl<'a> BodyHelpWalk<'a> {
             if let Some(id) = shape.schema_id {
                 self.visited.insert(id, path.clone());
             }
-            self.push_fields(
-                &format!("{path}."),
-                shape.fields,
-                shape.directions,
-                flagged,
-                depth + 1,
-            )?;
+            self.push_fields(&format!("{path}."), shape.fields, flagged, depth + 1)?;
         }
         Ok(())
     }
 
     /// The object `ty` holds, through arrays and named aliases, or `None` for any other shape.
-    fn object_shape(
-        &self,
-        ty: &'a Type,
-        directions: SchemaDirections,
-    ) -> Result<Option<ObjectShape<'a>>, CoreError> {
+    fn object_shape(&self, ty: &'a Type) -> Result<Option<ObjectShape<'a>>, CoreError> {
         let mut arrays = String::new();
-        let mut directions = directions;
         let mut schema_id = None;
         let mut seen = BTreeSet::new();
         let mut current = ty;
@@ -443,7 +432,6 @@ impl<'a> BodyHelpWalk<'a> {
                         return Ok(None);
                     }
                     let schema = self.schema(id)?;
-                    directions = directions_of(&self.directions, &schema.id);
                     schema_id = Some(schema.id.as_str());
                     current = &schema.body;
                 }
@@ -451,7 +439,6 @@ impl<'a> BodyHelpWalk<'a> {
                     return Ok(Some(ObjectShape {
                         arrays,
                         fields,
-                        directions,
                         schema_id,
                     }))
                 }
@@ -474,8 +461,8 @@ impl<'a> BodyHelpWalk<'a> {
             Type::Primitive(Prim::String | Prim::Bytes) | Type::WellKnown(_) | Type::Enum(_) => {
                 "string".to_string()
             }
-            Type::Array(inner) => format!("array of {}", self.type_name(inner, seen)?),
-            Type::Map { value, .. } => format!("map of {}", self.type_name(value, seen)?),
+            Type::Array(inner) => format!("array of {}", self.element_type_name(inner, seen)?),
+            Type::Map { value, .. } => format!("map of {}", self.element_type_name(value, seen)?),
             Type::Object(_) => "object".to_string(),
             Type::Any {} => "any".to_string(),
             Type::Union(variants) => {
@@ -507,18 +494,38 @@ impl<'a> BodyHelpWalk<'a> {
         })
     }
 
-    /// The values `field` allows: its enum type's members, else its validation enum.
-    fn enum_values(&self, field: &Field) -> Result<Vec<String>, CoreError> {
+    /// Parentheses keep a container's union element distinct from a nullable container.
+    fn element_type_name(
+        &self,
+        ty: &'a Type,
+        seen: &mut Vec<&'a str>,
+    ) -> Result<String, CoreError> {
+        let name = self.type_name(ty, seen)?;
+        Ok(if name.contains(" or ") {
+            format!("({name})")
+        } else {
+            name
+        })
+    }
+
+    /// Intersect the enum type's members with the field's validation constraint. Both describe the
+    /// same value, so a constraint may narrow the type's set but can never broaden it.
+    fn enum_values(&self, field: &Field) -> Result<Option<Vec<String>>, CoreError> {
         let mut current = &field.schema;
         let mut seen = BTreeSet::new();
-        loop {
+        let declared = loop {
             match current {
-                Type::Enum(members) => return Ok(members.clone()),
+                Type::Enum(members) => break Some(members.as_slice()),
                 Type::Array(inner) => current = inner,
                 Type::Named(id) if seen.insert(id.as_str()) => current = &self.schema(id)?.body,
-                _ => return Ok(field.meta.constraints.enum_values.clone()),
+                _ => break None,
             }
-        }
+        };
+        let constraint = &field.meta.constraints.enum_values;
+        Ok(intersect_enum_values(
+            declared,
+            (!constraint.is_empty()).then_some(constraint.as_slice()),
+        ))
     }
 }
 
@@ -765,7 +772,8 @@ fn command_flag_specs(
 }
 
 /// `{"schema", "fields"}` for `help --json`: the same rows `--help` prints under Body, with the
-/// prose uncut. `enum`, `help` and `sameShapeAs` are left out when empty, as a flag's are.
+/// prose uncut. `enum` is omitted for unrestricted fields; an empty set stays explicit. Empty
+/// `help` and `sameShapeAs` are omitted.
 fn body_spec(body: &BodyHelp) -> serde_json::Value {
     let fields = body
         .fields
@@ -784,12 +792,11 @@ fn body_spec(body: &BodyHelp) -> serde_json::Value {
                 "required".to_string(),
                 serde_json::Value::Bool(field.required),
             );
-            if !field.enum_values.is_empty() {
+            if let Some(members) = &field.enum_values {
                 object.insert(
                     "enum".to_string(),
                     serde_json::Value::Array(
-                        field
-                            .enum_values
+                        members
                             .iter()
                             .map(|member| serde_json::Value::String(member.clone()))
                             .collect(),
@@ -842,8 +849,28 @@ pub(crate) fn body_help_rows(body: &BodyHelp) -> Vec<String> {
                     "optional"
                 }
             );
-            if !field.enum_values.is_empty() {
-                let _ = write!(row, "  one of: {}", field.enum_values.join("|"));
+            if let Some(members) = &field.enum_values {
+                if members.is_empty() {
+                    row.push_str("  no enum members");
+                } else {
+                    let values: Vec<String> = members
+                        .iter()
+                        .map(|member| {
+                            if member.is_empty()
+                                || member.chars().any(|ch| {
+                                    ch.is_whitespace()
+                                        || ch.is_control()
+                                        || matches!(ch, '|' | '"' | '\\')
+                                })
+                            {
+                                quoted_string_literal(member)
+                            } else {
+                                member.clone()
+                            }
+                        })
+                        .collect();
+                    let _ = write!(row, "  one of: {}", values.join("|"));
+                }
             }
             if let Some(path) = &field.same_shape_as {
                 let _ = write!(row, "  same shape as {path}");

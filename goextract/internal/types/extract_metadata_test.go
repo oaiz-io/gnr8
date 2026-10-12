@@ -347,6 +347,47 @@ func TestFieldMetaFromTagsIgnoresMapKeyScopedTokens(t *testing.T) {
 	}
 }
 
+func TestFieldMetaFromTagsReportsOneofOnACollectionItself(t *testing.T) {
+	// A field-scope `oneof` compares the field's own value with its members, and a slice
+	// or map never equals one: go-playground panics on it, and publishing it as an enum
+	// on the collection made every non-null value invalid. The element's values belong
+	// to the element type, or to a rule past `dive`.
+	array := facts.ArrayType(facts.PrimitiveType(facts.StringPrim()))
+	mapping := facts.MapTypeOf(facts.PrimitiveType(facts.StringPrim()), facts.PrimitiveType(facts.StringPrim()))
+	cases := []struct {
+		name   string
+		tag    reflect.StructTag
+		schema facts.Type
+		token  string
+	}{
+		{"binding oneof on a slice", `json:"formats" binding:"omitempty,oneof=markdown summary"`, array, `binding tag on ScopedRules.Field: "oneof=markdown summary"`},
+		{"validate oneof on a map", `json:"labels" validate:"oneof=a b"`, mapping, `validate tag on ScopedRules.Field: "oneof=a b"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			diags := diag.New()
+			meta := fieldMetaFromTags("ScopedRules", "Field", tc.tag, string(tc.tag), tc.schema, tc.schema, "dto.go", 16, diags)
+			if meta != nil && meta.Constraints != nil && meta.Constraints.EnumValues != nil {
+				t.Fatalf("a collection must not carry the enum itself: %#v", meta.Constraints.EnumValues)
+			}
+			if len(diags.Items()) != 1 || !hasMetadataDiag(diags.Items(), "unsupported", tc.token) {
+				t.Fatalf("the rule must be reported once, got %#v", diags.Items())
+			}
+		})
+	}
+
+	// Past `dive` the rule binds each element: understood, not carried, not reported.
+	diags := diag.New()
+	tag := reflect.StructTag(`json:"formats" binding:"omitempty,dive,oneof=markdown summary"`)
+	meta := fieldMetaFromTags("ScopedRules", "Field", tag, string(tag), array, array, "dto.go", 17, diags)
+	if meta != nil && meta.Constraints != nil {
+		t.Fatalf("an element rule must not bind the slice: %#v", meta.Constraints)
+	}
+	if len(diags.Items()) != 0 {
+		t.Fatalf("an element rule is understood, not unresolved: %#v", diags.Items())
+	}
+}
+
 func TestFieldMetaFromTagsReportsUnknownRulesAtEveryScope(t *testing.T) {
 	// Scope decides where a rule applies; recognition decides whether gnr8 can say
 	// anything about it. `email` is a rule gnr8 does not lower, so it is reported
