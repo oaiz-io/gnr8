@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.19.0 — 2026-10-12
+
 ### Breaking
 
 - **Go extraction no longer publishes a request null that a custom decoder decides.**
