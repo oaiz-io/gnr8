@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "graph": {
     "module": "flask-bookstore",
     "operations": [
@@ -22,9 +22,7 @@
               }
             },
             "provenance": {
-              "file": "app/routes.py",
-              "start_line": 36,
-              "end_line": 36
+              "file": "app/routes.py"
             }
           }
         ],
@@ -41,9 +39,7 @@
           }
         ],
         "provenance": {
-          "file": "app/routes.py",
-          "start_line": 30,
-          "end_line": 30
+          "file": "app/routes.py"
         }
       },
       {
@@ -70,9 +66,7 @@
           }
         ],
         "provenance": {
-          "file": "app/routes.py",
-          "start_line": 43,
-          "end_line": 43
+          "file": "app/routes.py"
         }
       },
       {
@@ -92,9 +86,7 @@
           }
         ],
         "provenance": {
-          "file": "app/routes.py",
-          "start_line": 60,
-          "end_line": 60
+          "file": "app/routes.py"
         }
       },
       {
@@ -117,9 +109,7 @@
               }
             },
             "provenance": {
-              "file": "app/routes.py",
-              "start_line": 54,
-              "end_line": 54
+              "file": "app/routes.py"
             }
           }
         ],
@@ -136,9 +126,7 @@
           }
         ],
         "provenance": {
-          "file": "app/routes.py",
-          "start_line": 54,
-          "end_line": 54
+          "file": "app/routes.py"
         }
       }
     ],
@@ -158,9 +146,7 @@
           "out_of_stock"
         ],
         "provenance": {
-          "file": "app/dto.py",
-          "start_line": 31,
-          "end_line": 31
+          "file": "app/dto.py"
         }
       },
       {
@@ -241,9 +227,7 @@
           ]
         },
         "provenance": {
-          "file": "app/dto.py",
-          "start_line": 96,
-          "end_line": 96
+          "file": "app/dto.py"
         }
       },
       {
@@ -393,9 +377,7 @@
           ]
         },
         "provenance": {
-          "file": "app/dto.py",
-          "start_line": 60,
-          "end_line": 60
+          "file": "app/dto.py"
         }
       },
       {
@@ -443,42 +425,34 @@
           ]
         },
         "provenance": {
-          "file": "app/dto.py",
-          "start_line": 49,
-          "end_line": 49
+          "file": "app/dto.py"
         }
       }
     ],
     "diagnostics": [
-      {
-        "code": "request.parameter.unresolved",
-        "severity": "WARN",
-        "category": "request_parameter",
-        "message": "untyped query param 'q' on GET /orders/: read via request.args.get with no annotation; param type/required-ness under-specified, type inferred as string only",
-        "file": "app/routes.py",
-        "line": 37,
-        "span": {
-          "file": "app/routes.py",
-          "start_line": 37,
-          "end_line": 37
-        },
-        "operation": "GET /orders/",
-        "subject": "q"
-      },
       {
         "code": "request.body.unresolved",
         "severity": "WARN",
         "category": "request_body",
         "message": "untyped request body on POST /orders/raw: read via request.json with no typed DTO; body shape under-specified, no schema inferred",
         "file": "app/routes.py",
-        "line": 66,
         "span": {
-          "file": "app/routes.py",
-          "start_line": 66,
-          "end_line": 66
+          "file": "app/routes.py"
         },
         "operation": "POST /orders/raw",
         "subject": "payload"
+      },
+      {
+        "code": "request.parameter.unresolved",
+        "severity": "WARN",
+        "category": "request_parameter",
+        "message": "untyped query param 'q' on GET /orders/: read via request.args.get with no annotation; param type/required-ness under-specified, type inferred as string only",
+        "file": "app/routes.py",
+        "span": {
+          "file": "app/routes.py"
+        },
+        "operation": "GET /orders/",
+        "subject": "q"
       }
     ],
     "base_path": "/",

@@ -302,7 +302,7 @@ fn assert_native_binding_contract(graph: &ApiGraph) {
     assert_eq!(header.location, "header", "{header:#?}");
     assert_eq!(header.constraints.max_length, Some(64), "{header:#?}");
     for parameter in &operation.params {
-        assert!(parameter.provenance.start_line > 0, "{parameter:#?}");
+        assert_eq!(parameter.provenance.start_line, 0, "{parameter:#?}");
         assert!(
             parameter.provenance.file.ends_with("app.go"),
             "{parameter:#?}"
@@ -401,7 +401,7 @@ fn assert_native_body_contracts(graph: &ApiGraph) {
             .provenance
             .as_ref()
             .expect("request-body call-site provenance");
-        assert!(provenance.start_line > 0, "{body:#?}");
+        assert_eq!(provenance.start_line, 0, "{body:#?}");
         assert!(provenance.file.ends_with("app.go"), "{body:#?}");
         let schema = graph
             .schemas
@@ -431,7 +431,7 @@ fn assert_native_body_contracts(graph: &ApiGraph) {
         .as_ref()
         .and_then(|body| body.provenance.as_ref())
         .expect("raw-body call-site provenance");
-    assert!(raw_provenance.start_line > 0, "{raw_command:#?}");
+    assert_eq!(raw_provenance.start_line, 0, "{raw_command:#?}");
     assert!(raw_provenance.file.ends_with("app.go"), "{raw_command:#?}");
     let raw_schema = graph
         .schemas
@@ -741,7 +741,7 @@ fn assert_openapi(openapi: &str) {
         .next()
         .unwrap_or(directional);
     assert!(
-        directional.contains("required: [items, metadata, userUuid]"),
+        directional.contains("required:\n        - items\n        - metadata\n        - userUuid"),
         "{directional}"
     );
     let result = directional
@@ -763,7 +763,10 @@ fn assert_openapi(openapi: &str) {
         .split("    ValidatedRequest:\n")
         .nth(1)
         .expect("ValidatedRequest component");
-    assert!(validated.contains("required: [ids, raw]"), "{validated}");
+    assert!(
+        validated.contains("required:\n        - ids\n        - raw"),
+        "{validated}"
+    );
     let ids = validated
         .split("        ids:\n")
         .nth(1)
@@ -832,7 +835,7 @@ fn assert_openapi_request_contracts(openapi: &str) {
         upload_form.contains("files:")
             && upload_form.contains("format: binary")
             && upload_form.contains("request:\n          type: string")
-            && upload_form.contains("required: [request]"),
+            && upload_form.contains("required:\n        - request"),
         "{upload_form}"
     );
     let update_upload = path_section(openapi, "/v1/files/upload/{fileId}");
@@ -860,7 +863,7 @@ fn assert_openapi_request_contracts(openapi: &str) {
         assert!(
             schema.contains("asset:")
                 && schema.contains("format: binary")
-                && schema.contains("required: [asset]"),
+                && schema.contains("required:\n        - asset"),
             "{schema}"
         );
     }
@@ -885,7 +888,8 @@ fn assert_openapi_request_contracts(openapi: &str) {
         "{request_files_schema}"
     );
     assert!(
-        request_files_schema.contains("required: [primaryImage, supportingDocument]"),
+        request_files_schema
+            .contains("required:\n        - primaryImage\n        - supportingDocument"),
         "{request_files_schema}"
     );
 
@@ -1204,6 +1208,15 @@ fn go_gin_contract_pipeline_generates_expected_sdk_surfaces() {
     };
 
     assert_graph_request_contracts(&graph_artifact(&outcome).graph);
+    assert!(
+        outcome
+            .graph
+            .operations
+            .iter()
+            .flat_map(|operation| &operation.params)
+            .all(|parameter| parameter.provenance.start_line > 0),
+        "live parameter locations must retain source lines"
+    );
     let ts_client = artifact(&outcome, "generated/ts/client.ts");
     let go_models = artifact(&outcome, "generated/go/models.go");
     let go_ops = artifact(&outcome, "generated/go/operations.go");

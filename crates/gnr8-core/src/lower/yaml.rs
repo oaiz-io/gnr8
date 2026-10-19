@@ -212,16 +212,40 @@ fn write_parameter(out: &mut String, param: &Parameter, depth: usize) {
             if param.openapi_content.is_some() {
                 continue;
             }
+            write_source_value(out, "schema:", value, depth + 1);
+            continue;
         }
         let value = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
         let _ = writeln!(out, "{pad}  {}: {value}", map_key(name));
     }
     if let Some(content) = &param.openapi_content {
-        let content = serde_json::to_string(content).unwrap_or_else(|_| "null".to_string());
-        let _ = writeln!(out, "{pad}  content: {content}");
+        write_source_value(out, "content:", content, depth + 1);
     } else if !has_source_schema {
         let _ = writeln!(out, "{pad}  schema:");
         write_schema(out, &param.schema, depth + 2);
+    }
+}
+
+/// Imported parameter schemas and media objects retain their exact JSON values, but their
+/// collections use YAML blocks too, so a nested enum or required field never becomes an inline list.
+fn write_source_value(out: &mut String, prefix: &str, value: &serde_json::Value, depth: usize) {
+    let pad = INDENT.repeat(depth);
+    match value {
+        serde_json::Value::Object(fields) if !fields.is_empty() => {
+            let _ = writeln!(out, "{pad}{prefix}");
+            for (name, value) in fields {
+                write_source_value(out, &format!("{}:", map_key(name)), value, depth + 1);
+            }
+        }
+        serde_json::Value::Array(items) if !items.is_empty() => {
+            let _ = writeln!(out, "{pad}{prefix}");
+            for value in items {
+                write_source_value(out, "-", value, depth + 1);
+            }
+        }
+        _ => {
+            let _ = writeln!(out, "{pad}{prefix} {value}");
+        }
     }
 }
 
@@ -454,11 +478,17 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
         let _ = writeln!(out, "{pad}description: {}", scalar(description));
     }
     if let Some(members) = &schema.enum_values {
-        let mut values: Vec<String> = members.iter().map(|member| flow_scalar(member)).collect();
-        if schema.nullable {
-            values.push("null".to_string());
+        if members.is_empty() && !schema.nullable {
+            let _ = writeln!(out, "{pad}enum: []");
+        } else {
+            let _ = writeln!(out, "{pad}enum:");
+            for member in members {
+                let _ = writeln!(out, "{pad}{INDENT}- {}", flow_scalar(member));
+            }
+            if schema.nullable {
+                let _ = writeln!(out, "{pad}{INDENT}- null");
+            }
         }
-        let _ = writeln!(out, "{pad}enum: [{}]", values.join(", "));
     }
     write_schema_constraints(out, schema, &pad);
     if let Some(default_value) = &schema.default_value {
@@ -476,7 +506,10 @@ fn write_schema(out: &mut String, schema: &SchemaObject, depth: usize) {
         );
     }
     if !schema.required.is_empty() {
-        let _ = writeln!(out, "{pad}required: {}", flow_seq(&schema.required));
+        let _ = writeln!(out, "{pad}required:");
+        for name in &schema.required {
+            let _ = writeln!(out, "{pad}{INDENT}- {}", flow_scalar(name));
+        }
     }
     if !schema.properties.is_empty() {
         let _ = writeln!(out, "{pad}properties:");
@@ -670,9 +703,11 @@ fn needs_quoting(value: &str) -> bool {
     // Quote these everywhere rather than trying to depend on a parser's YAML 1.1/1.2 mode. This is
     // deliberately more conservative than the grammar: it keeps colons, comments and values such as
     // `=` portable across noyalib, PyYAML and Ruby Psych.
+    // `<<` is YAML 1.1's merge key: as a plain mapping key it merges instead of naming a member.
     value.contains(':')
         || value.contains('#')
         || value.contains('=')
+        || value == "<<"
         || looks_like_yaml_non_string(value)
 }
 
@@ -704,7 +739,27 @@ fn looks_like_yaml_non_string(value: &str) -> bool {
     ) || value.parse::<i64>().is_ok()
         || value.parse::<u64>().is_ok()
         || value.parse::<f64>().is_ok()
+        || looks_like_yaml_number(value)
         || looks_like_yaml_date(value)
+}
+
+/// Number spellings YAML 1.1 or 1.2 resolves that Rust's own parsers reject: radix-prefixed
+/// integers (`0x1F`, `0o17`, `0b101`) and underscore-grouped digits (`1_000`, `1_000.5`).
+fn looks_like_yaml_number(value: &str) -> bool {
+    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let radix = unsigned
+        .get(..2)
+        .is_some_and(|prefix| matches!(prefix.to_ascii_lowercase().as_str(), "0x" | "0o" | "0b"))
+        && unsigned.len() > 2
+        && unsigned[2..]
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    let grouped = unsigned.starts_with(|ch: char| ch.is_ascii_digit() || ch == '.')
+        && unsigned.contains('_')
+        && unsigned
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '_' | '.' | 'e' | 'E' | '+' | '-'));
+    radix || grouped
 }
 
 fn looks_like_yaml_date(value: &str) -> bool {
@@ -1114,6 +1169,13 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             "x]",
             "{y}",
             "c[d",
+            "0x1F",
+            "-0X1f",
+            "0o17",
+            "0b101",
+            "1_000",
+            "+1_000.5",
+            "<<",
         ];
         let mut doc = sample_doc();
         let schema = &mut doc.components.schemas[0].1;
@@ -1135,11 +1197,14 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             .collect();
         assert_eq!(round_trip, ambiguous);
 
+        // Both are YAML 1.1 readers, which resolve more plain scalars to numbers than YAML 1.2 does.
+        let expected = serde_json::to_string(&ambiguous).unwrap();
         assert_external_yaml_parser(
             "python3",
             &[
                 "-c",
-                "import sys, yaml; assert isinstance(yaml.safe_load(sys.stdin.read()), dict)",
+                "import json, sys, yaml; members = yaml.safe_load(sys.stdin.read())['components']['schemas']['Foo']['enum']; assert members == json.loads(sys.argv[1]), members",
+                &expected,
             ],
             &yaml,
         );
@@ -1147,7 +1212,59 @@ assert s["NullablePrimitive"]["type"] == ["string", "null"]
             "ruby",
             &[
                 "-e",
-                "require 'yaml'; value = YAML.safe_load(STDIN.read, permitted_classes: [], permitted_symbols: [], aliases: false); raise unless value.is_a?(Hash)",
+                "require 'json'; require 'yaml'; value = YAML.safe_load(STDIN.read, permitted_classes: [], permitted_symbols: [], aliases: false); members = value['components']['schemas']['Foo']['enum']; raise members.inspect unless members == JSON.parse(ARGV[0])",
+                &expected,
+            ],
+            &yaml,
+        );
+    }
+
+    #[test]
+    fn adding_an_enum_member_adds_one_yaml_line_and_json_keeps_item_lines() {
+        let mut doc = sample_doc();
+        doc.components.schemas[0].1.enum_values = Some(vec!["zebra".into(), "apple".into()]);
+        let before = write(&doc);
+        doc.components.schemas[0]
+            .1
+            .enum_values
+            .as_mut()
+            .unwrap()
+            .insert(1, "new".into());
+        let after = write(&doc);
+        assert_eq!(after.replace("        - new\n", ""), before);
+        assert!(after.contains("enum:\n        - zebra\n        - new\n        - apple\n"));
+        assert!(after.contains("required:\n        - id\n"));
+        let json = serde_json::to_string_pretty(&crate::lower::json::write(&doc)).unwrap();
+        assert!(json.contains(
+            "\"enum\": [\n          \"zebra\",\n          \"new\",\n          \"apple\"\n"
+        ));
+    }
+
+    #[test]
+    fn imported_parameter_schema_lists_use_blocks_and_preserve_json_values() {
+        let value = serde_json::json!({
+            "type": "object", "required": ["kind"],
+            "properties": {
+                "kind": { "enum": ["a", "null", null, 3, true] },
+                "0x1F": { "type": "integer" }, "1_000": {}, "<<": { "type": "string" }
+            },
+            "oneOf": [{"type": "null"}, {"enum": []}]
+        });
+        let mut yaml = String::new();
+        super::write_source_value(&mut yaml, "schema:", &value, 0);
+        assert!(yaml.contains("required:\n    - \"kind\"\n"), "{yaml}");
+        assert!(yaml.contains("enum:\n        - \"a\"\n        - \"null\"\n        - null\n        - 3\n        - true\n"), "{yaml}");
+        assert!(yaml.contains("enum: []"), "{yaml}");
+        let parsed =
+            crate::sdk::openapi_source::parse_json_or_yaml(&yaml, Path::new("schema.yaml"))
+                .unwrap();
+        assert_eq!(parsed["schema"], value);
+        assert_external_yaml_parser(
+            "python3",
+            &[
+                "-c",
+                "import json, sys, yaml; schema = yaml.safe_load(sys.stdin.read())['schema']; assert schema == json.loads(sys.argv[1]), schema",
+                &value.to_string(),
             ],
             &yaml,
         );

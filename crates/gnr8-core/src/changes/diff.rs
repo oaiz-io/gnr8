@@ -390,7 +390,10 @@ impl Collector {
             gating: kind == ChangeKind::Breaking && scope.checked,
             message,
             file: span.as_ref().map(|span| span.file.clone()),
-            line: span.as_ref().map(|span| span.start_line),
+            line: span
+                .as_ref()
+                .map(|span| span.start_line)
+                .filter(|line| *line != 0),
             span,
         });
     }
@@ -412,15 +415,26 @@ pub fn diff_graphs(
 /// version 1 artifact could not hold is unknown rather than added, and a server that still holds
 /// the base path is the current server without it.
 ///
+/// The base was read from committed JSON, so the current graph is read through the same JSON
+/// reader before comparison: a number that reader rounds is then rounded identically on both sides
+/// instead of being reported as a change. The current graph's source lines survive that reading.
+///
 /// # Errors
 ///
-/// Returns [`CoreError::Config`] when a gate selector matches neither graph side.
+/// Returns [`CoreError::Config`] when a gate selector matches neither graph side, or
+/// [`CoreError::GraphArtifact`] when the current graph cannot be read as JSON.
 pub fn diff_base_graph(
     base: &super::BaseGraph,
     current: &ApiGraph,
     exempt_tags: &BTreeSet<String>,
     gate_operations: &[GateOperation],
 ) -> Result<ChangeReport, CoreError> {
+    let current: ApiGraph = serde_json::to_vec(current)
+        .and_then(|bytes| serde_json::from_slice(&bytes))
+        .map_err(|error| CoreError::GraphArtifact {
+            message: format!("the current graph could not be read as JSON: {error}"),
+        })?;
+    let current = &current;
     let labels = gate_operation_labels(&base.graph, current, gate_operations)?;
     Ok(diff_graphs_inner(
         &base.graph,
@@ -4555,6 +4569,34 @@ mod tests {
         assert_eq!(report.changes.len(), 1, "{:?}", report.changes);
         let finding = change(&report, "request.parameter.serialization.changed");
         assert_eq!(finding.kind, ChangeKind::Breaking);
+    }
+
+    /// `serde_json` does not read every float it writes back to the same bits, so a committed base
+    /// must be compared with a current graph read through that same reader.
+    #[test]
+    fn a_float_the_json_reader_rounds_is_not_a_change_against_a_committed_base() {
+        let mut current = graph_with_tags(&[]);
+        current.operations[0].params.push(parameter(false));
+        current.operations[0].params[0]
+            .openapi_fields
+            .push(("x-scale".to_string(), serde_json::json!(1.602_176_634e-19)));
+        let text = crate::graph_artifact::GraphArtifact::json_for(&current).expect("artifact");
+        let committed: crate::graph_artifact::GraphArtifact =
+            serde_json::from_str(&text).expect("committed artifact");
+        assert_ne!(
+            committed.graph.operations[0].params[0].openapi_fields,
+            current.operations[0].params[0].openapi_fields,
+            "the reader no longer rounds this float; pick one it does"
+        );
+        let base = crate::changes::BaseGraph {
+            reference: "origin/main".to_string(),
+            commit: "0".repeat(40),
+            graph: committed.graph,
+            upgraded_from_version_1: false,
+        };
+
+        let report = super::diff_base_graph(&base, &current, &BTreeSet::new(), &[]).expect("diff");
+        assert!(report.changes.is_empty(), "{:?}", report.changes);
     }
 
     #[test]

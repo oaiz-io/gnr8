@@ -801,7 +801,8 @@ pub struct Diagnostic {
     pub message: String,
     /// The source file the diagnostic applies to (module-relative).
     pub file: String,
-    /// The 1-based line number.
+    /// The 1-based line number, or zero when read from a committed artifact without lines.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub line: u32,
     /// Full inclusive source span.
     pub span: SourceSpan,
@@ -870,10 +871,20 @@ impl Diagnostic {
 pub struct SourceSpan {
     /// The source file path, relative to the analyzed module.
     pub file: String,
-    /// The 1-based start line.
+    /// The 1-based start line, or zero when the location carries only a file.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub start_line: u32,
-    /// The 1-based end line.
+    /// The 1-based end line, or zero when the location carries only a file.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub end_line: u32,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive a reference to the field value"
+)]
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 impl ApiGraph {

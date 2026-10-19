@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "graph": {
     "module": "fastapi-bookstore",
     "operations": [
@@ -22,9 +22,7 @@
               }
             },
             "provenance": {
-              "file": "app/main.py",
-              "start_line": 41,
-              "end_line": 41
+              "file": "app/main.py"
             }
           },
           {
@@ -38,9 +36,7 @@
               }
             },
             "provenance": {
-              "file": "app/main.py",
-              "start_line": 39,
-              "end_line": 39
+              "file": "app/main.py"
             }
           },
           {
@@ -54,9 +50,7 @@
               }
             },
             "provenance": {
-              "file": "app/main.py",
-              "start_line": 40,
-              "end_line": 40
+              "file": "app/main.py"
             }
           }
         ],
@@ -73,9 +67,7 @@
           }
         ],
         "provenance": {
-          "file": "app/main.py",
-          "start_line": 38,
-          "end_line": 38
+          "file": "app/main.py"
         }
       },
       {
@@ -102,9 +94,7 @@
           }
         ],
         "provenance": {
-          "file": "app/main.py",
-          "start_line": 54,
-          "end_line": 54
+          "file": "app/main.py"
         }
       },
       {
@@ -128,9 +118,7 @@
               }
             },
             "provenance": {
-              "file": "app/main.py",
-              "start_line": 64,
-              "end_line": 64
+              "file": "app/main.py"
             }
           },
           {
@@ -142,9 +130,7 @@
               "of": "app.models.BookFormat"
             },
             "provenance": {
-              "file": "app/main.py",
-              "start_line": 64,
-              "end_line": 64
+              "file": "app/main.py"
             }
           }
         ],
@@ -161,9 +147,7 @@
           }
         ],
         "provenance": {
-          "file": "app/main.py",
-          "start_line": 63,
-          "end_line": 63
+          "file": "app/main.py"
         }
       },
       {
@@ -187,9 +171,7 @@
               }
             },
             "provenance": {
-              "file": "app/main.py",
-              "start_line": 75,
-              "end_line": 75
+              "file": "app/main.py"
             }
           }
         ],
@@ -209,9 +191,7 @@
           }
         ],
         "provenance": {
-          "file": "app/main.py",
-          "start_line": 74,
-          "end_line": 74
+          "file": "app/main.py"
         }
       }
     ],
@@ -259,9 +239,7 @@
           ]
         },
         "provenance": {
-          "file": "app/models.py",
-          "start_line": 53,
-          "end_line": 53
+          "file": "app/models.py"
         }
       },
       {
@@ -390,9 +368,7 @@
           ]
         },
         "provenance": {
-          "file": "app/models.py",
-          "start_line": 64,
-          "end_line": 64
+          "file": "app/models.py"
         }
       },
       {
@@ -475,9 +451,7 @@
           ]
         },
         "provenance": {
-          "file": "app/models.py",
-          "start_line": 95,
-          "end_line": 95
+          "file": "app/models.py"
         }
       },
       {
@@ -495,9 +469,7 @@
           "paperback"
         ],
         "provenance": {
-          "file": "app/models.py",
-          "start_line": 33,
-          "end_line": 33
+          "file": "app/models.py"
         }
       },
       {
@@ -517,9 +489,7 @@
           ]
         },
         "provenance": {
-          "file": "app/models.py",
-          "start_line": 130,
-          "end_line": 130
+          "file": "app/models.py"
         }
       },
       {
@@ -567,9 +537,7 @@
           ]
         },
         "provenance": {
-          "file": "app/models.py",
-          "start_line": 113,
-          "end_line": 113
+          "file": "app/models.py"
         }
       },
       {
@@ -635,9 +603,7 @@
           ]
         },
         "provenance": {
-          "file": "app/models.py",
-          "start_line": 135,
-          "end_line": 135
+          "file": "app/models.py"
         }
       },
       {
@@ -666,9 +632,7 @@
           ]
         },
         "provenance": {
-          "file": "app/models.py",
-          "start_line": 124,
-          "end_line": 124
+          "file": "app/models.py"
         }
       }
     ],

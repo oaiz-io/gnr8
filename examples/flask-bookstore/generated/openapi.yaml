@@ -67,10 +67,16 @@ components:
   schemas:
     Availability:
       type: string
-      enum: [in_stock, out_of_stock]
+      enum:
+        - in_stock
+        - out_of_stock
     OrderConfirmation:
       type: object
-      required: [availability, lines, message, order_id]
+      required:
+        - availability
+        - lines
+        - message
+        - order_id
       properties:
         availability:
           $ref: '#/components/schemas/Availability'
@@ -84,7 +90,9 @@ components:
           type: integer
     OrderInput:
       type: object
-      required: [book_id, price]
+      required:
+        - book_id
+        - price
       properties:
         book_id:
           type: integer
@@ -108,10 +116,14 @@ components:
             type: string
     Price:
       type: object
-      required: [amount, currency]
+      required:
+        - amount
+        - currency
       properties:
         amount:
           type: number
         currency:
           type: string
-          enum: [eur, usd]
+          enum:
+            - eur
+            - usd

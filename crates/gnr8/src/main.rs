@@ -93,26 +93,10 @@ fn run_changes(
 
     output.verbose("changes: running current pipeline");
     let run = gnr8_engine::worker::run_pipeline(&root, policy, cache_store().as_ref())?;
-    let artifact = run
-        .outcome
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.path == gnr8_engine::graph_artifact::GRAPH_ARTIFACT_PATH)
-        .ok_or_else(|| anyhow::anyhow!("current pipeline did not emit its gnr8 graph artifact"))?;
-    let current: gnr8_engine::graph_artifact::GraphArtifact = serde_json::from_str(&artifact.text)
-        .map_err(|error| anyhow::anyhow!("current graph artifact is invalid: {error}"))?;
-    if current.schema_version != gnr8_engine::graph_artifact::GRAPH_ARTIFACT_SCHEMA_VERSION {
-        bail!(
-            "current graph artifact schema version {} is unsupported; expected {}",
-            current.schema_version,
-            gnr8_engine::graph_artifact::GRAPH_ARTIFACT_SCHEMA_VERSION
-        );
-    }
-
     let exempt_tags: std::collections::BTreeSet<String> = exempt_tags.iter().cloned().collect();
     let report = gnr8_engine::changes::diff_base_graph(
         &base,
-        &current.graph,
+        &run.outcome.graph,
         &exempt_tags,
         gate_operations,
     )?;

@@ -80,7 +80,7 @@ print(result)
 
 ### Diagnostics
 
-- WARN: untyped query param 'q' on GET /orders/: read via request.args.get with no annotation; param type/required-ness under-specified, type inferred as string only (app/routes.py:37)
+- WARN: untyped query param 'q' on GET /orders/: read via request.args.get with no annotation; param type/required-ness under-specified, type inferred as string only (app/routes.py)
 
 ## `create_order`
 
@@ -191,7 +191,7 @@ print(result)
 
 ### Diagnostics
 
-- WARN: untyped request body on POST /orders/raw: read via request.json with no typed DTO; body shape under-specified, no schema inferred (app/routes.py:66)
+- WARN: untyped request body on POST /orders/raw: read via request.json with no typed DTO; body shape under-specified, no schema inferred (app/routes.py)
 
 ## `get_order`
 

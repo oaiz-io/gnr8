@@ -29,5 +29,5 @@
 
 ## Diagnostics
 
-- INFO: free-form map field: GoalResponse.Metadata (map[string]any) lowers to additionalProperties: true (TARGET-API.md §5.1) (internal/common/dto/goal.go:62)
-- WARN: unsupported Gin route pattern: dynamic Gin group prefix; prefix skipped rather than guessed (GO-04) (internal/goal/ports/http.go:52)
+- INFO: free-form map field: GoalResponse.Metadata (map[string]any) lowers to additionalProperties: true (TARGET-API.md §5.1) (internal/common/dto/goal.go)
+- WARN: unsupported Gin route pattern: dynamic Gin group prefix; prefix skipped rather than guessed (GO-04) (internal/goal/ports/http.go)

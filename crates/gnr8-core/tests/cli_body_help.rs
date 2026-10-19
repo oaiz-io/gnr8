@@ -377,7 +377,12 @@ fn nullable_inline_and_named_enums_allow_null_in_openapi() {
         );
     }
     let yaml = gnr8_engine::lower::to_openapi(&graph, "Review", "/", &[]).unwrap();
-    assert_eq!(yaml.matches("enum: [draft, null]").count(), 2, "{yaml}");
+    assert_eq!(
+        yaml.matches("enum:\n            - draft\n            - null")
+            .count(),
+        2,
+        "{yaml}"
+    );
 }
 
 #[test]

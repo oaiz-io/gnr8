@@ -128,7 +128,15 @@ components:
   schemas:
     Book:
       type: object
-      required: [author, genre, id, price, publishedAt, publisher, tags, title]
+      required:
+        - author
+        - genre
+        - id
+        - price
+        - publishedAt
+        - publisher
+        - tags
+        - title
       properties:
         author:
           type: string
@@ -153,7 +161,8 @@ components:
           type: string
     BookList:
       type: object
-      required: [books]
+      required:
+        - books
       properties:
         books:
           type: [array, 'null']
@@ -161,7 +170,10 @@ components:
             $ref: '#/components/schemas/Book'
     CreateBookRequest:
       type: object
-      required: [author, genre, title]
+      required:
+        - author
+        - genre
+        - title
       properties:
         author:
           type: string
@@ -183,7 +195,9 @@ components:
           type: string
     ErrorResponse:
       type: object
-      required: [code, message]
+      required:
+        - code
+        - message
       properties:
         code:
           type: string
@@ -191,7 +205,12 @@ components:
           type: string
     Genre:
       type: string
-      enum: [fiction, mystery, nonfiction, romance, scifi]
+      enum:
+        - fiction
+        - mystery
+        - nonfiction
+        - romance
+        - scifi
     PublisherInput:
       type: object
       properties:
@@ -201,7 +220,9 @@ components:
           type: [string, 'null']
     PublisherOutput:
       type: object
-      required: [country, name]
+      required:
+        - country
+        - name
       properties:
         country:
           type: string

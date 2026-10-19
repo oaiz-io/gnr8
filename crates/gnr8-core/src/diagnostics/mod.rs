@@ -13,6 +13,23 @@
 
 use crate::analyze::{facts::DiagnosticFact, helper, Lang};
 
+/// Committed diagnostics sort by file, code, message and symbol identity, never source line.
+pub(crate) fn compare_stable(
+    a: &crate::graph::Diagnostic,
+    b: &crate::graph::Diagnostic,
+) -> std::cmp::Ordering {
+    a.file
+        .cmp(&b.file)
+        .then_with(|| a.code.cmp(&b.code))
+        .then_with(|| a.message.cmp(&b.message))
+        .then_with(|| a.operation.cmp(&b.operation))
+        .then_with(|| a.schema.cmp(&b.schema))
+        .then_with(|| a.subject.cmp(&b.subject))
+        .then_with(|| a.severity.cmp(&b.severity))
+        .then_with(|| a.category.cmp(&b.category))
+        .then_with(|| a.span.file.cmp(&b.span.file))
+}
+
 /// Collect diagnostics for a Go fixture/module directory and render them as canonical text (D-10).
 ///
 /// Runs the helper, sorts the diagnostics by `(file, line, message)` for a stable, reviewable order,
