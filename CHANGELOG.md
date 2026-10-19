@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.20.0 — 2026-10-19
+
 ### Breaking
 
 - Committed graph artifacts use schema version 3: provenance keeps the source file, and the graph
