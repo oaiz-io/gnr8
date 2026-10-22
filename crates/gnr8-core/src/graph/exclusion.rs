@@ -5,7 +5,9 @@
 //! from one reduced graph. The view leaves out the excluded operations, their per-operation policies,
 //! and every schema that only those operations reach. A schema another operation reaches, a
 //! registered non-HTTP root reaches, or a schema the view keeps reaches stays, so an exclusion
-//! never removes a schema anything still in the view depends on.
+//! never removes a schema anything still in the view depends on. A diagnostic about a left-out
+//! operation or schema leaves with it. Security schemes stay declared: a declaration exposes no
+//! operation.
 
 use super::direction::{schema_consumers, schemas_reached_from};
 use super::{ApiGraph, EffectiveOperationTags};
@@ -107,6 +109,16 @@ pub(crate) fn without_operations<'a>(
         .retain(|policy| !excluded_ids.contains(policy.operation_id.as_str()));
     view.operation_docs
         .retain(|policy| !excluded_ids.contains(policy.operation_id.as_str()));
+    view.diagnostics.retain(|diagnostic| {
+        !diagnostic
+            .operation
+            .as_deref()
+            .is_some_and(|id| excluded_ids.contains(id))
+            && !diagnostic
+                .schema
+                .as_deref()
+                .is_some_and(|id| dropped.contains(id))
+    });
     // A group only the excluded operations carried describes nothing in this view.
     view.group_docs.retain(|group| {
         kept_tags.contains(group.name.as_str()) || !excluded_tags.contains(group.name.as_str())
@@ -121,8 +133,9 @@ mod tests {
     use super::without_operations;
     use crate::analyze::facts::FieldMeta;
     use crate::graph::{
-        ApiGraph, Field, GroupDocsPolicy, Operation, OperationDocsPolicy, Response, Schema,
-        SchemaRef, SchemaUse, SchemaUseRoot, SourceSpan, Type,
+        ApiGraph, Diagnostic, DiagnosticCategory, Field, GroupDocsPolicy, Operation,
+        OperationDocsPolicy, Response, Schema, SchemaRef, SchemaUse, SchemaUseRoot, SourceSpan,
+        Type,
     };
     use crate::sdk::builtins::OperationSelector;
     use std::borrow::Cow;
@@ -197,6 +210,21 @@ mod tests {
         }
     }
 
+    fn diagnostic(operation: Option<&str>, schema: Option<&str>) -> Diagnostic {
+        Diagnostic {
+            code: "schema.example".to_string(),
+            severity: "WARN".to_string(),
+            category: DiagnosticCategory::Response,
+            message: "example".to_string(),
+            file: "api.go".to_string(),
+            line: 1,
+            span: span(),
+            operation: operation.map(str::to_string),
+            schema: schema.map(str::to_string),
+            subject: None,
+        }
+    }
+
     fn graph() -> ApiGraph {
         ApiGraph {
             operations: vec![
@@ -220,6 +248,12 @@ mod tests {
                 request_content_types: Vec::new(),
                 responses: Vec::new(),
             }],
+            diagnostics: vec![
+                diagnostic(Some("listBooks"), None),
+                diagnostic(Some("listOperators"), None),
+                diagnostic(None, Some("OperatorOnly")),
+                diagnostic(None, Some("OperatorRow")),
+            ],
             group_docs: vec![
                 GroupDocsPolicy {
                     name: "books".to_string(),
@@ -266,7 +300,15 @@ mod tests {
              stays, and so does OperatorPage, which no operation reaches, with the OperatorRow \
              it references"
         );
-        assert!(view.operation_docs.is_empty());
+        assert_eq!(view.operation_docs, []);
+        assert_eq!(
+            view.diagnostics,
+            [
+                diagnostic(Some("listBooks"), None),
+                diagnostic(None, Some("OperatorRow"))
+            ],
+            "a diagnostic about a left-out operation or schema leaves with it"
+        );
         let groups: Vec<&str> = view.group_docs.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(groups, ["books"]);
     }

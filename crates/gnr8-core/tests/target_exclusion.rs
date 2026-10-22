@@ -7,7 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use gnr8_engine::graph::ApiGraph;
-use gnr8_engine::sdk::builtins::{generate_target, PlanTargets};
+use gnr8_engine::sdk::builtins::{generate_target, sdk_docs_suites, PlanTargets};
 use gnr8_engine::sdk::prelude::*;
 use gnr8_engine::sdk::{Artifacts, BuiltinTarget, Cx};
 use gnr8_engine::CoreError;
@@ -208,4 +208,43 @@ fn static_docs_refuses_a_sibling_sdk_that_excludes_operations() {
     let err = try_emit(&docs, &[&python, &docs]).unwrap_err();
     assert!(matches!(err, CoreError::Config { .. }), "{err:?}");
     assert!(err.to_string().contains("PySdk"), "{err}");
+}
+
+#[test]
+fn sdk_docs_samples_cover_only_the_operations_each_sdk_emits() {
+    let python = BuiltinTarget::PySdk(
+        PySdk::new()
+            .module("bookstore")
+            .to("generated/py")
+            .exclude(admin()),
+    );
+    // A package manifest gives the TypeScript samples a consumer identity to import.
+    let typescript = BuiltinTarget::TsSdk(
+        TsSdk::new()
+            .module("bookstore")
+            .package_metadata(true)
+            .to("generated/ts"),
+    );
+    let targets = [(0, &python), (1, &typescript)];
+    let suites = sdk_docs_suites(&graph(), &PlanTargets::new(&targets)).expect("docs suites");
+    let unit = |dir: &str| {
+        suites
+            .iter()
+            .find(|suite| suite.sdk_output_path == dir)
+            .and_then(|suite| suite.compile_unit.as_ref())
+            .unwrap_or_else(|| panic!("a docs compile unit for {dir}"))
+            .text
+            .clone()
+    };
+    let python_samples = unit("generated/py");
+    assert!(python_samples.contains("list_books"), "{python_samples}");
+    assert!(
+        !python_samples.contains("list_operators"),
+        "{python_samples}"
+    );
+    let typescript_samples = unit("generated/ts");
+    assert!(
+        typescript_samples.contains("listOperators"),
+        "{typescript_samples}"
+    );
 }
