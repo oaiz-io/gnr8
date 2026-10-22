@@ -619,7 +619,8 @@ impl Pipeline {
         self
     }
 
-    /// Append a [`Target`] (each generates from the same frozen IR).
+    /// Append a [`Target`] (each generates from the same frozen IR; a built-in target that excludes
+    /// operations reads it without them).
     #[must_use]
     pub fn target(mut self, t: impl Into<TargetStage>) -> Self {
         self.targets.push(t.into());

@@ -2161,6 +2161,8 @@ impl OpenApiFieldPatch {
 pub struct OpenApi31 {
     pub path: String,
     pub schema_patches: Vec<OpenApiSchemaPatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_operations: Vec<OperationSelector>,
 }
 
 impl OpenApi31 {
@@ -2170,6 +2172,7 @@ impl OpenApi31 {
         Self {
             path: String::new(),
             schema_patches: Vec::new(),
+            excluded_operations: Vec::new(),
         }
     }
 
@@ -2177,6 +2180,17 @@ impl OpenApi31 {
     #[must_use]
     pub fn to(mut self, path: impl Into<String>) -> Self {
         self.path = path.into();
+        self
+    }
+
+    /// Leave the operations `selector` matches out of this target, together with every schema
+    /// that only those operations reach. The other targets of the pipeline still emit them.
+    ///
+    /// Each call adds one selector, and an operation any of them matches is left out. A selector
+    /// that matches no operation is a configuration error, so a stale exclusion cannot stay.
+    #[must_use]
+    pub fn exclude(mut self, selector: OperationSelector) -> Self {
+        self.excluded_operations.push(selector);
         self
     }
 
@@ -2199,6 +2213,8 @@ impl Default for OpenApi31 {
 pub struct OpenApi31Json {
     pub path: String,
     pub schema_patches: Vec<OpenApiSchemaPatch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_operations: Vec<OperationSelector>,
 }
 
 impl OpenApi31Json {
@@ -2208,6 +2224,7 @@ impl OpenApi31Json {
         Self {
             path: String::new(),
             schema_patches: Vec::new(),
+            excluded_operations: Vec::new(),
         }
     }
 
@@ -2215,6 +2232,17 @@ impl OpenApi31Json {
     #[must_use]
     pub fn to(mut self, path: impl Into<String>) -> Self {
         self.path = path.into();
+        self
+    }
+
+    /// Leave the operations `selector` matches out of this target, together with every schema
+    /// that only those operations reach. The other targets of the pipeline still emit them.
+    ///
+    /// Each call adds one selector, and an operation any of them matches is left out. A selector
+    /// that matches no operation is a configuration error, so a stale exclusion cannot stay.
+    #[must_use]
+    pub fn exclude(mut self, selector: OperationSelector) -> Self {
+        self.excluded_operations.push(selector);
         self
     }
 
@@ -2341,6 +2369,8 @@ pub struct GoSdk {
     pub contract_tests: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<SdkCli>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_operations: Vec<OperationSelector>,
 }
 
 impl GoSdk {
@@ -2357,6 +2387,7 @@ impl GoSdk {
             package_info: SdkPackageMetadata::default(),
             contract_tests: true,
             cli: None,
+            excluded_operations: Vec::new(),
         }
     }
 
@@ -2387,6 +2418,17 @@ impl GoSdk {
     #[must_use]
     pub fn to(mut self, dir: impl Into<String>) -> Self {
         self.dir = dir.into();
+        self
+    }
+
+    /// Leave the operations `selector` matches out of this target, together with every schema
+    /// that only those operations reach. The other targets of the pipeline still emit them.
+    ///
+    /// Each call adds one selector, and an operation any of them matches is left out. A selector
+    /// that matches no operation is a configuration error, so a stale exclusion cannot stay.
+    #[must_use]
+    pub fn exclude(mut self, selector: OperationSelector) -> Self {
+        self.excluded_operations.push(selector);
         self
     }
 
@@ -2496,6 +2538,8 @@ pub struct PySdk {
     pub contract_tests: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<SdkCli>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_operations: Vec<OperationSelector>,
 }
 
 impl PySdk {
@@ -2513,6 +2557,7 @@ impl PySdk {
             root_exports: Vec::new(),
             contract_tests: true,
             cli: None,
+            excluded_operations: Vec::new(),
         }
     }
 
@@ -2529,6 +2574,17 @@ impl PySdk {
     #[must_use]
     pub fn to(mut self, dir: impl Into<String>) -> Self {
         self.dir = dir.into();
+        self
+    }
+
+    /// Leave the operations `selector` matches out of this target, together with every schema
+    /// that only those operations reach. The other targets of the pipeline still emit them.
+    ///
+    /// Each call adds one selector, and an operation any of them matches is left out. A selector
+    /// that matches no operation is a configuration error, so a stale exclusion cannot stay.
+    #[must_use]
+    pub fn exclude(mut self, selector: OperationSelector) -> Self {
+        self.excluded_operations.push(selector);
         self
     }
 
@@ -2657,6 +2713,8 @@ pub struct TsSdk {
     pub package_info: SdkPackageMetadata,
     #[serde(default = "default_contract_tests")]
     pub contract_tests: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_operations: Vec<OperationSelector>,
 }
 
 impl TsSdk {
@@ -2671,6 +2729,7 @@ impl TsSdk {
             package_metadata: None,
             package_info: SdkPackageMetadata::default(),
             contract_tests: true,
+            excluded_operations: Vec::new(),
         }
     }
 
@@ -2687,6 +2746,17 @@ impl TsSdk {
     #[must_use]
     pub fn to(mut self, dir: impl Into<String>) -> Self {
         self.dir = dir.into();
+        self
+    }
+
+    /// Leave the operations `selector` matches out of this target, together with every schema
+    /// that only those operations reach. The other targets of the pipeline still emit them.
+    ///
+    /// Each call adds one selector, and an operation any of them matches is left out. A selector
+    /// that matches no operation is a configuration error, so a stale exclusion cannot stay.
+    #[must_use]
+    pub fn exclude(mut self, selector: OperationSelector) -> Self {
+        self.excluded_operations.push(selector);
         self
     }
 

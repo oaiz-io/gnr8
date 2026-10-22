@@ -9,6 +9,20 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- `OpenApi31`, `OpenApi31Json`, `GoSdk`, `PySdk` and `TsSdk` have a new public
+  `excluded_operations` field, so a struct literal of one of them must set it. Build them with
+  `new()` and the builder methods instead.
+
+### Added
+
+- `OpenApi31`, `OpenApi31Json`, `GoSdk`, `PySdk` and `TsSdk` accept `.exclude(OperationSelector)`.
+  The target leaves the matched operations out of its own output, with their per-operation policies
+  and every schema only they reach; sibling targets still emit them. A published reference and a
+  first-party client can come from one pipeline. A selector that matches no operation is a
+  configuration error, and `StaticDocs` refuses a sibling SDK that excludes operations.
+
 ## 0.20.0 — 2026-10-19
 
 ### Breaking

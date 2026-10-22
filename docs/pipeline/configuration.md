@@ -93,6 +93,28 @@ Pipeline::new()
 Do not duplicate the same correction in individual targets. Put API meaning in transforms; keep
 target-specific file layout and package policy on targets.
 
+### One audience per target
+
+Every target reads the same frozen graph. A target can leave operations out of its own output with
+`.exclude(OperationSelector)`, so one pipeline serves a published API reference and a first-party
+client that also calls internal routes:
+
+```rust
+let internal = OperationSelector::PathPrefix("/admin/".to_string());
+Pipeline::new()
+    .source(GoGin::new().inputs(["."]))
+    .target(OpenApi31::new().to("generated/openapi.yaml").exclude(internal.clone()))
+    .target(PySdk::new().module("acme").to("generated/py").exclude(internal))
+    .target(TsSdk::new().module("@acme/web-client").to("generated/ts"));
+```
+
+The excluding target drops the matched operations, their per-operation policies, and every schema
+that only those operations reach. A schema another operation, a registered non-HTTP root, or a kept
+schema reaches stays. The target's contract tests, CLI and docs samples read the same reduced graph.
+A selector that matches no operation is a configuration error. `OpenApi31`, `OpenApi31Json`,
+`GoSdk`, `PySdk` and `TsSdk` accept exclusions. `StaticDocs` samples every operation in each sibling
+SDK, so it refuses a sibling SDK that excludes operations.
+
 ## Custom stages
 
 The traits are public. A custom target must use explicit artifact ownership methods:
