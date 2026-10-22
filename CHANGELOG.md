@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.21.0 — 2026-10-22
+
 ### Breaking
 
 - `OpenApi31`, `OpenApi31Json`, `GoSdk`, `PySdk` and `TsSdk` have a new public
