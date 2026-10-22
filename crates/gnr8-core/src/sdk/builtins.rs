@@ -170,6 +170,16 @@ impl SiblingSdk<'_> {
         !docs.is_none()
     }
 
+    /// The operations the declaration leaves out.
+    #[must_use]
+    pub fn excluded_operations(&self) -> &[OperationSelector] {
+        match self {
+            Self::Go(t) => &t.excluded_operations,
+            Self::Python(t) => &t.excluded_operations,
+            Self::TypeScript(t) => &t.excluded_operations,
+        }
+    }
+
     /// The declaration's stage name, as host diagnostics spell it.
     #[must_use]
     pub fn label(&self) -> &'static str {
@@ -4567,11 +4577,16 @@ pub fn generate_target(
     store: Option<&Store>,
     plan: &PlanTargets<'_>,
 ) -> Result<(), CoreError> {
+    let view = target_graph(spec, ir)?;
+    let ir = &*view;
     match spec {
         BuiltinTarget::OpenApi31(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::OpenApi31Json(t) => t.generate(ir, out, cx, store),
         BuiltinTarget::StaticFiles(t) => t.generate(ir, out, cx, store),
-        BuiltinTarget::StaticDocs(t) => crate::staticdocs::generate(t, ir, out, plan),
+        BuiltinTarget::StaticDocs(t) => {
+            refuse_static_docs_beside_exclusions(plan)?;
+            crate::staticdocs::generate(t, ir, out, plan)
+        }
         BuiltinTarget::GoSdk(t) => {
             crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::Go(t), plan)?;
             t.generate(ir, out, cx, store)
@@ -4584,6 +4599,51 @@ pub fn generate_target(
             crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::TypeScript(t), plan)?;
             t.generate(ir, out, cx, store)
         }
+    }
+}
+
+/// The operations a declared target leaves out ([`OpenApi31::exclude`] and its siblings).
+fn excluded_operations(spec: &BuiltinTarget) -> &[OperationSelector] {
+    match spec {
+        BuiltinTarget::OpenApi31(t) => &t.excluded_operations,
+        BuiltinTarget::OpenApi31Json(t) => &t.excluded_operations,
+        BuiltinTarget::GoSdk(t) => &t.excluded_operations,
+        BuiltinTarget::PySdk(t) => &t.excluded_operations,
+        BuiltinTarget::TsSdk(t) => &t.excluded_operations,
+        BuiltinTarget::StaticFiles(_) | BuiltinTarget::StaticDocs(_) => &[],
+    }
+}
+
+/// The graph one declared target reads: the frozen graph without the operations it excludes.
+///
+/// Every output of a target — its files and each suite that verifies them — reads this one view, so
+/// a check never covers an operation the target did not emit.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when an exclusion matches no operation.
+pub(crate) fn target_graph<'a>(
+    spec: &BuiltinTarget,
+    ir: &'a ApiGraph,
+) -> Result<std::borrow::Cow<'a, ApiGraph>, CoreError> {
+    crate::graph::exclusion::without_operations(ir, excluded_operations(spec), spec.label())
+}
+
+/// `StaticDocs` prints a sample in every sibling SDK for every operation, so it cannot sit beside an
+/// SDK target that leaves operations out.
+fn refuse_static_docs_beside_exclusions(plan: &PlanTargets<'_>) -> Result<(), CoreError> {
+    match plan
+        .sdks()
+        .find(|sdk| !sdk.excluded_operations().is_empty())
+    {
+        Some(sdk) => Err(CoreError::Config {
+            message: format!(
+                "StaticDocs samples every operation in each sibling SDK, but {} excludes \
+                 operations; remove the exclusion or the StaticDocs target",
+                sdk.label()
+            ),
+        }),
+        None => Ok(()),
     }
 }
 
@@ -4625,6 +4685,8 @@ pub fn target_contract_test_suites(
     spec: &BuiltinTarget,
     ir: &ApiGraph,
 ) -> Result<Vec<ContractTestSuite>, CoreError> {
+    let view = target_graph(spec, ir)?;
+    let ir = &*view;
     match spec {
         BuiltinTarget::OpenApi31(t) => t.contract_test_suites(ir),
         BuiltinTarget::OpenApi31Json(t) => t.contract_test_suites(ir),
@@ -4680,7 +4742,8 @@ pub fn target_cli_help_suites(
         | BuiltinTarget::StaticDocs(_)
         | BuiltinTarget::TsSdk(_) => return Ok(Vec::new()),
     };
-    let projected = crate::graph::projection::for_generation(ir)?;
+    let view = target_graph(spec, ir)?;
+    let projected = crate::graph::projection::for_generation(&view)?;
     Ok(vec![CliHelpSuite {
         output_path: dir.trim_end_matches('/').to_string(),
         program: cli.program.clone(),
@@ -4703,6 +4766,7 @@ pub fn target_docs_suites(
     let BuiltinTarget::StaticDocs(docs) = spec else {
         return Ok(Vec::new());
     };
+    refuse_static_docs_beside_exclusions(plan)?;
     // One docs model for the target, built exactly as its pages were: every unit reads it.
     let sdks: Vec<SiblingSdk<'_>> = plan.sdks().collect();
     let crate::docs::verify::PlanUnits {
@@ -4724,7 +4788,28 @@ pub fn sdk_docs_suites(
     ir: &ApiGraph,
     plan: &PlanTargets<'_>,
 ) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
-    let sdks: Vec<SiblingSdk<'_>> = plan.sdks().filter(SiblingSdk::emits_docs).collect();
+    let (shared, own): (Vec<SiblingSdk<'_>>, Vec<SiblingSdk<'_>>) = plan
+        .sdks()
+        .filter(SiblingSdk::emits_docs)
+        .partition(|sdk| sdk.excluded_operations().is_empty());
+    let mut suites = sdk_docs_suites_over(ir, shared)?;
+    // An SDK that leaves operations out samples its own view of the graph.
+    for sdk in own {
+        let view = crate::graph::exclusion::without_operations(
+            ir,
+            sdk.excluded_operations(),
+            sdk.label(),
+        )?;
+        suites.extend(sdk_docs_suites_over(&view, vec![sdk])?);
+    }
+    Ok(suites)
+}
+
+/// The docs suites of SDKs whose README and reference sample the same graph.
+fn sdk_docs_suites_over(
+    ir: &ApiGraph,
+    sdks: Vec<SiblingSdk<'_>>,
+) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
     if sdks.is_empty() {
         return Ok(Vec::new());
     }

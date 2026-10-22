@@ -195,6 +195,19 @@ pub(crate) fn schema_consumers(graph: &ApiGraph) -> SchemaConsumers<'_> {
     }
 }
 
+/// Every component schema `roots` reach through the `$ref`s in schema bodies, roots included.
+pub(crate) fn schemas_reached_from<'a>(
+    graph: &'a ApiGraph,
+    roots: Vec<&'a str>,
+) -> BTreeSet<&'a str> {
+    let bodies: BTreeMap<&str, &Type> = graph
+        .schemas
+        .iter()
+        .map(|schema| (schema.id.as_str(), &schema.body))
+        .collect();
+    reachable_schemas(roots, &bodies)
+}
+
 /// The diagnostic a source raises for a field whose explicit `null` code gnr8 does not read decides
 /// (a custom `UnmarshalJSON`, or the handler reading required raw JSON). Its `schema` is the schema id
 /// and its `subject` the field's JSON name.

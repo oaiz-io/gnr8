@@ -127,7 +127,9 @@ See [OpenAPI generation](../openapi/generation.md).
 | `ReadinessKind` | choose the OpenAPI, Go, Python, or TypeScript readiness validator |
 
 Each SDK target emits a contract test `gnr8 verify` runs with that language's own test tool;
-`without_contract_tests()` stops it. `PySdk::cli("name")` and `GoSdk::cli("name")` are the opt-in
+`without_contract_tests()` stops it. `.exclude(OperationSelector)` leaves operations out of one
+target; see [One audience per target](../pipeline/configuration.md#one-audience-per-target).
+`PySdk::cli("name")` and `GoSdk::cli("name")` are the opt-in
 generated command-line clients; see [Generated CLI](../cli/generated-cli.md).
 
 See [SDK generation](../sdk/generation.md).

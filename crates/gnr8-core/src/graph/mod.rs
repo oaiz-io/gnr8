@@ -11,6 +11,7 @@
 //! and guarantees there is exactly one definition of every node type (AGENTS.md rule 3).
 
 pub(crate) mod direction;
+pub(crate) mod exclusion;
 pub(crate) mod projection;
 
 pub use gnr8::graph::*;
