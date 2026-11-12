@@ -129,8 +129,9 @@ See [OpenAPI generation](../openapi/generation.md).
 Each SDK target emits a contract test `gnr8 verify` runs with that language's own test tool;
 `without_contract_tests()` stops it. `.exclude(OperationSelector)` leaves operations out of one
 target; see [One audience per target](../pipeline/configuration.md#one-audience-per-target). An SDK
-target emits only the models its operations reach; `.model_root(schema)` keeps another model and
-`.all_models()` emits every one. See
+target emits only the models its operations and the registered non-HTTP schemas reach;
+`.model_root(schema)` keeps another model, `.without_registered_schema_roots()` drops the registered
+schemas no kept operation reaches, and `.all_models()` emits every one. See
 [Which models an SDK emits](../sdk/generation.md#which-models-an-sdk-emits).
 `PySdk::cli("name")` and `GoSdk::cli("name")` are the opt-in
 generated command-line clients; see [Generated CLI](../cli/generated-cli.md).

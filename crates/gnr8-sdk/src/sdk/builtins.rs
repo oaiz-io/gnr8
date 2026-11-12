@@ -2350,6 +2350,19 @@ const fn default_contract_tests() -> bool {
     true
 }
 
+/// An SDK target roots its models at the registered non-HTTP schemas unless it turns that off.
+const fn default_registered_schema_roots() -> bool {
+    true
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive a reference to the field value"
+)]
+const fn is_registered_schema_roots(value: &bool) -> bool {
+    *value
+}
+
 /// The Go SDK target: generates the multi-file Go SDK bundle and writes each file under [`GoSdk::to`].
 ///
 /// Derives the SDK's Go package name from [`GoSdk::module`] (the last path segment, sanitized — the
@@ -2357,6 +2370,8 @@ const fn default_contract_tests() -> bool {
 /// `gnr8_engine::gosdk::generate` to produce the bundle, splits it into files via the shared bundle
 /// framing, and writes each at `<dir>/<name>`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// Each bool is one independent builder switch the plan serializes; an enum would join unrelated ones.
+#[allow(clippy::struct_excessive_bools)]
 pub struct GoSdk {
     pub module: String,
     pub go_version: String,
@@ -2375,6 +2390,11 @@ pub struct GoSdk {
     pub model_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_models: bool,
+    #[serde(
+        default = "default_registered_schema_roots",
+        skip_serializing_if = "is_registered_schema_roots"
+    )]
+    pub registered_schema_roots: bool,
 }
 
 impl GoSdk {
@@ -2394,6 +2414,7 @@ impl GoSdk {
             excluded_operations: Vec::new(),
             model_roots: Vec::new(),
             all_models: false,
+            registered_schema_roots: true,
         }
     }
 
@@ -2444,7 +2465,8 @@ impl GoSdk {
     /// The SDK emits only the models its operations reach: their request and response bodies,
     /// parameters, headers and error bodies, everything those reference, and the schemas
     /// [`ApiOverrides::register_input_schema`] and [`ApiOverrides::register_output_schema`]
-    /// register. Declare a root for a model reached any other way, such as a webhook payload.
+    /// register, unless [`GoSdk::without_registered_schema_roots`] turns those off. Declare a root
+    /// for a model reached any other way, such as a webhook payload.
     /// Each call adds one root. A root that names no schema is a configuration error.
     #[must_use]
     pub fn model_root(mut self, schema: impl Into<String>) -> Self {
@@ -2458,6 +2480,17 @@ impl GoSdk {
     #[must_use]
     pub fn all_models(mut self) -> Self {
         self.all_models = true;
+        self
+    }
+
+    /// Stop treating the schemas [`ApiOverrides::register_input_schema`] and
+    /// [`ApiOverrides::register_output_schema`] register as model roots of this target. The target
+    /// then emits the models its operations and its [`GoSdk::model_root`]s reach, and a registered
+    /// schema only when one of those reaches it. Other targets keep the registered schemas.
+    /// Declaring [`GoSdk::all_models`] as well is a configuration error.
+    #[must_use]
+    pub const fn without_registered_schema_roots(mut self) -> Self {
+        self.registered_schema_roots = false;
         self
     }
 
@@ -2554,6 +2587,8 @@ impl Default for GoSdk {
 /// calls the existing `gnr8_engine::pysdk::generate` to produce the bundle, splits it into files on
 /// the shared bundle framing, and writes each at `<dir>/<name>`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+// Each bool is one independent builder switch the plan serializes; an enum would join unrelated ones.
+#[allow(clippy::struct_excessive_bools)]
 pub struct PySdk {
     pub module: String,
     pub dir: String,
@@ -2573,6 +2608,11 @@ pub struct PySdk {
     pub model_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_models: bool,
+    #[serde(
+        default = "default_registered_schema_roots",
+        skip_serializing_if = "is_registered_schema_roots"
+    )]
+    pub registered_schema_roots: bool,
 }
 
 impl PySdk {
@@ -2593,6 +2633,7 @@ impl PySdk {
             excluded_operations: Vec::new(),
             model_roots: Vec::new(),
             all_models: false,
+            registered_schema_roots: true,
         }
     }
 
@@ -2629,7 +2670,8 @@ impl PySdk {
     /// The SDK emits only the models its operations reach: their request and response bodies,
     /// parameters, headers and error bodies, everything those reference, and the schemas
     /// [`ApiOverrides::register_input_schema`] and [`ApiOverrides::register_output_schema`]
-    /// register. Declare a root for a model reached any other way, such as a webhook payload.
+    /// register, unless [`PySdk::without_registered_schema_roots`] turns those off. Declare a root
+    /// for a model reached any other way, such as a webhook payload.
     /// Each call adds one root. A root that names no schema is a configuration error.
     #[must_use]
     pub fn model_root(mut self, schema: impl Into<String>) -> Self {
@@ -2643,6 +2685,17 @@ impl PySdk {
     #[must_use]
     pub fn all_models(mut self) -> Self {
         self.all_models = true;
+        self
+    }
+
+    /// Stop treating the schemas [`ApiOverrides::register_input_schema`] and
+    /// [`ApiOverrides::register_output_schema`] register as model roots of this target. The target
+    /// then emits the models its operations and its [`PySdk::model_root`]s reach, and a registered
+    /// schema only when one of those reaches it. Other targets keep the registered schemas.
+    /// Declaring [`PySdk::all_models`] as well is a configuration error.
+    #[must_use]
+    pub const fn without_registered_schema_roots(mut self) -> Self {
+        self.registered_schema_roots = false;
         self
     }
 
@@ -2777,6 +2830,11 @@ pub struct TsSdk {
     pub model_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_models: bool,
+    #[serde(
+        default = "default_registered_schema_roots",
+        skip_serializing_if = "is_registered_schema_roots"
+    )]
+    pub registered_schema_roots: bool,
 }
 
 impl TsSdk {
@@ -2794,6 +2852,7 @@ impl TsSdk {
             excluded_operations: Vec::new(),
             model_roots: Vec::new(),
             all_models: false,
+            registered_schema_roots: true,
         }
     }
 
@@ -2830,7 +2889,8 @@ impl TsSdk {
     /// The SDK emits only the models its operations reach: their request and response bodies,
     /// parameters, headers and error bodies, everything those reference, and the schemas
     /// [`ApiOverrides::register_input_schema`] and [`ApiOverrides::register_output_schema`]
-    /// register. Declare a root for a model reached any other way, such as a webhook payload.
+    /// register, unless [`TsSdk::without_registered_schema_roots`] turns those off. Declare a root
+    /// for a model reached any other way, such as a webhook payload.
     /// Each call adds one root. A root that names no schema is a configuration error.
     #[must_use]
     pub fn model_root(mut self, schema: impl Into<String>) -> Self {
@@ -2844,6 +2904,17 @@ impl TsSdk {
     #[must_use]
     pub fn all_models(mut self) -> Self {
         self.all_models = true;
+        self
+    }
+
+    /// Stop treating the schemas [`ApiOverrides::register_input_schema`] and
+    /// [`ApiOverrides::register_output_schema`] register as model roots of this target. The target
+    /// then emits the models its operations and its [`TsSdk::model_root`]s reach, and a registered
+    /// schema only when one of those reaches it. Other targets keep the registered schemas.
+    /// Declaring [`TsSdk::all_models`] as well is a configuration error.
+    #[must_use]
+    pub const fn without_registered_schema_roots(mut self) -> Self {
+        self.registered_schema_roots = false;
         self
     }
 

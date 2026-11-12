@@ -17,7 +17,14 @@
 //! | `UnusedThing`, `UnusedChild`  | by no operation                                             |
 //! | `OrderWebhook`                | by no operation; the targets declare it as a model root, and it reaches `WebhookPayload` and `Order` |
 //!
+//! The registered-schema cases register `UnusedThing` as an input and `Order` and `AuditLog` as
+//! outputs, the way `ApiOverrides::register_input_schema` and `register_output_schema` do.
+//!
 //! Go has no sum types, so the Go SDK reads the fixture without `PaymentMethod` and its variants.
+//!
+//! The `registered-schema-roots` fixture runs the whole pipeline over an `OpenAPI` document with
+//! `SupportTicket` and `Book` registered, a full target beside it, and narrow targets that leave out
+//! every operation or every operation but `getBook`.
 //!
 //! Each case also builds what it emits: `go build`, a Python import of every reached model from the
 //! package root, and `tsc` over a file importing every reached model from the index. A dangling
@@ -30,13 +37,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gnr8_engine::graph::ApiGraph;
+use gnr8_engine::graph::{ApiGraph, SchemaUse, SchemaUseRoot};
 use gnr8_engine::sdk::builtins::{generate_target, PlanTargets};
 use gnr8_engine::sdk::prelude::*;
-use gnr8_engine::sdk::{Artifacts, BuiltinTarget, Cx};
+use gnr8_engine::sdk::{Artifacts, BuiltinTarget, Cx, TargetStage};
 use gnr8_engine::CoreError;
 
 const FIXTURE: &str = include_str!("../../../fixtures/sdk-targets/model-reach.json");
+const REGISTERED_SPEC: &str =
+    include_str!("../../../fixtures/sdk-targets/registered-schema-roots.yaml");
 
 /// What every target in this file keeps, beside its operations' own bodies.
 const REACHED: [&str; 18] = [
@@ -335,6 +344,221 @@ fn a_root_beside_all_models_is_a_configuration_error() {
             .to_string();
         assert!(error.contains("all_models"), "{error}");
         assert!(error.contains("shop.OrderWebhook"), "{error}");
+    }
+}
+
+/// `graph(sdk)` with `UnusedThing` registered as an input and `Order` and `AuditLog` as outputs.
+fn registered_graph(sdk: Sdk) -> ApiGraph {
+    let mut graph = graph(sdk);
+    for (schema_id, use_) in [
+        ("shop.UnusedThing", SchemaUse::Input),
+        ("shop.Order", SchemaUse::Output),
+        ("admin.AuditLog", SchemaUse::Output),
+    ] {
+        graph.schema_uses.push(SchemaUseRoot {
+            schema_id: schema_id.to_string(),
+            use_,
+        });
+    }
+    graph
+}
+
+#[test]
+fn a_target_emits_the_registered_schemas_by_default() {
+    for sdk in SDKS {
+        let target = sdk_target!(sdk, "sdk", |t| t.exclude(admin()));
+        let files = emit(&target, &registered_graph(sdk));
+        let present = [
+            "Order",
+            "UnusedThing",
+            "UnusedChild",
+            "AuditLog",
+            "AuditEntry",
+        ];
+        assert_models(sdk, &files, &present, &["OrderWebhook"]);
+    }
+}
+
+#[test]
+fn without_registered_schema_roots_a_target_emits_what_its_operations_and_roots_reach() {
+    for sdk in SDKS {
+        let graph = registered_graph(sdk);
+        let target = sdk_target!(sdk, "sdk", |t| t
+            .exclude(admin())
+            .model_root("shop.OrderWebhook")
+            .without_registered_schema_roots());
+        let files = emit(&target, &graph);
+        // `Order` is registered and reached by `getOrder`, so it stays.
+        let absent: Vec<&str> = EXCLUDED.iter().chain(&UNREACHED).copied().collect();
+        assert_models(sdk, &files, &expressible(sdk, &REACHED), &absent);
+        build(sdk, &files, &expressible(sdk, &REACHED));
+
+        let target = sdk_target!(sdk, "sdk", |t| t
+            .exclude(admin())
+            .without_registered_schema_roots());
+        let files = emit(&target, &graph);
+        assert_models(
+            sdk,
+            &files,
+            &["Order"],
+            &["OrderWebhook", "UnusedThing", "AuditLog"],
+        );
+    }
+}
+
+#[test]
+fn without_registered_schema_roots_changes_nothing_when_none_are_registered() {
+    for sdk in SDKS {
+        let graph = graph(sdk);
+        let default = sdk_target!(sdk, "sdk", |t| t.exclude(admin()));
+        let opted_out = sdk_target!(sdk, "sdk", |t| t
+            .exclude(admin())
+            .without_registered_schema_roots());
+        assert_eq!(emit(&default, &graph), emit(&opted_out, &graph), "{sdk:?}");
+    }
+}
+
+#[test]
+fn an_opted_out_target_does_not_change_the_target_beside_it() {
+    for sdk in SDKS {
+        let graph = registered_graph(sdk);
+        let everything = OperationSelector::PathPrefix("/".to_string());
+        let narrow = sdk_target!(sdk, "narrow", |t| t
+            .exclude(everything.clone())
+            .without_registered_schema_roots());
+        let full = sdk_target!(sdk, "full", |t| t);
+        let plan = [&narrow, &full];
+
+        let narrow_files = try_emit(&narrow, &graph, &plan).unwrap();
+        assert_models(
+            sdk,
+            &narrow_files,
+            &[],
+            &["Order", "UnusedThing", "AuditLog"],
+        );
+        let full_files = try_emit(&full, &graph, &plan).unwrap();
+        assert_models(sdk, &full_files, &["Order", "UnusedThing", "AuditLog"], &[]);
+        assert_eq!(full_files, emit(&full, &graph), "{sdk:?}");
+    }
+}
+
+#[test]
+fn without_registered_schema_roots_beside_all_models_is_a_configuration_error() {
+    for sdk in SDKS {
+        let target = sdk_target!(sdk, "sdk", |t| t
+            .all_models()
+            .without_registered_schema_roots());
+        let error = try_emit(&target, &registered_graph(sdk), &[&target])
+            .expect_err("the opt-out beside all_models must fail")
+            .to_string();
+        assert!(error.contains("all_models"), "{error}");
+        assert!(error.contains("without_registered_schema_roots"), "{error}");
+    }
+}
+
+/// Every file the pipeline over [`REGISTERED_SPEC`] writes under `dir`, with `SupportTicket`
+/// registered as an input and `Book` as an output, and `narrow` beside a full target in `full`.
+fn run_registered_pipeline(sdk: Sdk, narrow: BuiltinTarget) -> Vec<(String, String)> {
+    let root = unique_temp_dir("registered");
+    std::fs::write(root.join("openapi.yaml"), REGISTERED_SPEC).unwrap();
+    let pipeline = Pipeline::new()
+        .source(OpenApi::new().input("openapi.yaml"))
+        .transform(
+            ApiOverrides::new()
+                .register_input_schema("SupportTicket")
+                .register_output_schema("Book"),
+        )
+        .target(TargetStage::Builtin(sdk_target!(sdk, "full", |t| t)))
+        .target(TargetStage::Builtin(narrow));
+    let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), None)
+        .expect("pipeline must generate");
+    std::fs::remove_dir_all(&root).unwrap();
+    outcome
+        .artifacts
+        .into_iter()
+        .map(|artifact| (artifact.path, artifact.text))
+        .collect()
+}
+
+/// The files of `files` written under `dir/`.
+fn under(files: &[(String, String)], dir: &str) -> Vec<(String, String)> {
+    files
+        .iter()
+        .filter(|(path, _)| path.starts_with(&format!("{dir}/")))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_narrow_target_leaves_the_registered_schemas_to_the_full_target() {
+    let every = || OperationSelector::PathPrefix("/".to_string());
+    let only_get_book =
+        || OperationSelector::Not(Box::new(OperationSelector::operation("getBook")));
+    let registered = ["SupportTicket", "SupportNote"];
+    for sdk in SDKS {
+        // Without the opt-out, a target that keeps no operation still writes the registered schemas.
+        let files =
+            run_registered_pipeline(sdk, sdk_target!(sdk, "narrow", |t| t.exclude(every())));
+        assert_models(sdk, &under(&files, "narrow"), &registered, &["StaffMember"]);
+        let full = under(&files, "full");
+        assert_models(
+            sdk,
+            &full,
+            &["Book", "Author", "StaffMember", "SupportTicket"],
+            &[],
+        );
+
+        let files = run_registered_pipeline(
+            sdk,
+            sdk_target!(sdk, "narrow", |t| t
+                .exclude(every())
+                .without_registered_schema_roots()),
+        );
+        let narrow = under(&files, "narrow");
+        assert_models(
+            sdk,
+            &narrow,
+            &[],
+            &["Book", "StaffMember", "SupportTicket", "SupportNote"],
+        );
+        assert_eq!(
+            under(&files, "full"),
+            full,
+            "{sdk:?}: the opt-out must not change the full target"
+        );
+
+        // `Book` is registered too, and `getBook` reaches it, so it stays; `BookWebhook` reaches
+        // `Book` but nothing reaches `BookWebhook` until it is a model root.
+        let files = run_registered_pipeline(
+            sdk,
+            sdk_target!(sdk, "narrow", |t| t
+                .exclude(only_get_book())
+                .without_registered_schema_roots()),
+        );
+        let narrow = under(&files, "narrow");
+        assert_models(
+            sdk,
+            &narrow,
+            &["Book", "Author"],
+            &["StaffMember", "SupportTicket", "SupportNote", "BookWebhook"],
+        );
+        build(sdk, &narrow, &["Book", "Author"]);
+
+        let files = run_registered_pipeline(
+            sdk,
+            sdk_target!(sdk, "narrow", |t| t
+                .exclude(only_get_book())
+                .model_root("BookWebhook")
+                .without_registered_schema_roots()),
+        );
+        let narrow = under(&files, "narrow");
+        assert_models(
+            sdk,
+            &narrow,
+            &["Book", "Author", "BookWebhook"],
+            &["StaffMember", "SupportTicket", "SupportNote"],
+        );
+        assert_eq!(under(&files, "full"), full, "{sdk:?}");
     }
 }
 

@@ -9,6 +9,20 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- `GoSdk`, `PySdk` and `TsSdk` have a new public `registered_schema_roots` field, so a struct
+  literal of one of them must set it. Build them with `new()` and the builder methods instead.
+
+### Added
+
+- `GoSdk`, `PySdk` and `TsSdk` accept `.without_registered_schema_roots()`. The schemas
+  `register_input_schema` and `register_output_schema` register stop being model roots of that
+  target: it emits the models its operations and `.model_root(...)` schemas reach, and a registered
+  schema only when one of those reaches it. Other targets keep the registered schemas, and a target
+  without the call emits what it did in 0.22.0. Calling it beside `.all_models()` is a
+  configuration error.
+
 ## 0.22.0 — 2026-11-12
 
 ### Breaking

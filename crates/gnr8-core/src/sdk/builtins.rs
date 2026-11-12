@@ -206,29 +206,40 @@ impl<'a> SiblingSdk<'a> {
     }
 
     /// The graph this SDK reads: the operations it emits and the models they reach, together with
-    /// the model roots it declares, or every model with `all_models`.
+    /// the model roots it declares and, unless it opts out, the registered non-HTTP schemas, or
+    /// every model with `all_models`.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::Config`] when an exclusion matches no operation, a model root names no
-    /// schema or several, or the declaration sets both `all_models` and a model root.
+    /// schema or several, or the declaration sets `all_models` beside a model root or
+    /// `without_registered_schema_roots`.
     pub(crate) fn view<'g>(
         &self,
         ir: &'g ApiGraph,
     ) -> Result<std::borrow::Cow<'g, ApiGraph>, CoreError> {
-        let (roots, all_models) = match self {
-            Self::Go(t) => (&t.model_roots, t.all_models),
-            Self::Python(t) => (&t.model_roots, t.all_models),
-            Self::TypeScript(t) => (&t.model_roots, t.all_models),
+        let (roots, all_models, registered) = match self {
+            Self::Go(t) => (&t.model_roots, t.all_models, t.registered_schema_roots),
+            Self::Python(t) => (&t.model_roots, t.all_models, t.registered_schema_roots),
+            Self::TypeScript(t) => (&t.model_roots, t.all_models, t.registered_schema_roots),
         };
-        let models = match (all_models, roots.as_slice()) {
-            (false, roots) => Models::Reached(roots),
-            (true, []) => Models::All,
-            (true, [root, ..]) => {
+        let models = match (all_models, roots.as_slice(), registered) {
+            (false, roots, registered) => Models::Reached { roots, registered },
+            (true, [], true) => Models::All,
+            (true, [root, ..], _) => {
                 return Err(CoreError::Config {
                     message: format!(
                         "{} emits every model with `all_models()`, so its model root {root:?} \
                          has no effect; remove one of them",
+                        self.label()
+                    ),
+                })
+            }
+            (true, [], false) => {
+                return Err(CoreError::Config {
+                    message: format!(
+                        "{} emits every model with `all_models()`, so \
+                         `without_registered_schema_roots()` has no effect; remove one of them",
                         self.label()
                     ),
                 })

@@ -26,9 +26,13 @@ pub(crate) enum Models<'a> {
     /// references, so an exclusion never removes a schema anything still in the view depends on.
     All,
     /// The schemas the kept operations reach — their request bodies, parameters, response and
-    /// error bodies and response headers — together with those a registered non-HTTP root or one
-    /// of these declared roots reaches. Each root is a schema id or a bare type name.
-    Reached(&'a [String]),
+    /// error bodies and response headers — together with those one of the declared `roots`
+    /// reaches, and, with `registered`, those a registered non-HTTP root reaches. Each declared
+    /// root is a schema id or a bare type name.
+    Reached {
+        roots: &'a [String],
+        registered: bool,
+    },
 }
 
 /// `graph` without the operations any of `selectors` matches, keeping the schemas `models`
@@ -102,6 +106,9 @@ pub(crate) fn target_view<'a>(
         .retain(|op| !excluded_ids.contains(op.id.as_str()));
     view.schemas
         .retain(|schema| !dropped.contains(schema.id.as_str()));
+    // A registered root the view leaves out no longer names a schema in it.
+    view.schema_uses
+        .retain(|root| !dropped.contains(root.schema_id.as_str()));
     view.operation_security
         .retain(|policy| !excluded_ids.contains(policy.operation_id.as_str()));
     view.operation_runtime
@@ -161,14 +168,16 @@ fn dropped_schemas<'a>(
             }
             dropped
         }
-        Models::Reached(roots) => {
+        Models::Reached { roots, registered } => {
             let mut kept: Vec<&str> = consumers
                 .operations
                 .iter()
                 .filter(|(_, operations)| operations.iter().any(|op| !excluded.contains(op)))
                 .map(|(id, _)| *id)
                 .collect();
-            kept.extend(consumers.non_http.iter().copied());
+            if registered {
+                kept.extend(consumers.non_http.iter().copied());
+            }
             for root in roots {
                 kept.extend(model_root(graph, root, target)?);
             }
@@ -465,10 +474,26 @@ mod tests {
         Type::Named(id.to_string())
     }
 
+    /// The models a default SDK keeps: those its operations, `roots` and registered roots reach.
+    fn reached(roots: &[String]) -> Models<'_> {
+        Models::Reached {
+            roots,
+            registered: true,
+        }
+    }
+
+    /// The models an SDK that leaves registered roots out keeps.
+    fn unregistered(roots: &[String]) -> Models<'_> {
+        Models::Reached {
+            roots,
+            registered: false,
+        }
+    }
+
     #[test]
     fn reached_keeps_only_what_kept_operations_reach() {
         let graph = graph();
-        let view = target_view(&graph, &[admin()], Models::Reached(&[]), "TsSdk").expect("view");
+        let view = target_view(&graph, &[admin()], reached(&[]), "TsSdk").expect("view");
         assert_eq!(
             schema_ids(&view),
             ["BookList", "Shared"],
@@ -510,7 +535,7 @@ mod tests {
             schema("Rate", Type::Any {}),
             object_referencing("Upload", &["OperatorOnly"]),
         ]);
-        let view = target_view(&graph, &[admin()], Models::Reached(&[]), "TsSdk").expect("view");
+        let view = target_view(&graph, &[admin()], reached(&[]), "TsSdk").expect("view");
         assert_eq!(
             schema_ids(&view),
             [
@@ -532,7 +557,7 @@ mod tests {
             use_: SchemaUse::Output,
         });
         let roots = ["OperatorPage".to_string()];
-        let view = target_view(&graph, &[admin()], Models::Reached(&roots), "TsSdk").expect("view");
+        let view = target_view(&graph, &[admin()], reached(&roots), "TsSdk").expect("view");
         assert_eq!(
             schema_ids(&view),
             [
@@ -550,7 +575,7 @@ mod tests {
     fn reached_borrows_the_graph_when_every_schema_is_reached() {
         let mut graph = graph();
         graph.schemas.retain(|schema| schema.id != "OperatorPage");
-        let view = target_view(&graph, &[], Models::Reached(&[]), "TsSdk").expect("view");
+        let view = target_view(&graph, &[], reached(&[]), "TsSdk").expect("view");
         assert!(matches!(view, Cow::Borrowed(_)));
     }
 
@@ -568,8 +593,7 @@ mod tests {
         graph.diagnostics.push(diagnostic(None, Some("Page")));
         let halves = |root: &str| {
             let roots = [root.to_string()];
-            let view =
-                target_view(&graph, &[admin()], Models::Reached(&roots), "TsSdk").expect("view");
+            let view = target_view(&graph, &[admin()], reached(&roots), "TsSdk").expect("view");
             let kept: Vec<String> = schema_ids(&view)
                 .into_iter()
                 .filter(|id| id.starts_with("Page"))
@@ -593,7 +617,7 @@ mod tests {
             (vec!["Page::input".to_string()], true),
             "an emitted name keeps that half; the diagnostic stays while one half does"
         );
-        let view = target_view(&graph, &[admin()], Models::Reached(&[]), "TsSdk").expect("view");
+        let view = target_view(&graph, &[admin()], reached(&[]), "TsSdk").expect("view");
         assert!(
             !view.diagnostics.contains(&diagnostic(None, Some("Page"))),
             "a diagnostic naming the source schema leaves when both halves do"
@@ -611,14 +635,63 @@ mod tests {
             ("Shared", "matches 2 schemas"),
         ] {
             let roots = [root.to_string()];
-            let message = target_view(&graph, &[], Models::Reached(&roots), "GoSdk")
+            let message = target_view(&graph, &[], reached(&roots), "GoSdk")
                 .expect_err("root must fail")
                 .to_string();
             assert!(message.contains("GoSdk"), "{message}");
             assert!(message.contains(expected), "{message}");
         }
         let roots = ["other.Shared".to_string()];
-        let view = target_view(&graph, &[], Models::Reached(&roots), "GoSdk").expect("view");
+        let view = target_view(&graph, &[], reached(&roots), "GoSdk").expect("view");
         assert!(schema_ids(&view).contains(&"other.Shared"));
+    }
+
+    #[test]
+    fn without_registered_roots_keeps_what_operations_and_declared_roots_reach() {
+        let mut graph = graph();
+        graph.schema_uses.extend([
+            SchemaUseRoot {
+                schema_id: "OperatorList".to_string(),
+                use_: SchemaUse::Output,
+            },
+            SchemaUseRoot {
+                schema_id: "BookList".to_string(),
+                use_: SchemaUse::Input,
+            },
+        ]);
+        let view = target_view(&graph, &[admin()], unregistered(&[]), "TsSdk").expect("view");
+        assert_eq!(
+            schema_ids(&view),
+            ["BookList", "Shared"],
+            "OperatorList is registered, but no kept operation reaches it; BookList is \
+             registered and a kept operation reaches it"
+        );
+        assert_eq!(
+            view.schema_uses,
+            [SchemaUseRoot {
+                schema_id: "BookList".to_string(),
+                use_: SchemaUse::Input,
+            }],
+            "a registered root the view leaves out leaves with its schema"
+        );
+
+        let roots = ["OperatorPage".to_string()];
+        let view = target_view(&graph, &[admin()], unregistered(&roots), "TsSdk").expect("view");
+        assert_eq!(
+            schema_ids(&view),
+            ["BookList", "OperatorPage", "Shared", "OperatorRow"],
+            "a declared root still keeps what it reaches"
+        );
+
+        let view = target_view(&graph, &[admin()], reached(&[]), "TsSdk").expect("view");
+        assert_eq!(view.schema_uses, graph.schema_uses);
+    }
+
+    #[test]
+    fn without_registered_roots_changes_nothing_when_none_are_registered() {
+        let graph = graph();
+        let with = target_view(&graph, &[admin()], reached(&[]), "TsSdk").expect("view");
+        let without = target_view(&graph, &[admin()], unregistered(&[]), "TsSdk").expect("view");
+        assert_eq!(*with, *without);
     }
 }
