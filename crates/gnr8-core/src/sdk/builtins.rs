@@ -25,6 +25,7 @@ use gnr8::sdk::{
 
 use crate::analyze::facts::LiteralValue;
 use crate::analyze::helper::ExtractorIdentity;
+use crate::graph::exclusion::{target_view, Models};
 use crate::graph::{
     ApiGraph, DiagnosticCategory, Field, MediaExample, OperationDocsPolicy, OperationRuntimePolicy,
     PaginationMode, PaginationPolicy, Response, ResponseDocsPolicy, RuntimeHookKind, Schema,
@@ -138,7 +139,21 @@ pub enum SiblingSdk<'a> {
     TypeScript(&'a TsSdk),
 }
 
-impl SiblingSdk<'_> {
+impl<'a> SiblingSdk<'a> {
+    /// The SDK declaration `spec` is, if it is one.
+    #[must_use]
+    pub fn of(spec: &'a BuiltinTarget) -> Option<Self> {
+        match spec {
+            BuiltinTarget::GoSdk(t) => Some(Self::Go(t)),
+            BuiltinTarget::PySdk(t) => Some(Self::Python(t)),
+            BuiltinTarget::TsSdk(t) => Some(Self::TypeScript(t)),
+            BuiltinTarget::OpenApi31(_)
+            | BuiltinTarget::OpenApi31Json(_)
+            | BuiltinTarget::StaticFiles(_)
+            | BuiltinTarget::StaticDocs(_) => None,
+        }
+    }
+
     /// The language is a property of the variant, never a second argument.
     #[must_use]
     pub fn language(&self) -> ContractTestLanguage {
@@ -189,6 +204,60 @@ impl SiblingSdk<'_> {
             Self::TypeScript(_) => "TsSdk",
         }
     }
+
+    /// The graph this SDK reads: the operations it emits and the models they reach, together with
+    /// the model roots it declares, or every model with `all_models`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Config`] when an exclusion matches no operation, a model root names no
+    /// schema or several, or the declaration sets both `all_models` and a model root.
+    pub(crate) fn view<'g>(
+        &self,
+        ir: &'g ApiGraph,
+    ) -> Result<std::borrow::Cow<'g, ApiGraph>, CoreError> {
+        let (roots, all_models) = match self {
+            Self::Go(t) => (&t.model_roots, t.all_models),
+            Self::Python(t) => (&t.model_roots, t.all_models),
+            Self::TypeScript(t) => (&t.model_roots, t.all_models),
+        };
+        let models = match (all_models, roots.as_slice()) {
+            (false, roots) => Models::Reached(roots),
+            (true, []) => Models::All,
+            (true, [root, ..]) => {
+                return Err(CoreError::Config {
+                    message: format!(
+                        "{} emits every model with `all_models()`, so its model root {root:?} \
+                         has no effect; remove one of them",
+                        self.label()
+                    ),
+                })
+            }
+        };
+        target_view(ir, self.excluded_operations(), models, self.label())
+    }
+
+    /// The schemas this SDK leaves out only because its operations and model roots do not reach
+    /// them: those `all_models` would emit and [`Self::view`] does not. Empty with `all_models`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same configuration errors as [`Self::view`].
+    pub fn unreached_models(&self, ir: &ApiGraph) -> Result<Vec<String>, CoreError> {
+        let kept: BTreeSet<String> = self
+            .view(ir)?
+            .schemas
+            .iter()
+            .map(|schema| schema.id.clone())
+            .collect();
+        let every = target_view(ir, self.excluded_operations(), Models::All, self.label())?;
+        Ok(every
+            .schemas
+            .iter()
+            .map(|schema| schema.id.clone())
+            .filter(|id| !kept.contains(id))
+            .collect())
+    }
 }
 
 impl<'a> PlanTargets<'a> {
@@ -200,15 +269,9 @@ impl<'a> PlanTargets<'a> {
 
     /// Every Go/Python/TypeScript SDK declaration, in plan order.
     pub fn sdks(&self) -> impl Iterator<Item = SiblingSdk<'a>> + 'a {
-        self.targets.iter().filter_map(|(_, spec)| match *spec {
-            BuiltinTarget::GoSdk(t) => Some(SiblingSdk::Go(t)),
-            BuiltinTarget::PySdk(t) => Some(SiblingSdk::Python(t)),
-            BuiltinTarget::TsSdk(t) => Some(SiblingSdk::TypeScript(t)),
-            BuiltinTarget::OpenApi31(_)
-            | BuiltinTarget::OpenApi31Json(_)
-            | BuiltinTarget::StaticFiles(_)
-            | BuiltinTarget::StaticDocs(_) => None,
-        })
+        self.targets
+            .iter()
+            .filter_map(|(_, spec)| SiblingSdk::of(spec))
     }
 
     /// Every schema patch an OpenAPI target declares, with that target's stage name, in plan
@@ -4614,19 +4677,25 @@ fn excluded_operations(spec: &BuiltinTarget) -> &[OperationSelector] {
     }
 }
 
-/// The graph one declared target reads: the frozen graph without the operations it excludes.
+/// The graph one declared target reads: the frozen graph without the operations it excludes, and,
+/// for an SDK, with only the models it emits ([`SiblingSdk::view`]). The other targets keep every
+/// model, because the OpenAPI document and the docs site publish the whole contract.
 ///
 /// Every output of a target — its files and each suite that verifies them — reads this one view, so
-/// a check never covers an operation the target did not emit.
+/// a check never covers an operation or a model the target did not emit.
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::Config`] when an exclusion matches no operation.
+/// Returns [`CoreError::Config`] when an exclusion matches no operation, or an SDK's model
+/// declaration is invalid.
 pub(crate) fn target_graph<'a>(
     spec: &BuiltinTarget,
     ir: &'a ApiGraph,
 ) -> Result<std::borrow::Cow<'a, ApiGraph>, CoreError> {
-    crate::graph::exclusion::without_operations(ir, excluded_operations(spec), spec.label())
+    match SiblingSdk::of(spec) {
+        Some(sdk) => sdk.view(ir),
+        None => target_view(ir, excluded_operations(spec), Models::All, spec.label()),
+    }
 }
 
 /// `StaticDocs` prints a sample in every sibling SDK for every operation, so it cannot sit beside an
@@ -4788,18 +4857,10 @@ pub fn sdk_docs_suites(
     ir: &ApiGraph,
     plan: &PlanTargets<'_>,
 ) -> Result<Vec<crate::verify::DocsSnippetSuite>, CoreError> {
-    let (shared, own): (Vec<SiblingSdk<'_>>, Vec<SiblingSdk<'_>>) = plan
-        .sdks()
-        .filter(SiblingSdk::emits_docs)
-        .partition(|sdk| sdk.excluded_operations().is_empty());
-    let mut suites = sdk_docs_suites_over(ir, shared)?;
-    // An SDK that leaves operations out samples its own view of the graph.
-    for sdk in own {
-        let view = crate::graph::exclusion::without_operations(
-            ir,
-            sdk.excluded_operations(),
-            sdk.label(),
-        )?;
+    // Each SDK samples its own view of the graph: the operations and models it emits.
+    let mut suites = Vec::new();
+    for sdk in plan.sdks().filter(SiblingSdk::emits_docs) {
+        let view = sdk.view(ir)?;
         suites.extend(sdk_docs_suites_over(&view, vec![sdk])?);
     }
     Ok(suites)

@@ -41,6 +41,38 @@ derive the generated package name unless package metadata supplies a registry na
 Package metadata defaults to version `0.1.0`. `source_only()` disables generated docs and package
 metadata. `without_docs()` disables docs only; `package_metadata(bool)` controls metadata files.
 
+## Which models an SDK emits
+
+An SDK target emits only the models its own operations reach. The roots are the request and
+response bodies, parameters, headers and error bodies of the operations the target emits after its
+`.exclude(...)` selectors, plus the schemas `register_input_schema` and `register_output_schema`
+register. Every model a root references is emitted too, through fields, arrays, maps, unions and
+their variants, enums, nullable wrappers and recursive references. The models file, the package
+exports, `reference.md` and the contract test all list the same set, and `gnr8 generate` removes a
+model that leaves it like any other output it no longer produces.
+
+A model no operation reaches, such as a webhook payload or a type only a message queue carries, is
+left out. Keep it, and every model it reaches, with `.model_root(schema)`, which takes a schema id or
+a bare type name and may be called more than once:
+
+```rust
+TsSdk::new()
+    .module("@acme/client")
+    .to("generated/ts")
+    .model_root("OrderWebhook")
+```
+
+`.all_models()` emits every model in the graph instead, except the ones only excluded operations
+reach. A root that names no schema, a bare name that matches several, and a root beside
+`.all_models()` are configuration errors. A `generate` run that changes a target's output and leaves
+models out names them on stderr:
+
+```text
+note: TsSdk (generated/ts) emits only the models its operations reach and leaves out 2 models: OrderWebhook, WebhookPayload. Keep one with `.model_root("<schema id>")`, or every one with `.all_models()`.
+```
+
+OpenAPI targets, the API graph and `gnr8 changes` describe the whole API and keep every schema.
+
 ## Generated contract tests
 
 Every SDK target emits a contract test beside its sources, derived from the same API graph the SDK

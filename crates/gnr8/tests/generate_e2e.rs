@@ -959,3 +959,211 @@ fn generate_go_cli_is_a_noop_on_second_run() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A spec whose `Draft` schema, and the `DraftNote` it holds, no operation reaches.
+const MODEL_REACH_SPEC: &str = r##"openapi: 3.1.0
+info:
+  title: Bookstore
+  version: 1.0.0
+paths:
+  /books/{book_id}:
+    get:
+      operationId: getBook
+      parameters:
+        - name: book_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Book" }
+components:
+  schemas:
+    Book:
+      type: object
+      required: [id, author]
+      properties:
+        id: { type: integer }
+        author: { $ref: "#/components/schemas/Author" }
+    Author:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+    Draft:
+      type: object
+      required: [note]
+      properties:
+        note: { $ref: "#/components/schemas/DraftNote" }
+    DraftNote:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+"##;
+
+/// A Python SDK pipeline; `ROOT` is replaced by the target's model declarations.
+const MODEL_REACH_PIPELINE: &str = r#"use gnr8::sdk::prelude::*;
+
+fn main() -> std::process::ExitCode {
+    gnr8::worker::run(
+        Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(PySdk::new().module("bookstore").to("sdk")ROOT),
+    )
+}
+"#;
+
+/// A fresh clone of `from`: the spec, the SDK, the API graph and `.gnr8/` without the cache and build directories
+/// git ignores, so it holds neither the ownership manifest nor a built worker.
+fn clone_model_reach_project(from: &Path, to: &Path) {
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create a clone directory");
+        for entry in std::fs::read_dir(from).expect("read a source directory") {
+            let entry = entry.expect("read a source entry");
+            let name = entry.file_name();
+            if entry.file_type().expect("stat a source entry").is_dir() {
+                if !matches!(name.to_string_lossy().as_ref(), "target" | "cache") {
+                    copy_tree(&entry.path(), &to.join(&name));
+                }
+            } else {
+                std::fs::copy(entry.path(), to.join(&name)).expect("copy a clone file");
+            }
+        }
+    }
+    copy_tree(&from.join(".gnr8"), &to.join(".gnr8"));
+    copy_tree(&from.join("sdk"), &to.join("sdk"));
+    copy_tree(&from.join("generated"), &to.join("generated"));
+    std::fs::copy(from.join("openapi.yaml"), to.join("openapi.yaml")).expect("copy the spec");
+}
+
+/// An SDK emits the models a declared root reaches, and removing the root removes them.
+///
+/// The first generate keeps `Draft` and the `DraftNote` it holds through `.model_root("Draft")`. A
+/// fresh clone, with no manifest and no cache, checks clean against what it wrote. Dropping the root
+/// rewrites the models without them and says why on stderr; the next generate writes nothing and
+/// says nothing, and `check` agrees.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn generate_removes_models_no_operation_reaches_and_says_so() {
+    if Command::new("cargo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!(
+            "skipping generate_removes_models_no_operation_reaches_and_says_so: cargo unavailable"
+        );
+        return;
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "gnr8-e2e-model-reach-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("create the staging dir");
+    std::fs::write(root.join("openapi.yaml"), MODEL_REACH_SPEC).expect("write the spec");
+    let (ok, out, err) = run_gnr8(&root, &["init"]);
+    assert!(
+        ok,
+        "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let pipeline = root.join(".gnr8/src/main.rs");
+    std::fs::write(
+        &pipeline,
+        MODEL_REACH_PIPELINE.replace("ROOT", ".model_root(\"Draft\")"),
+    )
+    .expect("write the pipeline");
+
+    let (ok, out, err) = run_gnr8(&root, &["generate"]);
+    assert!(ok, "generate must succeed.\nstdout:\n{out}\nstderr:\n{err}");
+    let models = std::fs::read_to_string(root.join("sdk/models.py")).expect("read models.py");
+    for name in ["Book", "Author", "Draft", "DraftNote"] {
+        assert!(
+            models.contains(&format!("class {name}(")),
+            "models.py must declare {name}:\n{models}"
+        );
+    }
+    assert!(
+        !err.contains("note:"),
+        "a run that leaves nothing out says nothing:\n{err}"
+    );
+
+    let clone = root.with_file_name(format!(
+        "{}-clone",
+        root.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    clone_model_reach_project(&root, &clone);
+    let (ok, out, err) = run_gnr8(&clone, &["check", "-v"]);
+    assert!(
+        ok,
+        "a fresh clone must check clean after generate.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let _ = std::fs::remove_dir_all(&clone);
+
+    std::fs::write(&pipeline, MODEL_REACH_PIPELINE.replace("ROOT", "")).expect("drop the root");
+    let (ok, out, err) = run_gnr8(&root, &["--json", "generate"]);
+    assert!(
+        ok,
+        "generate without the root must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&out).expect("generate --json is JSON");
+    assert!(
+        report["written"]
+            .as_array()
+            .expect("written is an array")
+            .iter()
+            .any(|path| path.as_str() == Some("sdk/models.py")),
+        "models.py must be rewritten without the models the root reached:\n{out}"
+    );
+    let models = std::fs::read_to_string(root.join("sdk/models.py")).expect("read models.py");
+    for name in ["Draft", "DraftNote"] {
+        assert!(
+            !models.contains(&format!("class {name}(")),
+            "models.py must not declare {name}:\n{models}"
+        );
+    }
+    assert!(
+        err.contains(
+            "note: PySdk (sdk) emits only the models its operations reach and leaves out 2 models: \
+             Draft, DraftNote."
+        ),
+        "the run that removes models must say which and why:\n{err}"
+    );
+
+    let (ok, out, err) = run_gnr8(&root, &["--json", "generate"]);
+    assert!(
+        ok,
+        "a second generate must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&out).expect("generate --json is JSON");
+    assert_eq!(
+        report["counts"]["written"],
+        serde_json::json!(0),
+        "a second generate writes nothing:\n{out}"
+    );
+    assert_eq!(
+        report["counts"]["deleted"],
+        serde_json::json!(0),
+        "a second generate deletes nothing:\n{out}"
+    );
+    assert!(
+        !err.contains("note:"),
+        "a run that changes nothing says nothing:\n{err}"
+    );
+    let (ok, out, err) = run_gnr8(&root, &["check"]);
+    assert!(
+        ok,
+        "check must agree with generate.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

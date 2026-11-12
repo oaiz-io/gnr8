@@ -182,6 +182,20 @@ pub struct PipelineOutcome {
     pub cli_help_suites: Vec<crate::verify::CliHelpSuite>,
     /// How many distinct source files contributed a fact to the graph.
     pub source_files: usize,
+    /// The models each SDK target leaves out because nothing it emits reaches them, in plan order.
+    /// A target that leaves none out is not listed.
+    pub unreached_models: Vec<UnreachedModels>,
+}
+
+/// The models one SDK target leaves out because none of its operations or model roots reaches them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreachedModels {
+    /// The target's declaration name, such as `TsSdk`.
+    pub target: String,
+    /// The project-relative directory the target writes.
+    pub dir: String,
+    /// The ids of the schemas it leaves out, sorted.
+    pub schemas: Vec<String>,
 }
 
 /// The loop-safety anchors a plan's targets declare, plus gnr8's own workspace directory.
@@ -211,6 +225,37 @@ pub fn readiness_targets(plan: &StagePlan) -> Vec<ReadinessTarget> {
             } => readiness_targets.clone(),
         })
         .collect()
+}
+
+/// The models each SDK target of a plan leaves out because nothing it emits reaches them.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when an SDK's exclusions or model declaration are invalid.
+pub fn unreached_models(
+    plan: &StagePlan,
+    ir: &ApiGraph,
+) -> Result<Vec<UnreachedModels>, CoreError> {
+    let mut unreached = Vec::new();
+    for stage in &plan.targets {
+        let PlanStage::Builtin(spec) = stage else {
+            continue;
+        };
+        let Some(sdk) = builtins::SiblingSdk::of(spec) else {
+            continue;
+        };
+        let mut schemas = sdk.unreached_models(ir)?;
+        if schemas.is_empty() {
+            continue;
+        }
+        schemas.sort();
+        unreached.push(UnreachedModels {
+            target: sdk.label().to_string(),
+            dir: sdk.dir().to_string(),
+            schemas,
+        });
+    }
+    Ok(unreached)
 }
 
 /// The generated contract-test suites a plan's targets declare for one graph.
@@ -478,6 +523,7 @@ pub fn run(
     // writers apply to user-configured target output; the versioned graph must remain exact JSON.
     let contract_test_suites = contract_test_suites(plan, &generation_ir)?;
     let cli_help_suites = cli_help_suites(plan, &generation_ir)?;
+    let unreached_models = unreached_models(plan, &generation_ir)?;
 
     artifacts.begin_stage("gnr8:GraphArtifact");
     artifacts.create(crate::graph_artifact::GRAPH_ARTIFACT_PATH, rendered_graph?)?;
@@ -493,6 +539,7 @@ pub fn run(
         contract_test_suites,
         cli_help_suites,
         source_files,
+        unreached_models,
     })
 }
 

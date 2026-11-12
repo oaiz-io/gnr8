@@ -504,6 +504,14 @@ fn run_generate(force: bool, policy: WorkerPolicy, output: Output) -> Result<()>
 
     let diagnostics = run.outcome.diagnostics;
     print_diagnostics(output, &diagnostics);
+    for note in unreached_model_notes(
+        &run.outcome.unreached_models,
+        &outcome.written,
+        &outcome.deleted,
+        output.verbose > 0,
+    ) {
+        eprintln!("{note}");
+    }
     // Warn (stderr) for every protected file so the user SEES which outputs were not clobbered.
     for path in &outcome.skipped {
         eprintln!(
@@ -1888,6 +1896,46 @@ fn lifecycle_summary(outcome: &gnr8_engine::lifecycle::GenerateOutcome) -> Strin
     )
 }
 
+/// How many left-out model ids a note names without `-v`.
+const UNREACHED_MODELS_NAMED: usize = 5;
+
+/// One `note:` per SDK target that leaves models out and whose output this run changed.
+///
+/// An SDK emits only the models its operations and declared roots reach. A project that relied on
+/// every model being emitted sees its files change with no word of why, so the run that changes a
+/// target's output names what it left out and the two ways to keep a model. A run that changes
+/// nothing under the target stays quiet, which keeps a repeated `generate` silent. Pure, so the
+/// wording is testable without running a pipeline.
+fn unreached_model_notes(
+    unreached: &[gnr8_engine::pipeline::UnreachedModels],
+    written: &[String],
+    deleted: &[String],
+    all: bool,
+) -> Vec<String> {
+    unreached
+        .iter()
+        .filter(|target| {
+            let dir = target.dir.trim_start_matches("./").trim_end_matches('/');
+            let prefix = format!("{dir}/");
+            written.iter().chain(deleted).any(|path| path.starts_with(&prefix))
+        })
+        .map(|target| {
+            let count = target.schemas.len();
+            let shown = if all { count } else { count.min(UNREACHED_MODELS_NAMED) };
+            let mut names = target.schemas[..shown].join(", ");
+            if shown < count {
+                names = format!("{names}, and {} more (-v lists them)", count - shown);
+            }
+            let noun = if count == 1 { "model" } else { "models" };
+            format!(
+                "note: {} ({}) emits only the models its operations reach and leaves out {count} {noun}: {names}. \
+                 Keep one with `.model_root(\"<schema id>\")`, or every one with `.all_models()`.",
+                target.target, target.dir
+            )
+        })
+        .collect()
+}
+
 pub(crate) fn print_diagnostics(output: Output, diagnostics: &[gnr8_engine::graph::Diagnostic]) {
     if diagnostics.is_empty() || output.json {
         return;
@@ -1972,7 +2020,8 @@ mod tests {
         diagnostic_counts, diagnostic_summary, link_typescript_node_modules, local_node_modules,
         local_typescript_compiler, materialize_artifact_group, readiness_for_target,
         reconcile_doctor_source_probe, text_output_excerpt, typescript_compiler,
-        validate_typescript_package_entrypoints, MaterializedTarget, TypeScriptCompiler,
+        unreached_model_notes, validate_typescript_package_entrypoints, MaterializedTarget,
+        TypeScriptCompiler,
     };
     use gnr8_engine::graph::{Diagnostic, DiagnosticCategory, SourceSpan};
     use gnr8_engine::sdk::{Artifact, ReadinessKind, ReadinessTarget};
@@ -1987,6 +2036,49 @@ mod tests {
             std::env::temp_dir().join(format!("gnr8-doctor-{name}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    fn left_out(dir: &str, count: usize) -> gnr8_engine::pipeline::UnreachedModels {
+        gnr8_engine::pipeline::UnreachedModels {
+            target: "TsSdk".to_string(),
+            dir: dir.to_string(),
+            schemas: (0..count).map(|n| format!("Model{n}")).collect(),
+        }
+    }
+
+    #[test]
+    fn a_note_names_left_out_models_only_when_the_run_changed_that_target() {
+        let unreached = [left_out("./sdks/ts/", 2), left_out("sdks/go", 1)];
+        let notes = unreached_model_notes(
+            &unreached,
+            &[],
+            &["sdks/ts/src/models.ts".to_string()],
+            false,
+        );
+        assert_eq!(
+            notes,
+            ["note: TsSdk (./sdks/ts/) emits only the models its operations reach and leaves out 2 \
+              models: Model0, Model1. Keep one with `.model_root(\"<schema id>\")`, or every one \
+              with `.all_models()`."]
+        );
+        assert_eq!(
+            unreached_model_notes(&unreached, &["sdks/tsx/a.ts".to_string()], &[], false),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_note_names_five_left_out_models_and_every_one_under_verbose() {
+        let unreached = [left_out("sdks/ts", 7)];
+        let written = ["sdks/ts/src/models.ts".to_string()];
+        let short = unreached_model_notes(&unreached, &written, &[], false);
+        assert!(
+            short[0].contains("Model4, and 2 more (-v lists them)."),
+            "{}",
+            short[0]
+        );
+        let full = unreached_model_notes(&unreached, &written, &[], true);
+        assert!(full[0].contains("Model5, Model6. Keep"), "{}", full[0]);
     }
 
     #[test]

@@ -9,6 +9,25 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- `GoSdk`, `PySdk` and `TsSdk` emit only the models their own operations reach: the request and
+  response bodies, parameters, headers and error bodies of the operations the target keeps after
+  `.exclude(...)`, the schemas `register_input_schema` and `register_output_schema` register, and
+  every model those reference. A project whose SDK carried models no operation reaches, such as
+  webhook payloads or types only shared with another service, loses them on its next
+  `gnr8 generate`, which removes them and names them on stderr. Keep one, with every model it
+  reaches, with `.model_root("Schema")`; keep every model with `.all_models()`, which restores the
+  previous output byte for byte. OpenAPI targets, the API graph and `gnr8 changes` are unchanged.
+- `GoSdk`, `PySdk` and `TsSdk` have new public `model_roots` and `all_models` fields, so a struct
+  literal of one of them must set them. Build them with `new()` and the builder methods instead.
+
+### Added
+
+- `GoSdk`, `PySdk` and `TsSdk` accept `.model_root(schema)` and `.all_models()`. A root names a
+  schema by id or bare type name; one that names no schema or several is a configuration error, and
+  so is a root beside `.all_models()`.
+
 ## 0.21.0 — 2026-10-22
 
 ### Breaking
