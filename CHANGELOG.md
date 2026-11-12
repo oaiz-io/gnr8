@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.22.0 — 2026-11-12
+
 ### Breaking
 
 - `GoSdk`, `PySdk` and `TsSdk` emit only the models their own operations reach: the request and
@@ -27,6 +29,11 @@ must move the minor version.
 - `GoSdk`, `PySdk` and `TsSdk` accept `.model_root(schema)` and `.all_models()`. A root names a
   schema by id or bare type name; one that names no schema or several is a configuration error, and
   so is a root beside `.all_models()`.
+
+### Fixed
+
+- A union schema that no operation reaches no longer makes `GoSdk` generation fail, because the
+  model is not emitted. With `.all_models()` it fails as before.
 
 ## 0.21.0 — 2026-10-22
 
