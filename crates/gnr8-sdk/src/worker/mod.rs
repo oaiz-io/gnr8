@@ -41,7 +41,7 @@ const EXIT_HANDSHAKE: u8 = 2;
 /// The by-value `Pipeline` is the public contract a `.gnr8/` `main()` calls: it hands the composed
 /// pipeline over wholesale.
 #[allow(clippy::needless_pass_by_value)]
-#[must_use]
+#[must_use = "return this exit code from `main` so the host sees how the session ended"]
 pub fn run(pipeline: Pipeline) -> ExitCode {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

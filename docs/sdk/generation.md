@@ -62,10 +62,23 @@ TsSdk::new()
     .model_root("OrderWebhook")
 ```
 
+The registered schemas are roots of every SDK target. A target that serves a narrower audience
+stops that with `.without_registered_schema_roots()`: it then emits the models its operations and
+its `.model_root(...)` schemas reach, and a registered schema only when one of those reaches it.
+The other targets keep the registered schemas:
+
+```rust
+TsSdk::new()
+    .module("@acme/public-client")
+    .to("generated/ts-public")
+    .exclude(OperationSelector::PathPrefix("/internal/".to_string()))
+    .without_registered_schema_roots()
+```
+
 `.all_models()` emits every model in the graph instead, except the ones only excluded operations
-reach. A root that names no schema, a bare name that matches several, and a root beside
-`.all_models()` are configuration errors. A `generate` run that changes a target's output and leaves
-models out names them on stderr:
+reach. A root that names no schema, a bare name that matches several, and a root or
+`.without_registered_schema_roots()` beside `.all_models()` are configuration errors. A `generate`
+run that changes a target's output and leaves models out names them on stderr:
 
 ```text
 note: TsSdk (generated/ts) emits only the models its operations reach and leaves out 2 models: OrderWebhook, WebhookPayload. Keep one with `.model_root("<schema id>")`, or every one with `.all_models()`.

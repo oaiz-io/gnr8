@@ -1,0 +1,61 @@
+openapi: 3.1.0
+info:
+  title: Library
+  version: 1.0.0
+paths:
+  /books/{book_id}:
+    get:
+      operationId: getBook
+      parameters:
+        - name: book_id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Book" }
+  /staff/members:
+    get:
+      operationId: listStaffMembers
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffMember" }
+components:
+  schemas:
+    Book:
+      type: object
+      required: [id, author]
+      properties:
+        id: { type: integer }
+        author: { $ref: "#/components/schemas/Author" }
+    Author:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+    StaffMember:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string }
+    SupportTicket:
+      type: object
+      required: [note]
+      properties:
+        note: { $ref: "#/components/schemas/SupportNote" }
+    SupportNote:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+    BookWebhook:
+      type: object
+      required: [book]
+      properties:
+        book: { $ref: "#/components/schemas/Book" }
