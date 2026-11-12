@@ -404,7 +404,8 @@ side of the exchange the payload is on. The OpenAPI `required` array:
 | both | the request and response answers separately | gnr8 emits `TypeInput` and `TypeOutput` when presence or null behavior differs |
 | registered non-HTTP input/output | the corresponding request/response answer | `register_input_schema` and `register_output_schema` add roots without fake routes |
 
-The direction is derived from HTTP operations plus explicitly registered non-HTTP roots. The walk is
+The direction is derived from HTTP operations plus explicitly registered non-HTTP roots. SDK targets
+emit the models a registered root reaches as well as those their operations reach. The walk is
 transitive through named fields. If a shared schema or anything it references differs by direction,
 the artifact projection creates distinct input and output components/models and rewrites references.
 

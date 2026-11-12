@@ -1,0 +1,938 @@
+{
+  "module": "example.com/shop",
+  "base_path": "/",
+  "title": "Shop API",
+  "security": [],
+  "group_docs": [],
+  "diagnostics": [],
+  "operations": [
+    {
+      "id": "getOrder",
+      "method": "GET",
+      "path": "/orders/{id}",
+      "handler": "getOrder",
+      "group": "orders",
+      "summary": "Reads one order.",
+      "params": [
+        {
+          "name": "id",
+          "location": "path",
+          "required": true,
+          "schema": {
+            "type": "primitive",
+            "of": {
+              "prim": "string"
+            }
+          },
+          "provenance": {
+            "file": "shop.go",
+            "start_line": 1,
+            "end_line": 1
+          }
+        },
+        {
+          "name": "sort",
+          "location": "query",
+          "required": false,
+          "schema": {
+            "type": "named",
+            "of": "shop.SortOrder"
+          },
+          "provenance": {
+            "file": "shop.go",
+            "start_line": 1,
+            "end_line": 1
+          }
+        }
+      ],
+      "request_body": null,
+      "responses": [
+        {
+          "status": 200,
+          "body": {
+            "ref_id": "shop.Order"
+          },
+          "content_types": [
+            "application/json"
+          ]
+        },
+        {
+          "status": 404,
+          "body": {
+            "ref_id": "shop.OrderProblem"
+          },
+          "content_types": [
+            "application/json"
+          ]
+        }
+      ],
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "createOrder",
+      "method": "POST",
+      "path": "/orders",
+      "handler": "createOrder",
+      "group": "orders",
+      "summary": "Places an order.",
+      "params": [],
+      "request_body": {
+        "ref_id": "shop.OrderDraft"
+      },
+      "request_body_required": true,
+      "request_body_content_type": "application/json",
+      "responses": [
+        {
+          "status": 201,
+          "body": {
+            "ref_id": "shop.Order"
+          },
+          "content_types": [
+            "application/json"
+          ]
+        }
+      ],
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "listAudit",
+      "method": "GET",
+      "path": "/admin/audit",
+      "handler": "listAudit",
+      "group": "admin",
+      "summary": "Lists the audit log.",
+      "params": [],
+      "request_body": null,
+      "responses": [
+        {
+          "status": 200,
+          "body": {
+            "ref_id": "admin.AuditLog"
+          },
+          "content_types": [
+            "application/json"
+          ]
+        }
+      ],
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    }
+  ],
+  "schemas": [
+    {
+      "id": "admin.AuditEntry",
+      "name": "AuditEntry",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "actor",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "admin.AuditLog",
+      "name": "AuditLog",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "entries",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "array",
+              "of": {
+                "type": "named",
+                "of": "admin.AuditEntry"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.BankTransfer",
+      "name": "BankTransfer",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "iban",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          },
+          {
+            "json_name": "kind",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "enum",
+              "of": [
+                "transfer"
+              ]
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.CardPayment",
+      "name": "CardPayment",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "kind",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "enum",
+              "of": [
+                "card"
+              ]
+            }
+          },
+          {
+            "json_name": "last4",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.CatalogProduct",
+      "name": "CatalogProduct",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "sku",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.CouponDiscount",
+      "name": "CouponDiscount",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "percent",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "int",
+                "bits": 64,
+                "signed": true
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.GiftTag",
+      "name": "GiftTag",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "label",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.MoneyAmount",
+      "name": "MoneyAmount",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "amount",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "int",
+                "bits": 64,
+                "signed": true
+              }
+            }
+          },
+          {
+            "json_name": "currency",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.Order",
+      "name": "Order",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "discount",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": true,
+            "serializer_may_emit_null": true,
+            "validator_requires_presence": true,
+            "validator_rejects_null": false,
+            "schema": {
+              "type": "named",
+              "of": "shop.CouponDiscount"
+            }
+          },
+          {
+            "json_name": "id",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          },
+          {
+            "json_name": "lines",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "array",
+              "of": {
+                "type": "named",
+                "of": "shop.OrderLine"
+              }
+            }
+          },
+          {
+            "json_name": "payment",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.PaymentMethod"
+            }
+          },
+          {
+            "json_name": "status",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.OrderStatus"
+            }
+          },
+          {
+            "json_name": "tags",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "map",
+              "of": {
+                "key": {
+                  "type": "primitive",
+                  "of": {
+                    "prim": "string"
+                  }
+                },
+                "value": {
+                  "type": "named",
+                  "of": "shop.GiftTag"
+                }
+              }
+            }
+          },
+          {
+            "json_name": "total",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.OrderTotal"
+            }
+          },
+          {
+            "json_name": "tree",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.TreeNode"
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.OrderDraft",
+      "name": "OrderDraft",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "lines",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "array",
+              "of": {
+                "type": "named",
+                "of": "shop.OrderLine"
+              }
+            }
+          },
+          {
+            "json_name": "note",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.OrderLine",
+      "name": "OrderLine",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "product",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.CatalogProduct"
+            }
+          },
+          {
+            "json_name": "quantity",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "int",
+                "bits": 64,
+                "signed": true
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.OrderProblem",
+      "name": "OrderProblem",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "detail",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.OrderStatus",
+      "name": "OrderStatus",
+      "body": {
+        "type": "enum",
+        "of": [
+          "open",
+          "paid"
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      },
+      "enum_source_order": [
+        "open",
+        "paid"
+      ]
+    },
+    {
+      "id": "shop.OrderTotal",
+      "name": "OrderTotal",
+      "body": {
+        "type": "named",
+        "of": "shop.MoneyAmount"
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.OrderWebhook",
+      "name": "OrderWebhook",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "payload",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.WebhookPayload"
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.PaymentMethod",
+      "name": "PaymentMethod",
+      "body": {
+        "type": "union",
+        "of": [
+          {
+            "type": "named",
+            "of": "shop.CardPayment"
+          },
+          {
+            "type": "named",
+            "of": "shop.BankTransfer"
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.SortOrder",
+      "name": "SortOrder",
+      "body": {
+        "type": "enum",
+        "of": [
+          "asc",
+          "desc"
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      },
+      "enum_source_order": [
+        "asc",
+        "desc"
+      ]
+    },
+    {
+      "id": "shop.TreeEdge",
+      "name": "TreeEdge",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "target",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.TreeNode"
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.TreeNode",
+      "name": "TreeNode",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "children",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "array",
+              "of": {
+                "type": "named",
+                "of": "shop.TreeNode"
+              }
+            }
+          },
+          {
+            "json_name": "edge",
+            "serializer_may_omit": true,
+            "deserializer_accepts_absent": true,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": false,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.TreeEdge"
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.UnusedChild",
+      "name": "UnusedChild",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "note",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.UnusedThing",
+      "name": "UnusedThing",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "child",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.UnusedChild"
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    },
+    {
+      "id": "shop.WebhookPayload",
+      "name": "WebhookPayload",
+      "body": {
+        "type": "object",
+        "of": [
+          {
+            "json_name": "event",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            }
+          },
+          {
+            "json_name": "order",
+            "serializer_may_omit": false,
+            "deserializer_accepts_absent": false,
+            "deserializer_accepts_null": false,
+            "serializer_may_emit_null": false,
+            "validator_requires_presence": true,
+            "validator_rejects_null": true,
+            "schema": {
+              "type": "named",
+              "of": "shop.Order"
+            }
+          }
+        ]
+      },
+      "provenance": {
+        "file": "shop.go",
+        "start_line": 1,
+        "end_line": 1
+      }
+    }
+  ]
+}

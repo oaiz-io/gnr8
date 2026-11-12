@@ -109,8 +109,10 @@ Pipeline::new()
 ```
 
 The excluding target drops the matched operations, their per-operation policies, and every schema
-that only those operations reach. A schema another operation, a registered non-HTTP root, or a kept
-schema reaches stays. The target's contract tests, CLI and docs samples read the same reduced graph.
+that only those operations reach. In an OpenAPI target, a schema another operation, a registered
+non-HTTP root, or a kept schema reaches stays. An SDK target goes further and emits only the models
+its kept operations, registered roots and declared `.model_root(...)` schemas reach; see
+[Which models an SDK emits](../sdk/generation.md#which-models-an-sdk-emits). The target's contract tests, CLI and docs samples read the same reduced graph.
 A selector that matches no operation is a configuration error. `OpenApi31`, `OpenApi31Json`,
 `GoSdk`, `PySdk` and `TsSdk` accept exclusions. `StaticDocs` samples every operation in each sibling
 SDK, so it refuses a sibling SDK that excludes operations.

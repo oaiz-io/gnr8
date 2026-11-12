@@ -2371,6 +2371,10 @@ pub struct GoSdk {
     pub cli: Option<SdkCli>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_operations: Vec<OperationSelector>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_models: bool,
 }
 
 impl GoSdk {
@@ -2388,6 +2392,8 @@ impl GoSdk {
             contract_tests: true,
             cli: None,
             excluded_operations: Vec::new(),
+            model_roots: Vec::new(),
+            all_models: false,
         }
     }
 
@@ -2429,6 +2435,29 @@ impl GoSdk {
     #[must_use]
     pub fn exclude(mut self, selector: OperationSelector) -> Self {
         self.excluded_operations.push(selector);
+        self
+    }
+
+    /// Emit the model `schema` names, and every model it reaches, even if no operation this target
+    /// emits reaches it. `schema` is a schema id or a bare type name, as in [`RenameType`].
+    ///
+    /// The SDK emits only the models its operations reach: their request and response bodies,
+    /// parameters, headers and error bodies, everything those reference, and the schemas
+    /// [`ApiOverrides::register_input_schema`] and [`ApiOverrides::register_output_schema`]
+    /// register. Declare a root for a model reached any other way, such as a webhook payload.
+    /// Each call adds one root. A root that names no schema is a configuration error.
+    #[must_use]
+    pub fn model_root(mut self, schema: impl Into<String>) -> Self {
+        self.model_roots.push(schema.into());
+        self
+    }
+
+    /// Emit every model in the graph except those only excluded operations reach, whether or not
+    /// an operation this target emits reaches it. Declaring a [`GoSdk::model_root`] as well is a
+    /// configuration error.
+    #[must_use]
+    pub fn all_models(mut self) -> Self {
+        self.all_models = true;
         self
     }
 
@@ -2540,6 +2569,10 @@ pub struct PySdk {
     pub cli: Option<SdkCli>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_operations: Vec<OperationSelector>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_models: bool,
 }
 
 impl PySdk {
@@ -2558,6 +2591,8 @@ impl PySdk {
             contract_tests: true,
             cli: None,
             excluded_operations: Vec::new(),
+            model_roots: Vec::new(),
+            all_models: false,
         }
     }
 
@@ -2585,6 +2620,29 @@ impl PySdk {
     #[must_use]
     pub fn exclude(mut self, selector: OperationSelector) -> Self {
         self.excluded_operations.push(selector);
+        self
+    }
+
+    /// Emit the model `schema` names, and every model it reaches, even if no operation this target
+    /// emits reaches it. `schema` is a schema id or a bare type name, as in [`RenameType`].
+    ///
+    /// The SDK emits only the models its operations reach: their request and response bodies,
+    /// parameters, headers and error bodies, everything those reference, and the schemas
+    /// [`ApiOverrides::register_input_schema`] and [`ApiOverrides::register_output_schema`]
+    /// register. Declare a root for a model reached any other way, such as a webhook payload.
+    /// Each call adds one root. A root that names no schema is a configuration error.
+    #[must_use]
+    pub fn model_root(mut self, schema: impl Into<String>) -> Self {
+        self.model_roots.push(schema.into());
+        self
+    }
+
+    /// Emit every model in the graph except those only excluded operations reach, whether or not
+    /// an operation this target emits reaches it. Declaring a [`PySdk::model_root`] as well is a
+    /// configuration error.
+    #[must_use]
+    pub fn all_models(mut self) -> Self {
+        self.all_models = true;
         self
     }
 
@@ -2715,6 +2773,10 @@ pub struct TsSdk {
     pub contract_tests: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_operations: Vec<OperationSelector>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_models: bool,
 }
 
 impl TsSdk {
@@ -2730,6 +2792,8 @@ impl TsSdk {
             package_info: SdkPackageMetadata::default(),
             contract_tests: true,
             excluded_operations: Vec::new(),
+            model_roots: Vec::new(),
+            all_models: false,
         }
     }
 
@@ -2757,6 +2821,29 @@ impl TsSdk {
     #[must_use]
     pub fn exclude(mut self, selector: OperationSelector) -> Self {
         self.excluded_operations.push(selector);
+        self
+    }
+
+    /// Emit the model `schema` names, and every model it reaches, even if no operation this target
+    /// emits reaches it. `schema` is a schema id or a bare type name, as in [`RenameType`].
+    ///
+    /// The SDK emits only the models its operations reach: their request and response bodies,
+    /// parameters, headers and error bodies, everything those reference, and the schemas
+    /// [`ApiOverrides::register_input_schema`] and [`ApiOverrides::register_output_schema`]
+    /// register. Declare a root for a model reached any other way, such as a webhook payload.
+    /// Each call adds one root. A root that names no schema is a configuration error.
+    #[must_use]
+    pub fn model_root(mut self, schema: impl Into<String>) -> Self {
+        self.model_roots.push(schema.into());
+        self
+    }
+
+    /// Emit every model in the graph except those only excluded operations reach, whether or not
+    /// an operation this target emits reaches it. Declaring a [`TsSdk::model_root`] as well is a
+    /// configuration error.
+    #[must_use]
+    pub fn all_models(mut self) -> Self {
+        self.all_models = true;
         self
     }
 
