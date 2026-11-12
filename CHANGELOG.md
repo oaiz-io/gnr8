@@ -9,6 +9,8 @@ must move the minor version.
 
 ## Unreleased
 
+## 0.23.0 — 2026-11-12
+
 ### Breaking
 
 - `GoSdk`, `PySdk` and `TsSdk` have a new public `registered_schema_roots` field, so a struct
