@@ -409,8 +409,15 @@ schemas:
           validator_requires_presence: false
           validator_rejects_null: false
           schema:
-            type: any
-            of: {}
+            type: map
+            of:
+              key:
+                type: primitive
+                of:
+                  prim: string
+              value:
+                type: any
+                of: {}
           description: ~
           example: ~
         - json_name: name

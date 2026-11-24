@@ -1263,6 +1263,16 @@ fn lower_schema_type(
                     ),
                 });
             }
+            // A map whose values are free-form is an open object: `additionalProperties: true`,
+            // which is also what the OpenAPI source imports back as this same map. Its values are
+            // not objects, so they do not take a free-form value's own schema.
+            if matches!(value.as_ref(), Type::Any {}) {
+                return Ok(SchemaObject {
+                    type_name: Some("object".to_string()),
+                    additional_properties: Some(true),
+                    ..SchemaObject::default()
+                });
+            }
             Ok(SchemaObject {
                 type_name: Some("object".to_string()),
                 items: None,

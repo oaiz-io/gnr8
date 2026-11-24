@@ -1140,9 +1140,14 @@ func TestGoalResponseWellKnownAndFreeFormMap(t *testing.T) {
 	if !ok {
 		t.Fatal("metadata field not found")
 	}
-	// A free-form Go map lowers to the neutral Any type (explicitly lossy).
-	if metadata.Schema.Type != facts.TypeAny {
-		t.Errorf("metadata: want any (free-form), got %+v", metadata.Schema)
+	// A free-form Go map keeps its object shape: a string-keyed map whose values are free-form,
+	// never the free-form value itself, which could also be a scalar or an array.
+	mapped, isMap := metadata.Schema.Of.(*facts.MapType)
+	if metadata.Schema.Type != facts.TypeMap || !isMap || mapped == nil {
+		t.Fatalf("metadata: want map, got %+v", metadata.Schema)
+	}
+	if mapped.Key.Type != facts.TypePrimitive || mapped.Value.Type != facts.TypeAny {
+		t.Errorf("metadata: want map[string]any, got key %+v value %+v", mapped.Key, mapped.Value)
 	}
 
 	// A free-form-map diagnostic for GoalResponse.Metadata must exist.

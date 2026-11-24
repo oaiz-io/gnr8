@@ -62,7 +62,7 @@ pub enum Type {
     Object(Vec<Field>),              // inline object
     Enum(Vec<EnumMember>),
     Union(Vec<Type>),                // oneOf / sum types (sources that have them; targets that can)
-    Any,                             // free-form (map[string]any) — explicitly lossy
+    Any,                             // free-form JSON value (Go `any`, json.RawMessage) — explicitly lossy
     Ext(ExtTypeId),                  // a type only an extension understands (see 2c)
 }
 ```

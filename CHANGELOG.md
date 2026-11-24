@@ -9,6 +9,23 @@ must move the minor version.
 
 ## Unreleased
 
+### Breaking
+
+- **Go extraction keeps a `map[K]any` field a map.** A struct field typed `map[string]any` (or any
+  map of interface values) is now `Map { key, value: Any }` in the graph, where it used to be the
+  free-form `Any` that a Go `any` or `json.RawMessage` field also is. `encoding/json` writes such a
+  map as an object or `null`, never as a scalar or an array, and the graph now says so. The
+  generated Go, Python and TypeScript SDKs and the OpenAPI document publish such a field exactly as
+  before; a custom stage that matched `Type::Any` to find these fields must match the map instead,
+  and `gnr8 changes` against a graph extracted before this release reports `type.changed` once for
+  each of them. A map keyed by anything but a string (`map[int]any`) is now refused by the OpenAPI
+  target like every other such map, where before it was published as a free-form object.
+- **OpenAPI publishes a map of free-form values as `additionalProperties: true`.** It used to nest a
+  free-form object schema under `additionalProperties`, which said every value was an object. This
+  changes the document for a Python `dict[str, Any]`, a TypeScript `Record<string, unknown>`, a
+  non-literal `gin.H` response, an imported open object, and a custom stage's `Map { value: Any }`;
+  the OpenAPI source already imports `additionalProperties: true` as this map.
+
 ## 0.23.0 — 2026-11-12
 
 ### Breaking
