@@ -192,6 +192,25 @@ fn dropped_schemas<'a>(
     })
 }
 
+/// The ids of the schemas `roots` name, together with every schema they reach. Each root resolves
+/// exactly as an SDK target's model root does ([`Models::Reached`]), so a root naming a schema the
+/// generation projection split selects both halves.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when a root names no schema or more than one.
+pub(crate) fn schemas_rooted_at<'a>(
+    graph: &'a ApiGraph,
+    roots: &[String],
+    target: &str,
+) -> Result<BTreeSet<&'a str>, CoreError> {
+    let mut seeds = Vec::new();
+    for root in roots {
+        seeds.extend(model_root(graph, root, target)?);
+    }
+    Ok(schemas_reached_from(graph, seeds))
+}
+
 /// The ids of the schemas a declared model root names.
 ///
 /// A root matches a schema by its id or bare name. The generation projection splits a schema whose

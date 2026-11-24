@@ -720,7 +720,7 @@ pub mod prelude {
         Header, MarkIdempotent, NestJs, OpenApi, OpenApi31, OpenApi31Json, OpenApiFieldPatch,
         OpenApiMetadata, OpenApiSchemaPatch, OperationSelector, ParameterOverride, PySdk,
         RenameOperation, RenameType, RequestParameter, RequireOperationDocs, ResponseOverride,
-        SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
+        RustModels, SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticDocs, StaticFiles, TsSdk,
     };
     pub use super::cli::{OwnedCommand, SdkCli};

@@ -2991,6 +2991,119 @@ impl Default for TsSdk {
     }
 }
 
+/// The Rust models target: Rust types with Serde serialization for the schemas its model roots
+/// reach, written as one Rust module tree under [`RustModels::to`].
+///
+/// The target emits models only: no HTTP client, no package manifest. Its output directory is a
+/// module whose root is `mod.rs`, so a crate declares it where it wants it:
+///
+/// ```text
+/// #[rustfmt::skip] // gnr8 owns these bytes; `gnr8 check` reports any edit.
+/// pub mod models;
+/// ```
+///
+/// Nothing reaches a model here except a root the declaration names, because the target emits no
+/// operations: [`RustModels::model_root`] selects a schema by its id or bare type name, and the
+/// target emits it together with every model it references. [`RustModels::all_models`] emits every
+/// model in the graph instead. A declaration with neither is a configuration error.
+///
+/// Field presence and nullability follow the direction the API graph reaches each schema from,
+/// exactly as in the other SDK targets. A graph shape the target cannot represent faithfully fails
+/// generation with an error naming the schema and field; see `docs/sdk/rust-models.md` for the
+/// supported subset.
+///
+/// The declaration's facts are private: the builder sets them and the accessors read them, so no
+/// caller can build a declaration the builder could not.
+///
+/// ```compile_fail
+/// let models = gnr8::sdk::builtins::RustModels { dir: "src/models".to_string() };
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RustModels {
+    dir: String,
+    #[serde(default)]
+    layout: SdkFileLayout,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    all_models: bool,
+}
+
+impl RustModels {
+    /// A Rust models target with no output directory and no model roots yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the project-relative directory the module tree is written to (e.g. `"src/models"`). Its
+    /// root file is `<dir>/mod.rs`.
+    #[must_use]
+    pub fn to(mut self, dir: impl Into<String>) -> Self {
+        self.dir = dir.into();
+        self
+    }
+
+    /// Emit the model `schema` names, and every model it references. `schema` is a schema id or a
+    /// bare type name, as in [`RenameType`]. A name the graph splits into input and output models
+    /// selects both.
+    ///
+    /// Each call adds one root. A root that names no schema, or a bare name several schemas share,
+    /// is a configuration error.
+    #[must_use]
+    pub fn model_root(mut self, schema: impl Into<String>) -> Self {
+        self.model_roots.push(schema.into());
+        self
+    }
+
+    /// Emit every model in the graph. Declaring a [`RustModels::model_root`] as well is a
+    /// configuration error.
+    #[must_use]
+    pub const fn all_models(mut self) -> Self {
+        self.all_models = true;
+        self
+    }
+
+    /// Set the generated file layout. The compact layout (the default) writes every model into
+    /// `mod.rs`; a split layout writes one file per model, placed by the layout's model directory
+    /// and model file template. Operation settings do not apply: the target emits no operations.
+    #[must_use]
+    pub fn layout(mut self, layout: SdkFileLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Write one file per model beside `mod.rs`.
+    #[must_use]
+    pub fn split_files(self) -> Self {
+        self.layout(SdkFileLayout::split().root_models())
+    }
+
+    /// The project-relative output directory [`RustModels::to`] set; empty until it is set.
+    #[must_use]
+    pub fn dir(&self) -> &str {
+        &self.dir
+    }
+
+    /// The file layout [`RustModels::layout`] set.
+    #[must_use]
+    pub const fn file_layout(&self) -> &SdkFileLayout {
+        &self.layout
+    }
+
+    /// The model roots, in declaration order.
+    #[must_use]
+    pub fn model_roots(&self) -> &[String] {
+        &self.model_roots
+    }
+
+    /// Whether [`RustModels::all_models`] was called.
+    #[must_use]
+    pub const fn emits_all_models(&self) -> bool {
+        self.all_models
+    }
+}
+
 /// Package-manager metadata shared by generated SDK targets.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SdkPackageMetadata {

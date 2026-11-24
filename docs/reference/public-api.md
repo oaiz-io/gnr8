@@ -113,6 +113,7 @@ See [OpenAPI generation](../openapi/generation.md).
 | `GoSdk` | Go client/model/docs/package/contract-test target; `.cli("bookstore")` emits a `cmd/<program>/` project |
 | `PySdk` | Python client/model/docs/package/contract-test target; `.cli("bookstore")` emits a `cli/` subpackage |
 | `TsSdk` | TypeScript client/model/docs/package/contract-test target |
+| `RustModels` | Rust types with Serde serialization for the schemas its `.model_root(...)`s reach (or `.all_models()`); models only; see [Rust models](../sdk/rust-models.md) |
 | `SdkCli` | generated-CLI program name, command scope, default host, and Go library seam (`hand_owned_main`, `owned_command`); unrelated to gnr8's own command surface |
 | `OwnedCommand` | one hand-owned command the generated Go dispatcher names, at the root (`SdkCli::owned_command`) or under a topic (`CliTopic::owned_command`) |
 | `CliRenameError` | one retired invocation for `SdkCli::rename_error`: a path, or a command path ending in a retired `--flag`; prints the replacement and exits 2 |

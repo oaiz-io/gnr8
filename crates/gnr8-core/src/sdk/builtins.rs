@@ -150,7 +150,8 @@ impl<'a> SiblingSdk<'a> {
             BuiltinTarget::OpenApi31(_)
             | BuiltinTarget::OpenApi31Json(_)
             | BuiltinTarget::StaticFiles(_)
-            | BuiltinTarget::StaticDocs(_) => None,
+            | BuiltinTarget::StaticDocs(_)
+            | BuiltinTarget::RustModels(_) => None,
         }
     }
 
@@ -306,6 +307,7 @@ impl<'a> PlanTargets<'a> {
                     BuiltinTarget::GoSdk(_)
                     | BuiltinTarget::PySdk(_)
                     | BuiltinTarget::TsSdk(_)
+                    | BuiltinTarget::RustModels(_)
                     | BuiltinTarget::StaticFiles(_)
                     | BuiltinTarget::StaticDocs(_) => Box::new(std::iter::empty()),
                 }
@@ -3822,6 +3824,69 @@ impl TargetExec for TsSdk {
     }
 }
 
+impl TargetExec for RustModels {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
+        if self.dir().is_empty() {
+            return Err(CoreError::Config {
+                message: "RustModels target has no output dir — call .to(\"src/models\")"
+                    .to_string(),
+            });
+        }
+        // Presence and nullability are read from the directions the WHOLE graph reaches each schema
+        // from, so the projection runs before the selection, never on a graph the selection cut.
+        let projected = crate::graph::projection::for_generation(ir)?;
+        let ir = &*projected;
+        let selected = rust_models_selection(self, ir)?;
+        let files = crate::rustmodels::generate_files(ir, &selected, self.file_layout())?;
+        write_sdk_files(out, self.dir(), files)
+    }
+
+    /// The module tree may sit inside an analyzed source tree, so it is a loop-safety anchor like
+    /// every other generated directory.
+    fn output_anchors(&self) -> Vec<String> {
+        if self.dir().is_empty() {
+            Vec::new()
+        } else {
+            vec![self.dir().trim_end_matches('/').to_string()]
+        }
+    }
+}
+
+/// The schema ids a `RustModels` declaration emits: every schema with `all_models`, otherwise the
+/// schemas its model roots reach.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when the declaration names no root and does not ask for every
+/// model, sets both, or names a root that matches no schema or several.
+fn rust_models_selection<'g>(
+    target: &RustModels,
+    ir: &'g ApiGraph,
+) -> Result<BTreeSet<&'g str>, CoreError> {
+    match (target.emits_all_models(), target.model_roots()) {
+        (true, []) => Ok(ir.schemas.iter().map(|schema| schema.id.as_str()).collect()),
+        (true, [root, ..]) => Err(CoreError::Config {
+            message: format!(
+                "RustModels emits every model with `all_models()`, so its model root {root:?} has \
+                 no effect; remove one of them"
+            ),
+        }),
+        (false, []) => Err(CoreError::Config {
+            message: "RustModels selects no models — name each root with \
+                      .model_root(\"<schema id or type name>\"), or emit every model with \
+                      .all_models()"
+                .to_string(),
+        }),
+        (false, roots) => crate::graph::exclusion::schemas_rooted_at(ir, roots, "RustModels"),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // PostProcess
 // ---------------------------------------------------------------------------------------------------
@@ -4673,6 +4738,7 @@ pub fn generate_target(
             crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::TypeScript(t), plan)?;
             t.generate(ir, out, cx, store)
         }
+        BuiltinTarget::RustModels(t) => t.generate(ir, out, cx, store),
     }
 }
 
@@ -4684,7 +4750,10 @@ fn excluded_operations(spec: &BuiltinTarget) -> &[OperationSelector] {
         BuiltinTarget::GoSdk(t) => &t.excluded_operations,
         BuiltinTarget::PySdk(t) => &t.excluded_operations,
         BuiltinTarget::TsSdk(t) => &t.excluded_operations,
-        BuiltinTarget::StaticFiles(_) | BuiltinTarget::StaticDocs(_) => &[],
+        // `RustModels` emits no operations, so it has none to leave out.
+        BuiltinTarget::StaticFiles(_)
+        | BuiltinTarget::StaticDocs(_)
+        | BuiltinTarget::RustModels(_) => &[],
     }
 }
 
@@ -4738,6 +4807,7 @@ pub fn target_output_anchors(spec: &BuiltinTarget) -> Vec<String> {
         BuiltinTarget::GoSdk(t) => t.output_anchors(),
         BuiltinTarget::PySdk(t) => t.output_anchors(),
         BuiltinTarget::TsSdk(t) => t.output_anchors(),
+        BuiltinTarget::RustModels(t) => t.output_anchors(),
     }
 }
 
@@ -4753,6 +4823,7 @@ pub fn target_readiness_targets(spec: &BuiltinTarget) -> Vec<ReadinessTarget> {
         BuiltinTarget::GoSdk(t) => t.readiness_targets(),
         BuiltinTarget::PySdk(t) => t.readiness_targets(),
         BuiltinTarget::TsSdk(t) => t.readiness_targets(),
+        BuiltinTarget::RustModels(t) => t.readiness_targets(),
     }
 }
 
@@ -4775,6 +4846,7 @@ pub fn target_contract_test_suites(
         BuiltinTarget::GoSdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::PySdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::TsSdk(t) => t.contract_test_suites(ir),
+        BuiltinTarget::RustModels(t) => t.contract_test_suites(ir),
     }
 }
 
@@ -4820,7 +4892,8 @@ pub fn target_cli_help_suites(
         | BuiltinTarget::OpenApi31Json(_)
         | BuiltinTarget::StaticFiles(_)
         | BuiltinTarget::StaticDocs(_)
-        | BuiltinTarget::TsSdk(_) => return Ok(Vec::new()),
+        | BuiltinTarget::TsSdk(_)
+        | BuiltinTarget::RustModels(_) => return Ok(Vec::new()),
     };
     let view = target_graph(spec, ir)?;
     let projected = crate::graph::projection::for_generation(&view)?;

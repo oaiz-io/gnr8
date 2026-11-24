@@ -16,6 +16,7 @@ current task; each page includes runnable examples, invariants, and failure beha
 | Extract from Go, Python, NestJS, or OpenAPI | [Sources and extraction](../extraction/sources.md) |
 | Emit or patch OpenAPI 3.1 | [OpenAPI generation](../openapi/generation.md) |
 | Generate Go, Python, or TypeScript SDKs | [SDK generation](../sdk/generation.md) |
+| Generate Rust types with Serde for selected schemas | [Rust models](../sdk/rust-models.md) |
 | Generate a Markdown API reference with verified code samples | [Static docs generation](../static-docs/generation.md) |
 | Interpret or gate diagnostics | [Diagnostics reference](../diagnostics/reference.md) |
 | Understand writes, caches, CI, or the Action | [Artifacts and CI](../operations/artifacts-and-ci.md) |

@@ -107,6 +107,14 @@ jobs:
             needs_python: "false"
             needs_node: "false"
             test_args: "--test committed_outputs"
+          # The RustModels lifecycle builds one worker and the standalone consumer crate
+          # (serde + serde_json) on top of the host binary, so it gets its own entry.
+          - package: gnr8-cli
+            name: gnr8-cli rust models
+            needs_go: "true"
+            needs_python: "false"
+            needs_node: "false"
+            test_args: "--test rust_models_e2e"
     steps:
       - uses: actions/checkout@v7
 

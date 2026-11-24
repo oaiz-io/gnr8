@@ -37,6 +37,7 @@ pub(crate) mod parallel;
 pub mod pipeline;
 pub mod pysdk;
 pub mod resource;
+pub mod rustmodels;
 pub mod sdk;
 pub mod staticdocs;
 pub mod store;
