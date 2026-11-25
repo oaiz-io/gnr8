@@ -16,7 +16,7 @@ pub struct Event {
     #[serde(deserialize_with = "super::deserialize_nullable")]
     pub note: Option<String>,
     #[serde(deserialize_with = "super::deserialize_nullable")]
-    pub params: Option<::serde_json::Value>,
+    pub params: Option<::std::collections::BTreeMap<String, ::serde_json::Value>>,
     #[serde(deserialize_with = "super::deserialize_nullable")]
     pub payload: Option<::serde_json::Value>,
     pub status: super::JobStatus,
@@ -38,7 +38,7 @@ impl Event {
         id: String,
         input: super::FileReferenceOutput,
         note: Option<String>,
-        params: Option<::serde_json::Value>,
+        params: Option<::std::collections::BTreeMap<String, ::serde_json::Value>>,
         payload: Option<::serde_json::Value>,
         status: super::JobStatus,
         r#type: String,

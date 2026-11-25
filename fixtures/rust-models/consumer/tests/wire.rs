@@ -19,6 +19,7 @@
 use jobs_consumer::job;
 use jobs_consumer::models::{Event, FileReferenceInput, FileReferenceOutput, JobOutput, JobStatus};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// A complete event as the service writes it.
 const EVENT: &str = r#"{
@@ -104,9 +105,14 @@ fn an_event_decodes_into_the_values_its_json_states() {
         },
         labels: Some(std::iter::once(("team".to_string(), "data".to_string())).collect()),
         note: None,
-        params: Some(
-            json!({"flag": false, "limit": 10, "nested": {"list": [1, "two", null, true]}}),
-        ),
+        params: Some(BTreeMap::from([
+            ("flag".to_string(), json!(false)),
+            ("limit".to_string(), json!(10)),
+            (
+                "nested".to_string(),
+                json!({"list": [1, "two", null, true]}),
+            ),
+        ])),
         payload: Some(json!([1, {"deep": [null]}])),
         status: JobStatus::InProgress2,
         r#type: "job.started".to_string(),
@@ -245,7 +251,7 @@ fn a_constructor_takes_the_required_fields_and_leaves_every_other_key_out() {
         "evt_2".to_string(),
         FileReferenceOutput::new("/work/in.csv".to_string(), 7),
         Some("retrying".to_string()),
-        Some(json!({"limit": 1})),
+        Some(BTreeMap::from([("limit".to_string(), json!(1))])),
         None,
         JobStatus::Queued,
         "job.retried".to_string(),
@@ -349,6 +355,33 @@ fn recursive_references_nest_both_through_a_box_and_through_a_list() {
     assert_eq!(serde_json::to_value(&tree).expect("encodes"), expected);
     let decoded: FileReferenceOutput = serde_json::from_value(expected).expect("decodes");
     assert_eq!(decoded, tree);
+}
+
+#[test]
+fn an_event_map_keeps_its_object_shape_while_payload_accepts_any_json() {
+    for value in [json!(0), json!(false), json!("x"), json!([1, null])] {
+        assert!(
+            decode_event(&event_with("params", Some(value.clone()))).is_err(),
+            "params must refuse {value}"
+        );
+        assert!(
+            decode_event(&event_with("payload", Some(value.clone()))).is_ok(),
+            "payload must accept {value}"
+        );
+    }
+
+    for value in [
+        json!(null),
+        json!({}),
+        json!({"flag": false, "items": [1, null], "nested": {"count": 0}}),
+    ] {
+        let event = decode_event(&event_with("params", Some(value.clone())))
+            .expect("params accepts an object or null");
+        assert_eq!(
+            serde_json::to_value(&event).expect("encodes")["params"],
+            value
+        );
+    }
 }
 
 #[test]
