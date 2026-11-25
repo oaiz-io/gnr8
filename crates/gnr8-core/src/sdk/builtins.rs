@@ -151,7 +151,8 @@ impl<'a> SiblingSdk<'a> {
             | BuiltinTarget::OpenApi31Json(_)
             | BuiltinTarget::StaticFiles(_)
             | BuiltinTarget::StaticDocs(_)
-            | BuiltinTarget::RustModels(_) => None,
+            | BuiltinTarget::RustModels(_)
+            | BuiltinTarget::RustSdk(_) => None,
         }
     }
 
@@ -308,6 +309,7 @@ impl<'a> PlanTargets<'a> {
                     | BuiltinTarget::PySdk(_)
                     | BuiltinTarget::TsSdk(_)
                     | BuiltinTarget::RustModels(_)
+                    | BuiltinTarget::RustSdk(_)
                     | BuiltinTarget::StaticFiles(_)
                     | BuiltinTarget::StaticDocs(_) => Box::new(std::iter::empty()),
                 }
@@ -3824,6 +3826,44 @@ impl TargetExec for TsSdk {
     }
 }
 
+impl TargetExec for RustSdk {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
+        if self.module_name().is_empty() || self.dir().is_empty() {
+            return Err(CoreError::Config {
+                message: "RustSdk requires .module(...) and .to(...)".to_string(),
+            });
+        }
+        let _package = sdk_package(self.module_name())?;
+        let projected = crate::graph::projection::for_generation(ir)?;
+        let selected = projected
+            .schemas
+            .iter()
+            .map(|schema| schema.id.as_str())
+            .collect();
+        let files = crate::rustsdk::generate_files(
+            &projected,
+            &selected,
+            self.file_layout(),
+            self.effective_package_metadata(),
+        )?;
+        write_sdk_files(out, self.dir(), files)
+    }
+
+    fn output_anchors(&self) -> Vec<String> {
+        if self.dir().is_empty() {
+            Vec::new()
+        } else {
+            vec![self.dir().trim_end_matches('/').to_string()]
+        }
+    }
+}
+
 impl TargetExec for RustModels {
     fn generate(
         &self,
@@ -4739,6 +4779,7 @@ pub fn generate_target(
             t.generate(ir, out, cx, store)
         }
         BuiltinTarget::RustModels(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::RustSdk(t) => t.generate(ir, out, cx, store),
     }
 }
 
@@ -4750,6 +4791,7 @@ fn excluded_operations(spec: &BuiltinTarget) -> &[OperationSelector] {
         BuiltinTarget::GoSdk(t) => &t.excluded_operations,
         BuiltinTarget::PySdk(t) => &t.excluded_operations,
         BuiltinTarget::TsSdk(t) => &t.excluded_operations,
+        BuiltinTarget::RustSdk(t) => t.excluded_operations(),
         // `RustModels` emits no operations, so it has none to leave out.
         BuiltinTarget::StaticFiles(_)
         | BuiltinTarget::StaticDocs(_)
@@ -4772,6 +4814,14 @@ pub(crate) fn target_graph<'a>(
     spec: &BuiltinTarget,
     ir: &'a ApiGraph,
 ) -> Result<std::borrow::Cow<'a, ApiGraph>, CoreError> {
+    if let BuiltinTarget::RustSdk(t) = spec {
+        let models = match (t.emits_all_models(), t.model_roots(), t.includes_registered_schema_roots()) {
+            (false, roots, registered) => Models::Reached { roots, registered },
+            (true, [], true) => Models::All,
+            _ => return Err(CoreError::Config { message: "RustSdk all_models cannot be combined with model roots or disabled registered roots".to_string() }),
+        };
+        return target_view(ir, t.excluded_operations(), models, "RustSdk");
+    }
     match SiblingSdk::of(spec) {
         Some(sdk) => sdk.view(ir),
         None => target_view(ir, excluded_operations(spec), Models::All, spec.label()),
@@ -4808,6 +4858,7 @@ pub fn target_output_anchors(spec: &BuiltinTarget) -> Vec<String> {
         BuiltinTarget::PySdk(t) => t.output_anchors(),
         BuiltinTarget::TsSdk(t) => t.output_anchors(),
         BuiltinTarget::RustModels(t) => t.output_anchors(),
+        BuiltinTarget::RustSdk(t) => t.output_anchors(),
     }
 }
 
@@ -4824,6 +4875,7 @@ pub fn target_readiness_targets(spec: &BuiltinTarget) -> Vec<ReadinessTarget> {
         BuiltinTarget::PySdk(t) => t.readiness_targets(),
         BuiltinTarget::TsSdk(t) => t.readiness_targets(),
         BuiltinTarget::RustModels(t) => t.readiness_targets(),
+        BuiltinTarget::RustSdk(t) => t.readiness_targets(),
     }
 }
 
@@ -4847,6 +4899,7 @@ pub fn target_contract_test_suites(
         BuiltinTarget::PySdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::TsSdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::RustModels(t) => t.contract_test_suites(ir),
+        BuiltinTarget::RustSdk(t) => t.contract_test_suites(ir),
     }
 }
 
@@ -4893,7 +4946,8 @@ pub fn target_cli_help_suites(
         | BuiltinTarget::StaticFiles(_)
         | BuiltinTarget::StaticDocs(_)
         | BuiltinTarget::TsSdk(_)
-        | BuiltinTarget::RustModels(_) => return Ok(Vec::new()),
+        | BuiltinTarget::RustModels(_)
+        | BuiltinTarget::RustSdk(_) => return Ok(Vec::new()),
     };
     let view = target_graph(spec, ir)?;
     let projected = crate::graph::projection::for_generation(&view)?;

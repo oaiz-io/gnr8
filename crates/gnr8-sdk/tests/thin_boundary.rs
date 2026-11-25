@@ -23,12 +23,13 @@ fn crate_root() -> PathBuf {
 const ALLOWED_DEPENDENCIES: [&str; 4] = ["blake3", "serde", "serde_json", "thiserror"];
 
 /// Module names that belong to the host engine and must never appear in SDK source.
-const HOST_ONLY_MODULES: [&str; 10] = [
+const HOST_ONLY_MODULES: [&str; 11] = [
     "analyze",
     "lower",
     "gosdk",
     "pysdk",
     "tssdk",
+    "rustsdk",
     "lifecycle",
     "manifest",
     "resource",

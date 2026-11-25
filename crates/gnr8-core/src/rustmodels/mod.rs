@@ -37,8 +37,12 @@ use std::fmt::Write as _;
 
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{ApiGraph, Field, Prim, Schema, Type};
+use crate::rust_layout::{
+    assignment, attribute, pad, signature, width, RustType, INDENT, MAX_WIDTH,
+};
+use crate::rust_names::{escape_keyword, field_idents, type_ident, variant_idents};
 use crate::sdk::bundle::{check_unique_file_names, SdkFile};
-use crate::sdk::emit_common::{file_stem, is_json_object_key, model_file_name, split_words};
+use crate::sdk::emit_common::{file_stem, is_json_object_key, model_file_name};
 use crate::sdk::layout::SdkFileLayout;
 use crate::CoreError;
 
@@ -51,18 +55,6 @@ const TARGET: &str = "RustModels";
 /// Type names the generated code itself spells unqualified, so a model may not take them.
 const RESERVED_TYPE_NAMES: [&str; 5] = ["Box", "Option", "Self", "String", "Vec"];
 
-/// Strict and reserved Rust keywords (2021 edition, plus the 2024 `gen`).
-const KEYWORDS: [&str; 52] = [
-    "Self", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue",
-    "crate", "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if",
-    "impl", "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub",
-    "ref", "return", "self", "static", "struct", "super", "trait", "true", "try", "type", "typeof",
-    "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
-];
-
-/// Keywords a raw identifier cannot spell.
-const NOT_RAW: [&str; 4] = ["Self", "crate", "self", "super"];
-
 /// The inner attribute every generated module tree carries. It allows only what the API, not the
 /// emitter, decides: whether a model is used (`dead_code`), whether the graph has prose for a field
 /// (`missing_docs`), how the consuming crate declares the module (`unreachable_pub`), and the
@@ -74,18 +66,8 @@ const LINT_ALLOWS: &str =
                            clippy::style,\n    clippy::complexity,\n    clippy::pedantic,\n    \
                            clippy::nursery\n)]\n";
 
-/// `rustfmt`'s default `max_width`: the widest line it leaves whole.
-const MAX_WIDTH: usize = 100;
-
-/// `rustfmt`'s default `attr_fn_like_width`: the widest list of two or more attribute arguments it
-/// keeps on one line.
-const ATTR_ARGS_WIDTH: usize = 70;
-
 /// `rustfmt`'s default `struct_lit_width`: the widest struct literal body it keeps on one line.
 const STRUCT_LIT_WIDTH: usize = 18;
-
-/// One level of `rustfmt`'s block indent.
-const INDENT: usize = 4;
 
 /// Clippy's default `too-many-arguments-threshold`: the most arguments a function takes unremarked.
 const MAX_ARGUMENTS: usize = 7;
@@ -154,68 +136,6 @@ impl Presence {
     /// Whether the key must be present, so the constructor takes the field as an argument.
     const fn is_required(self) -> bool {
         matches!(self, Self::Required | Self::RequiredNullable)
-    }
-}
-
-/// A Rust type as a head and its generic arguments, so a line `rustfmt` would not leave whole is
-/// broken where `rustfmt` breaks it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RustType {
-    head: String,
-    args: Vec<Self>,
-}
-
-impl RustType {
-    fn leaf(head: impl Into<String>) -> Self {
-        Self {
-            head: head.into(),
-            args: Vec::new(),
-        }
-    }
-
-    fn generic(head: impl Into<String>, args: Vec<Self>) -> Self {
-        Self {
-            head: head.into(),
-            args,
-        }
-    }
-
-    /// `head<self>`.
-    fn inside(self, head: &str) -> Self {
-        Self::generic(head, vec![self])
-    }
-
-    /// The type on one line.
-    fn flat(&self) -> String {
-        if self.args.is_empty() {
-            return self.head.clone();
-        }
-        let args: Vec<String> = self.args.iter().map(Self::flat).collect();
-        format!("{}<{}>", self.head, args.join(", "))
-    }
-
-    /// The type as `rustfmt` lays it out when its first line starts `used` columns into a line
-    /// indented `indent` columns and `reserved` columns follow its last line: on one line when that
-    /// fits, and otherwise one generic argument per line, each laid out the same way.
-    ///
-    /// `None` when no layout fits there: a type with no generic arguments to break at, or one
-    /// whose own name already runs past the line. `rustfmt` then leaves the item as it found it.
-    fn layout(&self, indent: usize, used: usize, reserved: usize) -> Option<String> {
-        let flat = self.flat();
-        if used + width(&flat) + reserved <= MAX_WIDTH {
-            return Some(flat);
-        }
-        if self.args.is_empty() || used + width(&self.head) + 1 > MAX_WIDTH {
-            return None;
-        }
-        let inner = indent + INDENT;
-        let mut out = format!("{}<\n", self.head);
-        for arg in &self.args {
-            let _ = writeln!(out, "{}{},", pad(inner), arg.layout(inner, inner, 1)?);
-        }
-        out.push_str(&pad(indent));
-        out.push('>');
-        Some(out)
     }
 }
 
@@ -600,7 +520,7 @@ impl<'g> Plan<'g> {
                 rust_primitive(prim)
                     .ok_or_else(|| internal("", "an unsupported primitive passed validation"))?,
             ),
-            Type::WellKnown(_) => RustType::leaf("String"),
+            Type::WellKnown(_) | Type::Enum(_) => RustType::leaf("String"),
             Type::Array(items) => self.rust_type(items)?.inside("Vec"),
             Type::Map { value, .. } => RustType::generic(
                 "::std::collections::BTreeMap",
@@ -614,7 +534,7 @@ impl<'g> Plan<'g> {
                 RustType::leaf(format!("{}{ident}", self.root()))
             }
             Type::Any {} => RustType::leaf("::serde_json::Value"),
-            Type::Object(_) | Type::Enum(_) | Type::Union(_) => {
+            Type::Object(_) | Type::Union(_) => {
                 return Err(internal("", "an inline shape passed validation"));
             }
         })
@@ -698,27 +618,11 @@ fn render_constructor(out: &mut String, ident: &str, plans: &[FieldPlan<'_>]) {
         let _ = writeln!(out, "{margin}#[allow(clippy::too_many_arguments)]");
     }
 
-    let flat: Vec<String> = required
+    let args: Vec<(&str, &RustType)> = required
         .iter()
-        .map(|plan| format!("{}: {}", plan.ident, plan.ty.flat()))
+        .map(|plan| (plan.ident.as_str(), &plan.ty))
         .collect();
-    let line = format!("{margin}pub fn new({}) -> Self {{", flat.join(", "));
-    if width(&line) <= MAX_WIDTH {
-        let _ = writeln!(out, "{line}");
-    } else {
-        let inner = 2 * INDENT;
-        let _ = writeln!(out, "{margin}pub fn new(");
-        for plan in &required {
-            // An argument's type always starts on the argument's own line.
-            let used = inner + width(&plan.ident) + 2;
-            let ty = plan
-                .ty
-                .layout(inner, used, 1)
-                .unwrap_or_else(|| plan.ty.flat());
-            let _ = writeln!(out, "{}{}: {ty},", pad(inner), plan.ident);
-        }
-        let _ = writeln!(out, "{margin}) -> Self {{");
-    }
+    out.push_str(&signature(INDENT, "pub fn new", &args, " -> Self {"));
 
     let values: Vec<String> = plans
         .iter()
@@ -745,48 +649,6 @@ fn render_constructor(out: &mut String, ident: &str, plans: &[FieldPlan<'_>]) {
     }
     let _ = writeln!(out, "{margin}}}");
     out.push_str("}\n");
-}
-
-/// `lhs` and the type it introduces, closed by `terminator`, as `rustfmt` lays out a struct field
-/// (`pub name:`) or a type alias (`pub type Name =`) at `indent`: on one line when that fits, the
-/// type alone on the next line when it fits there, and otherwise broken at its generic arguments
-/// on whichever of the two lines takes fewer lines.
-fn assignment(indent: usize, lhs: &str, ty: &RustType, terminator: char) -> String {
-    let start = indent + width(lhs) + 1;
-    let flat = ty.flat();
-    // Strictly less: the terminator takes the column after the type.
-    if start + width(&flat) < MAX_WIDTH {
-        return format!("{}{lhs} {flat}{terminator}\n", pad(indent));
-    }
-    let below = indent + INDENT;
-    let lines = |text: &str| text.lines().count();
-    let (beside, under) = match (ty.layout(indent, start, 1), ty.layout(below, below, 1)) {
-        (Some(same), Some(next)) => {
-            if lines(&next) == 1 || lines(&same) > lines(&next) + 1 {
-                (None, Some(next))
-            } else {
-                (Some(same), None)
-            }
-        }
-        (same, next) => (same.filter(|_| next.is_none()), next),
-    };
-    match (beside, under) {
-        (_, Some(next)) => format!("{}{lhs}\n{}{next}{terminator}\n", pad(indent), pad(below)),
-        (Some(same), None) => format!("{}{lhs} {same}{terminator}\n", pad(indent)),
-        // Nothing fits, so `rustfmt` keeps what it is given.
-        (None, None) => format!("{}{lhs} {flat}{terminator}\n", pad(indent)),
-    }
-}
-
-/// `columns` spaces.
-fn pad(columns: usize) -> String {
-    " ".repeat(columns)
-}
-
-/// The width `rustfmt` is taken to give `text`: one column per character. `rustfmt` counts display
-/// columns, so this is exact for everything but double-width characters.
-fn width(text: &str) -> usize {
-    text.chars().count()
 }
 
 /// The schemas each schema holds by value, transitively. A `Vec` or a map holds its elements behind
@@ -945,7 +807,7 @@ fn unsupported(
                 Prim::String | Prim::Bool => "an unsupported primitive".to_string(),
             }),
         },
-        Type::WellKnown(_) | Type::Any {} => None,
+        Type::WellKnown(_) | Type::Any {} | Type::Enum(_) => None,
         Type::Array(items) => unsupported(items, bodies, selected)
             .map(|reason| format!("an array whose items are {reason}")),
         Type::Map { key, value } => {
@@ -971,9 +833,6 @@ fn unsupported(
         }
         Type::Object(_) => {
             Some("an inline object: declare it as a named type so it has a Rust name".to_string())
-        }
-        Type::Enum(_) => {
-            Some("an inline enum: declare it as a named enum so it has a Rust name".to_string())
         }
         Type::Union(_) => Some(union_reason().to_string()),
     }
@@ -1065,115 +924,6 @@ fn internal(id: &str, what: &str) -> CoreError {
     }
 }
 
-/// A schema name as a Rust type name: kept when it already is an upper-camel-case identifier, and
-/// otherwise rebuilt from its words. `None` when no word starts it with a letter.
-fn type_ident(name: &str) -> Option<String> {
-    let kept = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        && name.chars().all(|c| c.is_ascii_alphanumeric());
-    let ident = if kept {
-        name.to_string()
-    } else {
-        upper_camel(name)
-    };
-    ident
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic())
-        .then_some(ident)
-}
-
-/// The words of `value`, each capitalized, joined.
-fn upper_camel(value: &str) -> String {
-    split_words(value)
-        .iter()
-        .map(|word| {
-            let mut chars = word.chars();
-            chars.next().map_or_else(String::new, |first| {
-                let mut out = first.to_ascii_uppercase().to_string();
-                out.push_str(&chars.as_str().to_ascii_lowercase());
-                out
-            })
-        })
-        .collect()
-}
-
-/// `value` as a lowercase snake-case identifier body (not yet keyword-escaped).
-fn snake(value: &str) -> String {
-    let mut out = split_words(value)
-        .iter()
-        .map(|word| word.to_ascii_lowercase())
-        .collect::<Vec<_>>()
-        .join("_");
-    if out.is_empty() {
-        out.push_str("value");
-    }
-    if out.starts_with(|c: char| c.is_ascii_digit()) {
-        out.insert_str(0, "value_");
-    }
-    out
-}
-
-/// A keyword spelled as an identifier: a raw identifier, or `suffix` appended where Rust has none.
-fn escape_keyword(ident: &str, suffix: &str) -> String {
-    if NOT_RAW.contains(&ident) {
-        format!("{ident}{suffix}")
-    } else if KEYWORDS.contains(&ident) {
-        format!("r#{ident}")
-    } else {
-        ident.to_string()
-    }
-}
-
-/// One Rust field name per field, in field order. Two wire names that spell the same identifier
-/// keep it for the first and number the rest (`file_id`, `file_id_2`), the fields being sorted by
-/// wire name.
-fn field_idents(fields: &[Field]) -> Vec<String> {
-    let bases: Vec<String> = fields.iter().map(|field| snake(&field.json_name)).collect();
-    disambiguate(&bases, |base, n| format!("{base}_{n}"))
-        .into_iter()
-        .map(|name| escape_keyword(&name, "_"))
-        .collect()
-}
-
-/// One Rust variant name per enum member, numbered on a collision like [`field_idents`].
-fn variant_idents(members: &[String]) -> Vec<String> {
-    let bases: Vec<String> = members
-        .iter()
-        .map(|member| {
-            let camel = upper_camel(member);
-            if camel.is_empty() {
-                "Value".to_string()
-            } else if camel.starts_with(|c: char| c.is_ascii_digit()) {
-                format!("Value{camel}")
-            } else {
-                camel
-            }
-        })
-        .collect();
-    disambiguate(&bases, |base, n| format!("{base}{n}"))
-        .into_iter()
-        .map(|name| escape_keyword(&name, "Value"))
-        .collect()
-}
-
-/// `bases`, with every repeat of an earlier name numbered from 2 until it is unique.
-fn disambiguate(bases: &[String], numbered: impl Fn(&str, usize) -> String) -> Vec<String> {
-    let taken: BTreeSet<&str> = bases.iter().map(String::as_str).collect();
-    let mut used: BTreeSet<String> = BTreeSet::new();
-    let mut out = Vec::with_capacity(bases.len());
-    for base in bases {
-        let mut name = base.clone();
-        let mut n = 2;
-        while used.contains(&name) || (name != *base && taken.contains(name.as_str())) {
-            name = numbered(base, n);
-            n += 1;
-        }
-        used.insert(name.clone());
-        out.push(name);
-    }
-    out
-}
-
 /// A `#[derive(...)]` as `rustfmt` lays it out: on one line when the line fits, and otherwise one
 /// trait per line with a trailing comma.
 fn derive(traits: &[&str]) -> String {
@@ -1186,28 +936,6 @@ fn derive(traits: &[&str]) -> String {
         let _ = writeln!(out, "{}{name},", pad(INDENT));
     }
     out.push_str(")]\n");
-    out
-}
-
-/// Any other attribute as `rustfmt` lays it out: on one line when the line ends short of
-/// [`MAX_WIDTH`] and, for two or more arguments, the arguments are no wider than
-/// [`ATTR_ARGS_WIDTH`]; one argument per line otherwise, with no trailing comma.
-fn attribute<S: AsRef<str>>(indent: &str, name: &str, args: &[S]) -> String {
-    let joined = args
-        .iter()
-        .map(AsRef::as_ref)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let line = format!("{indent}#[{name}({joined})]");
-    if width(&line) < MAX_WIDTH && (args.len() == 1 || width(&joined) <= ATTR_ARGS_WIDTH) {
-        return format!("{line}\n");
-    }
-    let mut out = format!("{indent}#[{name}(\n");
-    for (index, arg) in args.iter().enumerate() {
-        let comma = if index + 1 == args.len() { "" } else { "," };
-        let _ = writeln!(out, "{indent}{}{}{comma}", pad(INDENT), arg.as_ref());
-    }
-    let _ = writeln!(out, "{indent})]");
     out
 }
 
@@ -1257,11 +985,12 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::{
-        assignment, attribute, derive, escape_keyword, field_idents, rust_str, serde_name, snake,
+        assignment, attribute, derive, escape_keyword, field_idents, rust_str, serde_name,
         type_ident, variant_idents, RustType, ENUM_DERIVES, STRUCT_DERIVES,
     };
     use crate::analyze::facts::FieldMeta;
     use crate::graph::{Field, Type};
+    use crate::rust_names::snake;
 
     fn field(json_name: &str) -> Field {
         Field {

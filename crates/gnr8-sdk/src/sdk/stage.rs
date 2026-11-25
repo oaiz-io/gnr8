@@ -96,6 +96,7 @@ builtin_enum! {
         PySdk,
         TsSdk,
         RustModels,
+        RustSdk,
     }
 }
 
@@ -195,7 +196,8 @@ from_builtins!(
         GoSdk,
         PySdk,
         TsSdk,
-        RustModels
+        RustModels,
+        RustSdk
     ]
 );
 from_builtins!(PostStage, BuiltinPost, [FormatCommand, Header]);

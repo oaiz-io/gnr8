@@ -200,6 +200,7 @@ Two schemas whose Rust type names collide, and a schema whose Rust name would be
 | free-form value | `serde_json::Value` |
 | named object | `pub struct` |
 | named string enum | `pub enum` of unit variants; an unlisted value is a decode error |
+| inline enum | `String`; values are not validated against the enumerated set |
 | named alias of any of the above | `pub type` |
 | a reference that would make a struct contain itself | `Box<T>` |
 
@@ -258,7 +259,6 @@ See docs/sdk/rust-models.md for the shapes the target supports.
 | union (`oneOf`, a Python `A \| B`) | nothing in the graph says which variant a JSON value is | model the payload as one object, or as free-form JSON |
 | byte string (a graph `bytes` primitive: Python `bytes`, an imported `format: binary` string) | the graph does not state the JSON text encoding | carry the encoded text as a string field |
 | inline object | a Rust struct needs a name | declare a named type |
-| inline enum (a Python `Literal[...]` field) | a Rust enum needs a name | declare a named enum |
 | integer or float of another width | Rust has no such type | use a 8/16/32/64-bit integer or a 32/64-bit float |
 | map keyed by anything but a string | a JSON object key is a string | key the map by string |
 | an alias that refers to itself (`type Tree = Vec<Tree>`) | a Rust type alias cannot be recursive | declare the recursion through an object |

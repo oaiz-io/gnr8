@@ -534,6 +534,21 @@ fn identical_input_emits_identical_bytes() {
 }
 
 #[test]
+fn inline_enum_fields_and_items_use_strings() {
+    let graph = graph(vec![object(
+        "jobs.Choice",
+        vec![
+            required("mode", Type::enumeration(["a", "b"])),
+            required("modes", Type::array(Type::enumeration(["a", "b"]))),
+        ],
+    )]);
+    let files = emit(target("m").model_root("Choice"), &graph);
+    let output = text(&files, "m/mod.rs");
+    assert!(output.contains("pub mode: String,"), "{output}");
+    assert!(output.contains("pub modes: Vec<String>,"), "{output}");
+}
+
+#[test]
 fn every_unrepresentable_shape_is_named_in_one_error() {
     let graph = graph(vec![
         object(
@@ -571,14 +586,13 @@ fn every_unrepresentable_shape_is_named_in_one_error() {
     ]);
     let message = error(target("m").model_root("jobs.Bad"), &graph);
     for expected in [
-        "RustModels cannot represent 9 graph positions faithfully:",
+        "RustModels cannot represent 8 graph positions faithfully:",
         "schema `jobs.Bad` field `blob`: a byte string: the graph does not state its JSON text encoding",
         "schema `jobs.Bad` field `blobs`: an array whose items are a byte string",
         "schema `jobs.Bad` field `by_number`: a map keyed by signed 64-bit integer: a JSON object key is a string",
         "schema `jobs.Bad` field `choice`: a union: the graph states no discriminator",
         "schema `jobs.Bad` field `huge`: a signed 128-bit integer, which has no Rust integer type",
         "schema `jobs.Bad` field `inline`: an inline object: declare it as a named type",
-        "schema `jobs.Bad` field `mode`: an inline enum: declare it as a named enum",
         "schema `jobs.Either`: a union",
         "schema `jobs.Loop`: an alias that refers to itself",
         "See docs/sdk/rust-models.md",
@@ -668,6 +682,65 @@ fn the_declaration_round_trips_through_the_plan() {
         gnr8_engine::sdk::builtins::target_output_anchors(&back),
         ["src/models"]
     );
+}
+
+#[test]
+fn rust_sdk_declaration_and_model_roots_round_trip() {
+    for (metadata, split) in [(true, false), (false, false), (true, true), (false, true)] {
+        let target = RustSdk::new()
+            .module("example")
+            .to("sdk")
+            .model_root("Probe")
+            .package_metadata(metadata);
+        let target = if split { target.split_files() } else { target };
+        let spec = BuiltinTarget::RustSdk(target);
+        let json = serde_json::to_string(&spec).unwrap();
+        let spec: BuiltinTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec.label(), "RustSdk");
+        let targets = [(0, &spec)];
+        let mut out = Artifacts::new();
+        generate_target(
+            &spec,
+            &supported(),
+            &mut out,
+            &Cx::new(std::env::temp_dir()),
+            None,
+            &PlanTargets::new(&targets),
+        )
+        .unwrap();
+        let files: Vec<_> = out
+            .into_files()
+            .into_iter()
+            .map(|file| (file.path, file.text))
+            .collect();
+        let paths: Vec<_> = files.iter().map(|(path, _)| path.clone()).collect();
+        let prefix = if metadata { "sdk/src" } else { "sdk" };
+        let root = if metadata { "lib.rs" } else { "mod.rs" };
+        assert!(paths.contains(&format!("{prefix}/{root}")), "{paths:?}");
+        let model_root = if split { "models/mod.rs" } else { "models.rs" };
+        assert!(
+            paths.contains(&format!("{prefix}/{model_root}")),
+            "{paths:?}"
+        );
+        let mounted: Vec<_> = files
+            .into_iter()
+            .map(|(path, text)| {
+                let path = if metadata && path.ends_with("/lib.rs") {
+                    path.replace("/lib.rs", "/mod.rs")
+                } else {
+                    path
+                };
+                (path, text)
+            })
+            .collect();
+        let name = match (metadata, split) {
+            (true, true) => "sdk-crate-split",
+            (true, false) => "sdk-crate",
+            (false, true) => "sdk-module-split",
+            (false, false) => "sdk-module",
+        };
+        cargo_check(name, &mounted, &format!("{prefix}/"), Deps::SerdeAndJson);
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
