@@ -51,7 +51,11 @@ def blocks(lines: list[str], start_pattern: str) -> list[tuple[str, list[str]]]:
 
 # A package whose tests CI runs in more than one matrix entry: every test target it owns has to
 # appear in exactly one of those entries, or a green run silently never executed it.
-PACKAGE_TEST_DIRS = {"gnr8-cli": Path("crates/gnr8/tests")}
+PACKAGE_TEST_DIRS = {
+    "gnr8-cli": Path("crates/gnr8/tests"),
+    "gnr8-engine": Path("crates/gnr8-core/tests"),
+}
+PACKAGE_UNIT_TARGETS = {"gnr8-cli": "--bins", "gnr8-engine": "--lib"}
 
 
 def matrix_test_args(lines: list[str]) -> dict[str, list[str]]:
@@ -97,8 +101,9 @@ def check_test_split(path: Path, lines: list[str]) -> list[str]:
             )
         for target in sorted(set(declared) - on_disk):
             errors.append(f"{name}: {package} runs --test {target}, which does not exist")
-        if not any("--bins" in args for args in arg_strings):
-            errors.append(f"{name}: {package} restricts its tests but never runs --bins")
+        unit_target = PACKAGE_UNIT_TARGETS[package]
+        if sum(args.split().count(unit_target) for args in arg_strings) != 1:
+            errors.append(f"{name}: {package} must run {unit_target} exactly once")
     return errors
 
 

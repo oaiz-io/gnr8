@@ -62,10 +62,20 @@ jobs:
             needs_go: "false"
             needs_python: "false"
             needs_node: "false"
+          # Keep the slower compile-and-run suites in their own job so cold engine runs
+          # leave room for cache upload within the five-minute cap.
           - package: gnr8-engine
             needs_go: "true"
             needs_python: "true"
             needs_node: "true"
+            test_args: "--lib --test cli_body_help --test cli_emit --test contract_tests --test docs_emit --test gin_contract_regression --test gosdk_split_wire_helpers --test lifecycle --test open_object --test pysdk_compile --test sdk_call_shape --test sdk_lint --test sdk_model_presence --test sdk_model_reach --test sdk_pipeline --test sdk_surface_flexibility_e2e --test snapshot_diagnostics --test snapshot_docs --test snapshot_fastapi_graph --test snapshot_fastapi_openapi --test snapshot_flask_graph --test snapshot_flask_openapi --test snapshot_graph --test snapshot_nestjs_graph --test snapshot_nestjs_openapi --test snapshot_openapi --test snapshot_sdk --test target_exclusion --test tssdk_compile --test tssdk_request_wire"
+            doctests: "true"
+          - package: gnr8-engine
+            name: gnr8-engine compile checks
+            needs_go: "true"
+            needs_python: "true"
+            needs_node: "true"
+            test_args: "--test determinism --test docs_snippets_compile --test operation_prose --test sdk_compile"
           # gnr8-cli is split into four entries. A cold 2-4 core runner rebuilds the engine,
           # links the host binary, then cargo-builds a `.gnr8/` worker per compiling test; one
           # combined job exceeds the 5-minute cap on a cache miss (lockfile/version bump).
@@ -143,6 +153,10 @@ jobs:
 
       - name: Test package
         run: cargo test -p "${{ matrix.package }}" --all-features ${{ matrix.test_args }}
+
+      - name: Test documentation
+        if: matrix.doctests == 'true'
+        run: cargo test -p "${{ matrix.package }}" --all-features --doc
 
   sidecars:
     name: Language sidecars and action contract
