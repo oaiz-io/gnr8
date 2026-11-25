@@ -9,24 +9,34 @@
 //! `// [name]` and `// [/name]` comment lines, which this module removes.
 
 mod operations;
+mod pagination;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use gnr8::sdk::builtins::SdkPackageMetadata;
 
 use crate::graph::ApiGraph;
-use crate::sdk::bundle::SdkFile;
-use crate::sdk::layout::SdkFileLayout;
+use crate::rust_layout::rust_str;
+use crate::rust_names::{escape_keyword, snake};
+use crate::sdk::bundle::{check_unique_file_names, SdkFile};
+use crate::sdk::emit_common::{
+    file_stem, operation_file_name, operation_group_file_name, operation_group_name,
+    request_body_models_of, RequestBodyEncoding,
+};
+use crate::sdk::layout::{OperationFileSplit, SdkFileLayout};
 use crate::CoreError;
 
-use self::operations::{AuthUse, Types};
+use self::operations::{Features, Types};
 
 /// The client runtime, every optional piece included.
 const CLIENT: &str = include_str!("runtime/client.rs.txt");
 
 /// The error types.
 const ERRORS: &str = include_str!("runtime/errors.rs.txt");
+
+/// The multipart file type and body encoder, written when an operation sends multipart.
+const MULTIPART: &str = include_str!("runtime/multipart.rs.txt");
 
 /// The inner attribute the root carries: what `RustModels` allows, for the same reasons.
 const LINT_ALLOWS: &str =
@@ -49,10 +59,11 @@ const CLIENT_EXPORTS: [&str; 10] = [
 ];
 
 /// The items of `errors.rs` the root re-exports, in the order `rustfmt` sorts them.
-const ERROR_EXPORTS: [&str; 5] = [
+const ERROR_EXPORTS: [&str; 6] = [
     "ApiError",
     "AuthConfigurationError",
     "DecodeError",
+    "EncodeError",
     "Error",
     "TransportError",
 ];
@@ -82,9 +93,28 @@ pub(crate) fn generate_files(
     } else {
         layout.clone()
     };
+    let mut multipart = BTreeSet::new();
+    for op in &graph.operations {
+        for body in request_body_models_of(op, graph)? {
+            if body.encoding == RequestBodyEncoding::Multipart {
+                multipart.insert(body.schema_id);
+            }
+        }
+    }
     let types = Types::new(graph);
     let operations = operations::render(graph, &types)?;
-    let mut files = crate::rustmodels::generate_files(graph, selected, &model_layout)?;
+    let sdk = crate::rustmodels::SdkModels {
+        multipart: &multipart,
+    };
+    let models = crate::rustmodels::generate_sdk_files(graph, selected, &model_layout, &sdk)?;
+    let (operations, mut files) = match (operations, models) {
+        (Ok(operations), Ok(models)) => (operations, models),
+        (operations, models) => {
+            let mut problems = models.err().unwrap_or_default();
+            problems.extend(operations.err().unwrap_or_default());
+            return Err(operations::refusal(&problems));
+        }
+    };
     for file in &mut files {
         file.name = if !layout.is_split() && file.name == crate::rustmodels::ROOT_FILE {
             format!("{prefix}models.rs")
@@ -92,19 +122,26 @@ pub(crate) fn generate_files(
             format!("{prefix}models/{}", file.name)
         };
     }
+    let features = operations.features;
     files.push(SdkFile {
         name: format!("{prefix}client.rs"),
-        contents: client(graph, operations.auth),
+        contents: client(graph, features),
     });
     files.push(SdkFile {
         name: format!("{prefix}errors.rs"),
         contents: ERRORS.to_string(),
     });
-    let has_operations = !graph.operations.is_empty();
-    if has_operations {
+    if features.multipart {
         files.push(SdkFile {
-            name: format!("{prefix}operations.rs"),
-            contents: operations.text,
+            name: format!("{prefix}multipart.rs"),
+            contents: MULTIPART.to_string(),
+        });
+    }
+    let modules = operation_modules(layout, &operations.units)?;
+    for module in &modules {
+        files.push(SdkFile {
+            name: format!("{prefix}{}", module.file),
+            contents: module.text.clone(),
         });
     }
     files.push(SdkFile {
@@ -116,7 +153,7 @@ pub(crate) fn generate_files(
                 "mod.rs"
             }
         ),
-        contents: root(has_operations, &operations.exports),
+        contents: root(&modules, features),
     });
     if let Some(package) = package {
         files.push(SdkFile {
@@ -124,12 +161,117 @@ pub(crate) fn generate_files(
             contents: cargo_toml(package)?,
         });
     }
+    check_unique_file_names(&files, "RustSdk")?;
     files.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(files)
 }
 
+/// One operations module: its file, its module name, and the types the root re-exports.
+struct OperationModule {
+    file: String,
+    module: String,
+    text: String,
+    exports: Vec<String>,
+}
+
+/// Root modules an operations module may not take the name of.
+const ROOT_MODULES: [&str; 4] = ["client", "errors", "models", "multipart"];
+
+/// The operations modules `layout` splits `units` into.
+fn operation_modules(
+    layout: &SdkFileLayout,
+    units: &[operations::Unit<'_>],
+) -> Result<Vec<OperationModule>, CoreError> {
+    let mut groups: Vec<(String, String, Vec<&operations::Unit<'_>>)> = Vec::new();
+    match layout.operation_split() {
+        OperationFileSplit::Compact => {
+            if !units.is_empty() {
+                groups.push((
+                    "operations.rs".to_string(),
+                    "One method on the client per API operation.".to_string(),
+                    units.iter().collect(),
+                ));
+            }
+        }
+        OperationFileSplit::PerEndpoint => {
+            for unit in units {
+                let file = operation_file_name(
+                    layout,
+                    unit.op,
+                    &format!("api_{}.rs", file_stem(&unit.op.id)),
+                )?;
+                let doc = format!("The `{}` operation.", unit.op.id);
+                groups.push((file, doc, vec![unit]));
+            }
+        }
+        OperationFileSplit::PerTag => {
+            let mut by_group: BTreeMap<&str, Vec<&operations::Unit<'_>>> = BTreeMap::new();
+            for unit in units {
+                by_group
+                    .entry(operation_group_name(unit.op))
+                    .or_default()
+                    .push(unit);
+            }
+            for (group, members) in by_group {
+                let file = operation_group_file_name(
+                    layout,
+                    group,
+                    &format!("api_{}.rs", file_stem(group)),
+                )?;
+                let doc = format!("The operations of the `{group}` group.");
+                groups.push((file, doc, members));
+            }
+        }
+    }
+    let mut modules = Vec::new();
+    let mut taken: BTreeMap<String, String> = BTreeMap::new();
+    let mut problems = Vec::new();
+    for (file, doc, members) in groups {
+        let path = std::path::Path::new(&file);
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            problems.push(format!(
+                "the layout places operations in {file:?}, which is not a `.rs` file"
+            ));
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        let module = escape_keyword(&snake(stem), "_");
+        if ROOT_MODULES.contains(&module.as_str()) {
+            problems.push(format!(
+                "the layout places operations in {file:?}, whose module `{module}` the SDK \
+                 defines itself"
+            ));
+            continue;
+        }
+        if let Some(previous) = taken.insert(module.clone(), file.clone()) {
+            problems.push(format!(
+                "the layout places operations in {previous:?} and {file:?}, which both map to \
+                 the Rust module `{module}`"
+            ));
+            continue;
+        }
+        modules.push(OperationModule {
+            text: operations::module(&doc, &members),
+            exports: members
+                .iter()
+                .flat_map(|unit| unit.exports.iter().cloned())
+                .collect(),
+            file,
+            module,
+        });
+    }
+    if problems.is_empty() {
+        Ok(modules)
+    } else {
+        Err(operations::refusal(&problems))
+    }
+}
+
 /// The client runtime with the graph's defaults and only the credential kinds `auth` names.
-fn client(graph: &ApiGraph, auth: AuthUse) -> String {
+fn client(graph: &ApiGraph, features: Features) -> String {
     let runtime = &graph.runtime;
     let mut statuses = runtime.retry_statuses.clone();
     if statuses.is_empty() {
@@ -143,10 +285,18 @@ fn client(graph: &ApiGraph, auth: AuthUse) -> String {
         |ms| format!("Some(Duration::from_millis({ms}))"),
     );
     let enabled = [
-        ("auth", auth.any()),
-        ("api_key", auth.api_key),
-        ("bearer", auth.bearer),
-        ("basic", auth.basic),
+        ("auth", features.auth()),
+        ("api_key", features.api_key),
+        ("bearer", features.bearer),
+        ("basic", features.basic),
+        ("text", features.text),
+        ("binary", features.binary),
+        ("form", features.form),
+        ("fields", features.form),
+        ("multipart", features.multipart),
+        ("pagination", features.pagination),
+        ("cursor", features.cursor),
+        ("counter", features.counter),
     ];
     select_blocks(CLIENT, &enabled)
         .replace(
@@ -209,7 +359,7 @@ fn select_blocks(text: &str, enabled: &[(&str, bool)]) -> String {
 }
 
 /// The root module: lint allowances, module declarations and re-exports.
-fn root(has_operations: bool, operation_exports: &[String]) -> String {
+fn root(modules: &[OperationModule], features: Features) -> String {
     let mut out = String::from(
         "//! Rust SDK generated by gnr8 from the API graph.\n//!\n//! Do not edit: `gnr8 \
          generate` rewrites this module and `gnr8 check` reports any change to it.\n",
@@ -224,16 +374,23 @@ fn root(has_operations: bool, operation_exports: &[String]) -> String {
         let _ = writeln!(out, "pub use self::errors::{name};");
     }
     out.push_str("\npub mod models;\n");
-    if has_operations {
-        out.push_str("\nmod operations;\n");
+    if features.multipart {
+        out.push_str("\nmod multipart;\npub use self::multipart::MultipartFile;\n");
     }
-    // One re-export to a paragraph: `rustfmt` sorts a run of `use` items, and its 2021 and 2024
-    // style editions sort some names differently.
-    for (index, name) in operation_exports.iter().enumerate() {
-        if index > 0 {
-            out.push('\n');
+    // One re-export to a paragraph: `rustfmt` sorts a run of `mod` or `use` items, and its 2021
+    // and 2024 style editions sort some names differently.
+    for module in modules {
+        out.push('\n');
+        if module.file != format!("{}.rs", module.module) || module.module.starts_with("r#") {
+            let _ = writeln!(out, "#[path = {}]", rust_str(&module.file));
         }
-        let _ = writeln!(out, "pub use self::operations::{name};");
+        let _ = writeln!(out, "mod {};", module.module);
+        for (index, name) in module.exports.iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            let _ = writeln!(out, "pub use self::{}::{name};", module.module);
+        }
     }
     out
 }

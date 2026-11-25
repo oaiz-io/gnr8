@@ -42,7 +42,9 @@ use crate::rust_layout::{
 };
 use crate::rust_names::{escape_keyword, field_idents, type_ident, variant_idents};
 use crate::sdk::bundle::{check_unique_file_names, SdkFile};
-use crate::sdk::emit_common::{file_stem, is_json_object_key, model_file_name};
+use crate::sdk::emit_common::{
+    binary_value_shape, file_stem, is_json_object_key, model_file_name, BinaryValueShape,
+};
 use crate::sdk::layout::SdkFileLayout;
 use crate::CoreError;
 
@@ -160,10 +162,39 @@ pub(crate) fn generate_files(
     selected: &BTreeSet<&str>,
     layout: &SdkFileLayout,
 ) -> Result<Vec<SdkFile>, CoreError> {
-    let plan = Plan::new(graph, selected, layout)?;
+    let plan = Plan::new(graph, selected, layout, None)?.map_err(|p| unrepresentable(&p))?;
     let files = plan.render()?;
     check_unique_file_names(&files, TARGET)?;
     Ok(files)
+}
+
+/// Where the Rust SDK sends each byte string, which decides how its models carry them.
+pub(crate) struct SdkModels<'a> {
+    /// The schemas sent as multipart request bodies: a byte-string field of one is a file.
+    pub(crate) multipart: &'a BTreeSet<String>,
+}
+
+/// [`generate_files`] for the models of a Rust SDK: a named byte-string alias is a `Vec<u8>`, a
+/// file field of a multipart request model is a `MultipartFile`, and that model is a plain struct
+/// the SDK encodes field by field. Every other rule is the same.
+///
+/// # Errors
+///
+/// `Ok(Err(problems))` names every position the models cannot represent faithfully, for the SDK
+/// to report together with its own; [`CoreError`] is any other failure.
+pub(crate) fn generate_sdk_files(
+    graph: &ApiGraph,
+    selected: &BTreeSet<&str>,
+    layout: &SdkFileLayout,
+    sdk: &SdkModels<'_>,
+) -> Result<Result<Vec<SdkFile>, Vec<String>>, CoreError> {
+    let plan = match Plan::new(graph, selected, layout, Some(sdk))? {
+        Ok(plan) => plan,
+        Err(problems) => return Ok(Err(problems)),
+    };
+    let files = plan.render()?;
+    check_unique_file_names(&files, "RustSdk")?;
+    Ok(Ok(files))
 }
 
 /// One schema the tree emits, with the names it is emitted under.
@@ -184,6 +215,8 @@ struct Plan<'g> {
     /// The schemas each schema holds by value, transitively.
     by_value: BTreeMap<&'g str, BTreeSet<&'g str>>,
     split: bool,
+    /// The multipart request models of an SDK, with the file shape of each byte-string field.
+    multipart: BTreeMap<&'g str, BTreeMap<&'g str, BinaryValueShape>>,
 }
 
 impl<'g> Plan<'g> {
@@ -191,7 +224,8 @@ impl<'g> Plan<'g> {
         graph: &'g ApiGraph,
         selected: &BTreeSet<&str>,
         layout: &SdkFileLayout,
-    ) -> Result<Self, CoreError> {
+        sdk: Option<&SdkModels<'_>>,
+    ) -> Result<Result<Self, Vec<String>>, CoreError> {
         let bodies: BTreeMap<&str, &Type> = graph
             .schemas
             .iter()
@@ -233,9 +267,7 @@ impl<'g> Plan<'g> {
             idents.insert(schema.id.as_str(), ident);
         }
 
-        for schema in &schemas {
-            check_schema(schema, &bodies, selected, &mut problems);
-        }
+        let multipart = check_schemas(graph, &schemas, &bodies, selected, sdk, &mut problems)?;
         check_alias_cycles(&schemas, &mut problems);
 
         let split = layout.is_split();
@@ -277,17 +309,18 @@ impl<'g> Plan<'g> {
         }
 
         if !problems.is_empty() {
-            return Err(unrepresentable(&problems));
+            return Ok(Err(problems));
         }
 
         let by_value = by_value_reach(&schemas);
-        Ok(Self {
+        Ok(Ok(Self {
             models,
             idents,
             directions: schema_directions(graph),
             by_value,
             split,
-        })
+            multipart,
+        }))
     }
 
     /// The path prefix a model's own file names a root-module item with.
@@ -362,7 +395,8 @@ impl<'g> Plan<'g> {
         match &schema.body {
             Type::Object(fields) => {
                 let plans = self.plan_fields(schema, fields)?;
-                self.render_struct(&mut out, &model.ident, &plans, helpers);
+                let serde = !self.multipart.contains_key(schema.id.as_str());
+                self.render_struct(&mut out, &model.ident, &plans, serde, helpers);
             }
             Type::Enum(members) => {
                 out.push_str(&derive(&ENUM_DERIVES));
@@ -405,10 +439,16 @@ impl<'g> Plan<'g> {
         fields: &'f [Field],
     ) -> Result<Vec<FieldPlan<'f>>, CoreError> {
         let directions = directions_of(&self.directions, &schema.id);
+        let files = self.multipart.get(schema.id.as_str());
         let mut plans = Vec::with_capacity(fields.len());
         for (field, ident) in fields.iter().zip(field_idents(fields)) {
             let presence = Presence::of(directions, field);
-            let mut ty = self.rust_type(&field.schema)?;
+            let file = RustType::leaf(format!("{}super::MultipartFile", self.root()));
+            let mut ty = match files.and_then(|files| files.get(field.json_name.as_str())) {
+                Some(BinaryValueShape::Single) => file,
+                Some(BinaryValueShape::Repeated) => file.inside("Vec"),
+                Some(BinaryValueShape::Other) | None => self.rust_type(&field.schema)?,
+            };
             if self.needs_box(&schema.id, &field.schema) {
                 ty = ty.inside("Box");
             }
@@ -433,17 +473,22 @@ impl<'g> Plan<'g> {
         out: &mut String,
         ident: &str,
         plans: &[FieldPlan<'_>],
+        serde: bool,
         helpers: &mut BTreeSet<Presence>,
     ) {
         // With no required field every field is an `Option`, so the struct has a default value.
         let defaulted = !plans.iter().any(|plan| plan.presence.is_required());
         let mut derives = STRUCT_DERIVES.to_vec();
+        if !serde {
+            // A multipart request model: the SDK writes it part by part, never through Serde.
+            derives.retain(|name| !name.starts_with("::serde"));
+        }
         if defaulted {
             derives.insert(2, "Default");
         }
         out.push_str(&derive(&derives));
 
-        let camel_case = camel_case_states_more(plans);
+        let camel_case = serde && camel_case_states_more(plans);
         if camel_case {
             out.push_str("#[serde(rename_all = \"camelCase\")]\n");
         }
@@ -452,7 +497,7 @@ impl<'g> Plan<'g> {
         } else {
             let _ = writeln!(out, "pub struct {ident} {{");
             for plan in plans {
-                self.render_field(out, plan, camel_case, helpers);
+                self.render_field(out, plan, camel_case, serde, helpers);
             }
             out.push_str("}\n");
         }
@@ -465,6 +510,7 @@ impl<'g> Plan<'g> {
         out: &mut String,
         plan: &FieldPlan<'_>,
         camel_case: bool,
+        serde: bool,
         helpers: &mut BTreeSet<Presence>,
     ) {
         let indent = pad(INDENT);
@@ -489,11 +535,11 @@ impl<'g> Plan<'g> {
             args.push("default".to_string());
             args.push("skip_serializing_if = \"Option::is_none\"".to_string());
         }
-        if let Some(helper) = plan.presence.helper() {
+        if let Some(helper) = plan.presence.helper().filter(|_| serde) {
             helpers.insert(plan.presence);
             args.push(format!("deserialize_with = \"{}{helper}\"", self.root()));
         }
-        if !args.is_empty() {
+        if serde && !args.is_empty() {
             out.push_str(&attribute(&indent, "serde", &args));
         }
         let lhs = format!("pub {}:", plan.ident);
@@ -516,6 +562,8 @@ impl<'g> Plan<'g> {
     /// The Rust spelling of a validated type.
     fn rust_type(&self, ty: &Type) -> Result<RustType, CoreError> {
         Ok(match ty {
+            // Only an SDK's byte-string alias passes validation: a raw body or response.
+            Type::Primitive(Prim::Bytes) => RustType::leaf("u8").inside("Vec"),
             Type::Primitive(prim) => RustType::leaf(
                 rust_primitive(prim)
                     .ok_or_else(|| internal("", "an unsupported primitive passed validation"))?,
@@ -778,6 +826,109 @@ fn check_schema(
             }
         }
     }
+}
+
+/// Check every schema for the target `sdk` says, returning the file shapes of the SDK's
+/// multipart request models.
+fn check_schemas<'g>(
+    graph: &ApiGraph,
+    schemas: &[&'g Schema],
+    bodies: &BTreeMap<&str, &Type>,
+    selected: &BTreeSet<&str>,
+    sdk: Option<&SdkModels<'_>>,
+    problems: &mut Vec<String>,
+) -> Result<BTreeMap<&'g str, BTreeMap<&'g str, BinaryValueShape>>, CoreError> {
+    let mut multipart = BTreeMap::new();
+    for schema in schemas {
+        match sdk {
+            None => check_schema(schema, bodies, selected, problems),
+            Some(sdk) => {
+                let files = check_sdk_schema(graph, schema, bodies, selected, sdk, problems)?;
+                if sdk.multipart.contains(&schema.id) {
+                    multipart.insert(schema.id.as_str(), files);
+                }
+            }
+        }
+    }
+    Ok(multipart)
+}
+
+/// [`check_schema`] for an SDK's models, returning the file shape of each byte-string field of
+/// a multipart request model.
+///
+/// A schema that is itself a byte string is an alias the SDK sends raw. A file field of a
+/// multipart request model is a file. Every other position is JSON, where a byte string has no
+/// stated text encoding whether it is spelled directly or through an alias, and where a multipart
+/// request model, which has no JSON form, cannot appear.
+fn check_sdk_schema<'g>(
+    graph: &ApiGraph,
+    schema: &'g Schema,
+    bodies: &BTreeMap<&str, &Type>,
+    selected: &BTreeSet<&str>,
+    sdk: &SdkModels<'_>,
+    problems: &mut Vec<String>,
+) -> Result<BTreeMap<&'g str, BinaryValueShape>, CoreError> {
+    let mut files = BTreeMap::new();
+    let json = |ty: &Type| -> Option<String> {
+        unsupported(ty, bodies, selected).or_else(|| json_reason(ty, bodies, sdk))
+    };
+    match &schema.body {
+        Type::Primitive(Prim::Bytes) | Type::Enum(_) => {}
+        Type::Object(fields) => {
+            let multipart = sdk.multipart.contains(&schema.id);
+            for field in fields {
+                if multipart {
+                    let shape = binary_value_shape(&field.schema, graph)?;
+                    if shape != BinaryValueShape::Other {
+                        files.insert(field.json_name.as_str(), shape);
+                        continue;
+                    }
+                }
+                if let Some(reason) = json(&field.schema) {
+                    problems.push(format!(
+                        "schema `{}` field `{}`: {reason}",
+                        schema.id, field.json_name
+                    ));
+                }
+            }
+        }
+        Type::Union(_) => problems.push(format!("schema `{}`: {}", schema.id, union_reason())),
+        body => {
+            if let Some(reason) = json(body) {
+                problems.push(format!("schema `{}`: {reason}", schema.id));
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Why `ty`, in a JSON position of an SDK model, names something with no JSON form: a byte
+/// string through an alias, or a multipart request model.
+fn json_reason(ty: &Type, bodies: &BTreeMap<&str, &Type>, sdk: &SdkModels<'_>) -> Option<String> {
+    let mut named = Vec::new();
+    named_refs(ty, &mut named);
+    for id in named {
+        if sdk.multipart.contains(id) {
+            return Some(format!(
+                "a reference to `{id}`, a multipart request model, which has no JSON form"
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut current = id;
+        while let Some(Type::Named(next)) = bodies.get(current) {
+            if !seen.insert(current) {
+                break;
+            }
+            current = next.as_str();
+        }
+        if matches!(bodies.get(current), Some(Type::Primitive(Prim::Bytes))) {
+            return Some(format!(
+                "a byte string inside JSON, through `{id}`: the graph does not state its JSON \
+                 text encoding"
+            ));
+        }
+    }
+    None
 }
 
 fn union_reason() -> &'static str {

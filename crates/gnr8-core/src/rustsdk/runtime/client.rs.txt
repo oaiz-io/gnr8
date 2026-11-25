@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::errors::ApiError;
 use super::errors::DecodeError;
+use super::errors::EncodeError;
 use super::errors::Error;
 use super::errors::TransportError;
 
@@ -375,6 +376,9 @@ pub(super) struct Call {
     idempotency_header: Option<&'static str>,
     /// Headers a redirect to another origin drops.
     sensitive: Vec<String>,
+    // [multipart]
+    parts: Option<Vec<(String, super::multipart::Part)>>,
+    // [/multipart]
     // [auth]
     alternatives: Vec<Vec<AuthScheme>>,
     // [/auth]
@@ -403,6 +407,9 @@ impl Call {
                 "Cookie".to_string(),
                 "Proxy-Authorization".to_string(),
             ],
+            // [multipart]
+            parts: None,
+            // [/multipart]
             // [auth]
             alternatives: Vec::new(),
             // [/auth]
@@ -503,10 +510,93 @@ impl Call {
         content_type: &str,
         body: &T,
     ) -> Result<(), Error> {
-        let bytes = serde_json::to_vec(body).map_err(Error::Encode)?;
+        let bytes = serde_json::to_vec(body).map_err(encode_error)?;
         self.body = Some((content_type.to_string(), bytes));
         Ok(())
     }
+    // [text]
+
+    /// Send `body` as text in the media type `content_type`.
+    pub(super) fn text(&mut self, content_type: &str, body: &str) {
+        self.body = Some((content_type.to_string(), body.as_bytes().to_vec()));
+    }
+    // [/text]
+    // [binary]
+
+    /// Send `body` as it is, in the media type `content_type`.
+    pub(super) fn binary(&mut self, content_type: &str, body: &[u8]) {
+        self.body = Some((content_type.to_string(), body.to_vec()));
+    }
+    // [/binary]
+    // [form]
+
+    /// Send the fields of `body` form-encoded, each value as a query parameter's.
+    pub(super) fn form<T: serde::Serialize + ?Sized>(
+        &mut self,
+        content_type: &str,
+        body: &T,
+    ) -> Result<(), Error> {
+        let mut encoded = Vec::new();
+        for (name, value) in fields(body)? {
+            for text in value {
+                encoded.push(format!("{}={}", form_escape(&name), form_escape(&text)));
+            }
+        }
+        self.body = Some((content_type.to_string(), encoded.join("&").into_bytes()));
+        Ok(())
+    }
+    // [/form]
+    // [multipart]
+
+    /// Send a multipart body made of the parts added after this.
+    pub(super) fn multipart(&mut self) {
+        self.parts = Some(Vec::new());
+    }
+
+    /// Add a text part for each value of the field `name`; an absent value adds none.
+    pub(super) fn part<T: serde::Serialize + ?Sized>(
+        &mut self,
+        name: &str,
+        value: &T,
+    ) -> Result<(), Error> {
+        let text = serde_json::to_string(value).map_err(encode_error)?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(encode_error)?;
+        let values = match value {
+            serde_json::Value::Array(items) => items,
+            value => vec![value],
+        };
+        let parts = self.parts.get_or_insert_with(Vec::new);
+        for value in values.iter().filter(|value| !value.is_null()) {
+            let text = super::multipart::Part::Text(part_text(value));
+            parts.push((name.to_string(), text));
+        }
+        Ok(())
+    }
+
+    /// Add a file part for each file of the field `name`.
+    pub(super) fn file<F: super::multipart::Files + ?Sized>(
+        &mut self,
+        name: &str,
+        files: &F,
+    ) -> Result<(), Error> {
+        let parts = self.parts.get_or_insert_with(Vec::new);
+        for file in files.files() {
+            if file.filename.is_empty() {
+                return Err(Error::Encode(EncodeError::new(
+                    "multipart filename must not be empty",
+                )));
+            }
+            if file.filename.contains(['\r', '\n']) {
+                return Err(Error::Encode(EncodeError::new(
+                    "multipart filename must not contain newlines",
+                )));
+            }
+            let part = super::multipart::Part::File(file.clone());
+            parts.push((name.to_string(), part));
+        }
+        Ok(())
+    }
+    // [/multipart]
 
     /// Accept `status`, a declared redirect, as a success.
     pub(super) fn accepts(&mut self, status: u16) {
@@ -594,6 +684,11 @@ impl Call {
             headers.push(("Cookie".to_string(), self.cookies.join("; ")));
         }
         let mut body = Vec::new();
+        // [multipart]
+        if let Some(parts) = self.parts.take() {
+            self.body = Some(super::multipart::encode(&parts));
+        }
+        // [/multipart]
         if let Some((content_type, bytes)) = self.body.take() {
             headers.push(("Content-Type".to_string(), content_type));
             body = bytes;
@@ -830,6 +925,10 @@ impl Reply {
     }
 }
 
+fn encode_error(error: serde_json::Error) -> Error {
+    Error::Encode(EncodeError::new(error.to_string()))
+}
+
 fn decode_json<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(body).map_err(|error| Error::Decode(DecodeError::new(error.to_string())))
 }
@@ -950,8 +1049,8 @@ fn retry_delay(response: &Response, attempt: usize) -> Duration {
 /// `value` as its JSON encoding states it, ready for a parameter location.
 fn wire<T: serde::Serialize + ?Sized>(value: &T) -> Result<Wire, Error> {
     // Through text, so a float keeps the shortest digits of its own width.
-    let text = serde_json::to_string(value).map_err(Error::Encode)?;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(Error::Encode)?;
+    let text = serde_json::to_string(value).map_err(encode_error)?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(encode_error)?;
     Ok(match value {
         serde_json::Value::Null => Wire::Absent,
         serde_json::Value::Array(items) => Wire::List(items.iter().map(scalar).collect()),
@@ -976,6 +1075,212 @@ fn scalar(value: &serde_json::Value) -> String {
         other => other.to_string(),
     }
 }
+// [fields]
+
+/// Each field of `body`, an object, with its values as parameter text: none when absent, one
+/// per item of an array.
+fn fields<T: serde::Serialize + ?Sized>(body: &T) -> Result<Vec<(String, Vec<String>)>, Error> {
+    let text = serde_json::to_string(body).map_err(encode_error)?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(encode_error)?;
+    let serde_json::Value::Object(entries) = value else {
+        return Err(Error::Encode(EncodeError::new(
+            "a form body must encode to an object",
+        )));
+    };
+    Ok(entries
+        .into_iter()
+        .map(|(name, value)| {
+            let values = match value {
+                serde_json::Value::Array(items) => items,
+                value => vec![value],
+            };
+            let texts = values
+                .iter()
+                .filter(|value| !value.is_null())
+                .map(scalar)
+                .collect();
+            (name, texts)
+        })
+        .collect())
+}
+
+/// Percent-encode a form field name or value, a space as `+`.
+fn form_escape(value: &str) -> String {
+    escape(value, false).replace("%20", "+")
+}
+// [/fields]
+// [multipart]
+
+/// A multipart text part: a string as itself, an object as its JSON, a scalar as a parameter.
+fn part_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => value.to_string(),
+        value => scalar(value),
+    }
+}
+// [/multipart]
+// [pagination]
+
+/// The items field of a page, whatever its presence.
+pub(super) trait PageItems {
+    type Item;
+
+    fn count(&self) -> usize;
+
+    fn into_items(self) -> Vec<Self::Item>;
+}
+
+impl<T> PageItems for Vec<T> {
+    type Item = T;
+
+    fn count(&self) -> usize {
+        self.len()
+    }
+
+    fn into_items(self) -> Vec<T> {
+        self
+    }
+}
+
+impl<P: PageItems> PageItems for Option<P> {
+    type Item = P::Item;
+
+    fn count(&self) -> usize {
+        self.as_ref().map_or(0, P::count)
+    }
+
+    fn into_items(self) -> Vec<P::Item> {
+        self.map(P::into_items).unwrap_or_default()
+    }
+}
+
+/// How many items a page's items field holds.
+pub(super) fn item_count<P: PageItems>(items: &P) -> usize {
+    items.count()
+}
+
+/// The items of a page's items field.
+pub(super) fn page_items<P: PageItems>(items: P) -> Vec<P::Item> {
+    items.into_items()
+}
+// [/pagination]
+// [cursor]
+
+/// A next-cursor field or a cursor parameter, whatever its presence.
+pub(super) trait Cursor {
+    fn get(&self) -> Option<&str>;
+
+    fn set(&mut self, cursor: String);
+}
+
+impl Cursor for String {
+    fn get(&self) -> Option<&str> {
+        Some(self)
+            .filter(|cursor| !cursor.is_empty())
+            .map(String::as_str)
+    }
+
+    fn set(&mut self, cursor: String) {
+        *self = cursor;
+    }
+}
+
+impl Cursor for Option<String> {
+    fn get(&self) -> Option<&str> {
+        self.as_ref().and_then(Cursor::get)
+    }
+
+    fn set(&mut self, cursor: String) {
+        *self = Some(cursor);
+    }
+}
+
+impl Cursor for Option<Option<String>> {
+    fn get(&self) -> Option<&str> {
+        self.as_ref().and_then(Cursor::get)
+    }
+
+    fn set(&mut self, cursor: String) {
+        *self = Some(Some(cursor));
+    }
+}
+
+/// Move `param` to the page's `next` cursor; `false` when there is none, so no page follows.
+pub(super) fn advance_cursor<P: Cursor, N: Cursor>(param: &mut P, next: &N) -> bool {
+    match next.get() {
+        Some(cursor) => {
+            param.set(cursor.to_string());
+            true
+        }
+        None => false,
+    }
+}
+// [/cursor]
+// [counter]
+
+/// A page-number or offset parameter, whatever its presence.
+pub(super) trait Counter {
+    /// Give an absent counter its first value.
+    fn start(&mut self, first: u8);
+
+    fn advance(&mut self, by: usize);
+}
+
+/// An integer a counter counts in.
+pub(super) trait Count: Copy {
+    fn first(value: u8) -> Self;
+
+    fn plus(self, by: usize) -> Self;
+}
+
+macro_rules! count {
+    ($($t:ty),*) => {
+        $(
+            impl Count for $t {
+                fn first(value: u8) -> Self {
+                    Self::try_from(value).unwrap_or(Self::MAX)
+                }
+
+                fn plus(self, by: usize) -> Self {
+                    self.saturating_add(Self::try_from(by).unwrap_or(Self::MAX))
+                }
+            }
+        )*
+    };
+}
+
+count!(i8, i16, i32, i64, u8, u16, u32, u64);
+
+impl<C: Count> Counter for C {
+    fn start(&mut self, _: u8) {}
+
+    fn advance(&mut self, by: usize) {
+        *self = self.plus(by);
+    }
+}
+
+impl<C: Count> Counter for Option<C> {
+    fn start(&mut self, first: u8) {
+        self.get_or_insert(C::first(first));
+    }
+
+    fn advance(&mut self, by: usize) {
+        if let Some(count) = self {
+            *count = count.plus(by);
+        }
+    }
+}
+
+/// Give an absent page-number or offset parameter its first value.
+pub(super) fn start_counter<C: Counter>(counter: &mut C, first: u8) {
+    counter.start(first);
+}
+
+/// Move a page-number or offset parameter on by `by`.
+pub(super) fn advance_counter<C: Counter>(counter: &mut C, by: usize) {
+    counter.advance(by);
+}
+// [/counter]
 
 /// The name-value pairs a parameter `name` sends in `style`.
 fn pairs(name: &str, value: Wire, style: &str, explode: bool) -> Vec<(String, String)> {

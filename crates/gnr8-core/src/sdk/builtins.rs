@@ -225,28 +225,7 @@ impl<'a> SiblingSdk<'a> {
             Self::Python(t) => (&t.model_roots, t.all_models, t.registered_schema_roots),
             Self::TypeScript(t) => (&t.model_roots, t.all_models, t.registered_schema_roots),
         };
-        let models = match (all_models, roots.as_slice(), registered) {
-            (false, roots, registered) => Models::Reached { roots, registered },
-            (true, [], true) => Models::All,
-            (true, [root, ..], _) => {
-                return Err(CoreError::Config {
-                    message: format!(
-                        "{} emits every model with `all_models()`, so its model root {root:?} \
-                         has no effect; remove one of them",
-                        self.label()
-                    ),
-                })
-            }
-            (true, [], false) => {
-                return Err(CoreError::Config {
-                    message: format!(
-                        "{} emits every model with `all_models()`, so \
-                         `without_registered_schema_roots()` has no effect; remove one of them",
-                        self.label()
-                    ),
-                })
-            }
-        };
+        let models = sdk_models(self.label(), roots, all_models, registered)?;
         target_view(ir, self.excluded_operations(), models, self.label())
     }
 
@@ -270,6 +249,37 @@ impl<'a> SiblingSdk<'a> {
             .map(|schema| schema.id.clone())
             .filter(|id| !kept.contains(id))
             .collect())
+    }
+}
+
+/// The models an SDK declaration selects: those its operations and `roots` reach, with the
+/// registered schemas unless `registered` is off, or every model with `all_models`.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when `all_models` is set beside a model root or beside
+/// `without_registered_schema_roots`.
+fn sdk_models<'r>(
+    label: &str,
+    roots: &'r [String],
+    all_models: bool,
+    registered: bool,
+) -> Result<Models<'r>, CoreError> {
+    match (all_models, roots, registered) {
+        (false, roots, registered) => Ok(Models::Reached { roots, registered }),
+        (true, [], true) => Ok(Models::All),
+        (true, [root, ..], _) => Err(CoreError::Config {
+            message: format!(
+                "{label} emits every model with `all_models()`, so its model root {root:?} has no \
+                 effect; remove one of them"
+            ),
+        }),
+        (true, [], false) => Err(CoreError::Config {
+            message: format!(
+                "{label} emits every model with `all_models()`, so \
+                 `without_registered_schema_roots()` has no effect; remove one of them"
+            ),
+        }),
     }
 }
 
@@ -4838,11 +4848,12 @@ pub(crate) fn target_graph<'a>(
     ir: &'a ApiGraph,
 ) -> Result<std::borrow::Cow<'a, ApiGraph>, CoreError> {
     if let BuiltinTarget::RustSdk(t) = spec {
-        let models = match (t.emits_all_models(), t.model_roots(), t.includes_registered_schema_roots()) {
-            (false, roots, registered) => Models::Reached { roots, registered },
-            (true, [], true) => Models::All,
-            _ => return Err(CoreError::Config { message: "RustSdk all_models cannot be combined with model roots or disabled registered roots".to_string() }),
-        };
+        let models = sdk_models(
+            "RustSdk",
+            t.model_roots(),
+            t.emits_all_models(),
+            t.includes_registered_schema_roots(),
+        )?;
         return target_view(ir, t.excluded_operations(), models, "RustSdk");
     }
     match SiblingSdk::of(spec) {

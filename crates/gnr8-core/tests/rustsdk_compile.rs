@@ -815,3 +815,624 @@ fn every_operation_statement_is_broken_where_rustfmt_breaks_it() {
     rustfmt_check(&root);
     cargo(&root, "does not compile", &["check", "--quiet", "--locked"]);
 }
+
+// -------------------------------------------------------------------------------------------------
+// The rest of the wire: every request body kind, several media types for one body, pagination.
+// -------------------------------------------------------------------------------------------------
+
+const MEDIA: &str = r##"
+openapi: 3.1.0
+info: { title: Media, version: "1" }
+paths:
+  /files:
+    post:
+      operationId: uploadFiles
+      requestBody:
+        required: true
+        content: { multipart/form-data: { schema: { $ref: "#/components/schemas/Upload" } } }
+      responses: { "204": { description: ok } }
+  /raw:
+    put:
+      operationId: putRaw
+      requestBody:
+        required: true
+        content: { application/octet-stream: { schema: { $ref: "#/components/schemas/Blob" } } }
+      responses: { "204": { description: ok } }
+  /note:
+    post:
+      operationId: postNote
+      requestBody:
+        required: false
+        content: { text/plain: { schema: { $ref: "#/components/schemas/Text" } } }
+      responses: { "204": { description: ok } }
+  /form:
+    post:
+      operationId: submitForm
+      requestBody:
+        required: true
+        content: { application/x-www-form-urlencoded: { schema: { $ref: "#/components/schemas/Signup" } } }
+      responses: { "204": { description: ok } }
+  /either:
+    post:
+      operationId: sendEither
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: "#/components/schemas/Signup" } }
+          text/plain: { schema: { $ref: "#/components/schemas/Text" } }
+          multipart/form-data: { schema: { $ref: "#/components/schemas/Upload" } }
+      responses: { "204": { description: ok } }
+  /cursor:
+    get:
+      operationId: listCursor
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, format: int32 } }
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/CursorPage" } } } }
+  /pages/{shelf}:
+    get:
+      operationId: listPages
+      parameters:
+        - { name: shelf, in: path, required: true, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer, format: int32 } }
+        - { name: size, in: query, schema: { type: integer, format: int32 } }
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Page" } } } }
+  /offsets:
+    get:
+      operationId: listOffsets
+      parameters:
+        - { name: offset, in: query, schema: { type: integer, format: int64 } }
+        - { name: limit, in: query, schema: { type: integer, format: int64 } }
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Page" } } } }
+components:
+  schemas:
+    Blob: { type: string, format: binary }
+    Text: { type: string }
+    Meta:
+      type: object
+      properties: { k: { type: string } }
+    Upload:
+      type: object
+      required: [file]
+      properties:
+        file: { type: string, format: binary }
+        extras: { type: array, items: { type: string, format: binary } }
+        avatar: { $ref: "#/components/schemas/Blob" }
+        tags: { type: array, items: { type: string } }
+        label: { type: string }
+        meta: { $ref: "#/components/schemas/Meta" }
+        count: { type: integer, format: int32 }
+    Signup:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        langs: { type: array, items: { type: string } }
+        age: { type: integer, format: int32 }
+        ratio: { type: number, format: double }
+    Item:
+      type: object
+      required: [id]
+      properties: { id: { type: string } }
+    CursorPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Item" } }
+        next: { type: string }
+    Page:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Item" } }
+"##;
+
+fn media_transforms() -> Vec<TransformStage> {
+    vec![
+        ConfigurePagination::cursor(
+            OperationSelector::OperationId("listCursor".into()),
+            "cursor",
+            "next",
+            "items",
+        )
+        .into(),
+        ConfigurePagination::page(
+            OperationSelector::OperationId("listPages".into()),
+            "page",
+            "size",
+            "items",
+        )
+        .into(),
+        ConfigurePagination::offset(
+            OperationSelector::OperationId("listOffsets".into()),
+            "offset",
+            "limit",
+            "items",
+        )
+        .into(),
+    ]
+}
+
+const MEDIA_WIRE_TESTS: &str = r##"
+use crate::sdk::models;
+use crate::sdk::{Client, Error, MultipartFile, Request, Response, TransportError};
+use std::sync::{Arc, Mutex};
+
+type Seen = Arc<Mutex<Vec<Request>>>;
+
+fn ok(body: &[u8]) -> Response {
+    Response { status: 200, headers: Vec::new(), body: body.to_vec() }
+}
+
+fn recording(replies: Vec<Response>) -> (Client, Seen) {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let replies = Mutex::new(replies.into_iter());
+    let client = Client::new("http://media.test", move |request: &Request| {
+        log.lock().unwrap().push(request.clone());
+        replies.lock().unwrap().next().ok_or_else(|| TransportError::new("no reply left"))
+    });
+    (client, seen)
+}
+
+fn content_type(request: &Request) -> &str {
+    request.headers.iter().find(|(k, _)| k == "Content-Type").map(|(_, v)| v.as_str()).unwrap()
+}
+
+/// The parts of a multipart body, as (headers, content) text.
+fn parts(request: &Request) -> Vec<(String, String)> {
+    let boundary = content_type(request).split("boundary=").nth(1).unwrap().to_string();
+    let body = String::from_utf8(request.body.clone()).unwrap();
+    assert!(body.ends_with(&format!("--{boundary}--\r\n")), "{body}");
+    body.split(&format!("--{boundary}"))
+        .filter(|part| part.starts_with("\r\n"))
+        .map(|part| {
+            let (head, content) = part[2..].split_once("\r\n\r\n").unwrap();
+            (head.to_string(), content.strip_suffix("\r\n").unwrap().to_string())
+        })
+        .collect()
+}
+
+fn upload() -> models::Upload {
+    let mut upload = models::Upload::new(MultipartFile::new("a.txt", b"alpha".to_vec()));
+    upload.extras = Some(vec![MultipartFile::new("b\"c.bin", b"\x00b".to_vec()), MultipartFile::new("d.bin", b"d".to_vec())]);
+    upload.tags = Some(vec!["x".into(), "y".into()]);
+    upload.meta = Some(models::Meta { k: Some("v".into()) });
+    upload.count = Some(3);
+    upload
+}
+
+#[test]
+fn a_multipart_body_sends_files_and_fields_as_parts() {
+    let (client, seen) = recording(vec![Response { status: 204, headers: Vec::new(), body: Vec::new() }]);
+    client.upload_files(&upload()).unwrap();
+    let calls = seen.lock().unwrap();
+    assert!(content_type(&calls[0]).starts_with("multipart/form-data; boundary=gnr8-"));
+    assert_eq!(
+        parts(&calls[0]),
+        vec![
+            ("Content-Disposition: form-data; name=\"count\"".to_string(), "3".to_string()),
+            ("Content-Disposition: form-data; name=\"extras\"; filename=\"b\\\"c.bin\"\r\nContent-Type: application/octet-stream".to_string(), "\u{0}b".to_string()),
+            ("Content-Disposition: form-data; name=\"extras\"; filename=\"d.bin\"\r\nContent-Type: application/octet-stream".to_string(), "d".to_string()),
+            ("Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: application/octet-stream".to_string(), "alpha".to_string()),
+            ("Content-Disposition: form-data; name=\"meta\"".to_string(), "{\"k\":\"v\"}".to_string()),
+            ("Content-Disposition: form-data; name=\"tags\"".to_string(), "x".to_string()),
+            ("Content-Disposition: form-data; name=\"tags\"".to_string(), "y".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_file_without_a_usable_name_is_refused_before_sending() {
+    let (client, seen) = recording(Vec::new());
+    let bad = models::Upload::new(MultipartFile::new("", b"x".to_vec()));
+    assert!(matches!(client.upload_files(&bad), Err(Error::Encode(_))));
+    let bad = models::Upload::new(MultipartFile::new("a\r\nb", b"x".to_vec()));
+    assert!(matches!(client.upload_files(&bad), Err(Error::Encode(_))));
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn raw_text_and_form_bodies_reach_the_wire() {
+    let replies = (0..4).map(|_| Response { status: 204, headers: Vec::new(), body: Vec::new() }).collect();
+    let (client, seen) = recording(replies);
+    client.put_raw(b"\x01\x02").unwrap();
+    client.post_note(Some("hé")).unwrap();
+    client.post_note(None).unwrap();
+    let mut signup = models::Signup::new("Ada Lovelace".into());
+    signup.langs = Some(vec!["en".into(), "fr".into()]);
+    signup.ratio = Some(0.5);
+    client.submit_form(&signup).unwrap();
+    let calls = seen.lock().unwrap();
+    assert_eq!(calls[0].body, b"\x01\x02");
+    assert_eq!(content_type(&calls[0]), "application/octet-stream");
+    assert_eq!(calls[1].body, "hé".as_bytes());
+    assert_eq!(content_type(&calls[1]), "text/plain");
+    assert!(calls[2].body.is_empty());
+    assert_eq!(calls[3].body, b"langs=en&langs=fr&name=Ada+Lovelace&ratio=0.5");
+    assert_eq!(content_type(&calls[3]), "application/x-www-form-urlencoded");
+}
+
+#[test]
+fn a_body_in_several_media_types_is_sent_in_the_one_chosen() {
+    let replies = (0..3).map(|_| Response { status: 204, headers: Vec::new(), body: Vec::new() }).collect();
+    let (client, seen) = recording(replies);
+    client.send_either(&crate::sdk::SendEitherBody::ApplicationJson(models::Signup::new("a".into()))).unwrap();
+    client.send_either(&crate::sdk::SendEitherBody::TextPlain("plain".into())).unwrap();
+    client.send_either(&crate::sdk::SendEitherBody::MultipartFormData(upload())).unwrap();
+    let calls = seen.lock().unwrap();
+    assert_eq!(calls[0].body, br#"{"name":"a"}"#);
+    assert_eq!(calls[1].body, b"plain");
+    assert!(content_type(&calls[2]).starts_with("multipart/form-data"));
+}
+
+#[test]
+fn cursor_pages_follow_the_next_cursor_until_it_runs_out() {
+    let (client, seen) = recording(vec![
+        ok(br#"{"items":[{"id":"1"},{"id":"2"}],"next":"c2"}"#),
+        ok(br#"{"items":[{"id":"3"}],"next":""}"#),
+    ]);
+    let mut params = crate::sdk::ListCursorParams::new();
+    params.limit = Some(2);
+    let ids: Vec<String> = client.iter_list_cursor(&params).map(|item| item.unwrap().id).collect();
+    assert_eq!(ids, ["1", "2", "3"]);
+    let calls = seen.lock().unwrap();
+    assert_eq!(calls[0].url, "http://media.test/cursor?limit=2");
+    assert_eq!(calls[1].url, "http://media.test/cursor?cursor=c2&limit=2");
+}
+
+#[test]
+fn page_numbers_count_from_one_until_a_page_is_empty() {
+    let (client, seen) = recording(vec![
+        ok(br#"{"items":[{"id":"1"}]}"#),
+        ok(br#"{"items":[{"id":"2"}]}"#),
+        ok(br#"{}"#),
+    ]);
+    let pages: Vec<models::Page> = client
+        .list_pages_pages("s 1", &crate::sdk::ListPagesParams::new())
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(pages.len(), 2);
+    let urls: Vec<String> = seen.lock().unwrap().iter().map(|r| r.url.clone()).collect();
+    assert_eq!(urls, ["http://media.test/pages/s%201?page=1", "http://media.test/pages/s%201?page=2", "http://media.test/pages/s%201?page=3"]);
+}
+
+#[test]
+fn offsets_move_on_by_the_items_received_and_an_error_ends_the_pages() {
+    let (client, seen) = recording(vec![
+        ok(br#"{"items":[{"id":"1"},{"id":"2"}]}"#),
+        Response { status: 500, headers: Vec::new(), body: Vec::new() },
+    ]);
+    let mut params = crate::sdk::ListOffsetsParams::new();
+    params.offset = Some(10);
+    let results: Vec<_> = client.iter_list_offsets(&params).collect();
+    assert_eq!(results.len(), 3);
+    assert!(matches!(results[2], Err(Error::Api(_))));
+    let urls: Vec<String> = seen.lock().unwrap().iter().map(|r| r.url.clone()).collect();
+    assert_eq!(urls, ["http://media.test/offsets?offset=10", "http://media.test/offsets?offset=12"]);
+}
+"##;
+
+#[test]
+fn the_media_sdk_sends_every_body_kind_and_paginates() {
+    let files = generate(
+        "media",
+        MEDIA,
+        media_transforms(),
+        RustSdk::new().module("media").to("sdk"),
+    );
+    let models = text(&files, "sdk/src/models.rs");
+    assert!(models.contains("pub type Blob = Vec<u8>;"), "{models}");
+    assert!(
+        models.contains("pub file: super::MultipartFile,"),
+        "{models}"
+    );
+    assert!(
+        models.contains("pub extras: Option<Vec<super::MultipartFile>>,"),
+        "{models}"
+    );
+    assert!(
+        models.contains("pub avatar: Option<super::MultipartFile>,"),
+        "{models}"
+    );
+    for edition in ["2021", "2024"] {
+        let root = consumer(
+            &format!("media-{edition}"),
+            edition,
+            &files,
+            "sdk/src/",
+            Some(MEDIA_WIRE_TESTS),
+        );
+        cargo(
+            &root,
+            "fails its wire tests",
+            &["test", "--quiet", "--locked"],
+        );
+        if edition == "2021" {
+            rustfmt_check(&root);
+            clippy_check(&root);
+        }
+    }
+    // Every Clippy lint on, the root's allowances reduced to `dead_code`: this API leaves some of
+    // the runtime unused, and that is the API's choice, not the emitter's.
+    let files: Vec<(String, String)> = without_lint_allows(&files)
+        .into_iter()
+        .map(|(path, text)| {
+            if path.ends_with("/lib.rs") {
+                let text = text.replacen("\nmod client;", "#![allow(dead_code)]\n\nmod client;", 1);
+                (path, text)
+            } else {
+                (path, text)
+            }
+        })
+        .collect();
+    let root = consumer("media-no-allows", "2021", &files, "sdk/src/", None);
+    clippy_check(&root);
+}
+
+#[test]
+fn split_layouts_put_each_operation_or_group_in_its_own_module() {
+    let layouts = [
+        (
+            "per-endpoint",
+            RustSdk::new().split_files(),
+            "sdk/src/api_upload_files.rs",
+        ),
+        (
+            "per-tag",
+            RustSdk::new().layout(
+                SdkFileLayout::split()
+                    .operations_per_tag()
+                    .model_dir("models"),
+            ),
+            "sdk/src/api_default.rs",
+        ),
+        (
+            "template",
+            RustSdk::new().layout(
+                SdkFileLayout::split()
+                    .operations_per_endpoint()
+                    .operation_file_template("ops/{operation_snake}.rs")
+                    .model_dir("types"),
+            ),
+            "sdk/src/ops/upload_files.rs",
+        ),
+    ];
+    for (label, target, expected) in layouts {
+        let files = generate(
+            &format!("split-{label}"),
+            MEDIA,
+            media_transforms(),
+            target.module("media").to("sdk"),
+        );
+        let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
+        assert!(paths.contains(&expected), "{label}: {paths:?}");
+        assert!(
+            !paths.contains(&"sdk/src/operations.rs"),
+            "{label}: {paths:?}"
+        );
+        let root = consumer(
+            &format!("split-{label}"),
+            "2024",
+            &files,
+            "sdk/src/",
+            Some(MEDIA_WIRE_TESTS),
+        );
+        cargo(
+            &root,
+            "fails its wire tests",
+            &["test", "--quiet", "--locked"],
+        );
+        rustfmt_check(&root);
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// The graphs the target generates for, and the shapes it refuses.
+// -------------------------------------------------------------------------------------------------
+
+fn committed_graph(example: &str) -> gnr8_engine::graph::ApiGraph {
+    let path = repository().join(format!("examples/{example}/generated/gnr8.graph.json"));
+    serde_json::from_str::<gnr8_engine::graph_artifact::GraphArtifact>(
+        &std::fs::read_to_string(path).unwrap(),
+    )
+    .unwrap()
+    .graph
+}
+
+fn generate_from_graph(
+    graph: &gnr8_engine::graph::ApiGraph,
+    target: RustSdk,
+) -> Result<Vec<(String, String)>, String> {
+    use gnr8_engine::sdk::builtins::{generate_target, PlanTargets};
+    let spec = gnr8_engine::sdk::BuiltinTarget::RustSdk(target);
+    let targets = [(0, &spec)];
+    let mut out = gnr8_engine::sdk::Artifacts::new();
+    generate_target(
+        &spec,
+        graph,
+        &mut out,
+        &Cx::new(std::env::temp_dir()),
+        None,
+        &PlanTargets::new(&targets),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(out
+        .into_files()
+        .into_iter()
+        .map(|file| (file.path, file.text))
+        .collect())
+}
+
+/// Generate, compile, format-check and lint the SDK for `graph`.
+fn quality_gate(label: &str, graph: &gnr8_engine::graph::ApiGraph, target: RustSdk) {
+    let files = generate_from_graph(graph, target.module(label).to("sdk"))
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+    let root = consumer(label, "2021", &files, "sdk/src/", None);
+    cargo(&root, "does not compile", &["check", "--quiet", "--locked"]);
+    rustfmt_check(&root);
+    clippy_check(&root);
+}
+
+#[test]
+fn the_go_sourced_examples_pass_the_quality_gate() {
+    quality_gate("bookstore", &committed_graph("bookstore"), RustSdk::new());
+    quality_gate("taskflow", &committed_graph("taskflow"), RustSdk::new());
+    quality_gate(
+        "taskflow-split",
+        &committed_graph("taskflow"),
+        RustSdk::new().split_files(),
+    );
+}
+
+fn binary_multipart_graph() -> gnr8_engine::graph::ApiGraph {
+    serde_json::from_str(
+        &std::fs::read_to_string(repository().join("fixtures/sdk-targets/binary-multipart.json"))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_byte_string_inside_json_is_refused_and_excluding_its_operation_lifts_it() {
+    let graph = binary_multipart_graph();
+    let error = generate_from_graph(&graph, RustSdk::new().module("bytes").to("sdk")).unwrap_err();
+    assert!(error.contains("RustSdk cannot represent"), "{error}");
+    assert!(
+        error.contains("schema `sdk.JsonBytes` field `data`: a byte string"),
+        "{error}"
+    );
+    quality_gate(
+        "binary-multipart",
+        &graph,
+        RustSdk::new().exclude(OperationSelector::OperationId("sendJsonBytes".into())),
+    );
+}
+
+#[test]
+fn the_python_and_typescript_examples_are_refused_for_their_unions_only() {
+    for example in ["fastapi-bookstore", "flask-bookstore", "nestjs-bookstore"] {
+        let error = generate_from_graph(
+            &committed_graph(example),
+            RustSdk::new().module("refused").to("sdk"),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("RustSdk cannot represent"),
+            "{example}: {error}"
+        );
+        assert!(
+            error.contains("a union: the graph states no discriminator"),
+            "{example}: {error}"
+        );
+        assert!(!error.contains("inline enum"), "{example}: {error}");
+    }
+}
+
+#[test]
+fn every_refused_shape_is_named_in_one_error() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: Refused, version: "1" }
+paths:
+  /a:
+    post:
+      operationId: postA
+      parameters:
+        - { name: filter, in: query, schema: { type: object, properties: { a: { type: string } } } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Holder" } } }
+      responses: { "204": { description: ok } }
+  /b:
+    get:
+      operationId: withOptions
+      responses: { "204": { description: ok } }
+components:
+  schemas:
+    Blob: { type: string, format: binary }
+    Holder:
+      type: object
+      properties:
+        either: { oneOf: [ { type: string }, { type: integer } ] }
+        inline: { type: object, properties: { x: { type: string } } }
+        raw: { type: string, format: byte }
+        aliased: { $ref: "#/components/schemas/Blob" }
+"##;
+    let dir = temp_dir("refused-input");
+    std::fs::write(dir.join("openapi.yaml"), spec).unwrap();
+    let pipeline = Pipeline::new()
+        .source(OpenApi::new().input("openapi.yaml"))
+        .target(RustSdk::new().module("refused").to("sdk"));
+    let Err(error) = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&dir), None) else {
+        panic!("generation must fail");
+    };
+    let error = error.to_string();
+    for expected in [
+        "operation `withOptions`: its Rust name `with_options` is a method the client defines",
+        "operation `postA` query parameter `filter`: an inline object",
+        "field `either`: a union",
+        "field `inline`: an inline object",
+        "field `raw`: a byte string",
+        "field `aliased`: a byte string inside JSON, through `",
+    ] {
+        assert!(
+            error.contains(expected),
+            "missing {expected:?} in:\n{error}"
+        );
+    }
+}
+
+fn go_available() -> bool {
+    Command::new("go")
+        .arg("version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() == ".gnr8" {
+            continue;
+        }
+        let target = dst.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// The graph the Gin extractor reads from `fixture`, as the pipeline projects it.
+fn gin_graph(label: &str, fixture: &str) -> gnr8_engine::graph::ApiGraph {
+    let dir = temp_dir(&format!("{label}-fixture"));
+    copy_dir(&repository().join(fixture), &dir);
+    let store = gnr8_engine::store::Store::at(dir.join("cache-store"));
+    let pipeline = Pipeline::new()
+        .source(GoGin::new().inputs(["."]))
+        .transform(ApiOverrides::new().sse_response("GET", "/v1/items/raw-stream"))
+        .target(OpenApi31::new().to("generated/openapi.yaml"));
+    let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&dir), Some(&store))
+        .expect("the Gin pipeline must run");
+    outcome.graph
+}
+
+#[test]
+fn the_go_fixtures_pass_the_quality_gate() {
+    if !go_available() {
+        eprintln!("skipping: go is not available");
+        return;
+    }
+    let fixture = repository().join("fixtures/goalservice");
+    let goalservice = gnr8_engine::analyze::build_graph(&fixture.to_string_lossy())
+        .expect("the goalservice fixture must extract");
+    quality_gate("goalservice", &goalservice, RustSdk::new());
+    let gin = gin_graph("gin", "fixtures/gin-contract-regression");
+    quality_gate("gin-contract", &gin, RustSdk::new());
+    quality_gate("gin-contract-split", &gin, RustSdk::new().split_files());
+}

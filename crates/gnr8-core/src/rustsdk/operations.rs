@@ -13,13 +13,16 @@ use crate::rust_layout::{
     assignment, attribute, call, let_call, method_signature, pad, rust_str, signature, width,
     RustType, INDENT,
 };
-use crate::rust_names::{escape_keyword, snake, type_ident};
+use crate::rust_names::{escape_keyword, field_idents, snake, type_ident};
 use crate::sdk::emit_common::{
-    check_path_parameters, join_path, operation_auth_alternatives, operation_prose, path_tokens,
-    path_tokens_match, request_body_models_of, success_responses_of, ApiKeyLocation,
-    HttpAuthScheme, OperationAuthScheme, RequestBodyEncoding, SuccessResponses,
+    binary_value_shape, check_path_parameters, join_path, operation_auth_alternatives,
+    operation_prose, path_tokens, path_tokens_match, request_body_models_of, success_responses_of,
+    ApiKeyLocation, BinaryValueShape, HttpAuthScheme, OperationAuthScheme, RequestBodyEncoding,
+    SuccessResponses,
 };
 use crate::CoreError;
+
+use super::pagination::{self, Pagination};
 
 /// Method names the client defines itself, so no operation may take them.
 const CLIENT_METHODS: [&str; 3] = ["builder", "new", "with_options"];
@@ -33,26 +36,65 @@ const STRUCT_LIT_WIDTH: usize = 18;
 /// Clippy's default `too-many-arguments-threshold`.
 const MAX_ARGUMENTS: usize = 7;
 
-/// The credential kinds the emitted operations require, which decides the runtime pieces written.
+/// The runtime pieces the emitted operations reach, so the rest is not written.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AuthUse {
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct Features {
     pub(crate) bearer: bool,
     pub(crate) basic: bool,
     pub(crate) api_key: bool,
+    pub(crate) text: bool,
+    pub(crate) binary: bool,
+    pub(crate) form: bool,
+    pub(crate) multipart: bool,
+    pub(crate) pagination: bool,
+    pub(crate) cursor: bool,
+    pub(crate) counter: bool,
 }
 
-impl AuthUse {
-    pub(crate) const fn any(self) -> bool {
+impl Features {
+    pub(crate) const fn auth(self) -> bool {
         self.bearer || self.basic || self.api_key
     }
 }
 
-/// The rendered operations file and the public types it defines.
-pub(crate) struct Operations {
-    pub(crate) text: String,
-    /// The parameter types, re-exported from the root.
+/// One operation, rendered: the types it defines and its methods.
+pub(crate) struct Unit<'g> {
+    pub(crate) op: &'g Operation,
+    /// Items at module level: the parameter type, the body enum, pagination iterators.
+    pub(crate) items: String,
+    /// Methods inside `impl super::Client`.
+    pub(crate) methods: String,
+    /// The public types `items` defines, re-exported from the root.
     pub(crate) exports: Vec<String>,
-    pub(crate) auth: AuthUse,
+}
+
+/// Every operation, rendered, and the runtime pieces they reach.
+pub(crate) struct Operations<'g> {
+    pub(crate) units: Vec<Unit<'g>>,
+    pub(crate) features: Features,
+}
+
+/// An operations module holding `units`, with the module doc `doc`.
+pub(crate) fn module(doc: &str, units: &[&Unit<'_>]) -> String {
+    let mut body = String::new();
+    for unit in units {
+        body.push_str(&unit.items);
+    }
+    body.push_str("\nimpl super::Client {\n");
+    for (index, unit) in units.iter().enumerate() {
+        if index > 0 {
+            body.push('\n');
+        }
+        body.push_str(&unit.methods);
+    }
+    body.push_str("}\n");
+    let mut text = format!("//! {doc}\n\nuse super::client::Call;\nuse super::errors::Error;\n");
+    if body.contains("models::") {
+        text.push_str("use super::models;\n");
+    }
+    text.push_str(&body);
+    text
 }
 
 /// The Rust spelling of graph types inside the operations module.
@@ -81,7 +123,7 @@ impl<'g> Types<'g> {
     }
 
     /// The model `id` as the operations module names it.
-    fn model(&self, id: &str) -> Result<RustType, String> {
+    pub(super) fn model(&self, id: &str) -> Result<RustType, String> {
         self.idents
             .get(id)
             .map(|ident| RustType::leaf(format!("models::{ident}")))
@@ -89,7 +131,7 @@ impl<'g> Types<'g> {
     }
 
     /// `ty` as an owned value, or why it has no faithful Rust type.
-    fn owned(&self, ty: &Type) -> Result<RustType, String> {
+    pub(super) fn owned(&self, ty: &Type) -> Result<RustType, String> {
         Ok(match ty {
             Type::Primitive(prim) => RustType::leaf(primitive(prim)?),
             Type::WellKnown(_) | Type::Enum(_) => RustType::leaf("String"),
@@ -175,21 +217,23 @@ fn primitive(prim: &Prim) -> Result<&'static str, String> {
 }
 
 /// One parameter-struct field.
-struct ParamField<'g> {
-    param: &'g Param,
-    ident: String,
+pub(super) struct ParamField<'g> {
+    pub(super) param: &'g Param,
+    pub(super) ident: String,
     ty: RustType,
 }
 
 /// One operation, resolved.
-struct Plan<'g> {
+pub(super) struct Plan<'g> {
     op: &'g Operation,
-    method: String,
+    pub(super) method: String,
     path_template: String,
     url_path: Option<String>,
-    path_args: Vec<(String, &'g Param, RustType, bool)>,
-    body: Option<Body>,
-    params: Option<(String, Vec<ParamField<'g>>)>,
+    /// Each path parameter's argument name, parameter, type, and whether the type is a borrow.
+    pub(super) path_args: Vec<(String, &'g Param, RustType, bool)>,
+    pub(super) body: Option<Body>,
+    pub(super) params: Option<(String, Vec<ParamField<'g>>)>,
+    pagination: Option<Pagination>,
     success: SuccessResponses,
     ret: RustType,
     reply: &'static str,
@@ -198,56 +242,119 @@ struct Plan<'g> {
     idempotency_header: Option<String>,
 }
 
-struct Body {
-    ty: RustType,
-    required: bool,
+/// How a request body in one media type is sent.
+enum BodyKind {
+    Json,
+    Text,
+    Binary,
+    Form,
+    /// The model's fields as parts: wire name, Rust field name, and whether it holds files.
+    Multipart(Vec<(String, String, bool)>),
+}
+
+/// One media type an operation accepts its body in.
+struct BodyChoice {
     content_type: String,
+    kind: BodyKind,
+    /// The value sent, owned.
+    owned: RustType,
+    /// Its variant in the operation's body enum.
+    variant: String,
+}
+
+pub(super) struct Body {
+    choices: Vec<BodyChoice>,
+    pub(super) required: bool,
+    /// The enum of the media types, when there are several.
+    enum_name: Option<String>,
+}
+
+/// What kind of value a stored body is, which decides how it is copied and lent.
+pub(super) enum BodyShape {
+    Text,
+    Bytes,
+    Value,
+}
+
+impl Body {
+    /// The body as an owned value, and its shape.
+    pub(super) fn owned(&self) -> (RustType, BodyShape) {
+        match (&self.enum_name, self.choices.as_slice()) {
+            (Some(name), _) => (RustType::leaf(name.clone()), BodyShape::Value),
+            (None, [choice]) => match choice.kind {
+                BodyKind::Text => (choice.owned.clone(), BodyShape::Text),
+                BodyKind::Binary => (choice.owned.clone(), BodyShape::Bytes),
+                _ => (choice.owned.clone(), BodyShape::Value),
+            },
+            (None, _) => (RustType::leaf("()"), BodyShape::Value),
+        }
+    }
+
+    /// The type the method takes the body as.
+    pub(super) fn argument(&self) -> RustType {
+        let ty = match (&self.enum_name, self.choices.as_slice()) {
+            (Some(name), _) => RustType::leaf(format!("&{name}")),
+            (None, [choice]) => match choice.kind {
+                BodyKind::Text => RustType::leaf("&str"),
+                BodyKind::Binary => RustType::leaf("&[u8]"),
+                _ => RustType::leaf(format!("&{}", choice.owned.flat())),
+            },
+            (None, _) => RustType::leaf("&()"),
+        };
+        if self.required {
+            ty
+        } else {
+            ty.inside("Option")
+        }
+    }
 }
 
 /// Render every operation of `graph`.
-pub(crate) fn render(graph: &ApiGraph, types: &Types<'_>) -> Result<Operations, CoreError> {
+pub(crate) fn render<'g>(
+    graph: &'g ApiGraph,
+    types: &Types<'_>,
+) -> Result<Result<Operations<'g>, Vec<String>>, CoreError> {
     let mut problems = Vec::new();
     let mut plans = Vec::new();
     for op in &graph.operations {
-        match plan(graph, types, op, &mut problems) {
-            Ok(Some(plan)) => plans.push(plan),
-            Ok(None) => {}
-            Err(error) => return Err(error),
+        if let Some(plan) = plan(graph, types, op, &mut problems)? {
+            plans.push(plan);
         }
     }
     check_names(&plans, types, &mut problems);
     if !problems.is_empty() {
-        return Err(refusal(&problems));
+        return Ok(Err(problems));
     }
-
-    let mut auth = AuthUse::default();
-    let mut text = String::from("//! One method on the client per API operation.\n\n");
-    text.push_str("use super::client::Call;\nuse super::errors::Error;\n");
-    let mut body = String::new();
-    let mut exports = Vec::new();
+    let mut features = Features::default();
+    let mut units = Vec::new();
     for plan in &plans {
+        let mut items = String::new();
+        let mut exports = Vec::new();
         if let Some((name, fields)) = &plan.params {
-            render_params(&mut body, plan, name, fields);
+            render_params(&mut items, plan, name, fields);
             exports.push(name.clone());
         }
-    }
-    body.push_str("\nimpl super::Client {\n");
-    for (index, plan) in plans.iter().enumerate() {
-        if index > 0 {
-            body.push('\n');
+        if let Some(body) = &plan.body {
+            if let Some(name) = &body.enum_name {
+                render_body_enum(&mut items, plan, name, body);
+                exports.push(name.clone());
+            }
         }
-        render_method(&mut body, plan, &mut auth);
+        let mut methods = String::new();
+        render_method(&mut methods, plan, &mut features);
+        if let Some(pages) = &plan.pagination {
+            pagination::render(&mut items, &mut methods, plan, pages, &mut features);
+            exports.push(pages.pages_type.clone());
+            exports.push(pages.items_type.clone());
+        }
+        units.push(Unit {
+            op: plan.op,
+            items,
+            methods,
+            exports,
+        });
     }
-    body.push_str("}\n");
-    if body.contains("models::") {
-        text.push_str("use super::models;\n");
-    }
-    text.push_str(&body);
-    Ok(Operations {
-        text,
-        exports,
-        auth,
-    })
+    Ok(Ok(Operations { units, features }))
 }
 
 /// Resolve `op`, recording every position the target refuses in `problems`.
@@ -291,31 +398,11 @@ fn plan<'g>(
 
     let params = plan_params(types, op, problems);
 
-    let bodies = request_body_models_of(op, graph)?;
-    let body = match bodies.as_slice() {
-        [] => None,
-        [one] if one.encoding == RequestBodyEncoding::Json => match types.model(&one.schema_id) {
-            Ok(ty) => Some(Body {
-                ty,
-                required: one.required,
-                content_type: one.content_type.clone(),
-            }),
-            Err(reason) => {
-                problems.push(format!("operation `{}` request body: {reason}", op.id));
-                None
-            }
-        },
-        _ => {
-            problems.push(format!(
-                "operation `{}`: a request body other than one JSON body is not supported yet",
-                op.id
-            ));
-            None
-        }
-    };
+    let body = plan_body(graph, types, op, problems)?;
 
     let success = success_responses_of(op, graph)?;
     let (ret, reply, returns) = plan_reply(graph, types, op, &success, problems);
+    let pagination = pagination::plan(graph, types, op, params.as_ref(), &ret, reply)?;
 
     let auth = operation_auth_alternatives(graph, op)?;
     let idempotency_header = graph
@@ -340,6 +427,7 @@ fn plan<'g>(
         path_args,
         body,
         params,
+        pagination,
         success,
         ret: RustType::generic("Result", vec![ret, RustType::leaf("Error")]),
         reply,
@@ -384,6 +472,88 @@ fn plan_params<'g>(
         }
         Some((name, fields))
     }
+}
+
+/// The request body of `op`, in each media type it accepts.
+fn plan_body(
+    graph: &ApiGraph,
+    types: &Types<'_>,
+    op: &Operation,
+    problems: &mut Vec<String>,
+) -> Result<Option<Body>, CoreError> {
+    let bodies = request_body_models_of(op, graph)?;
+    let Some(first) = bodies.first() else {
+        return Ok(None);
+    };
+    let mut choices = Vec::new();
+    let mut variants = BTreeSet::new();
+    for body in &bodies {
+        let model = match types.model(&body.schema_id) {
+            Ok(model) => model,
+            Err(reason) => {
+                problems.push(format!("operation `{}` request body: {reason}", op.id));
+                continue;
+            }
+        };
+        let (kind, owned) = match body.encoding {
+            RequestBodyEncoding::Json => (BodyKind::Json, model),
+            RequestBodyEncoding::FormUrlEncoded => (BodyKind::Form, model),
+            RequestBodyEncoding::Text => (BodyKind::Text, RustType::leaf("String")),
+            RequestBodyEncoding::Binary => (BodyKind::Binary, RustType::leaf("u8").inside("Vec")),
+            RequestBodyEncoding::Multipart => {
+                let Some(Type::Object(fields)) = graph
+                    .schemas
+                    .iter()
+                    .find(|schema| schema.id == body.schema_id)
+                    .map(|schema| &schema.body)
+                else {
+                    problems.push(format!(
+                        "operation `{}` request body: a multipart body whose schema `{}` is not \
+                         an object, so it has no fields to send as parts",
+                        op.id, body.schema_id
+                    ));
+                    continue;
+                };
+                let mut parts = Vec::new();
+                for (field, ident) in fields.iter().zip(field_idents(fields)) {
+                    let file = binary_value_shape(&field.schema, graph)? != BinaryValueShape::Other;
+                    parts.push((field.json_name.clone(), ident, file));
+                }
+                (BodyKind::Multipart(parts), model)
+            }
+        };
+        let base = type_ident(&body.content_type).unwrap_or_else(|| "Body".to_string());
+        let variant = unique_camel(&base, &mut variants);
+        choices.push(BodyChoice {
+            content_type: body.content_type.clone(),
+            kind,
+            owned,
+            variant,
+        });
+    }
+    let enum_name = (bodies.len() > 1).then(|| {
+        format!(
+            "{}Body",
+            type_ident(&op.id).unwrap_or_else(|| "Operation".to_string())
+        )
+    });
+    Ok(Some(Body {
+        choices,
+        required: first.required,
+        enum_name,
+    }))
+}
+
+/// `base`, or `base` numbered from 2 when `taken` holds it; the result joins `taken`.
+fn unique_camel(base: &str, taken: &mut BTreeSet<String>) -> String {
+    let mut name = base.to_string();
+    let mut n = 2;
+    while taken.contains(&name) {
+        name = format!("{base}{n}");
+        n += 1;
+    }
+    taken.insert(name.clone());
+    name
 }
 
 /// What `op` returns, the `Reply` method that reads it, and the statuses that carry it.
@@ -469,10 +639,30 @@ fn check_names(plans: &[Plan<'_>], types: &Types<'_>, problems: &mut Vec<String>
                 plan.op.id, plan.method
             ));
         }
+        let mut defined: Vec<&str> = Vec::new();
         if let Some((name, _)) = &plan.params {
+            defined.push(name);
+        }
+        if let Some(name) = plan.body.as_ref().and_then(|body| body.enum_name.as_ref()) {
+            defined.push(name);
+        }
+        if let Some(pages) = &plan.pagination {
+            defined.push(&pages.pages_type);
+            defined.push(&pages.items_type);
+            for method in [&pages.pages_method, &pages.items_method] {
+                if let Some(previous) = methods.insert(method, &plan.op.id) {
+                    problems.push(format!(
+                        "operations `{previous}` and `{}` both define the Rust method `{method}`; \
+                         rename one with RenameOperation",
+                        plan.op.id
+                    ));
+                }
+            }
+        }
+        for name in defined {
             if let Some(owner) = type_names.insert(name, format!("operation `{}`", plan.op.id)) {
                 problems.push(format!(
-                    "operation `{}`: its parameter type `{name}` collides with {owner}; rename one \
+                    "operation `{}`: the type `{name}` it defines collides with {owner}; rename one \
                      with RenameOperation or RenameType",
                     plan.op.id
                 ));
@@ -581,7 +771,7 @@ fn render_params(out: &mut String, plan: &Plan<'_>, name: &str, fields: &[ParamF
     out.push_str("}\n");
 }
 
-fn render_method(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
+fn render_method(out: &mut String, plan: &Plan<'_>, features: &mut Features) {
     let op = plan.op;
     let prose = operation_prose(op, &[], "");
     let mut text = Vec::new();
@@ -613,13 +803,7 @@ fn render_method(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
         .map(|(ident, _, ty, _)| (ident.clone(), ty.clone()))
         .collect();
     if let Some(body) = &plan.body {
-        let ty = RustType::leaf(format!("&{}", body.ty.flat()));
-        let ty = if body.required {
-            ty
-        } else {
-            ty.inside("Option")
-        };
-        args.push(("body".to_string(), ty));
+        args.push(("body".to_string(), body.argument()));
     }
     if let Some((name, _)) = &plan.params {
         args.push(("params".to_string(), RustType::leaf(format!("&{name}"))));
@@ -638,7 +822,7 @@ fn render_method(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
 
     let indent = 2 * INDENT;
     let mut statements = String::new();
-    render_statements(&mut statements, plan, auth);
+    render_statements(&mut statements, plan, features);
     out.push_str(&let_call(
         indent,
         if statements.is_empty() {
@@ -665,7 +849,7 @@ fn render_method(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
 }
 
 /// The statements between the call's construction and its send.
-fn render_statements(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
+fn render_statements(out: &mut String, plan: &Plan<'_>, features: &mut Features) {
     let indent = 2 * INDENT;
     if let Some(url_path) = &plan.url_path {
         out.push_str(&call(indent, "call.url_path", &[rust_str(url_path)], ";"));
@@ -683,6 +867,28 @@ fn render_statements(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
             "?;",
         ));
     }
+    render_parameters(out, plan);
+    render_body_statements(out, plan, features);
+    render_auth(out, plan, features);
+    if let Some(header) = &plan.idempotency_header {
+        out.push_str(&call(indent, "call.idempotent", &[rust_str(header)], ";"));
+    }
+    for status in plan
+        .success
+        .statuses
+        .iter()
+        .filter(|status| (300..400).contains(*status))
+    {
+        out.push_str(&call(indent, "call.accepts", &[status.to_string()], ";"));
+    }
+    for status in &plan.returns {
+        out.push_str(&call(indent, "call.returns", &[status.to_string()], ";"));
+    }
+}
+
+/// The query, header and cookie parameter statements.
+fn render_parameters(out: &mut String, plan: &Plan<'_>) {
+    let indent = 2 * INDENT;
     if let Some((_, fields)) = &plan.params {
         for field in fields {
             let param = field.param;
@@ -713,16 +919,48 @@ fn render_statements(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
             }
         }
     }
+}
+
+/// The statements that send the request body.
+fn render_body_statements(out: &mut String, plan: &Plan<'_>, features: &mut Features) {
+    let indent = 2 * INDENT;
     if let Some(body) = &plan.body {
-        let args = [rust_str(&body.content_type), "body".to_string()];
-        if body.required {
-            out.push_str(&call(indent, "call.json", &args, "?;"));
+        let inner = if body.required {
+            indent
         } else {
             let _ = writeln!(out, "{}if let Some(body) = body {{", pad(indent));
-            out.push_str(&call(indent + INDENT, "call.json", &args, "?;"));
+            indent + INDENT
+        };
+        match &body.enum_name {
+            None => {
+                if let Some(choice) = body.choices.first() {
+                    render_body(out, inner, choice, features);
+                }
+            }
+            Some(name) => {
+                let _ = writeln!(out, "{}match body {{", pad(inner));
+                for choice in &body.choices {
+                    let _ = writeln!(
+                        out,
+                        "{}{name}::{}(body) => {{",
+                        pad(inner + INDENT),
+                        choice.variant
+                    );
+                    render_body(out, inner + 2 * INDENT, choice, features);
+                    let _ = writeln!(out, "{}}}", pad(inner + INDENT));
+                }
+                let _ = writeln!(out, "{}}}", pad(inner));
+            }
+        }
+        if !body.required {
             let _ = writeln!(out, "{}}}", pad(indent));
         }
     }
+}
+
+/// One statement per credential of each alternative the operation accepts.
+fn render_auth(out: &mut String, plan: &Plan<'_>, features: &mut Features) {
+    let indent = 2 * INDENT;
     for (index, alternative) in plan.auth.iter().enumerate() {
         for scheme in alternative {
             match scheme {
@@ -730,18 +968,18 @@ fn render_statements(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
                     scheme: HttpAuthScheme::Bearer,
                     ..
                 } => {
-                    auth.bearer = true;
+                    features.bearer = true;
                     out.push_str(&call(indent, "call.bearer", &[index.to_string()], ";"));
                 }
                 OperationAuthScheme::Http {
                     scheme: HttpAuthScheme::Basic,
                     ..
                 } => {
-                    auth.basic = true;
+                    features.basic = true;
                     out.push_str(&call(indent, "call.basic", &[index.to_string()], ";"));
                 }
                 OperationAuthScheme::ApiKey(key) => {
-                    auth.api_key = true;
+                    features.api_key = true;
                     let head = match key.location {
                         ApiKeyLocation::Header => "call.api_key_header",
                         ApiKeyLocation::Query => "call.api_key_query",
@@ -752,18 +990,56 @@ fn render_statements(out: &mut String, plan: &Plan<'_>, auth: &mut AuthUse) {
             }
         }
     }
-    if let Some(header) = &plan.idempotency_header {
-        out.push_str(&call(indent, "call.idempotent", &[rust_str(header)], ";"));
+}
+
+/// The statements that send `body` in one media type.
+fn render_body(out: &mut String, indent: usize, choice: &BodyChoice, features: &mut Features) {
+    let content_type = rust_str(&choice.content_type);
+    let args = [content_type, "body".to_string()];
+    match &choice.kind {
+        BodyKind::Json => out.push_str(&call(indent, "call.json", &args, "?;")),
+        BodyKind::Form => {
+            features.form = true;
+            out.push_str(&call(indent, "call.form", &args, "?;"));
+        }
+        BodyKind::Text => {
+            features.text = true;
+            out.push_str(&call(indent, "call.text", &args, ";"));
+        }
+        BodyKind::Binary => {
+            features.binary = true;
+            out.push_str(&call(indent, "call.binary", &args, ";"));
+        }
+        BodyKind::Multipart(parts) => {
+            features.multipart = true;
+            let _ = writeln!(out, "{}call.multipart();", pad(indent));
+            for (name, ident, file) in parts {
+                let head = if *file { "call.file" } else { "call.part" };
+                let args = [rust_str(name), format!("&body.{ident}")];
+                out.push_str(&call(indent, head, &args, "?;"));
+            }
+        }
     }
-    for status in plan
-        .success
-        .statuses
-        .iter()
-        .filter(|status| (300..400).contains(*status))
-    {
-        out.push_str(&call(indent, "call.accepts", &[status.to_string()], ";"));
+}
+
+/// The enum of the media types `plan`'s body may be sent in.
+fn render_body_enum(out: &mut String, plan: &Plan<'_>, name: &str, body: &Body) {
+    let _ = writeln!(
+        out,
+        "\n/// The request body of `{}`, in one of the media types it accepts.",
+        plan.method
+    );
+    out.push_str("#[derive(Debug, Clone, PartialEq)]\n");
+    let _ = writeln!(out, "pub enum {name} {{");
+    for choice in &body.choices {
+        let _ = writeln!(out, "{}/// `{}`", pad(INDENT), choice.content_type);
+        let _ = writeln!(
+            out,
+            "{}{}({}),",
+            pad(INDENT),
+            choice.variant,
+            choice.owned.flat()
+        );
     }
-    for status in &plan.returns {
-        out.push_str(&call(indent, "call.returns", &[status.to_string()], ";"));
-    }
+    out.push_str("}\n");
 }

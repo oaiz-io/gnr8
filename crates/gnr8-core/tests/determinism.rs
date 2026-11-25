@@ -257,6 +257,46 @@ fn sdk_generate_is_byte_identical_across_two_runs() {
 }
 
 #[test]
+fn rust_sdk_generate_is_byte_identical_across_two_runs() {
+    use gnr8_engine::sdk::builtins::{generate_target, PlanTargets};
+    use gnr8_engine::sdk::prelude::*;
+    use gnr8_engine::sdk::{Artifacts, BuiltinTarget, Cx};
+
+    let Ok(first) = gnr8_engine::analyze::build_graph(FIXTURE_DIR) else {
+        eprintln!("skipping Rust SDK determinism test: go toolchain unavailable for {FIXTURE_DIR}");
+        return;
+    };
+    let second = gnr8_engine::analyze::build_graph(FIXTURE_DIR)
+        .expect("second build_graph run must also succeed");
+    let emit = |graph: &gnr8_engine::graph::ApiGraph, split: bool| {
+        let target = RustSdk::new().module("goalservice").to("sdk");
+        let spec = BuiltinTarget::RustSdk(if split { target.split_files() } else { target });
+        let targets = [(0, &spec)];
+        let mut out = Artifacts::new();
+        generate_target(
+            &spec,
+            graph,
+            &mut out,
+            &Cx::new(std::env::temp_dir()),
+            None,
+            &PlanTargets::new(&targets),
+        )
+        .expect("RustSdk must generate for the goalservice fixture");
+        out.into_files()
+            .into_iter()
+            .map(|file| (file.path, file.text))
+            .collect::<Vec<_>>()
+    };
+    for split in [false, true] {
+        assert_eq!(
+            emit(&first, split),
+            emit(&second, split),
+            "two RustSdk generations over unchanged source must be byte-identical"
+        );
+    }
+}
+
+#[test]
 fn fastapi_build_graph_is_byte_identical_across_two_runs() {
     // Skip gracefully if the python3 toolchain is absent so the test never fails for a missing dep.
     let Ok(first) = gnr8_engine::analyze::build_graph(FASTAPI_FIXTURE_DIR) else {

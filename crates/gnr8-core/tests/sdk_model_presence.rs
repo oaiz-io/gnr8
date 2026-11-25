@@ -198,6 +198,54 @@ fn go_models_omitempty_follows_the_direction_the_schema_is_reached_from() {
     }
 }
 
+/// Every file the Rust SDK target writes for `graph`, every model included, concatenated.
+fn rust_sdk(graph: &ApiGraph) -> String {
+    use gnr8_engine::sdk::builtins::{generate_target, PlanTargets};
+    use gnr8_engine::sdk::prelude::*;
+    use gnr8_engine::sdk::{Artifacts, BuiltinTarget, Cx};
+
+    let spec = BuiltinTarget::RustSdk(RustSdk::new().module("presence").to("sdk").all_models());
+    let targets = [(0, &spec)];
+    let mut out = Artifacts::new();
+    generate_target(
+        &spec,
+        graph,
+        &mut out,
+        &Cx::new(std::env::temp_dir()),
+        None,
+        &PlanTargets::new(&targets),
+    )
+    .expect("Rust SDK generation must succeed");
+    out.into_files()
+        .into_iter()
+        .map(|file| file.text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn rust_models_take_options_from_the_direction_the_schema_is_reached_from() {
+    let out = rust_sdk(&graph());
+    for (model, table) in [
+        ("CreateInput", INPUT),
+        ("Payload", OUTPUT),
+        ("SharedInput", INPUT),
+        ("SharedOutput", OUTPUT),
+        ("Unwired", INPUT),
+    ] {
+        let lines = declaration_lines(&out, &format!("pub struct {model} {{"));
+        for (field, omittable) in table {
+            // Each axis is one `Option`, so both are two.
+            let ty = match (omittable, is_nullable(field)) {
+                (false, false) => "String",
+                (true, true) => "Option<Option<String>>",
+                _ => "Option<String>",
+            };
+            assert_declares(&lines, &format!("pub {field}: {ty},"), model);
+        }
+    }
+}
+
 #[test]
 fn typescript_interfaces_mark_optional_from_the_direction_the_schema_is_reached_from() {
     let out = gnr8_engine::tssdk::generate(&graph(), "presence", "/api")

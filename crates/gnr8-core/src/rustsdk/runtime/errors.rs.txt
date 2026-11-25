@@ -14,7 +14,7 @@ pub enum Error {
     /// UTF-8.
     Decode(DecodeError),
     /// The request could not be encoded.
-    Encode(serde_json::Error),
+    Encode(EncodeError),
     /// The client has no credential the operation accepts.
     Auth(AuthConfigurationError),
 }
@@ -25,7 +25,7 @@ impl fmt::Display for Error {
             Self::Api(error) => error.fmt(f),
             Self::Transport(error) => error.fmt(f),
             Self::Decode(error) => error.fmt(f),
-            Self::Encode(error) => write!(f, "the request could not be encoded: {error}"),
+            Self::Encode(error) => error.fmt(f),
             Self::Auth(error) => error.fmt(f),
         }
     }
@@ -150,6 +150,28 @@ impl fmt::Display for TransportError {
 }
 
 impl std::error::Error for TransportError {}
+
+/// A request that could not be encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodeError {
+    message: String,
+}
+
+impl EncodeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the request could not be encoded: {}", self.message)
+    }
+}
+
+impl std::error::Error for EncodeError {}
 
 /// A response body that is not what the operation returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
