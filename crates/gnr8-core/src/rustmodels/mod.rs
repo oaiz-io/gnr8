@@ -38,7 +38,7 @@ use std::fmt::Write as _;
 use crate::graph::direction::{directions_of, schema_directions, SchemaDirections};
 use crate::graph::{ApiGraph, Field, Prim, Schema, Type};
 use crate::rust_layout::{
-    assignment, attribute, pad, signature, width, RustType, INDENT, MAX_WIDTH,
+    assignment, attribute, pad, rust_str, signature, width, RustType, INDENT, MAX_WIDTH,
 };
 use crate::rust_names::{escape_keyword, field_idents, type_ident, variant_idents};
 use crate::sdk::bundle::{check_unique_file_names, SdkFile};
@@ -861,7 +861,7 @@ fn describe(ty: &Type) -> String {
 }
 
 /// The Rust type of a primitive, or `None` for one with no faithful Rust spelling.
-const fn rust_primitive(prim: &Prim) -> Option<&'static str> {
+pub(crate) const fn rust_primitive(prim: &Prim) -> Option<&'static str> {
     Some(match prim {
         Prim::String => "String",
         Prim::Bool => "bool",
@@ -936,27 +936,6 @@ fn derive(traits: &[&str]) -> String {
         let _ = writeln!(out, "{}{name},", pad(INDENT));
     }
     out.push_str(")]\n");
-    out
-}
-
-/// `value` as a Rust string literal.
-fn rust_str(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
     out
 }
 

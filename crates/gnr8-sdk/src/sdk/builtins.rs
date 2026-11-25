@@ -3197,6 +3197,21 @@ impl RustSdk {
     pub fn effective_package_metadata(&self) -> bool {
         self.package_metadata.unwrap_or(true)
     }
+    /// The package metadata `Cargo.toml` and `PUBLISHING.md` are written from.
+    #[must_use]
+    pub const fn package_info(&self) -> &SdkPackageMetadata {
+        &self.package_info
+    }
+    /// The generated documentation configuration.
+    #[must_use]
+    pub const fn docs_config(&self) -> &SdkDocs {
+        &self.docs
+    }
+    /// Whether the target emits its contract tests.
+    #[must_use]
+    pub const fn emits_contract_tests(&self) -> bool {
+        self.contract_tests
+    }
 }
 
 impl Default for RustSdk {

@@ -1,0 +1,193 @@
+//! The errors an operation returns.
+
+use std::fmt;
+
+/// An error preparing, sending, or reading the result of a call.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Error {
+    /// The API answered with a status the operation does not accept.
+    Api(ApiError),
+    /// The transport returned no response.
+    Transport(TransportError),
+    /// The response body is not what the operation returns: malformed JSON, or text that is not
+    /// UTF-8.
+    Decode(DecodeError),
+    /// The request could not be encoded.
+    Encode(serde_json::Error),
+    /// The client has no credential the operation accepts.
+    Auth(AuthConfigurationError),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Api(error) => error.fmt(f),
+            Self::Transport(error) => error.fmt(f),
+            Self::Decode(error) => error.fmt(f),
+            Self::Encode(error) => write!(f, "the request could not be encoded: {error}"),
+            Self::Auth(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Api(error) => Some(error),
+            Self::Transport(error) => Some(error),
+            Self::Decode(error) => Some(error),
+            Self::Encode(error) => Some(error),
+            Self::Auth(error) => Some(error),
+        }
+    }
+}
+
+/// A response with a status the operation does not accept, as the API sent it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiError {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl ApiError {
+    pub fn is_not_found(&self) -> bool {
+        self.status == 404
+    }
+
+    /// The first value of the header `name`, matched case-insensitively.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The `X-Request-ID` response header.
+    pub fn request_id(&self) -> Option<&str> {
+        self.header("X-Request-ID")
+    }
+
+    /// The body as JSON, when it is JSON.
+    pub fn json_body(&self) -> Option<serde_json::Value> {
+        serde_json::from_slice(&self.body).ok()
+    }
+
+    /// The body decoded as `T`, such as the error model the operation declares for the status.
+    ///
+    /// # Errors
+    ///
+    /// A [`DecodeError`] when the body is not a JSON `T`.
+    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, DecodeError> {
+        serde_json::from_slice(&self.body).map_err(|error| DecodeError::new(error.to_string()))
+    }
+
+    /// The body's string field `message`.
+    pub fn message(&self) -> Option<String> {
+        self.string_field("message")
+    }
+
+    /// The body's string field `slug`.
+    pub fn slug(&self) -> Option<String> {
+        self.string_field("slug")
+    }
+
+    /// The strings of the body's array field `hints`.
+    pub fn hints(&self) -> Vec<String> {
+        self.json_body()
+            .and_then(|body| {
+                body.get("hints")
+                    .and_then(|hints| hints.as_array().cloned())
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|hint| hint.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    fn string_field(&self, name: &str) -> Option<String> {
+        self.json_body().and_then(|body| {
+            body.get(name)
+                .and_then(|value| value.as_str().map(str::to_owned))
+        })
+    }
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the API answered with status {}", self.status)?;
+        if let Some(message) = self.message() {
+            write!(f, ": {message}")?;
+        }
+        if let Some(slug) = self.slug() {
+            write!(f, " ({slug})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// The transport returned no response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportError {
+    message: String,
+}
+
+impl TransportError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+/// A response body that is not what the operation returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeError {
+    message: String,
+}
+
+impl DecodeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the response could not be decoded: {}", self.message)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// The client has no credential the operation accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthConfigurationError {
+    /// The operation that was not sent.
+    pub operation_id: String,
+}
+
+impl fmt::Display for AuthConfigurationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "no configured credentials satisfy operation {}",
+            self.operation_id
+        )
+    }
+}
+
+impl std::error::Error for AuthConfigurationError {}

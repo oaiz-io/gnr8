@@ -3839,19 +3839,36 @@ impl TargetExec for RustSdk {
                 message: "RustSdk requires .module(...) and .to(...)".to_string(),
             });
         }
-        let _package = sdk_package(self.module_name())?;
+        let package = sdk_package(self.module_name())?;
         let projected = crate::graph::projection::for_generation(ir)?;
+        crate::sdk::emit_common::validate_sdk_base_path(&projected.base_path)?;
         let selected = projected
             .schemas
             .iter()
             .map(|schema| schema.id.as_str())
             .collect();
-        let files = crate::rustsdk::generate_files(
+        let manifest = if self.effective_package_metadata() {
+            let name = crate::rustsdk::crate_name(&self.package_info().resolved_name(&package)?)?;
+            Some(crate::rustsdk::Package {
+                name,
+                metadata: self.package_info(),
+            })
+        } else {
+            None
+        };
+        let mut files = crate::rustsdk::generate_files(
             &projected,
             &selected,
             self.file_layout(),
-            self.effective_package_metadata(),
+            manifest.as_ref(),
         )?;
+        if let Some(manifest) = &manifest {
+            files.push(super::bundle::SdkFile {
+                name: "PUBLISHING.md".to_string(),
+                contents: publishing_recipe("Rust", &manifest.name, manifest.metadata)?,
+            });
+            files.sort_by(|a, b| a.name.cmp(&b.name));
+        }
         write_sdk_files(out, self.dir(), files)
     }
 
@@ -4544,6 +4561,12 @@ generated SDK directory after reviewing the generated files.\n\n"
 3. `npm pack --dry-run`\n\
 4. `npm publish --dry-run`\n\
 5. Publish with your own npm credentials when the dry run matches expectations.\n",
+        ),
+        "Rust" => out.push_str(
+            "1. `cargo test`\n\
+2. `cargo package`\n\
+3. `cargo publish --dry-run`\n\
+4. Publish with your own crates.io token when the dry run matches expectations.\n",
         ),
         _ => {}
     }

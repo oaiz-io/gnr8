@@ -724,6 +724,10 @@ fn rust_sdk_declaration_and_model_roots_round_trip() {
         );
         let mounted: Vec<_> = files
             .into_iter()
+            .filter(|(path, _)| {
+                path.starts_with(&format!("{prefix}/"))
+                    && Path::new(path).extension().is_some_and(|ext| ext == "rs")
+            })
             .map(|(path, text)| {
                 let path = if metadata && path.ends_with("/lib.rs") {
                     path.replace("/lib.rs", "/mod.rs")
@@ -739,7 +743,8 @@ fn rust_sdk_declaration_and_model_roots_round_trip() {
             (false, true) => "sdk-module-split",
             (false, false) => "sdk-module",
         };
-        cargo_check(name, &mounted, &format!("{prefix}/"), Deps::SerdeAndJson);
+        let root = cargo_check(name, &mounted, &format!("{prefix}/"), Deps::SerdeAndJson);
+        rustfmt_check(&root);
     }
 }
 

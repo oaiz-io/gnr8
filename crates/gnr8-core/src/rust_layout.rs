@@ -158,3 +158,189 @@ pub(crate) fn signature(
     let _ = writeln!(out, "{margin}){tail}");
     out
 }
+
+/// `value` as a Rust string literal.
+pub(crate) fn rust_str(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `rustfmt`'s default `fn_call_width`: the widest argument list it keeps on one line.
+const CALL_ARGS_WIDTH: usize = 60;
+
+/// The arguments of a call on one line, when `rustfmt` keeps them there.
+fn flat_call(margin: &str, head: &str, args: &[String], tail: &str) -> Option<String> {
+    let joined = args.join(", ");
+    let line = format!("{margin}{head}({joined}){tail}");
+    (width(&line) <= MAX_WIDTH && width(&joined) <= CALL_ARGS_WIDTH).then_some(line)
+}
+
+/// The arguments of a call one per line, each followed by a comma.
+fn vertical_call(margin: &str, indent: usize, head: &str, args: &[String], tail: &str) -> String {
+    let mut out = format!("{margin}{head}(\n");
+    for arg in args {
+        let _ = writeln!(out, "{}{arg},", pad(indent + INDENT));
+    }
+    let _ = write!(out, "{margin}){tail}");
+    out
+}
+
+/// A call statement `head(args)tail` at `indent`, as `rustfmt` lays it out: on one line when the
+/// line fits and the arguments are no wider than `fn_call_width`, and otherwise one argument per
+/// line. Every argument must be a short expression `rustfmt` keeps whole (a literal, a path, a
+/// borrow of a field): an argument it could break or overflow, such as a closure or an array, is
+/// outside what this lays out.
+pub(crate) fn call(indent: usize, head: &str, args: &[String], tail: &str) -> String {
+    let margin = pad(indent);
+    let text = flat_call(&margin, head, args, tail)
+        .unwrap_or_else(|| vertical_call(&margin, indent, head, args, tail));
+    format!("{text}\n")
+}
+
+/// `lhs head(args)tail` at `indent`, where `lhs` ends in `=`: the call on the same line when it
+/// fits there, on the next line when it fits there on one line, and otherwise broken on the same
+/// line as [`call`] breaks it.
+pub(crate) fn let_call(
+    indent: usize,
+    lhs: &str,
+    head: &str,
+    args: &[String],
+    tail: &str,
+) -> String {
+    let margin = pad(indent);
+    if let Some(line) = flat_call(&margin, &format!("{lhs} {head}"), args, tail) {
+        return format!("{line}\n");
+    }
+    if let Some(line) = flat_call(&pad(indent + INDENT), head, args, tail) {
+        return format!("{margin}{lhs}\n{line}\n");
+    }
+    format!(
+        "{}\n",
+        vertical_call(&margin, indent, &format!("{lhs} {head}"), args, tail)
+    )
+}
+
+/// A method signature `head(receiver, args) -> ret {` at `indent`, as `rustfmt` lays it out: on
+/// one line when it fits, and otherwise one parameter per line. The return type then follows the
+/// closing parenthesis; one too wide for that line moves the brace to a line of its own, and one
+/// wider still is broken at its generic arguments.
+pub(crate) fn method_signature(
+    indent: usize,
+    head: &str,
+    receiver: &str,
+    args: &[(&str, &RustType)],
+    ret: &RustType,
+) -> String {
+    let margin = pad(indent);
+    let ret_flat = ret.flat();
+    let mut flat = vec![receiver.to_string()];
+    flat.extend(
+        args.iter()
+            .map(|(name, ty)| format!("{name}: {}", ty.flat())),
+    );
+    let line = format!("{margin}{head}({}) -> {ret_flat} {{", flat.join(", "));
+    if width(&line) <= MAX_WIDTH {
+        return format!("{line}\n");
+    }
+    let inner = indent + INDENT;
+    let mut out = format!("{margin}{head}(\n{}{receiver},\n", pad(inner));
+    for (name, ty) in args {
+        let used = inner + width(name) + 2;
+        let rendered = ty.layout(inner, used, 1).unwrap_or_else(|| ty.flat());
+        let _ = writeln!(out, "{}{name}: {rendered},", pad(inner));
+    }
+    // `rustfmt` keeps `) -> ret {` together four columns short of the line's end, keeps
+    // `) -> ret` alone up to two columns past it, and breaks the type beyond that.
+    let closing = indent + width(") -> ") + width(&ret_flat);
+    if closing + 2 <= MAX_WIDTH - 4 {
+        let _ = writeln!(out, "{margin}) -> {ret_flat} {{");
+    } else if closing <= MAX_WIDTH + 2 {
+        let _ = writeln!(out, "{margin}) -> {ret_flat}\n{margin}{{");
+    } else {
+        match ret.layout(indent, indent + width(") -> "), 2) {
+            Some(broken) => {
+                let _ = writeln!(out, "{margin}) -> {broken} {{");
+            }
+            // No layout fits: `rustfmt` gives up on the type and closes the signature against it.
+            None => {
+                let _ = writeln!(out, "{margin}) -> {ret_flat}{{");
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assignment, call, signature, RustType};
+    use std::fmt::Write as _;
+    use std::process::Command;
+
+    #[test]
+    fn method_signature_widths_match_both_rustfmt_editions(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("gnr8-rust-signatures-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let source = root.join("signatures.rs");
+        let mut text = String::from("struct Client;\n\nimpl Client {\n");
+        let receiver = RustType::leaf("&Self");
+        let nested = RustType::generic(
+            "Option",
+            vec![RustType::generic("Vec", vec![RustType::leaf("String")])],
+        );
+        for width in 1..=100 {
+            let arg = format!("value_{}", "x".repeat(width));
+            let head = format!("fn operation_{width}");
+            text.push_str(&signature(
+                4,
+                &head,
+                &[("self", &receiver), (&arg, &nested)],
+                " {",
+            ));
+            let _ = writeln!(text, "        let _ = self;\n    }}");
+        }
+        text.push_str("}\n\nfn calls() {\n");
+        for width in 1..=100 {
+            let arg = format!("\"{}\"", "x".repeat(width));
+            text.push_str(&call(4, "request", &["value".to_string(), arg], ";"));
+        }
+        text.push_str("}\n");
+        for width in 1..=100 {
+            let _ = writeln!(text, "\nstruct Params{width} {{");
+            let field = format!("value_{}:", "x".repeat(width));
+            text.push_str(&assignment(4, &field, &nested, ','));
+            text.push_str("}\n");
+        }
+        std::fs::write(&source, text)?;
+        for edition in ["2021", "2024"] {
+            let output = Command::new("rustfmt")
+                .args(["--check", "--edition", edition])
+                .arg(&source)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "rustfmt {edition}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

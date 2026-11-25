@@ -75,7 +75,7 @@ jobs:
             needs_go: "true"
             needs_python: "true"
             needs_node: "true"
-            test_args: "--test determinism --test docs_snippets_compile --test operation_prose --test rust_models --test sdk_compile"
+            test_args: "--test determinism --test docs_snippets_compile --test operation_prose --test rust_models --test rustsdk_compile --test sdk_compile"
           # gnr8-cli is split into four entries. A cold 2-4 core runner rebuilds the engine,
           # links the host binary, then cargo-builds a `.gnr8/` worker per compiling test; one
           # combined job exceeds the 5-minute cap on a cache miss (lockfile/version bump).
