@@ -9,7 +9,8 @@ expression: "text(&files, \"src/models/mod.rs\")"
     dead_code,
     missing_docs,
     unreachable_pub,
-    clippy::all,
+    clippy::style,
+    clippy::complexity,
     clippy::pedantic,
     clippy::nursery
 )]
@@ -18,14 +19,29 @@ expression: "text(&files, \"src/models/mod.rs\")"
 pub type Bag = ::std::collections::BTreeMap<String, ::serde_json::Value>;
 
 /// Generated from schema `jobs.Empty`.
-#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
 pub struct Empty {}
+
+impl Empty {
+    /// Build the model.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {}
+    }
+}
 
 /// Generated from schema `jobs.Left`.
 #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
 pub struct Left {
-    #[serde(rename = "right")]
     pub right: Box<RightAlias>,
+}
+
+impl Left {
+    /// Build the model from its fields, in field order.
+    #[must_use]
+    pub fn new(right: Box<RightAlias>) -> Self {
+        Self { right }
+    }
 }
 
 /// Generated from schema `jobs.Money`.
@@ -49,102 +65,147 @@ pub enum Never {}
 /// Generated from schema `jobs.Node`.
 #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
 pub struct Node {
-    #[serde(
-        rename = "children",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<Node>>,
-    #[serde(rename = "name")]
     pub name: String,
-    #[serde(
-        rename = "parent",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<Box<Node>>,
+}
+
+impl Node {
+    /// Build the model from its required fields, in field order.
+    ///
+    /// Every other field starts as `None`, which leaves its key out.
+    #[must_use]
+    pub fn new(name: String) -> Self {
+        Self {
+            children: None,
+            name,
+            parent: None,
+        }
+    }
 }
 
 /// Generated from schema `jobs.Probe`.
 #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Probe {
-    #[serde(rename = "at")]
     pub at: String,
-    #[serde(rename = "bag")]
     pub bag: Bag,
-    #[serde(rename = "count8")]
     pub count8: i8,
-    #[serde(rename = "empty")]
     pub empty: Empty,
-    #[serde(rename = "extra")]
     pub extra: ::serde_json::Value,
-    #[serde(rename = "fileId")]
     pub file_id: String,
     #[serde(rename = "file_id")]
     pub file_id_2: String,
-    #[serde(rename = "id")]
     pub id: String,
-    #[serde(
-        rename = "label",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(rename = "left")]
     pub left: Left,
-    #[serde(rename = "matrix")]
     pub matrix: Vec<Vec<i32>>,
-    #[serde(rename = "metrics")]
     pub metrics: ::std::collections::BTreeMap<String, f64>,
-    #[serde(rename = "money")]
     pub money: Money,
-    #[serde(rename = "never")]
     pub never: Never,
-    #[serde(rename = "node")]
     pub node: Node,
-    #[serde(rename = "note", deserialize_with = "deserialize_nullable")]
+    #[serde(deserialize_with = "deserialize_nullable")]
     pub note: Option<String>,
-    #[serde(rename = "ratio")]
     pub ratio: f32,
-    #[serde(rename = "score")]
     pub score: f64,
-    #[serde(rename = "self")]
     pub self_: bool,
-    #[serde(rename = "status")]
     pub status: Status,
-    #[cfg_attr(not(doctest), doc = "A summary.\n\n    let this = \"indented\"; // not a doctest")]
+    #[cfg_attr(
+        not(doctest),
+        doc = "A summary.\n\n    let this = \"indented\"; // not a doctest"
+    )]
     #[serde(
-        rename = "summary",
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_nullable"
     )]
     pub summary: Option<Option<String>>,
-    #[serde(rename = "tags")]
     pub tags: Vec<String>,
-    #[serde(rename = "type")]
     pub r#type: String,
-    #[serde(rename = "unsigned")]
     pub unsigned: u64,
-    #[serde(rename = "uuid")]
     pub uuid: String,
+}
+
+impl Probe {
+    /// Build the model from its required fields, in field order.
+    ///
+    /// Every other field starts as `None`, which leaves its key out.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        at: String,
+        bag: Bag,
+        count8: i8,
+        empty: Empty,
+        extra: ::serde_json::Value,
+        file_id: String,
+        file_id_2: String,
+        id: String,
+        left: Left,
+        matrix: Vec<Vec<i32>>,
+        metrics: ::std::collections::BTreeMap<String, f64>,
+        money: Money,
+        never: Never,
+        node: Node,
+        note: Option<String>,
+        ratio: f32,
+        score: f64,
+        self_: bool,
+        status: Status,
+        tags: Vec<String>,
+        r#type: String,
+        unsigned: u64,
+        uuid: String,
+    ) -> Self {
+        Self {
+            at,
+            bag,
+            count8,
+            empty,
+            extra,
+            file_id,
+            file_id_2,
+            id,
+            label: None,
+            left,
+            matrix,
+            metrics,
+            money,
+            never,
+            node,
+            note,
+            ratio,
+            score,
+            self_,
+            status,
+            summary: None,
+            tags,
+            r#type,
+            unsigned,
+            uuid,
+        }
+    }
 }
 
 /// Generated from schema `jobs.Right`.
 #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]
 pub struct Right {
-    #[serde(rename = "keep")]
     pub keep: bool,
-    #[serde(
-        rename = "left",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left: Option<Box<Left>>,
+}
+
+impl Right {
+    /// Build the model from its required fields, in field order.
+    ///
+    /// Every other field starts as `None`, which leaves its key out.
+    #[must_use]
+    pub fn new(keep: bool) -> Self {
+        Self { keep, left: None }
+    }
 }
 
 /// Generated from schema `jobs.RightAlias`.
@@ -183,16 +244,6 @@ where
     T: ::serde::Deserialize<'de>,
 {
     <Option<T> as ::serde::Deserialize<'de>>::deserialize(deserializer)
-}
-
-/// Deserialize a key that may be absent and is never `null`: an absent key is `None`
-/// (`#[serde(default)]`), and a `null` is refused.
-fn deserialize_optional<'de, D, T>(deserializer: D) -> ::core::result::Result<Option<T>, D::Error>
-where
-    D: ::serde::Deserializer<'de>,
-    T: ::serde::Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
 }
 
 /// Deserialize a key that may be absent or `null`: an absent key is `None`

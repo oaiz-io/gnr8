@@ -2998,9 +2998,12 @@ impl Default for TsSdk {
 /// module whose root is `mod.rs`, so a crate declares it where it wants it:
 ///
 /// ```text
-/// #[rustfmt::skip] // gnr8 owns these bytes; `gnr8 check` reports any edit.
 /// pub mod models;
 /// ```
+///
+/// The generated source is laid out as `rustfmt` lays it out by default and passes Clippy, so the
+/// crate's `cargo fmt` and `cargo clippy` cover it like any other module. Every struct has a `new`
+/// over its required fields, and a struct with none also derives `Default`.
 ///
 /// Nothing reaches a model here except a root the declaration names, because the target emits no
 /// operations: [`RustModels::model_root`] selects a schema by its id or bare type name, and the

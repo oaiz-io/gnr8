@@ -3,9 +3,10 @@
 //!
 //! One project copy walks the lifecycle a consumer sees: the committed models equal a fresh
 //! generation, a second generation is byte-identical, the standalone consumer crate's wire tests
-//! pass against the fresh models, a changed source field makes `gnr8 check` report the stale Rust
-//! file, and a removed root deletes the models only it reached while hand-written files beside
-//! and inside the generated directory survive.
+//! pass against the fresh models, `cargo fmt` over that crate changes nothing gnr8 wrote and
+//! Clippy passes it with warnings denied, a changed source field makes `gnr8 check` report the
+//! stale Rust file, and a removed root deletes the models only it reached while hand-written files
+//! beside and inside the generated directory survive.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -105,22 +106,41 @@ fn edit(path: &Path, from: &str, to: &str) {
     std::fs::write(path, text.replace(from, to)).unwrap();
 }
 
-fn consumer_tests(root: &Path) {
-    let output = Command::new(env!("CARGO"))
-        .args(["test", "--locked", "--quiet"])
+/// Run `cargo <args>` in the project's consumer crate.
+fn consumer_cargo(root: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO"))
+        .args(args)
         .current_dir(root.join("consumer"))
         .env(
             "CARGO_TARGET_DIR",
             Path::new(env!("CARGO_TARGET_TMPDIR")).join("rust-models-consumer-target"),
         )
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn consumer_succeeds(root: &Path, what: &str, args: &[&str]) {
+    let output = consumer_cargo(root, args);
     assert!(
         output.status.success(),
-        "consumer tests failed:\n{}\n{}",
+        "consumer {what} failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn consumer_tests(root: &Path) {
+    consumer_succeeds(root, "tests", &["test", "--locked", "--quiet"]);
+}
+
+/// Whether `cargo <tool>` runs here. A machine without the component skips its gate; the
+/// repository's `rust-toolchain.toml` installs both, and CI names them.
+fn cargo_tool(root: &Path, tool: &str) -> bool {
+    let found = consumer_cargo(root, &[tool, "--version"]).status.success();
+    if !found {
+        eprintln!("skipping: `cargo {tool}` is unavailable");
+    }
+    found
 }
 
 #[test]
@@ -145,6 +165,29 @@ fn rust_models_lifecycle_over_the_fixture() {
     // The standalone crate decodes, builds and encodes through the fresh models.
     consumer_tests(&root);
 
+    // Nothing keeps `cargo fmt` out of the generated modules, and formatting the crate leaves
+    // every byte gnr8 wrote as it was: the models are already what rustfmt writes.
+    if cargo_tool(&root, "fmt") {
+        consumer_succeeds(&root, "format", &["fmt"]);
+        assert_eq!(files(&models), first, "cargo fmt rewrote a generated model");
+        assert!(succeed(&root, &["check"]).contains("up to date"));
+    }
+    // The crate, generated modules included, passes Clippy with warnings denied.
+    if cargo_tool(&root, "clippy") {
+        consumer_succeeds(
+            &root,
+            "Clippy run",
+            &[
+                "clippy",
+                "--locked",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+    }
+
     // A changed source field leaves the committed Rust file stale, and check names it.
     let source = root.join("internal/jobspec/jobspec.go");
     edit(&source, "`json:\"note\"`", "`json:\"note,omitempty\"`");
@@ -162,7 +205,10 @@ fn rust_models_lifecycle_over_the_fixture() {
     succeed(&root, &["generate"]);
     let event = std::fs::read_to_string(models.join("event.rs")).unwrap();
     assert!(
-        event.contains("deserialize_with = \"super::deserialize_optional\"\n    )]\n    pub note: Option<String>,"),
+        event.contains(
+            "    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub note: \
+             Option<String>,"
+        ),
         "{event}"
     );
     assert!(succeed(&root, &["check"]).contains("up to date"));

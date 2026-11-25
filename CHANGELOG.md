@@ -35,9 +35,15 @@ must move the minor version.
   reach, or every schema with `.all_models()`, written as one module tree whose root is `mod.rs`
   (compact, or one file per model with `.split_files()` / a split `SdkFileLayout`). Field presence
   and nullability follow the graph's direction rules: a required key is `T`, a required nullable key
-  `Option<T>`, an optional key `Option<T>` that refuses `null`, and an optional nullable key
-  `Option<Option<T>>` that keeps absent, `null` and a value apart. Wire names are kept exactly with
-  `#[serde(rename)]` while Rust names are escaped and numbered where they collide. A union, a byte
+  `Option<T>`, an optional key `Option<T>` that reads a `null` as absent and never writes one, and
+  an optional nullable key `Option<Option<T>>` that keeps absent, `null` and a value apart. Every
+  struct has a `new` over its required fields that starts the rest as `None`, so a field the API
+  adds as optional leaves its callers compiling, and a struct with no required field derives
+  `Default`. Wire names are kept exactly while Rust names are escaped and numbered where they
+  collide; a rename is written only where Serde's own name for the field or variant is not the wire
+  name, and a struct with camel-case wire names states `rename_all = "camelCase"` once. The source
+  is laid out as `rustfmt` lays it out by default and passes `cargo clippy` with warnings denied,
+  so a consuming crate formats and lints it like its own code. A union, a byte
   string, an inline object or enum, an integer or float of a width Rust lacks, a map keyed by
   anything but a string, a self-referential alias, and a colliding or reserved Rust type name fail
   generation with one error naming every schema and field. See `docs/sdk/rust-models.md`.

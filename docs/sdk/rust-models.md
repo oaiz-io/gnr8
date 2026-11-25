@@ -19,12 +19,11 @@ crate that declares the module owns everything else: helpers, defaults, transpor
 
 ```rust
 // crates/job/src/lib.rs
-#[rustfmt::skip] // gnr8 owns these bytes, and `gnr8 check` reports any change to them.
 pub mod models;
 ```
 
-`#[rustfmt::skip]` on the declaration keeps `cargo fmt` out of the whole generated tree, split files
-included. Without it, `cargo fmt` rewrites generated files and `gnr8 check` reports them as drifted.
+The generated code is ordinary Rust for the toolchain to check, like the rest of the crate; see
+[Formatting and lints](#formatting-and-lints).
 
 The generated code derives `serde`'s `Serialize` and `Deserialize`, so the crate that declares the
 module depends on `serde` with its `derive` feature. A model with a free-form field also names
@@ -75,10 +74,48 @@ In a split layout `mod.rs` declares each file as a private module (with `#[path]
 not `<module>.rs` beside it) and re-exports its type, so callers always write `models::Event`. A
 template must produce a `.rs` path. Operation settings of a layout do not apply.
 
-`mod.rs` also carries the target's three private deserializer helpers (only those some field uses)
-and one inner attribute that allows `dead_code`, `missing_docs`, `unreachable_pub` and the Clippy
-groups for the generated tree, so a crate's own lint settings cannot fail its build on code it does
-not edit.
+In a split layout each module is declared beside its re-export:
+
+```rust
+mod event;
+pub use self::event::Event;
+
+mod job_output;
+pub use self::job_output::JobOutput;
+```
+
+`mod.rs` also carries the target's two private deserializer helpers (only those some field uses)
+and one inner attribute of lint allowances, described under
+[Formatting and lints](#formatting-and-lints).
+
+## Building a model
+
+Every struct has a `new` that takes its required fields, in field order (the order of the wire
+names), and starts every other field as `None`, which leaves its key out:
+
+```rust
+let mut output = JobOutput::new(artifacts, JobStatus::Done);
+output.summary = Some(Some("ok".to_string()));
+
+// or, naming the optional fields beside it:
+let output = JobOutput {
+    summary: Some(Some("ok".to_string())),
+    ..JobOutput::new(artifacts, JobStatus::Done)
+};
+```
+
+Build models this way rather than with a full struct literal. A struct literal has to name every
+field, so it stops compiling the day the API adds an optional one; a call to `new` does not. A
+field the API adds as required changes `new`'s arguments, and that is a compile error on purpose:
+the caller has to supply it.
+
+A required key whose value may be `null` is still an argument, typed `Option<T>`. A struct with no
+required field also derives `Default`, and its `new()` takes nothing. The fields stay public, so
+reading a model and setting an optional field need no accessor.
+
+The arguments are positional. Two neighbouring arguments of the same type can be swapped without a
+compile error, and the order follows the wire names, so renaming a field in the API can reorder
+them.
 
 ## Field presence and nullability
 
@@ -90,8 +127,14 @@ answers are independent, and each combination has one Rust spelling:
 |---|---|---|---|---|
 | required, not nullable | `T` | error: missing field | error (unless `T` is free-form JSON) | always written |
 | required, nullable | `Option<T>` | error: missing field | `None` | `None` writes `null` |
-| optional, not nullable | `Option<T>` | `None` | error | `None` leaves the key out |
+| optional, not nullable | `Option<T>` | `None` | `None` | `None` leaves the key out |
 | optional, nullable | `Option<Option<T>>` | `None` | `Some(None)` | `None` leaves the key out, `Some(None)` writes `null` |
+
+An optional key that is not nullable is the plain Serde spelling,
+`#[serde(default, skip_serializing_if = "Option::is_none")]`. It never writes `null`, and it reads
+one as the absent key, which is also what the generated Go and Python models do with it. The other
+two `Option` rows decode through a helper in `mod.rs`, because Serde's default for an `Option`
+cannot tell an absent key from a `null`.
 
 So for one optional, nullable `summary`:
 
@@ -112,8 +155,19 @@ service writes it).
 
 ## Names
 
-The Rust names are spelled from the graph; the wire names never change. Every field carries
-`#[serde(rename = "<wire name>")]` and every enum member `#[serde(rename = "<wire value>")]`.
+The Rust names are spelled from the graph; the wire names never change. Serde already names a key
+by its field and a value by its variant, so a rename is written only where that name is not the
+wire name:
+
+| Wire names of a struct | What the struct states |
+|---|---|
+| each is its field's identifier (`id`, `size_bytes`, `type` for `r#type`) | nothing |
+| camel case (`dryRun`, `fileId`) | `#[serde(rename_all = "camelCase")]` once, on the struct |
+| a name neither spells (`x-request-id`, a numbered `file_id_2`, `self` for `self_`) | `#[serde(rename = "<wire name>")]` on that field |
+
+The struct takes `rename_all = "camelCase"` when that leaves fewer fields to rename one by one, and
+a field the convention does not spell keeps its own `rename` beside it. An enum member is renamed
+unless its wire value already is its variant's name.
 
 | Graph | Rust | Rule |
 |---|---|---|
@@ -149,11 +203,43 @@ Two schemas whose Rust type names collide, and a schema whose Rust name would be
 | named alias of any of the above | `pub type` |
 | a reference that would make a struct contain itself | `Box<T>` |
 
-A struct derives `Debug, Clone, PartialEq, Serialize, Deserialize`; an enum also derives `Copy, Eq,
-Hash, PartialOrd, Ord`, so it can key a `BTreeMap`. A field's description from the graph becomes its
-rustdoc, through `#[cfg_attr(not(doctest), doc = "…")]` so prose that looks like code never runs as a
-doctest. Validation constraints and declared defaults are not enforced or applied: the models carry
-values, and the service validates them.
+A struct derives `Debug, Clone, PartialEq, Serialize, Deserialize`, and `Default` when none of its
+fields is required; an enum also derives `Copy, Eq, Hash, PartialOrd, Ord`, so it can key a
+`BTreeMap`. A field's description from the graph becomes its rustdoc, through
+`#[cfg_attr(not(doctest), doc = "…")]` so prose that looks like code never runs as a doctest.
+Validation constraints and declared defaults are not enforced or applied: the models carry values,
+and the service validates them.
+
+## Formatting and lints
+
+The generated source is laid out as `rustfmt` lays it out with its default settings, in both the
+2021 and the 2024 style edition, so `cargo fmt` formats the crate, generated modules included,
+without changing a byte gnr8 wrote, and `gnr8 check` stays up to date. Three limits, and one remedy
+for all of them: put `#[rustfmt::skip]` on the `pub mod models;` declaration, which covers the
+whole tree.
+
+- A crate that configures `rustfmt` away from its defaults (a `rustfmt.toml` with another
+  `max_width`, for example) would have `cargo fmt` rewrite the generated files.
+- gnr8 counts a line's width in characters, and `rustfmt` counts display columns. A field
+  description or a wire name with double-width characters (CJK text, emoji) can therefore be
+  broken at a different point than `rustfmt` would break it.
+- The two style editions disagree in one place: an enum member whose wire value is exactly 75
+  characters long, whose `rename` attribute then ends on column 100. gnr8 writes the 2021 layout.
+
+The code passes `cargo clippy` with warnings denied. `mod.rs` carries one inner attribute that
+allows, for the generated tree only, the lints whose answer the API decides rather than gnr8:
+
+| Allowed | Why the generated code cannot answer it |
+|---|---|
+| `dead_code` | a crate need not use every model it selects |
+| `missing_docs` | the graph has prose for some fields and not for others |
+| `unreachable_pub` | the crate chooses whether `models` is public |
+| `clippy::style`, `clippy::complexity` | they judge names, prose and shape: a field the API calls `foo`, members sharing a prefix, a deeply nested map |
+| `clippy::pedantic`, `clippy::nursery` | opt-in groups, for the same reason |
+
+Clippy's `correctness`, `suspicious` and `perf` groups stay on for the generated tree. A `new` with
+more than seven arguments carries its own `#[allow(clippy::too_many_arguments)]`: the API decides
+how many fields are required.
 
 ## What the target refuses
 

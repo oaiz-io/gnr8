@@ -6,6 +6,8 @@
 //!   - Go: `gofmt -l` (format) MUST list nothing, and `go vet ./...` (vet) MUST pass.
 //!   - Python: `ruff check` (F/I/UP/E, minus the PEP-604 pipe rules — see below) + `ruff format --check`.
 //!   - TypeScript: `prettier --check` MUST pass (the de-facto TS formatter).
+//!   - Rust: `rustfmt --check` (2021 and 2024 style editions) and `cargo clippy -D warnings` MUST
+//!     pass. That gate lives in `tests/rust_models.rs`, which owns the crate the models compile in.
 //!
 //! Each language reuses ITS OWN fixture + toolchain (a graph built for one target may contain shapes
 //! another target rejects — e.g. the Python/TS fixtures carry unions the Go target cannot emit), mirroring

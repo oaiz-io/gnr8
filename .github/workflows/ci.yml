@@ -118,7 +118,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `rust_models` and `rust_models_e2e` hold the generated Rust to `rustfmt` and Clippy, and
+      # each skips that gate when its tool is missing. Without the components here the gate would
+      # never run in CI, and a green run would say nothing about it.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - uses: actions/setup-go@v6
         if: matrix.needs_go == 'true'

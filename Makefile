@@ -108,11 +108,13 @@ action-annotations-test:
 release-notes-test:
 	python3 -m unittest discover -s scripts -p 'test_release_notes.py'
 
-# Run the standalone consumer crate's wire tests against the committed RustModels output. The crate
-# is its own Cargo workspace (cargo never builds it from the gnr8 workspace), and its lockfile pins
-# the serde version the generated models are checked against.
+# Hold the standalone consumer crate, the committed RustModels output included, to `cargo fmt
+# --check` and Clippy with warnings denied, then run its wire tests. Nothing shields the generated
+# modules from either tool: the emitter writes what rustfmt writes. The crate is its own Cargo
+# workspace (cargo never builds it from the gnr8 workspace), and its lockfile pins the serde version
+# the generated models are checked against.
 rust-models-consumer-test:
-	cd fixtures/rust-models/consumer && cargo test --locked
+	cd fixtures/rust-models/consumer && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
 
 # Compile + vet the standalone Go Gin fixture module (Pitfall 5 — cargo never builds it).
 fixture-build:

@@ -5,21 +5,25 @@
     dead_code,
     missing_docs,
     unreachable_pub,
-    clippy::all,
+    clippy::style,
+    clippy::complexity,
     clippy::pedantic,
     clippy::nursery
 )]
 
 mod event;
-mod file_reference_input;
-mod file_reference_output;
-mod job_output;
-mod job_status;
-
 pub use self::event::Event;
+
+mod file_reference_input;
 pub use self::file_reference_input::FileReferenceInput;
+
+mod file_reference_output;
 pub use self::file_reference_output::FileReferenceOutput;
+
+mod job_output;
 pub use self::job_output::JobOutput;
+
+mod job_status;
 pub use self::job_status::JobStatus;
 
 /// Deserialize a key that must be present and may be `null`.
@@ -29,16 +33,6 @@ where
     T: ::serde::Deserialize<'de>,
 {
     <Option<T> as ::serde::Deserialize<'de>>::deserialize(deserializer)
-}
-
-/// Deserialize a key that may be absent and is never `null`: an absent key is `None`
-/// (`#[serde(default)]`), and a `null` is refused.
-fn deserialize_optional<'de, D, T>(deserializer: D) -> ::core::result::Result<Option<T>, D::Error>
-where
-    D: ::serde::Deserializer<'de>,
-    T: ::serde::Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
 }
 
 /// Deserialize a key that may be absent or `null`: an absent key is `None`

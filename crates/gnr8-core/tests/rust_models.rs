@@ -2,6 +2,11 @@
 //! single error naming every shape it does not, how its roots select models, and that its output
 //! compiles under `cargo check` with warnings denied.
 //!
+//! It is also the Rust half of the generated-code quality gate `tests/sdk_lint.rs` holds the other
+//! targets to: the emitted source is what `rustfmt` writes with its default settings, in the 2021
+//! and 2024 style editions, and it passes `cargo clippy` with warnings denied. The gate lives here
+//! because this file owns the crate the models are compiled in.
+//!
 //! The wire behavior of the emitted types is checked against hand-written JSON by the standalone
 //! consumer crate in `fixtures/rust-models/consumer`, which `crates/gnr8/tests/rust_models_e2e.rs`
 //! drives through the real CLI.
@@ -338,6 +343,152 @@ fn roots_select_the_models_they_reach_and_nothing_else() {
 }
 
 #[test]
+fn a_struct_has_a_constructor_over_its_required_fields() {
+    let files = emit(target("m").model_root("jobs.Node"), &supported());
+    let root = text(&files, "m/mod.rs");
+    // `name` is required; `children` and `parent` may be left out, so they start as `None`.
+    assert!(
+        root.contains(
+            "    #[must_use]\n    pub fn new(name: String) -> Self {\n        Self {\n            \
+             children: None,\n            name,\n            parent: None,\n        }\n    }\n"
+        ),
+        "{root}"
+    );
+    // A struct with a required field has no default value.
+    assert!(
+        root.contains(
+            "#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]\npub \
+             struct Node {"
+        ),
+        "{root}"
+    );
+
+    let graph = graph(vec![
+        object(
+            "jobs.Patch",
+            vec![
+                field("title", Presence::Optional, Type::string()),
+                field("note", Presence::OptionalNullable, Type::string()),
+            ],
+        ),
+        object(
+            "jobs.Reply",
+            vec![
+                field("note", Presence::RequiredNullable, Type::string()),
+                required("ok", Type::boolean()),
+            ],
+        ),
+    ]);
+    let files = emit(target("m").all_models(), &graph);
+    let root = text(&files, "m/mod.rs");
+    // With no required field the struct derives `Default` beside its argument-free `new`.
+    assert!(
+        root.contains(
+            "#[derive(Debug, Clone, Default, PartialEq, ::serde::Serialize, \
+             ::serde::Deserialize)]\npub struct Patch {"
+        ),
+        "{root}"
+    );
+    assert!(
+        root.contains(
+            "    pub fn new() -> Self {\n        Self {\n            note: None,\n            \
+             title: None,\n        }\n    }\n"
+        ),
+        "{root}"
+    );
+    // A key that must be present is an argument even when its value may be `null`.
+    assert!(
+        root.contains(
+            "    pub fn new(note: Option<String>, ok: bool) -> Self {\n        Self { note, ok \
+             }\n    }\n"
+        ),
+        "{root}"
+    );
+}
+
+#[test]
+fn only_a_wire_name_serde_would_not_spell_is_renamed() {
+    let graph = graph(vec![
+        object(
+            "jobs.Plain",
+            vec![
+                required("id", Type::string()),
+                required("type", Type::string()),
+                required("size_bytes", Type::integer()),
+            ],
+        ),
+        object(
+            "jobs.Camel",
+            vec![
+                required("dryRun", Type::boolean()),
+                required("fileId", Type::string()),
+                required("file_id", Type::string()),
+                required("id", Type::string()),
+            ],
+        ),
+        object(
+            "jobs.Keyword",
+            vec![
+                required("id", Type::string()),
+                required("self", Type::boolean()),
+            ],
+        ),
+        schema("jobs.Mixed", "Mixed", Type::enumeration(["Done", "queued"])),
+    ]);
+    let files = emit(target("m").all_models(), &graph);
+    let root = text(&files, "m/mod.rs");
+    // Every wire name is its field's identifier, a raw one included: nothing is stated.
+    assert!(
+        root.contains(
+            "pub struct Plain {\n    pub id: String,\n    pub size_bytes: i64,\n    pub r#type: \
+             String,\n}\n"
+        ),
+        "{root}"
+    );
+    // Camel-case wire names are stated once, on the struct. The one name the convention does not
+    // spell keeps its own rename.
+    assert!(
+        root.contains(
+            "#[serde(rename_all = \"camelCase\")]\npub struct Camel {\n    pub dry_run: bool,\n    \
+             pub file_id: String,\n    #[serde(rename = \"file_id\")]\n    pub file_id_2: \
+             String,\n    pub id: String,\n}\n"
+        ),
+        "{root}"
+    );
+    // An escaped keyword is not a camel-case wire name, so it is renamed on its own.
+    assert!(
+        root.contains(
+            "::serde::Deserialize)]\npub struct Keyword {\n    pub id: String,\n    \
+             #[serde(rename = \"self\")]\n    pub self_: bool,\n}\n"
+        ),
+        "{root}"
+    );
+    // An enum member that already is its variant's name is not renamed either.
+    assert!(
+        root.contains(
+            "pub enum Mixed {\n    Done,\n    #[serde(rename = \"queued\")]\n    Queued,\n}\n"
+        ),
+        "{root}"
+    );
+}
+
+#[test]
+fn an_optional_key_that_is_not_nullable_is_the_plain_serde_spelling() {
+    let files = emit(target("m").model_root("jobs.Node"), &supported());
+    let root = text(&files, "m/mod.rs");
+    assert!(
+        root.contains(
+            "    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub parent: \
+             Option<Box<Node>>,\n"
+        ),
+        "{root}"
+    );
+    // `Node` has no nullable key, so the module carries no deserializer helper at all.
+    assert!(!root.contains("fn deserialize_"), "{root}");
+    assert!(!root.contains("deserialize_with"), "{root}");
+}
+
+#[test]
 fn a_root_naming_a_projected_schema_selects_both_directions() {
     // `Shared` is read in both directions with different presence answers, so the projection
     // splits it; naming the source schema selects both halves.
@@ -370,7 +521,7 @@ fn a_root_naming_a_projected_schema_selects_both_directions() {
     assert!(root.contains("pub struct SharedInput {"), "{root}");
     assert!(root.contains("pub struct SharedOutput {"), "{root}");
     // The input half requires the key; the output half may leave it out.
-    assert!(root.contains("Generated from schema `jobs.Shared::input`.\n#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]\npub struct SharedInput {\n    #[serde(rename = \"value\")]\n    pub value: String,"), "{root}");
+    assert!(root.contains("Generated from schema `jobs.Shared::input`.\n#[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)]\npub struct SharedInput {\n    pub value: String,"), "{root}");
     assert!(root.contains("pub value: Option<String>,"), "{root}");
     assert!(!root.contains("pub struct Request"), "{root}");
 }
@@ -539,14 +690,24 @@ enum Deps {
     SerdeOnly,
 }
 
-/// `cargo check` a crate holding `files` (written under `src/models`), with warnings denied and
-/// the consumer fixture's lockfile pinning serde.
-fn cargo_check(name: &str, files: &[(String, String)], strip: &str, deps: Deps) {
+/// A crate holding `files` (written under `src/models`) beside the consumer fixture's manifest and
+/// lockfile, which pins serde, with warnings denied. Nothing keeps `rustfmt` out of the models.
+///
+/// The package is named after `name`. Every crate here is its own workspace root built into one
+/// shared target directory, and cargo keys a package's build record by its name and its path inside
+/// its workspace, not by where the workspace is. Under one name, two of these crates would share a
+/// record, and the one written first would be reported as already built by the other's build and
+/// never compiled.
+fn consumer_crate(name: &str, files: &[(String, String)], strip: &str, deps: Deps) -> PathBuf {
+    const PACKAGE: &str = "name = \"jobs-consumer\"\n";
+    let package = format!("name = \"rust-models-{name}\"\n");
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("rust-models-{name}"));
     let _ = std::fs::remove_dir_all(&root);
     let consumer = repository().join("fixtures/rust-models/consumer");
     std::fs::create_dir_all(root.join("src")).unwrap();
     let manifest = std::fs::read_to_string(consumer.join("Cargo.toml")).unwrap();
+    assert_eq!(manifest.matches(PACKAGE).count(), 1, "{manifest}");
+    let manifest = manifest.replace(PACKAGE, &package);
     let manifest = match deps {
         Deps::SerdeAndJson => manifest,
         Deps::SerdeOnly => {
@@ -555,10 +716,12 @@ fn cargo_check(name: &str, files: &[(String, String)], strip: &str, deps: Deps) 
         }
     };
     std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
-    std::fs::copy(consumer.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let lock = std::fs::read_to_string(consumer.join("Cargo.lock")).unwrap();
+    assert_eq!(lock.matches(PACKAGE).count(), 1, "{lock}");
+    std::fs::write(root.join("Cargo.lock"), lock.replace(PACKAGE, &package)).unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
-        "#![deny(warnings)]\n#[rustfmt::skip]\npub mod models;\n",
+        "#![deny(warnings)]\npub mod models;\n",
     )
     .unwrap();
     for (path, text) in files {
@@ -568,14 +731,15 @@ fn cargo_check(name: &str, files: &[(String, String)], strip: &str, deps: Deps) 
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
+    root
+}
+
+/// Run `cargo <args>` in `root`, sharing one target directory between every crate these tests
+/// build so serde compiles once.
+fn cargo(root: &Path, what: &str, args: &[&str]) {
     let output = Command::new(env!("CARGO"))
-        // Without `serde_json` the copied lockfile lists one package too many, and cargo prunes it.
-        .args(if deps == Deps::SerdeAndJson {
-            ["check", "--quiet", "--locked"].as_slice()
-        } else {
-            ["check", "--quiet"].as_slice()
-        })
-        .current_dir(&root)
+        .args(args)
+        .current_dir(root)
         .env(
             "CARGO_TARGET_DIR",
             Path::new(env!("CARGO_TARGET_TMPDIR")).join("rust-models-target"),
@@ -584,23 +748,308 @@ fn cargo_check(name: &str, files: &[(String, String)], strip: &str, deps: Deps) 
         .unwrap();
     assert!(
         output.status.success(),
-        "generated Rust in {} does not compile:\n{}",
+        "generated Rust in {} {what}:\n{}{}",
         root.display(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
+/// `cargo check` a crate holding `files`, with warnings denied.
+fn cargo_check(name: &str, files: &[(String, String)], strip: &str, deps: Deps) -> PathBuf {
+    let root = consumer_crate(name, files, strip, deps);
+    // Without `serde_json` the copied lockfile lists one package too many, and cargo prunes it.
+    let args: &[&str] = if deps == Deps::SerdeAndJson {
+        &["check", "--quiet", "--locked"]
+    } else {
+        &["check", "--quiet"]
+    };
+    cargo(&root, "does not compile", args);
+    root
+}
+
+/// Whether `tool` runs here. A machine without it skips its gate, as `tests/sdk_lint.rs` does; the
+/// repository's `rust-toolchain.toml` installs both `rustfmt` and Clippy, so CI always has them.
+fn tool_available(tool: &str, args: &[&str]) -> bool {
+    let found = Command::new(tool)
+        .args(args)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !found {
+        eprintln!("skipping: `{tool} {}` is unavailable", args.join(" "));
+    }
+    found
+}
+
+/// The crate's sources are exactly what `rustfmt` writes with its default settings, in both style
+/// editions a consuming crate can be on.
+fn rustfmt_check(root: &Path) {
+    if !tool_available("rustfmt", &["--version"]) {
+        return;
+    }
+    for edition in ["2021", "2024"] {
+        let output = Command::new("rustfmt")
+            .args(["--check", "--edition", edition, "src/lib.rs"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "rustfmt (edition {edition}) would rewrite the generated Rust in {}:\n{}{}",
+            root.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// The crate passes `cargo clippy` with warnings denied.
+fn clippy_check(root: &Path) {
+    if !tool_available(env!("CARGO"), &["clippy", "--version"]) {
+        return;
+    }
+    cargo(
+        root,
+        "does not pass Clippy",
+        &["clippy", "--quiet", "--locked", "--", "-D", "warnings"],
+    );
+}
+
+/// `files` without the inner `#![allow(...)]` the module root carries.
+fn without_lint_allows(files: &[(String, String)]) -> Vec<(String, String)> {
+    files
+        .iter()
+        .map(|(path, text)| {
+            let Some(start) = text.find("#![allow(") else {
+                return (path.clone(), text.clone());
+            };
+            let end = start + text[start..].find(")]\n").unwrap() + ")]\n".len();
+            (path.clone(), format!("{}{}", &text[..start], &text[end..]))
+        })
+        .collect()
+}
+
 #[test]
-fn emitted_models_compile_in_both_layouts() {
+fn emitted_models_compile_and_pass_rustfmt_and_clippy_in_both_layouts() {
     let compact = emit(target("out").model_root("Probe"), &supported());
-    cargo_check("compact", &compact, "out/", Deps::SerdeAndJson);
+    let root = cargo_check("compact", &compact, "out/", Deps::SerdeAndJson);
+    rustfmt_check(&root);
+    clippy_check(&root);
     let split = emit(
         target("out")
             .model_root("Probe")
             .layout(SdkFileLayout::split().model_dir("types")),
         &supported(),
     );
-    cargo_check("split", &split, "out/", Deps::SerdeAndJson);
+    let root = cargo_check("split", &split, "out/", Deps::SerdeAndJson);
+    rustfmt_check(&root);
+    clippy_check(&root);
+}
+
+#[test]
+fn the_emitters_own_code_passes_clippy_without_the_lints_the_module_allows() {
+    // The module root allows the Clippy groups that judge what the API decides: names, prose and
+    // shape. Nothing in this graph trips those, so with the attribute removed every default lint
+    // is on and the code the emitter itself writes has to pass all of them.
+    let files = without_lint_allows(&emit(target("out").model_root("Probe"), &supported()));
+    assert!(
+        files.iter().all(|(_, text)| !text.contains("#![allow(")),
+        "{files:?}"
+    );
+    let root = cargo_check("no-allows", &files, "out/", Deps::SerdeAndJson);
+    clippy_check(&root);
+}
+
+fn map_of(value: Type) -> Type {
+    Type::Map {
+        key: Box::new(Type::string()),
+        value: Box::new(value),
+    }
+}
+
+/// A graph whose emitted lines step, one column at a time, across every width at which `rustfmt`
+/// changes a layout: a field and an alias that stop fitting their line, a type too wide for the
+/// line below, a constructor signature, a struct literal body, and each kind of attribute.
+fn width_sweep() -> ApiGraph {
+    let mut schemas = Vec::new();
+    sweep_types(&mut schemas);
+    sweep_constructors(&mut schemas);
+    sweep_attributes(&mut schemas);
+    graph(schemas)
+}
+
+/// Fields and aliases of ten type shapes, behind names one column longer each time.
+fn sweep_types(schemas: &mut Vec<Schema>) {
+    let presences = [
+        Presence::Required,
+        Presence::RequiredNullable,
+        Presence::Optional,
+        Presence::OptionalNullable,
+    ];
+    for length in [1, 40, 60] {
+        let id = format!("w.Ref{}", "x".repeat(length));
+        schemas.push(object(&id, vec![required("v", Type::string())]));
+    }
+    let reference = |length: usize| named(&format!("w.Ref{}", "x".repeat(length)));
+    let nested = |depth: usize, inner: Type| (0..depth).fold(inner, |ty, _| Type::array(ty));
+    let shapes = [
+        Type::string(),
+        nested(2, Type::string()),
+        map_of(Type::number()),
+        map_of(map_of(Type::array(Type::string()))),
+        Type::array(reference(40)),
+        map_of(reference(60)),
+        nested(6, reference(60)),
+        Type::Any {},
+        map_of(map_of(map_of(Type::Any {}))),
+        nested(3, map_of(nested(3, map_of(reference(40))))),
+    ];
+    // One struct per shape, so every shape meets each line limit under every presence. Each
+    // required field is also a constructor argument, which has its own rule.
+    for (index, shape) in shapes.iter().enumerate() {
+        let fields = (1..=90)
+            .map(|length| {
+                field(
+                    &"f".repeat(length),
+                    presences[(length + index) % presences.len()],
+                    shape.clone(),
+                )
+            })
+            .collect();
+        schemas.push(object(&format!("w.Fields{index}"), fields));
+    }
+    for (index, shape) in shapes.iter().enumerate() {
+        for length in (1..=60).step_by(if index == 2 { 1 } else { 7 }) {
+            let name = format!("Alias{index}{}", "a".repeat(length));
+            schemas.push(schema(&format!("w.{name}"), &name, shape.clone()));
+        }
+    }
+}
+
+/// A constructor signature and the struct literal it returns, one column wider each time.
+fn sweep_constructors(schemas: &mut Vec<Schema>) {
+    for length in 50..=80 {
+        let wide = "p".repeat(length);
+        schemas.push(object(
+            &format!("w.Sig{length}"),
+            vec![required(&wide, Type::string())],
+        ));
+        schemas.push(object(
+            &format!("w.SigTwo{length}"),
+            vec![
+                required("a", Type::boolean()),
+                required(&wide, Type::string()),
+            ],
+        ));
+    }
+    for length in 1..=24 {
+        let name = "q".repeat(length);
+        schemas.push(object(
+            &format!("w.Lit{length}"),
+            vec![required(&name, Type::string())],
+        ));
+        schemas.push(object(
+            &format!("w.LitNone{length}"),
+            vec![field(&name, Presence::Optional, Type::string())],
+        ));
+        schemas.push(object(
+            &format!("w.LitTwo{length}"),
+            vec![
+                required("a", Type::boolean()),
+                field(&name, Presence::Optional, Type::string()),
+                field("z", Presence::OptionalNullable, Type::string()),
+            ],
+        ));
+    }
+}
+
+/// Prose, a lone `rename`, a `rename` beside other arguments, and an enum member.
+fn sweep_attributes(schemas: &mut Vec<Schema>) {
+    let mut described: Vec<Field> = (30..=60)
+        .chain([70, 85, 100, 150])
+        .map(|length| {
+            let mut field = required(&format!("d{length}"), Type::string());
+            field.description = Some("x".repeat(length));
+            field
+        })
+        .collect();
+    let mut escaped = required("escaped", Type::string());
+    escaped.description = Some("Said \"no\", then C:\\temp.\n\nA second paragraph.".to_string());
+    described.push(escaped);
+    schemas.push(object("w.Docs", described));
+    schemas.push(object(
+        "w.Renamed",
+        (55..=85)
+            .map(|length| required(&format!("x-{}", "a".repeat(length)), Type::string()))
+            .collect(),
+    ));
+    schemas.push(object(
+        "w.RenamedOptional",
+        (1..=20)
+            .map(|length| {
+                field(
+                    &format!("y-{}", "b".repeat(length)),
+                    Presence::Optional,
+                    Type::string(),
+                )
+            })
+            .collect(),
+    ));
+    // `rustfmt`'s two style editions disagree in exactly one place: a variant's attribute that
+    // ends on column 100, which a 75-character wire value makes. The 2021 edition breaks it and
+    // the 2024 edition does not, so no layout satisfies both. The emitter writes the 2021 layout
+    // (`a_variant_attribute_ending_on_the_last_column_takes_the_2021_layout`), and the sweep,
+    // which is checked under both editions, leaves that one width out.
+    schemas.push(schema(
+        "w.Members",
+        "Members",
+        Type::enumeration(
+            (55..=85)
+                .filter(|length| *length != 75)
+                .map(|length| "v".repeat(length)),
+        ),
+    ));
+}
+
+#[test]
+fn every_line_is_broken_where_rustfmt_breaks_it() {
+    let graph = width_sweep();
+    let compact = emit(target("out").all_models(), &graph);
+    rustfmt_check(&consumer_crate(
+        "widths-compact",
+        &compact,
+        "out/",
+        Deps::SerdeAndJson,
+    ));
+    // A split layout names every reference `super::Name`, which moves every boundary.
+    let split = emit(target("out").all_models().split_files(), &graph);
+    rustfmt_check(&consumer_crate(
+        "widths-split",
+        &split,
+        "out/",
+        Deps::SerdeAndJson,
+    ));
+}
+
+#[test]
+fn a_variant_attribute_ending_on_the_last_column_takes_the_2021_layout() {
+    let member = "v".repeat(75);
+    let graph = graph(vec![schema(
+        "w.Edge",
+        "Edge",
+        Type::enumeration([member.clone()]),
+    )]);
+    let files = emit(target("out").all_models(), &graph);
+    let root = text(&files, "out/mod.rs");
+    let one_line = format!("    #[serde(rename = \"{member}\")]\n");
+    assert_eq!(one_line.len(), 101, "100 columns and a newline");
+    assert!(
+        root.contains(&format!(
+            "    #[serde(\n        rename = \"{member}\"\n    )]\n"
+        )),
+        "{root}"
+    );
+    assert!(!root.contains(&one_line), "{root}");
 }
 
 #[test]

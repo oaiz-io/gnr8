@@ -17,7 +17,7 @@
 #![allow(clippy::option_option)]
 
 use jobs_consumer::job;
-use jobs_consumer::models::{Event, FileReferenceOutput, JobOutput, JobStatus};
+use jobs_consumer::models::{Event, FileReferenceInput, FileReferenceOutput, JobOutput, JobStatus};
 use serde_json::{json, Value};
 
 /// A complete event as the service writes it.
@@ -68,12 +68,8 @@ fn event_with(key: &str, value: Option<Value>) -> String {
 
 fn output(summary: Option<Option<&str>>) -> JobOutput {
     JobOutput {
-        artifacts: Vec::new(),
-        exit_code: None,
-        result: None,
-        retry: None,
-        status: JobStatus::Done,
         summary: summary.map(|summary| summary.map(str::to_string)),
+        ..JobOutput::new(Vec::new(), JobStatus::Done)
     }
 }
 
@@ -173,13 +169,21 @@ fn a_nullable_required_key_reads_null_and_writes_null() {
 }
 
 #[test]
-fn a_non_nullable_key_refuses_null() {
-    // `labels` may be left out, but the service never writes it as `null`.
-    let error = decode_event(&event_with("labels", Some(Value::Null))).expect_err("labels: null");
-    assert!(error.contains("invalid type: null"), "{error}");
+fn a_required_key_that_is_not_nullable_refuses_null() {
     // `id` must be present and is never `null`.
     let error = decode_event(&event_with("id", Some(Value::Null))).expect_err("id: null");
     assert!(error.contains("invalid type: null"), "{error}");
+}
+
+#[test]
+fn an_optional_key_reads_null_as_absent_and_never_writes_it() {
+    // `labels` may be left out, and the service never writes it as `null`. A `null` from another
+    // writer reads as the absent key, as the Go and Python models read it, and is not written back.
+    let event = decode_event(&event_with("labels", Some(Value::Null))).expect("labels: null");
+    assert_eq!(event.labels, None);
+    let encoded = serde_json::to_value(&event).expect("encodes");
+    assert!(!encoded.as_object().expect("object").contains_key("labels"));
+    assert_eq!(encoded, parse(&event_with("labels", None)));
 }
 
 #[test]
@@ -212,6 +216,58 @@ fn an_optional_nullable_key_keeps_absent_null_and_value_apart() {
     assert_eq!(
         serde_json::to_string(&output(Some(Some("ok")))).expect("encodes"),
         r#"{"artifacts":[],"status":"done","summary":"ok"}"#
+    );
+}
+
+#[test]
+fn a_constructor_takes_the_required_fields_and_leaves_every_other_key_out() {
+    // `JobOutput` requires `artifacts` and `status`; nothing else reaches the wire.
+    let output = JobOutput::new(Vec::new(), JobStatus::Queued);
+    assert_eq!(
+        serde_json::to_string(&output).expect("encodes"),
+        r#"{"artifacts":[],"status":"queued"}"#
+    );
+
+    // `FileReferenceInput` requires nothing, so `new` takes nothing and equals the default value.
+    assert_eq!(FileReferenceInput::new(), FileReferenceInput::default());
+    assert_eq!(
+        serde_json::to_string(&FileReferenceInput::new()).expect("encodes"),
+        "{}"
+    );
+
+    // `Event` takes every key the service always writes, a nullable one included, in field order.
+    let event = Event::new(
+        None,
+        3,
+        true,
+        "camel-key".to_string(),
+        "snake-key".to_string(),
+        "evt_2".to_string(),
+        FileReferenceOutput::new("/work/in.csv".to_string(), 7),
+        Some("retrying".to_string()),
+        Some(json!({"limit": 1})),
+        None,
+        JobStatus::Queued,
+        "job.retried".to_string(),
+    );
+    assert_eq!(
+        serde_json::to_value(&event).expect("encodes"),
+        parse(
+            r#"{
+                "attachments": null,
+                "attempt": 3,
+                "dryRun": true,
+                "fileId": "camel-key",
+                "file_id": "snake-key",
+                "id": "evt_2",
+                "input": {"path": "/work/in.csv", "size_bytes": 7},
+                "note": "retrying",
+                "params": {"limit": 1},
+                "payload": null,
+                "status": "queued",
+                "type": "job.retried"
+            }"#
+        )
     );
 }
 
