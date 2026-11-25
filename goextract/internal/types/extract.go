@@ -1064,9 +1064,13 @@ func mapType(t gotypes.Type, ctx mapCtx) facts.Type {
 	case *gotypes.Array:
 		return facts.ArrayType(mapType(u.Elem(), ctx))
 	case *gotypes.Map:
+		// A map of interface values is still a map: encoding/json writes it as a JSON object (or
+		// null when nil), never as a scalar or an array. Its values are free-form, which is what
+		// the diagnostic reports, but the object shape is a fact of the source and stays in the
+		// graph. Collapsing the whole field to a free-form value would make `map[string]any` and
+		// `any` one fact, though only one of them may hold `false` or `[1, 2]`.
 		if _, ok := gotypes.Unalias(u.Elem()).(*gotypes.Interface); ok {
 			ctx.diags.FreeFormMap(ctx.structName, ctx.fieldName, ctx.declaredType, ctx.file, ctx.line)
-			return facts.AnyType()
 		}
 		key := mapType(u.Key(), ctx)
 		value := mapType(u.Elem(), ctx)

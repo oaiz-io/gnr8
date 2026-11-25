@@ -152,6 +152,11 @@ pub(super) fn type_label(
             Inline::text("array of "),
             type_label(items, None, nav)?,
         ])),
+        // `openapi.yaml` writes a map of free-form values as the open object it is, the very
+        // schema it writes for a free-form value, so the page names it the same way.
+        Type::Map { value, .. } if matches!(value.as_ref(), Type::Any {}) => {
+            type_label(value, format, nav)?
+        }
         Type::Map { key, value } => beside(Inline::Seq(vec![
             Inline::text("map of "),
             type_label(key, None, nav)?,

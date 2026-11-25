@@ -357,7 +357,9 @@ content-type: application/json
       },
       "createdAt": "2024-01-02T03:04:05.123Z",
       "description": "gnr8",
-      "metadata": {},
+      "metadata": {
+        "key": {}
+      },
       "name": "gnr8",
       "targetDirection": "gte",
       "targetValue": 1.5,
