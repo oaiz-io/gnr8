@@ -202,6 +202,11 @@ Keep dependencies narrow and reviewable:
   Rust's standard library has no JSON support. The consuming crate manages dependency versions in
   its lockfile. The generated models have no gnr8 runtime dependency, and gnr8 never reads `serde`
   attributes from source.
+- keep the generated Rust SDK on the standard library plus `serde` and `serde_json`. Models
+  derive `serde`; the client encodes and decodes JSON with `serde_json`; everything else is
+  generated standard-library code. The SDK contains no HTTP client: the caller supplies one
+  through the generated `Transport` trait, the seam the Go, Python and TypeScript SDKs expose
+  as an option. No async runtime, no HTTP or TLS crate, no gnr8 runtime crate.
 
 Before adding a dependency, document the bounded commodity concern it serves and verify that it does
 not weaken rules 1, 3, or 4.
