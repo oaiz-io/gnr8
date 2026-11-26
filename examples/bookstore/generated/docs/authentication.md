@@ -7,6 +7,7 @@ API key in header `X-API-Key`.
 | SDK | Credential option |
 | --- | --- |
 | Go — `example.com/bookstore/sdk` | `sdk.WithAPIKeyHeader("ApiKeyAuth", apiKey)` |
+| Rust — `bookstore_sdk` | `.api_key_for("ApiKeyAuth", api_key)` |
 
 Required by:
 

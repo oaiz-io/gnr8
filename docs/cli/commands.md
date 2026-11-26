@@ -46,7 +46,7 @@ diagnostics.
 ## `init`
 
 ```bash
-gnr8 init [--source go-gin|fastapi|flask|nestjs] [--sdk go|python|typescript]
+gnr8 init [--source go-gin|fastapi|flask|nestjs] [--sdk go|python|typescript|rust]
 ```
 
 Creates missing files only:

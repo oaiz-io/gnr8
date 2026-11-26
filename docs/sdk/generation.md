@@ -7,8 +7,9 @@
 support, generated reference docs, and optional package metadata. Configure API meaning in transforms;
 configure file/public-surface policy on the target.
 
-`RustModels` renders models only: Rust types with Serde serialization for the schemas you select by
-id or name. It reads field presence and nullability from the same graph rules described below; see
+`RustSdk` renders a blocking Rust client over a `Transport` you supply, with models, docs and
+contract tests; see [Rust SDK](rust-sdk.md). `RustModels` renders models only: Rust types with Serde
+serialization for the schemas you select by id or name. It reads field presence and nullability from the same graph rules described below; see
 [Rust models](rust-models.md).
 
 ## Minimal targets
@@ -28,6 +29,11 @@ id or name. It reads field presence and nullability from the same graph rules de
     TsSdk::new()
         .module("@acme/books")
         .to("generated/typescript"),
+)
+.target(
+    RustSdk::new()
+        .module("acme-books")
+        .to("generated/rust"),
 )
 ```
 

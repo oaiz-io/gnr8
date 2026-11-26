@@ -1,0 +1,1157 @@
+//! The client, the transport it sends through, and the wire encoding every operation shares.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::errors::ApiError;
+use super::errors::DecodeError;
+use super::errors::EncodeError;
+use super::errors::Error;
+use super::errors::TransportError;
+
+/// The first backoff step between attempts; it doubles per attempt up to [`MAX_RETRY_DELAY`].
+const BASE_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// The most time spent waiting between the attempts of one call, `Retry-After` included.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// The most redirects one attempt follows.
+const MAX_REDIRECTS: usize = 10;
+
+/// Statuses retried besides every `5xx`.
+const RETRY_STATUSES: &[u16] = &[408, 429];
+
+/// One HTTP exchange. A transport never follows a redirect and never retries: the client does
+/// both, so its policy cannot be bypassed by a transport's defaults.
+pub trait Transport: Send + Sync {
+    /// Send `request` and return the response, whatever its status.
+    ///
+    /// # Errors
+    ///
+    /// A [`TransportError`] when no response was received.
+    fn send(&self, request: &Request) -> Result<Response, TransportError>;
+}
+
+impl<F> Transport for F
+where
+    F: Fn(&Request) -> Result<Response, TransportError> + Send + Sync,
+{
+    fn send(&self, request: &Request) -> Result<Response, TransportError> {
+        self(request)
+    }
+}
+
+/// An HTTP request for the transport to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub method: &'static str,
+    /// The absolute URL: base URL, path and query.
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// The time this attempt may take; the transport enforces it.
+    pub timeout: Option<Duration>,
+}
+
+/// An HTTP response from the transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Response {
+    /// The first value of the header `name`, matched case-insensitively.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        header_value(&self.headers, name)
+    }
+}
+
+/// What a hook is told about the attempt it runs for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestContext {
+    pub operation_id: &'static str,
+    pub method: &'static str,
+    pub path_template: &'static str,
+    /// The metadata of the call's [`RequestOptions`].
+    pub metadata: Vec<(String, String)>,
+    /// The attempt, counted from 0.
+    pub attempt: usize,
+}
+
+/// Runs before each attempt and may change the request.
+pub type RequestHook = Arc<dyn Fn(&RequestContext, &mut Request) + Send + Sync>;
+
+/// Runs after each response the transport returns.
+pub type ResponseHook = Arc<dyn Fn(&RequestContext, &Response) + Send + Sync>;
+
+/// Runs once for a call that fails with a transport error or a rejected status.
+pub type ErrorHook = Arc<dyn Fn(&RequestContext, &Error) + Send + Sync>;
+
+/// Overrides for the calls made through [`Client::with_options`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestOptions {
+    pub timeout: Option<Duration>,
+    pub max_retries: Option<usize>,
+    /// Sent by operations the API marks idempotent.
+    pub idempotency_key: Option<String>,
+    pub follow_redirects: bool,
+    /// Passed to every hook.
+    pub metadata: Vec<(String, String)>,
+}
+
+impl RequestOptions {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    #[must_use]
+    pub fn max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = Some(max_retries);
+        self
+    }
+
+    #[must_use]
+    pub fn idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
+    #[must_use]
+    pub fn follow_redirects(mut self, follow: bool) -> Self {
+        self.follow_redirects = follow;
+        self
+    }
+
+    #[must_use]
+    pub fn metadata(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.push((name.into(), value.into()));
+        self
+    }
+}
+
+/// A blocking API client. Cloning it is cheap, and every clone shares one configuration.
+#[derive(Clone)]
+pub struct Client {
+    state: Arc<ClientState>,
+    options: RequestOptions,
+}
+
+struct ClientState {
+    base_url: String,
+    transport: Box<dyn Transport>,
+    headers: Vec<(String, String)>,
+    timeout: Option<Duration>,
+    max_retries: usize,
+    retry_unsafe_methods: bool,
+    request_hooks: Vec<RequestHook>,
+    response_hooks: Vec<ResponseHook>,
+    error_hooks: Vec<ErrorHook>,
+    transport_auth: bool,
+    api_key: Option<String>,
+    api_keys: Vec<(String, String)>,
+    bearer_token: Option<String>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("base_url", &self.state.base_url)
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Configures a [`Client`] before it is shared.
+pub struct ClientBuilder {
+    state: ClientState,
+}
+
+impl Client {
+    /// A client with the API's default configuration.
+    pub fn new(base_url: impl Into<String>, transport: impl Transport + 'static) -> Self {
+        Self::builder(base_url, transport).build()
+    }
+
+    pub fn builder(
+        base_url: impl Into<String>,
+        transport: impl Transport + 'static,
+    ) -> ClientBuilder {
+        ClientBuilder {
+            state: ClientState {
+                base_url: base_url.into(),
+                transport: Box::new(transport),
+                headers: Vec::new(),
+                timeout: Some(Duration::from_secs(30)),
+                max_retries: 0,
+                retry_unsafe_methods: false,
+                request_hooks: Vec::new(),
+                response_hooks: Vec::new(),
+                error_hooks: Vec::new(),
+                transport_auth: false,
+                api_key: None,
+                api_keys: Vec::new(),
+                bearer_token: None,
+            },
+        }
+    }
+
+    /// This client with `options` applied to every call made through it.
+    #[must_use]
+    pub fn with_options(&self, options: RequestOptions) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            options,
+        }
+    }
+}
+
+impl ClientBuilder {
+    /// A default header, sent when the request does not set one of the same name.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.state.headers.push((name.into(), value.into()));
+        self
+    }
+
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.state.timeout = Some(timeout);
+        self
+    }
+
+    #[must_use]
+    pub fn max_retries(mut self, max_retries: usize) -> Self {
+        self.state.max_retries = max_retries;
+        self
+    }
+
+    #[must_use]
+    pub fn on_request(
+        mut self,
+        hook: impl Fn(&RequestContext, &mut Request) + Send + Sync + 'static,
+    ) -> Self {
+        self.state.request_hooks.push(Arc::new(hook));
+        self
+    }
+
+    #[must_use]
+    pub fn on_response(
+        mut self,
+        hook: impl Fn(&RequestContext, &Response) + Send + Sync + 'static,
+    ) -> Self {
+        self.state.response_hooks.push(Arc::new(hook));
+        self
+    }
+
+    #[must_use]
+    pub fn on_error(
+        mut self,
+        hook: impl Fn(&RequestContext, &Error) + Send + Sync + 'static,
+    ) -> Self {
+        self.state.error_hooks.push(Arc::new(hook));
+        self
+    }
+
+    /// Leave authentication to the transport: the client attaches no credential and never
+    /// fails a call for lack of one.
+    #[must_use]
+    pub fn transport_auth(mut self) -> Self {
+        self.state.transport_auth = true;
+        self
+    }
+
+    /// The API key sent for every API-key scheme without a key of its own.
+    #[must_use]
+    pub fn api_key(mut self, key: impl Into<String>) -> Self {
+        self.state.api_key = Some(key.into());
+        self
+    }
+
+    /// The API key for one scheme, named by its scheme id or by the header or query parameter
+    /// it is sent in.
+    #[must_use]
+    pub fn api_key_for(mut self, name: impl Into<String>, key: impl Into<String>) -> Self {
+        self.state.api_keys.push((name.into(), key.into()));
+        self
+    }
+
+    #[must_use]
+    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.state.bearer_token = Some(token.into());
+        self
+    }
+
+    pub fn build(self) -> Client {
+        Client {
+            state: Arc::new(self.state),
+            options: RequestOptions::default(),
+        }
+    }
+}
+
+/// One credential an operation may require.
+#[derive(Debug, Clone, Copy)]
+enum AuthScheme {
+    Bearer,
+    Header {
+        id: &'static str,
+        name: &'static str,
+    },
+    Query {
+        id: &'static str,
+        name: &'static str,
+    },
+}
+
+/// A parameter value as the wire spells it, before the location escapes it.
+enum Wire {
+    Absent,
+    Scalar(String),
+    List(Vec<String>),
+    Map(Vec<(String, String)>),
+}
+
+/// One operation call while its request is assembled.
+pub(super) struct Call {
+    method: &'static str,
+    operation_id: &'static str,
+    path_template: &'static str,
+    path: String,
+    query: Vec<(String, String, bool)>,
+    headers: Vec<(String, String)>,
+    cookies: Vec<String>,
+    body: Option<(String, Vec<u8>)>,
+    accepts: Vec<u16>,
+    returns: Vec<u16>,
+    idempotency_header: Option<&'static str>,
+    /// Headers a redirect to another origin drops.
+    sensitive: Vec<String>,
+    parts: Option<Vec<(String, super::multipart::Part)>>,
+    alternatives: Vec<Vec<AuthScheme>>,
+}
+
+impl Call {
+    pub(super) fn new(
+        method: &'static str,
+        operation_id: &'static str,
+        path_template: &'static str,
+    ) -> Self {
+        Self {
+            method,
+            operation_id,
+            path_template,
+            path: path_template.to_string(),
+            query: Vec::new(),
+            headers: Vec::new(),
+            cookies: Vec::new(),
+            body: None,
+            accepts: Vec::new(),
+            returns: Vec::new(),
+            idempotency_header: None,
+            sensitive: vec![
+                "Authorization".to_string(),
+                "Cookie".to_string(),
+                "Proxy-Authorization".to_string(),
+            ],
+            parts: None,
+            alternatives: Vec::new(),
+        }
+    }
+
+    /// Send the call to `path`, the template mounted under the API's base path.
+    pub(super) fn url_path(&mut self, path: &str) {
+        self.path = path.to_string();
+    }
+
+    /// Fill the path's `{name}` with `value`, every reserved character escaped.
+    pub(super) fn path<T: serde::Serialize + ?Sized>(
+        &mut self,
+        name: &str,
+        value: &T,
+    ) -> Result<(), Error> {
+        let text = match wire(value)? {
+            Wire::Absent => String::new(),
+            Wire::Scalar(text) => text,
+            Wire::List(items) => items.join(","),
+            Wire::Map(entries) => flatten(entries, false).join(","),
+        };
+        self.path = self
+            .path
+            .replace(&format!("{{{name}}}"), &escape(&text, false));
+        Ok(())
+    }
+
+    /// Add a query parameter in `style`; an absent value adds nothing.
+    pub(super) fn query<T: serde::Serialize + ?Sized>(
+        &mut self,
+        name: &str,
+        value: &T,
+        style: &str,
+        explode: bool,
+    ) -> Result<(), Error> {
+        for (key, text) in pairs(name, wire(value)?, style, explode) {
+            self.query.push((key, text, false));
+        }
+        Ok(())
+    }
+
+    /// [`Call::query`] for a parameter whose value may keep the reserved characters.
+    pub(super) fn query_reserved<T: serde::Serialize + ?Sized>(
+        &mut self,
+        name: &str,
+        value: &T,
+        style: &str,
+        explode: bool,
+    ) -> Result<(), Error> {
+        for (key, text) in pairs(name, wire(value)?, style, explode) {
+            self.query.push((key, text, true));
+        }
+        Ok(())
+    }
+
+    /// Add a header parameter in the simple style; an absent value adds nothing.
+    pub(super) fn header<T: serde::Serialize + ?Sized>(
+        &mut self,
+        name: &str,
+        value: &T,
+        explode: bool,
+    ) -> Result<(), Error> {
+        for (key, text) in pairs(name, wire(value)?, "simple", explode) {
+            match self
+                .headers
+                .iter_mut()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(&key))
+            {
+                Some((_, joined)) => {
+                    joined.push(',');
+                    joined.push_str(&text);
+                }
+                None => self.headers.push((key, text)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Add a cookie parameter in the form style; an absent value adds nothing.
+    pub(super) fn cookie<T: serde::Serialize + ?Sized>(
+        &mut self,
+        name: &str,
+        value: &T,
+        explode: bool,
+    ) -> Result<(), Error> {
+        for (key, text) in pairs(name, wire(value)?, "form", explode) {
+            let cookie = format!("{}={}", escape(&key, false), escape(&text, false));
+            self.cookies.push(cookie);
+        }
+        Ok(())
+    }
+
+    /// Send `body` as JSON in the media type `content_type`.
+    pub(super) fn json<T: serde::Serialize + ?Sized>(
+        &mut self,
+        content_type: &str,
+        body: &T,
+    ) -> Result<(), Error> {
+        let bytes = serde_json::to_vec(body).map_err(encode_error)?;
+        self.body = Some((content_type.to_string(), bytes));
+        Ok(())
+    }
+
+    /// Send a multipart body made of the parts added after this.
+    pub(super) fn multipart(&mut self) {
+        self.parts = Some(Vec::new());
+    }
+
+    /// Add a text part for each value of the field `name`; an absent value adds none.
+    pub(super) fn part<T: serde::Serialize + ?Sized>(
+        &mut self,
+        name: &str,
+        value: &T,
+    ) -> Result<(), Error> {
+        let text = serde_json::to_string(value).map_err(encode_error)?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(encode_error)?;
+        let values = match value {
+            serde_json::Value::Array(items) => items,
+            value => vec![value],
+        };
+        let parts = self.parts.get_or_insert_with(Vec::new);
+        for value in values.iter().filter(|value| !value.is_null()) {
+            let text = super::multipart::Part::Text(part_text(value));
+            parts.push((name.to_string(), text));
+        }
+        Ok(())
+    }
+
+    /// Add a file part for each file of the field `name`.
+    pub(super) fn file<F: super::multipart::Files + ?Sized>(
+        &mut self,
+        name: &str,
+        files: &F,
+    ) -> Result<(), Error> {
+        let parts = self.parts.get_or_insert_with(Vec::new);
+        for file in files.files() {
+            if file.filename.is_empty() {
+                return Err(Error::Encode(EncodeError::new(
+                    "multipart filename must not be empty",
+                )));
+            }
+            if file.filename.contains(['\r', '\n']) {
+                return Err(Error::Encode(EncodeError::new(
+                    "multipart filename must not contain newlines",
+                )));
+            }
+            let part = super::multipart::Part::File(file.clone());
+            parts.push((name.to_string(), part));
+        }
+        Ok(())
+    }
+
+    /// Accept `status`, a declared redirect, as a success.
+    pub(super) fn accepts(&mut self, status: u16) {
+        self.accepts.push(status);
+    }
+
+    /// Read the body of a response with `status` as the operation's result.
+    pub(super) fn returns(&mut self, status: u16) {
+        self.returns.push(status);
+    }
+
+    /// Mark the operation idempotent: it may be retried, and sends a configured idempotency key
+    /// in `header`.
+    pub(super) fn idempotent(&mut self, header: &'static str) {
+        self.idempotency_header = Some(header);
+    }
+
+    fn require(&mut self, alternative: usize, scheme: AuthScheme) {
+        while self.alternatives.len() <= alternative {
+            self.alternatives.push(Vec::new());
+        }
+        self.alternatives[alternative].push(scheme);
+    }
+
+    /// Credential alternative `alternative` includes a bearer token.
+    pub(super) fn bearer(&mut self, alternative: usize) {
+        self.require(alternative, AuthScheme::Bearer);
+    }
+
+    /// Credential alternative `alternative` includes the API key `id`, sent in header `name`.
+    pub(super) fn api_key_header(
+        &mut self,
+        alternative: usize,
+        id: &'static str,
+        name: &'static str,
+    ) {
+        self.require(alternative, AuthScheme::Header { id, name });
+    }
+
+    /// Credential alternative `alternative` includes the API key `id`, sent in query parameter
+    /// `name`.
+    pub(super) fn api_key_query(
+        &mut self,
+        alternative: usize,
+        id: &'static str,
+        name: &'static str,
+    ) {
+        self.require(alternative, AuthScheme::Query { id, name });
+    }
+
+    /// Send the call through `client`: credentials, retries, redirects and hooks included.
+    pub(super) fn send(mut self, client: &Client) -> Result<Reply, Error> {
+        let state = &client.state;
+        let options = &client.options;
+        if !state.transport_auth && !self.alternatives.is_empty() {
+            self.authenticate(state)?;
+        }
+        let sensitive = std::mem::take(&mut self.sensitive);
+        let mut query = std::mem::take(&mut self.query);
+        query.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut url = format!("{}{}", state.base_url.trim_end_matches('/'), self.path);
+        for (index, (name, value, reserved)) in query.iter().enumerate() {
+            url.push(if index == 0 { '?' } else { '&' });
+            url.push_str(&escape(name, false));
+            url.push('=');
+            url.push_str(&escape(value, *reserved));
+        }
+        let mut headers = std::mem::take(&mut self.headers);
+        if !self.cookies.is_empty() {
+            headers.push(("Cookie".to_string(), self.cookies.join("; ")));
+        }
+        let mut body = Vec::new();
+        if let Some(parts) = self.parts.take() {
+            self.body = Some(super::multipart::encode(&parts));
+        }
+        if let Some((content_type, bytes)) = self.body.take() {
+            headers.push(("Content-Type".to_string(), content_type));
+            body = bytes;
+        }
+        if let (Some(header), Some(key)) = (self.idempotency_header, &options.idempotency_key) {
+            headers.push((header.to_string(), key.clone()));
+        }
+        for (name, value) in &state.headers {
+            if header_value(&headers, name).is_none() {
+                headers.push((name.clone(), value.clone()));
+            }
+        }
+        let request = Request {
+            method: self.method,
+            url,
+            headers,
+            body,
+            timeout: options.timeout.or(state.timeout),
+        };
+        let retryable = state.retry_unsafe_methods
+            || self.idempotency_header.is_some()
+            || matches!(self.method, "GET" | "HEAD" | "OPTIONS" | "PUT" | "DELETE");
+        let max_retries = if retryable {
+            options.max_retries.unwrap_or(state.max_retries)
+        } else {
+            0
+        };
+        let mut budget = MAX_RETRY_DELAY;
+        let mut attempt = 0;
+        loop {
+            let context = RequestContext {
+                operation_id: self.operation_id,
+                method: self.method,
+                path_template: self.path_template,
+                metadata: options.metadata.clone(),
+                attempt,
+            };
+            let mut attempt_request = request.clone();
+            for hook in &state.request_hooks {
+                hook(&context, &mut attempt_request);
+            }
+            let result = exchange(
+                state.transport.as_ref(),
+                attempt_request,
+                options.follow_redirects,
+                &sensitive,
+            );
+            if let Ok(response) = &result {
+                for hook in &state.response_hooks {
+                    hook(&context, response);
+                }
+            }
+            let delay = match &result {
+                Err(_) => backoff(attempt),
+                Ok(response)
+                    if response.status >= 500 || RETRY_STATUSES.contains(&response.status) =>
+                {
+                    retry_delay(response, attempt)
+                }
+                Ok(_) => Duration::ZERO,
+            };
+            if attempt < max_retries && !delay.is_zero() && !budget.is_zero() {
+                let wait = delay.min(budget);
+                budget -= wait;
+                std::thread::sleep(wait);
+                attempt += 1;
+                continue;
+            }
+            let error = match result {
+                Err(error) => Error::Transport(error),
+                Ok(response)
+                    if (200..300).contains(&response.status)
+                        || self.accepts.contains(&response.status) =>
+                {
+                    return Ok(Reply {
+                        response,
+                        returns: self.returns,
+                    });
+                }
+                Ok(response) => Error::Api(ApiError {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                }),
+            };
+            for hook in &state.error_hooks {
+                hook(&context, &error);
+            }
+            return Err(error);
+        }
+    }
+
+    /// Attach the first credential alternative the client has every credential for.
+    fn authenticate(&mut self, state: &ClientState) -> Result<(), Error> {
+        let satisfied = |scheme: &AuthScheme| match scheme {
+            AuthScheme::Bearer => state.bearer_token.as_ref().is_some_and(|t| !t.is_empty()),
+            AuthScheme::Header { id, name } | AuthScheme::Query { id, name } => {
+                api_key(state, id, name).is_some()
+            }
+        };
+        let Some(alternative) = self
+            .alternatives
+            .iter()
+            .find(|alternative| alternative.iter().all(satisfied))
+            .cloned()
+        else {
+            return Err(Error::Auth(super::errors::AuthConfigurationError {
+                operation_id: self.operation_id.to_string(),
+            }));
+        };
+        for scheme in alternative {
+            match scheme {
+                AuthScheme::Bearer => {
+                    if let Some(token) = &state.bearer_token {
+                        let value = format!("Bearer {token}");
+                        self.headers.push(("Authorization".to_string(), value));
+                    }
+                }
+                AuthScheme::Header { id, name } => {
+                    if let Some(key) = api_key(state, id, name) {
+                        self.headers.push((name.to_string(), key.to_string()));
+                        self.sensitive.push(name.to_string());
+                    }
+                }
+                AuthScheme::Query { id, name } => {
+                    if let Some(key) = api_key(state, id, name) {
+                        self.query.push((name.to_string(), key.to_string(), false));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The key for API-key scheme `id` sent as `name`: its own key, else the default key.
+fn api_key<'a>(state: &'a ClientState, id: &str, name: &str) -> Option<&'a str> {
+    let own = |wanted: &str| {
+        state
+            .api_keys
+            .iter()
+            .rev()
+            .find(|(key_name, _)| key_name == wanted)
+            .map(|(_, key)| key.as_str())
+    };
+    own(id)
+        .or_else(|| own(name))
+        .or(state.api_key.as_deref())
+        .filter(|key| !key.is_empty())
+}
+
+/// A response the operation accepted, and the statuses whose body is its result.
+pub(super) struct Reply {
+    response: Response,
+    returns: Vec<u16>,
+}
+
+impl Reply {
+    fn result_body(self) -> Option<Vec<u8>> {
+        self.returns
+            .contains(&self.response.status)
+            .then_some(self.response.body)
+    }
+
+    fn rejected(self) -> Error {
+        Error::Api(ApiError {
+            status: self.response.status,
+            headers: self.response.headers,
+            body: self.response.body,
+        })
+    }
+
+    /// The body decoded from JSON; any other status is an error.
+    pub(super) fn json<T: serde::de::DeserializeOwned>(self) -> Result<T, Error> {
+        if !self.returns.contains(&self.response.status) {
+            return Err(self.rejected());
+        }
+        decode_json(&self.response.body)
+    }
+
+    /// The body decoded from JSON, or `None` for a status that carries none.
+    pub(super) fn json_or_none<T: serde::de::DeserializeOwned>(self) -> Result<Option<T>, Error> {
+        self.result_body()
+            .map(|body| decode_json(&body))
+            .transpose()
+    }
+
+    /// The body as UTF-8 text; any other status is an error.
+    pub(super) fn text(self) -> Result<String, Error> {
+        if !self.returns.contains(&self.response.status) {
+            return Err(self.rejected());
+        }
+        decode_text(self.response.body)
+    }
+
+    /// The body as UTF-8 text, or `None` for a status that carries none.
+    pub(super) fn text_or_none(self) -> Result<Option<String>, Error> {
+        self.result_body().map(decode_text).transpose()
+    }
+
+    /// The body's bytes; any other status is an error.
+    pub(super) fn bytes(self) -> Result<Vec<u8>, Error> {
+        if !self.returns.contains(&self.response.status) {
+            return Err(self.rejected());
+        }
+        Ok(self.response.body)
+    }
+
+    /// The body's bytes, or `None` for a status that carries none.
+    pub(super) fn bytes_or_none(self) -> Result<Option<Vec<u8>>, Error> {
+        Ok(self.result_body())
+    }
+}
+
+fn encode_error(error: serde_json::Error) -> Error {
+    Error::Encode(EncodeError::new(error.to_string()))
+}
+
+fn decode_json<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Error> {
+    serde_json::from_slice(body).map_err(|error| Error::Decode(DecodeError::new(error.to_string())))
+}
+
+fn decode_text(body: Vec<u8>) -> Result<String, Error> {
+    String::from_utf8(body).map_err(|error| Error::Decode(DecodeError::new(error.to_string())))
+}
+
+/// Send `request`, and when `follow` is set follow its redirects through the same transport. A
+/// hop to another origin drops every header in `sensitive`.
+fn exchange(
+    transport: &dyn Transport,
+    mut request: Request,
+    follow: bool,
+    sensitive: &[String],
+) -> Result<Response, TransportError> {
+    let mut response = transport.send(&request)?;
+    for _ in 0..MAX_REDIRECTS {
+        if !follow || !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            break;
+        }
+        let Some(location) = response.header("Location") else {
+            break;
+        };
+        let next = resolve(&request.url, location);
+        if origin(&next) != origin(&request.url) {
+            request.headers.retain(|(name, _)| {
+                !sensitive
+                    .iter()
+                    .any(|secret| secret.eq_ignore_ascii_case(name))
+            });
+        }
+        if matches!(response.status, 301..=303) && !matches!(request.method, "GET" | "HEAD") {
+            request.method = "GET";
+            request.body.clear();
+            request
+                .headers
+                .retain(|(name, _)| !name.eq_ignore_ascii_case("Content-Type"));
+        }
+        request.url = next;
+        response = transport.send(&request)?;
+    }
+    Ok(response)
+}
+
+/// `location` resolved against the URL `base`.
+fn resolve(base: &str, location: &str) -> String {
+    if location.contains("://") {
+        return location.to_string();
+    }
+    let (scheme, rest) = base.split_once("://").unwrap_or(("", base));
+    if let Some(authority) = location.strip_prefix("//") {
+        return format!("{scheme}://{authority}");
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let root = &base[..scheme.len() + 3 + authority_end];
+    if location.starts_with('/') {
+        return format!("{root}{location}");
+    }
+    let path = &rest[authority_end..];
+    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+    let directory = &path[..path.rfind('/').map_or(0, |slash| slash + 1)];
+    let directory = if directory.is_empty() { "/" } else { directory };
+    format!("{root}{directory}{location}")
+}
+
+/// The scheme, host and port of `url`, lowercased, with the scheme's default port filled in.
+fn origin(url: &str) -> (String, String, String) {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let scheme = scheme.to_ascii_lowercase();
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let port_start = match host_port.rfind(']') {
+        Some(end) => host_port[end..].find(':').map(|colon| end + colon),
+        None => host_port.rfind(':'),
+    };
+    let (host, port) = match port_start {
+        Some(colon) => (&host_port[..colon], host_port[colon + 1..].to_string()),
+        None => (host_port, String::new()),
+    };
+    let port = if port.is_empty() {
+        if scheme == "https" { "443" } else { "80" }.to_string()
+    } else {
+        port
+    };
+    (scheme, host.to_ascii_lowercase(), port)
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn backoff(attempt: usize) -> Duration {
+    u32::try_from(attempt)
+        .ok()
+        .and_then(|shift| 1_u32.checked_shl(shift))
+        .map_or(MAX_RETRY_DELAY, |factor| {
+            BASE_RETRY_DELAY.saturating_mul(factor).min(MAX_RETRY_DELAY)
+        })
+}
+
+fn retry_delay(response: &Response, attempt: usize) -> Duration {
+    response
+        .header("Retry-After")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map_or_else(
+            || backoff(attempt),
+            |seconds| Duration::from_secs(seconds).min(MAX_RETRY_DELAY),
+        )
+}
+
+/// `value` as its JSON encoding states it, ready for a parameter location.
+fn wire<T: serde::Serialize + ?Sized>(value: &T) -> Result<Wire, Error> {
+    // Through text, so a float keeps the shortest digits of its own width.
+    let text = serde_json::to_string(value).map_err(encode_error)?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(encode_error)?;
+    Ok(match value {
+        serde_json::Value::Null => Wire::Absent,
+        serde_json::Value::Array(items) => Wire::List(items.iter().map(scalar).collect()),
+        serde_json::Value::Object(entries) => Wire::Map(
+            entries
+                .iter()
+                .map(|(key, item)| (key.clone(), scalar(item)))
+                .collect(),
+        ),
+        value => Wire::Scalar(scalar(&value)),
+    })
+}
+
+/// One wire value as parameter text: a string as itself, a number as JavaScript writes it.
+fn scalar(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Number(number) => match number.as_f64() {
+            Some(float) if number.is_f64() => wire_number(float),
+            _ => number.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// A multipart text part: a string as itself, an object as its JSON, a scalar as a parameter.
+fn part_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => value.to_string(),
+        value => scalar(value),
+    }
+}
+
+/// The items field of a page, whatever its presence.
+pub(super) trait PageItems {
+    type Item;
+
+    fn count(&self) -> usize;
+
+    fn into_items(self) -> Vec<Self::Item>;
+}
+
+impl<T> PageItems for Vec<T> {
+    type Item = T;
+
+    fn count(&self) -> usize {
+        self.len()
+    }
+
+    fn into_items(self) -> Vec<T> {
+        self
+    }
+}
+
+impl<P: PageItems> PageItems for Option<P> {
+    type Item = P::Item;
+
+    fn count(&self) -> usize {
+        self.as_ref().map_or(0, P::count)
+    }
+
+    fn into_items(self) -> Vec<P::Item> {
+        self.map(P::into_items).unwrap_or_default()
+    }
+}
+
+/// How many items a page's items field holds.
+pub(super) fn item_count<P: PageItems>(items: &P) -> usize {
+    items.count()
+}
+
+/// The items of a page's items field.
+pub(super) fn page_items<P: PageItems>(items: P) -> Vec<P::Item> {
+    items.into_items()
+}
+
+/// A next-cursor field or a cursor parameter, whatever its presence.
+pub(super) trait Cursor {
+    fn get(&self) -> Option<&str>;
+
+    fn set(&mut self, cursor: String);
+}
+
+impl Cursor for String {
+    fn get(&self) -> Option<&str> {
+        Some(self)
+            .filter(|cursor| !cursor.is_empty())
+            .map(String::as_str)
+    }
+
+    fn set(&mut self, cursor: String) {
+        *self = cursor;
+    }
+}
+
+impl Cursor for Option<String> {
+    fn get(&self) -> Option<&str> {
+        self.as_ref().and_then(Cursor::get)
+    }
+
+    fn set(&mut self, cursor: String) {
+        *self = Some(cursor);
+    }
+}
+
+impl Cursor for Option<Option<String>> {
+    fn get(&self) -> Option<&str> {
+        self.as_ref().and_then(Cursor::get)
+    }
+
+    fn set(&mut self, cursor: String) {
+        *self = Some(Some(cursor));
+    }
+}
+
+/// Move `param` to the page's `next` cursor; `false` when there is none, so no page follows.
+pub(super) fn advance_cursor<P: Cursor, N: Cursor>(param: &mut P, next: &N) -> bool {
+    match next.get() {
+        Some(cursor) => {
+            param.set(cursor.to_string());
+            true
+        }
+        None => false,
+    }
+}
+
+/// The name-value pairs a parameter `name` sends in `style`.
+fn pairs(name: &str, value: Wire, style: &str, explode: bool) -> Vec<(String, String)> {
+    let delimiter = match style {
+        "spaceDelimited" => " ",
+        "pipeDelimited" => "|",
+        _ => ",",
+    };
+    match value {
+        Wire::Absent => Vec::new(),
+        Wire::Scalar(text) => vec![(name.to_string(), text)],
+        Wire::List(items) if explode && style == "form" => items
+            .into_iter()
+            .map(|item| (name.to_string(), item))
+            .collect(),
+        Wire::List(items) => vec![(name.to_string(), items.join(delimiter))],
+        Wire::Map(entries) if style == "deepObject" => entries
+            .into_iter()
+            .map(|(key, item)| (format!("{name}[{key}]"), item))
+            .collect(),
+        Wire::Map(entries) if explode && style == "form" => entries,
+        Wire::Map(entries) => vec![(name.to_string(), flatten(entries, explode).join(delimiter))],
+    }
+}
+
+/// A map's entries as one list: `key=value` items when exploded, else keys and values in turn.
+fn flatten(entries: Vec<(String, String)>, explode: bool) -> Vec<String> {
+    let mut parts = Vec::new();
+    for (key, item) in entries {
+        if explode {
+            parts.push(format!("{key}={item}"));
+        } else {
+            parts.push(key);
+            parts.push(item);
+        }
+    }
+    parts
+}
+
+/// Percent-encode every byte but an unreserved one; `allow_reserved` also keeps RFC 3986's
+/// reserved characters.
+fn escape(value: &str, allow_reserved: bool) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    const RESERVED: &[u8] = b":/?#[]@!$&'()*+,;=";
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || b"-._~".contains(&byte)
+            || (allow_reserved && RESERVED.contains(&byte))
+        {
+            out.push(char::from(byte));
+        } else {
+            out.push('%');
+            out.push(char::from(HEX[usize::from(byte >> 4)]));
+            out.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+    }
+    out
+}
+
+/// A float as JavaScript's `Number#toString` writes it: the shortest digits that read back as
+/// `value`, in positional notation from `1e-6` up to `1e21`.
+fn wire_number(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let sign = if value < 0.0 { "-" } else { "" };
+    let spelled = format!("{:e}", value.abs());
+    let (mantissa, exponent) = spelled.split_once('e').unwrap_or((&spelled, "0"));
+    let digits = mantissa.replace('.', "");
+    let length = i64::try_from(digits.len()).unwrap_or(i64::MAX);
+    let point = exponent.parse::<i64>().unwrap_or(0) + 1;
+    let zeros = |count: i64| "0".repeat(usize::try_from(count).unwrap_or(0));
+    if length <= point && point <= 21 {
+        return format!("{sign}{digits}{}", zeros(point - length));
+    }
+    if 0 < point && point <= 21 {
+        let (whole, fraction) = digits.split_at(usize::try_from(point).unwrap_or(0));
+        return format!("{sign}{whole}.{fraction}");
+    }
+    if -6 < point && point <= 0 {
+        return format!("{sign}0.{}{digits}", zeros(-point));
+    }
+    let (first, rest) = digits.split_at(1);
+    let text = if rest.is_empty() {
+        first.to_string()
+    } else {
+        format!("{first}.{rest}")
+    };
+    if point > 0 {
+        format!("{sign}{text}e+{}", point - 1)
+    } else {
+        format!("{sign}{text}e-{}", 1 - point)
+    }
+}

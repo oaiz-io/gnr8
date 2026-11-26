@@ -581,8 +581,8 @@ fn copy_project(src: &Path, dst: &Path) {
 }
 
 /// `gnr8 verify` over a copy of `examples/bookstore`, which declares `StaticDocs` beside its
-/// `GoSdk`: the Go docs suite runs `go vet` over the compile unit and passes, next to the contract
-/// and CLI help suites the same project already had.
+/// `GoSdk` and `RustSdk`: the Go docs suite runs `go vet` over the compile unit and the Rust one
+/// `cargo test`, and both pass, next to the contract and CLI help suites.
 #[test]
 fn verify_runs_the_go_docs_suite_for_bookstore() {
     if !toolchains_available() {
@@ -609,10 +609,13 @@ fn verify_runs_the_go_docs_suite_for_bookstore() {
     let report: serde_json::Value = serde_json::from_str(&out).expect("verify --json is JSON");
     assert_eq!(report["verified"], serde_json::json!(true), "{out}");
     let docs = report["docs_suites"].as_array().expect("docs suites");
-    assert_eq!(docs.len(), 1, "{out}");
+    assert_eq!(docs.len(), 2, "{out}");
     assert_eq!(docs[0]["language"], serde_json::json!("go"), "{out}");
     assert_eq!(docs[0]["status"], serde_json::json!("passed"), "{out}");
     assert_eq!(docs[0]["cases"], serde_json::json!(5), "{out}");
+    // The Rust SDK sibling's samples on the same pages compile and send the page's requests too.
+    assert_eq!(docs[1]["language"], serde_json::json!("rust"), "{out}");
+    assert_eq!(docs[1]["status"], serde_json::json!("passed"), "{out}");
     assert_eq!(
         docs[0]["docs_dir"],
         serde_json::json!("generated/docs"),

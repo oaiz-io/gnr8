@@ -65,7 +65,7 @@ executes every built-in stage itself and asks the worker only for the stages you
 | Command | Args/flags | Reads | Writes | Exit |
 |---|---|---|---|---|
 | `gnr8 guide` | `[go-gin-to-python-typescript\|python-apis-to-python-sdk\|nestjs-to-typescript-sdk]` | bundled docs | — (prints basic or scenario-specific agent guide) | 0; 2 on error |
-| `gnr8 init` | `--source go-gin\|fastapi\|flask\|nestjs`, `--sdk go\|python\|typescript` | — | `.gnr8/Cargo.toml`, `.gnr8/src/main.rs`, `.gnr8/README.md`, `.gnr8/.gitignore` (skips existing — idempotent) | 0; 2 on error |
+| `gnr8 init` | `--source go-gin\|fastapi\|flask\|nestjs`, `--sdk go\|python\|typescript\|rust` | — | `.gnr8/Cargo.toml`, `.gnr8/src/main.rs`, `.gnr8/README.md`, `.gnr8/.gitignore` (skips existing — idempotent) | 0; 2 on error |
 | `gnr8 generate` | `--force` | `.gnr8/` crate, the source dirs its `Source` reads | target paths, `generated/gnr8.graph.json`, `.gnr8/cache/manifest.json` | 0 reconciled; 1 protected output; 2 on error |
 | `gnr8 check` | — | `.gnr8/` crate, src, manifest | — (dry run) | **0 up-to-date; 1 stale/drifted**; 2 on error |
 | `gnr8 verify` | — | `.gnr8/` crate, src; the run's artifacts, materialized into a temporary tree | — (temporary tree only) | **0 at least one suite passed and none failed; 1 a suite failed or every suite skipped**; 2 on error or nothing to verify |

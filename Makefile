@@ -7,7 +7,7 @@
 # The Go/Python/TypeScript contract snapshots are GREEN and blocking. `make gates` runs the Rust
 # contract set; `make check` adds direct sidecar tests and release-example regeneration.
 
-.PHONY: fmt fmt-check clippy test gates rust-models-consumer-test fixture-build goextract-build pyextract-test tsextract-deps tsextract-test action-test action-annotations-test release-notes-test red check all examples-check install invariants
+.PHONY: fmt fmt-check clippy test gates rust-models-consumer-test rust-sdk-consumer-test fixture-build goextract-build pyextract-test tsextract-deps tsextract-test action-test action-annotations-test release-notes-test red check all examples-check install invariants
 
 # Auto-format the workspace in place.
 fmt:
@@ -70,6 +70,7 @@ gates:
 	cargo test -p gnr8-engine --test snapshot_nestjs_graph --test snapshot_nestjs_openapi
 	cargo test -p gnr8-engine --test sdk_lint
 	cargo test -p gnr8-engine --test rust_models
+	cargo test -p gnr8-engine --test rustsdk_compile
 
 # Restore the `typescript` toolchain for gnr8's OWN test suite (the nestjs snapshot extraction +
 # the tssdk_compile typecheck). gnr8 ships NO typescript — in real use `tsextract` borrows the user's
@@ -115,6 +116,11 @@ release-notes-test:
 # the generated models are checked against.
 rust-models-consumer-test:
 	cd fixtures/rust-models/consumer && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
+
+# The same for the Rust SDK fixture's consumer crate: the generated module tree in src/api, the
+# hand-written Unix-socket transport, its wire tests, and the generated contract tests.
+rust-sdk-consumer-test:
+	cd fixtures/rust-sdk/consumer && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
 
 # Compile + vet the standalone Go Gin fixture module (Pitfall 5 — cargo never builds it).
 fixture-build:
@@ -170,6 +176,6 @@ invariants:
 	$(MAKE) release-notes-test
 
 # Full local gate; CI runs these confidence areas as focused jobs.
-check: invariants fmt-check clippy tsextract-deps test rust-models-consumer-test fixture-build goextract-build pyextract-test tsextract-test action-test examples-check
+check: invariants fmt-check clippy tsextract-deps test rust-models-consumer-test rust-sdk-consumer-test fixture-build goextract-build pyextract-test tsextract-test action-test examples-check
 
 all: check

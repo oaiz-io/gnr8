@@ -78,6 +78,17 @@ if err != nil {
 fmt.Printf("%+v\n", result)
 ```
 
+### Rust — `bookstore_sdk`
+
+```rust
+use bookstore_sdk::Client;
+use bookstore_sdk::ListBooksParams;
+
+let client = Client::builder(base_url, transport).api_key_for("ApiKeyAuth", api_key).build();
+let result = client.list_books(&ListBooksParams { genre: Some("gnr8".to_string()), ..ListBooksParams::new() })?;
+println!("{result:?}");
+```
+
 ### CLI — `bookstore`
 
 `bookstore books list`

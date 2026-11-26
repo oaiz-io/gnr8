@@ -73,6 +73,8 @@ fn main() -> std::process::ExitCode {
 - Go SDK: `GoSdk::new().module("example.com/yourservice/sdk").to("sdk")`.
 - Python SDK: `PySdk::new().module("example.com/yourservice/sdk").to("sdk")`.
 - TypeScript SDK: `TsSdk::new().module("example.com/yourservice/sdk").to("sdk")`.
+- Rust SDK: `RustSdk::new().module("yourservice").to("sdk")` emits a blocking client over a
+  caller-supplied `Transport`, on `serde` and `serde_json` alone (`docs/sdk/rust-sdk.md`).
 - Rust models: `RustModels::new().to("src/models").model_root("<schema id>")` emits Rust types with
   Serde serialization for the selected schemas only (`docs/sdk/rust-models.md`).
 - Static Markdown docs: `StaticDocs::new().to("docs")`; an index, one page per group, operation and

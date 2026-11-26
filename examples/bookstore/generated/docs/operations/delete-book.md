@@ -60,6 +60,16 @@ if err != nil {
 fmt.Printf("%+v\n", result)
 ```
 
+### Rust — `bookstore_sdk`
+
+```rust
+use bookstore_sdk::Client;
+
+let client = Client::builder(base_url, transport).api_key_for("ApiKeyAuth", api_key).build();
+let result = client.delete_book("gnr8")?;
+println!("{result:?}");
+```
+
 ### CLI — `bookstore`
 
 `bookstore books delete`

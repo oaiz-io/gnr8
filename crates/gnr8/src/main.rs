@@ -316,6 +316,7 @@ fn map_sdk(sdk: SdkPreset) -> gnr8_engine::workspace::SdkPreset {
         SdkPreset::Go => gnr8_engine::workspace::SdkPreset::Go,
         SdkPreset::Python => gnr8_engine::workspace::SdkPreset::Python,
         SdkPreset::Typescript => gnr8_engine::workspace::SdkPreset::TypeScript,
+        SdkPreset::Rust => gnr8_engine::workspace::SdkPreset::Rust,
     }
 }
 
@@ -333,6 +334,7 @@ fn sdk_name(sdk: SdkPreset) -> &'static str {
         SdkPreset::Go => "go",
         SdkPreset::Python => "python",
         SdkPreset::Typescript => "typescript",
+        SdkPreset::Rust => "rust",
     }
 }
 

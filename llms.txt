@@ -16,6 +16,7 @@ Start here when using gnr8 from an AI coding agent:
 - [Sources](docs/extraction/sources.md): Go/Gin, FastAPI, Flask, NestJS, and OpenAPI extraction.
 - [OpenAPI](docs/openapi/generation.md): generation, metadata, and field patches.
 - [SDK Generation](docs/sdk/generation.md): Go, Python, and TypeScript targets and file layouts.
+- [Rust SDK](docs/sdk/rust-sdk.md): a blocking Rust client over a caller-supplied transport.
 - [Rust Models](docs/sdk/rust-models.md): Rust types with Serde serialization for selected schemas.
 - [Static Docs](docs/static-docs/generation.md): Markdown reference and `llms.txt` with verified samples.
 - [Diagnostics](docs/diagnostics/reference.md): stable codes, categories, gates, and remediation.

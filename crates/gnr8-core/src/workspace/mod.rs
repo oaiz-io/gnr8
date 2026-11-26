@@ -118,6 +118,8 @@ pub enum SdkPreset {
     Python,
     /// Dependency-free TypeScript SDK.
     TypeScript,
+    /// Rust SDK over a caller-supplied transport, on `serde` and `serde_json` alone.
+    Rust,
 }
 
 impl SdkPreset {
@@ -126,6 +128,7 @@ impl SdkPreset {
             Self::Go => "GoSdk::new().module(\"example.com/yourservice/sdk\").to(\"sdk\")",
             Self::Python => "PySdk::new().module(\"example.com/yourservice/sdk\").to(\"sdk\")",
             Self::TypeScript => "TsSdk::new().module(\"example.com/yourservice/sdk\").to(\"sdk\")",
+            Self::Rust => "RustSdk::new().module(\"yourservice\").to(\"sdk\")",
         }
     }
 
@@ -134,6 +137,7 @@ impl SdkPreset {
             Self::Go => "Go",
             Self::Python => "Python",
             Self::TypeScript => "TypeScript",
+            Self::Rust => "Rust",
         }
     }
 }

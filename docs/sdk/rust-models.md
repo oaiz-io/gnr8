@@ -3,7 +3,8 @@
 [Agent docs index](../agents/index.md)
 
 `RustModels` writes Rust types with Serde serialization for the schemas you select, as one Rust
-module tree. It emits models only: no HTTP client, no `Cargo.toml`, no docs, no contract test. The
+module tree. It emits models only: no HTTP client, no `Cargo.toml`, no docs, no contract test. For
+a client too, use [`RustSdk`](rust-sdk.md), whose models come from the same emitter. The
 crate that declares the module owns everything else: helpers, defaults, transport.
 
 ```rust

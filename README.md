@@ -55,9 +55,10 @@ crate.
 | TypeScript + NestJS | controllers, typed parameters, DTO classes, enums, and unions | Node and the project’s TypeScript package |
 | OpenAPI | an OpenAPI document used as a neutral source | none beyond gnr8 |
 
-Targets include OpenAPI 3.1 YAML, typed Go, Python, and TypeScript SDKs, `RustModels` (Rust types
-with Serde serialization for the schemas you select), and `StaticDocs`, a Markdown reference whose
-code samples `gnr8 verify` checks against the SDKs. Go uses `net/http`.
+Targets include OpenAPI 3.1 YAML, typed Go, Python, TypeScript and Rust SDKs, `RustModels` (Rust
+types with Serde serialization for the schemas you select), and `StaticDocs`, a Markdown reference
+whose code samples `gnr8 verify` checks against the SDKs. Go uses `net/http`. Rust is a blocking
+client over a `Transport` you supply, on `serde` and `serde_json` alone.
 TypeScript uses the built-in `fetch` API. Python uses `urllib`; its models use Pydantic v2 by default
 or standard-library dataclasses when selected in the pipeline.
 
@@ -182,6 +183,7 @@ routes and types produce a diagnostic or an explicit error.
 - [Pipeline configuration](docs/pipeline/configuration.md): built-in stages and custom Rust stages.
 - [Source extraction](docs/extraction/sources.md): supported patterns and limits.
 - [SDK generation](docs/sdk/generation.md): Go, Python, and TypeScript targets.
+- [Rust SDK](docs/sdk/rust-sdk.md): the `RustSdk` target, its transport seam and the graph shapes it supports.
 - [Rust models](docs/sdk/rust-models.md): the `RustModels` target and the graph shapes it supports.
 - [Static docs](docs/static-docs/generation.md): the `StaticDocs` Markdown reference and how its
   samples are verified.

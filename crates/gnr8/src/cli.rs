@@ -143,6 +143,8 @@ pub(crate) enum SdkPreset {
     Python,
     /// Generate a dependency-free TypeScript SDK.
     Typescript,
+    /// Generate a Rust SDK over a caller-supplied transport, needing Serde alone.
+    Rust,
 }
 
 /// Scenario guides available through `gnr8 guide <topic>`.
@@ -229,6 +231,20 @@ mod tests {
         SourcePreset, GATE_OPERATION_SHAPE,
     };
     use clap::Parser;
+
+    #[test]
+    fn init_takes_the_rust_sdk_preset() {
+        assert!(matches!(
+            Cli::try_parse_from(["gnr8", "init", "--sdk", "rust"])
+                .unwrap()
+                .command,
+            Commands::Init {
+                source: None,
+                sdk: Some(SdkPreset::Rust),
+                upgrade: false
+            }
+        ));
+    }
 
     #[test]
     fn cli_parses_all_top_level_commands() {

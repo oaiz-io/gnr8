@@ -115,10 +115,19 @@ jobs:
             needs_python: "false"
             needs_node: "false"
             test_args: "--test rust_models_e2e"
+          # The RustSdk lifecycle builds one worker, the consumer crate and its Unix-socket wire
+          # tests, then runs `gnr8 verify`, so it gets its own entry too.
+          - package: gnr8-cli
+            name: gnr8-cli rust sdk
+            needs_go: "true"
+            needs_python: "false"
+            needs_node: "false"
+            test_args: "--test rust_sdk_e2e"
     steps:
       - uses: actions/checkout@v7
 
-      # `rust_models` and `rust_models_e2e` hold the generated Rust to `rustfmt` and Clippy, and
+      # `rust_models`, `rustsdk_compile`, `rust_models_e2e` and `rust_sdk_e2e` hold the generated
+      # Rust to `rustfmt` and Clippy, and
       # each skips that gate when its tool is missing. Without the components here the gate would
       # never run in CI, and a green run would say nothing about it.
       - uses: dtolnay/rust-toolchain@stable
