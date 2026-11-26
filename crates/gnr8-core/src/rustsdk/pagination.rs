@@ -8,7 +8,9 @@
 use std::fmt::Write as _;
 
 use crate::graph::{ApiGraph, Operation, PaginationMode, PaginationTermination, Prim, Type};
-use crate::rust_layout::{assignment, let_call, method_signature, pad, RustType, INDENT};
+use crate::rust_layout::{
+    assignment, block_header, let_call, method_signature, pad, RustType, INDENT,
+};
 use crate::rust_names::{escape_keyword, field_idents, snake, type_ident};
 use crate::CoreError;
 
@@ -182,8 +184,9 @@ fn plan_mode<'f>(
 struct Stored {
     field: String,
     ty: RustType,
-    /// The expression that stores the method's argument.
-    init: String,
+    /// The method and arguments that make the method's argument owned, when it is not already;
+    /// bound to a local of the same name before the struct literal takes it.
+    init: Option<(String, Vec<String>)>,
     /// The expression that passes the stored value to the operation.
     pass: String,
 }
@@ -194,11 +197,11 @@ fn stored(plan: &Plan<'_>) -> Vec<Stored> {
         let (ty, init, pass) = if *borrowed {
             (
                 RustType::leaf("String"),
-                format!("{ident}.to_string()"),
+                Some((format!("{ident}.to_string"), Vec::new())),
                 format!("&self.{ident}"),
             )
         } else {
-            (ty.clone(), ident.clone(), format!("self.{ident}"))
+            (ty.clone(), None, format!("self.{ident}"))
         };
         out.push(Stored {
             field: ident.clone(),
@@ -209,13 +212,17 @@ fn stored(plan: &Plan<'_>) -> Vec<Stored> {
     }
     if let Some(body) = &plan.body {
         let (owned, shape) = body.owned();
-        let (init, pass) = match (body.required, shape) {
-            (true, BodyShape::Text) => ("body.to_string()", "&self.body"),
-            (true, BodyShape::Bytes) => ("body.to_vec()", "&self.body"),
-            (true, BodyShape::Value) => ("body.clone()", "&self.body"),
-            (false, BodyShape::Text) => ("body.map(str::to_string)", "self.body.as_deref()"),
-            (false, BodyShape::Bytes) => ("body.map(<[u8]>::to_vec)", "self.body.as_deref()"),
-            (false, BodyShape::Value) => ("body.cloned()", "self.body.as_ref()"),
+        let (head, args, pass) = match (body.required, shape) {
+            (true, BodyShape::Text) => ("body.to_string", None, "&self.body"),
+            (true, BodyShape::Bytes) => ("body.to_vec", None, "&self.body"),
+            (true, BodyShape::Value) => ("body.clone", None, "&self.body"),
+            (false, BodyShape::Text) => {
+                ("body.map", Some("str::to_string"), "self.body.as_deref()")
+            }
+            (false, BodyShape::Bytes) => {
+                ("body.map", Some("<[u8]>::to_vec"), "self.body.as_deref()")
+            }
+            (false, BodyShape::Value) => ("body.cloned", None, "self.body.as_ref()"),
         };
         let ty = if body.required {
             owned
@@ -225,7 +232,10 @@ fn stored(plan: &Plan<'_>) -> Vec<Stored> {
         out.push(Stored {
             field: "body".to_string(),
             ty,
-            init: init.to_string(),
+            init: Some((
+                head.to_string(),
+                args.map(ToString::to_string).into_iter().collect(),
+            )),
             pass: pass.to_string(),
         });
     }
@@ -265,7 +275,7 @@ fn render_pages(
         "\n/// The pages of `{}`, each fetched when the iteration reaches it.",
         plan.method
     );
-    let _ = writeln!(items, "pub struct {} {{", pages.pages_type);
+    items.push_str(&block_header(&format!("pub struct {}", pages.pages_type)));
     let _ = writeln!(items, "{margin}client: super::Client,");
     for value in stored {
         items.push_str(&assignment(
@@ -278,7 +288,10 @@ fn render_pages(
     let _ = writeln!(items, "{margin}params: {params_type},");
     let _ = writeln!(items, "{margin}done: bool,");
     items.push_str("}\n\n");
-    let _ = writeln!(items, "impl Iterator for {} {{", pages.pages_type);
+    items.push_str(&block_header(&format!(
+        "impl Iterator for {}",
+        pages.pages_type
+    )));
     let result = RustType::generic("Result", vec![pages.page.clone(), RustType::leaf("Error")]);
     items.push_str(&assignment(INDENT, "type Item =", &result, ';'));
     items.push_str(
@@ -287,10 +300,13 @@ fn render_pages(
     );
     let mut args: Vec<String> = stored.iter().map(|value| value.pass.clone()).collect();
     args.push("&self.params".to_string());
+    // The client is bound first, so the call is one method on one name: `rustfmt` lays out a
+    // longer chain (`self.client.method(..)`) by a rule of its own.
+    items.push_str("        let client = &self.client;\n");
     items.push_str(&let_call(
         2 * INDENT,
         "let result =",
-        &format!("self.client.{}", plan.method),
+        &format!("client.{}", plan.method),
         &args,
         ";",
     ));
@@ -315,6 +331,8 @@ fn render_pages(
              }\n",
         );
     }
+    // `params` is bound for the same reason as `client`: `self.params.field` is a longer chain.
+    items.push_str("        let params = &mut self.params;\n");
     match &pages.mode {
         Mode::Cursor { param, next } => {
             features.cursor = true;
@@ -322,7 +340,7 @@ fn render_pages(
                 2 * INDENT,
                 "let more =",
                 "super::client::advance_cursor",
-                &[format!("&mut self.params.{param}"), format!("&page.{next}")],
+                &[format!("&mut params.{param}"), format!("&page.{next}")],
                 ";",
             ));
             items.push_str("        self.done = !more;\n");
@@ -332,7 +350,7 @@ fn render_pages(
             items.push_str(&crate::rust_layout::call(
                 2 * INDENT,
                 "super::client::advance_counter",
-                &[format!("&mut self.params.{param}"), "1".to_string()],
+                &[format!("&mut params.{param}"), "1".to_string()],
                 ";",
             ));
         }
@@ -341,7 +359,7 @@ fn render_pages(
             items.push_str(&crate::rust_layout::call(
                 2 * INDENT,
                 "super::client::advance_counter",
-                &[format!("&mut self.params.{param}"), "count".to_string()],
+                &[format!("&mut params.{param}"), "count".to_string()],
                 ";",
             ));
         }
@@ -357,12 +375,15 @@ fn render_items(items: &mut String, plan: &Plan<'_>, pages: &Pagination) {
         "\n/// The items of every page of `{}`, each page fetched when the iteration reaches it.",
         plan.method
     );
-    let _ = writeln!(items, "pub struct {} {{", pages.items_type);
+    items.push_str(&block_header(&format!("pub struct {}", pages.items_type)));
     let _ = writeln!(items, "{margin}pages: {},", pages.pages_type);
     let into_iter = RustType::generic("std::vec::IntoIter", vec![pages.item.clone()]);
     items.push_str(&assignment(INDENT, "items:", &into_iter, ','));
     items.push_str("}\n\n");
-    let _ = writeln!(items, "impl Iterator for {} {{", pages.items_type);
+    items.push_str(&block_header(&format!(
+        "impl Iterator for {}",
+        pages.items_type
+    )));
     let result = RustType::generic("Result", vec![pages.item.clone(), RustType::leaf("Error")]);
     items.push_str(&assignment(INDENT, "type Item =", &result, ';'));
     items.push_str(
@@ -435,14 +456,16 @@ fn render_methods(
             ";",
         ));
     }
+    for value in stored {
+        if let Some((head, args)) = &value.init {
+            let lhs = format!("let {} =", value.field);
+            methods.push_str(&let_call(2 * INDENT, &lhs, head, args, ";"));
+        }
+    }
     let _ = writeln!(methods, "{body}{} {{", pages.pages_type);
     let _ = writeln!(methods, "{field}client: self.clone(),");
     for value in stored {
-        if value.init == value.field {
-            let _ = writeln!(methods, "{field}{},", value.field);
-        } else {
-            let _ = writeln!(methods, "{field}{}: {},", value.field, value.init);
-        }
+        let _ = writeln!(methods, "{field}{},", value.field);
     }
     if counter.is_some() {
         let _ = writeln!(methods, "{field}params,");

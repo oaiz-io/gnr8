@@ -203,11 +203,13 @@ fn vertical_call(margin: &str, indent: usize, head: &str, args: &[String], tail:
 }
 
 /// `head` as a receiver and a method, when `rustfmt` may break the chain between them: a call
-/// with at most two arguments (with more, the arguments one per line are what it keeps) on a
-/// receiver wider than the indent, which `rustfmt` never leaves alone on a line.
-fn chain<'h>(head: &'h str, args: &[String]) -> Option<(&'h str, &'h str)> {
+/// with at most two arguments (with more, the arguments one per line are what it keeps). At the
+/// start of a statement a receiver no wider than the indent stays on the method's line; after
+/// `let x =` it never does.
+fn chain<'h>(head: &'h str, args: &[String], statement: bool) -> Option<(&'h str, &'h str)> {
     let (receiver, method) = head.rsplit_once('.')?;
-    (args.len() <= 2 && width(receiver) > INDENT).then_some((receiver, method))
+    let joined = statement && width(receiver) <= INDENT;
+    (args.len() <= 2 && !joined).then_some((receiver, method))
 }
 
 /// The chain broken before its method, the call on the next line, when that line holds it.
@@ -219,9 +221,39 @@ fn broken_chain(
     args: &[String],
     tail: &str,
 ) -> Option<String> {
-    let (receiver, method) = chain(head, args)?;
+    let (receiver, method) = chain(head, args, first.is_empty())?;
     let call = flat_call(&pad(indent + INDENT), &format!(".{method}"), args, tail)?;
     Some(format!("{margin}{first}{receiver}\n{call}"))
+}
+
+/// One argument per line, or, when the line that opens the call is already too wide and the chain
+/// may break, the chain broken before the method and the arguments one per line under it.
+fn vertical_or_broken(
+    margin: &str,
+    first: &str,
+    indent: usize,
+    head: &str,
+    args: &[String],
+    tail: &str,
+) -> String {
+    let opening = width(&format!("{margin}{first}{head}("));
+    let statement = first.is_empty();
+    match head.rsplit_once('.') {
+        // `rustfmt` wants the opening line one column short of the end before it overflows.
+        Some((receiver, method))
+            if opening >= MAX_WIDTH && !(statement && width(receiver) <= INDENT) =>
+        {
+            let call = vertical_call(
+                &pad(indent + INDENT),
+                indent + INDENT,
+                &format!(".{method}"),
+                args,
+                tail,
+            );
+            format!("{margin}{first}{receiver}\n{call}")
+        }
+        _ => vertical_call(margin, indent, &format!("{first}{head}"), args, tail),
+    }
 }
 
 /// A call statement `head(args)tail` at `indent`, as `rustfmt` lays it out: on one line when the
@@ -234,7 +266,7 @@ pub(crate) fn call(indent: usize, head: &str, args: &[String], tail: &str) -> St
     let margin = pad(indent);
     let text = flat_call(&margin, head, args, tail)
         .or_else(|| broken_chain(&margin, "", indent, head, args, tail))
-        .unwrap_or_else(|| vertical_call(&margin, indent, head, args, tail));
+        .unwrap_or_else(|| vertical_or_broken(&margin, "", indent, head, args, tail));
     format!("{text}\n")
 }
 
@@ -260,8 +292,24 @@ pub(crate) fn let_call(
     }
     format!(
         "{}\n",
-        vertical_call(&margin, indent, &format!("{lhs} {head}"), args, tail)
+        vertical_or_broken(&margin, &format!("{lhs} "), indent, head, args, tail)
     )
+}
+
+/// The header of an item that opens a block at column zero, `head {`: on one line when it fits,
+/// and otherwise with the brace on a line of its own; an `impl Trait for Type` too wide for one
+/// line also puts `for Type` on a line of its own.
+pub(crate) fn block_header(head: &str) -> String {
+    let line = format!("{head} {{");
+    if width(&line) <= MAX_WIDTH {
+        return format!("{line}\n");
+    }
+    match head.split_once(" for ") {
+        Some((trait_part, ty)) if head.starts_with("impl ") => {
+            format!("{trait_part}\n{}for {ty}\n{{\n", pad(INDENT))
+        }
+        _ => format!("{head}\n{{\n"),
+    }
 }
 
 /// A method signature `head(receiver, args) -> ret {` at `indent`, as `rustfmt` lays it out: on

@@ -778,6 +778,7 @@ fn width_sweep_spec() -> String {
     for n in 1..=76 {
         let long = "x".repeat(n);
         let model = "x".repeat(n + 10);
+        let cursor = "x".repeat(n.min(60));
         let _ = std::fmt::Write::write_fmt(
             &mut spec,
             format_args!(
@@ -794,7 +795,21 @@ fn width_sweep_spec() -> String {
             &mut schemas,
             format_args!(
                 "    B{model}: {{ type: object, properties: {{ v: {{ type: string }} }} }}\n    \
-                 R{model}: {{ type: object, properties: {{ v: {{ type: string }} }} }}\n"
+                 R{model}: {{ type: object, properties: {{ v: {{ type: string }} }} }}\n    \
+                 P{model}: {{ type: object, required: [items], properties: {{ items: {{ type: array, items: {{ type: string }} }}, next{cursor}: {{ type: string }} }} }}\n"
+            ),
+        );
+        // A paginated operation beside it, so the iterators' statements cross the same widths.
+        // Its cursor and path parameter names stop at 60 columns: `rustfmt` breaks a field
+        // access past the line's end, and an argument naming a 70-column field is past what the
+        // layout reproduces.
+        let _ = std::fmt::Write::write_fmt(
+            &mut spec,
+            format_args!(
+                "  /l{n}/{long}/{{id{cursor}}}:\n    get:\n      operationId: list{long}\n      \
+                 parameters:\n        - {{ name: id{cursor}, in: path, required: true, schema: {{ type: string }} }}\n        \
+                 - {{ name: cursor{cursor}, in: query, schema: {{ type: string }} }}\n      \
+                 responses:\n        \"200\": {{ description: ok, content: {{ application/json: {{ schema: {{ $ref: \"#/components/schemas/P{model}\" }} }} }} }}\n",
             ),
         );
     }
@@ -803,12 +818,29 @@ fn width_sweep_spec() -> String {
     spec
 }
 
+/// Cursor pagination for every paginated operation of [`width_sweep_spec`].
+fn width_sweep_pagination() -> Vec<TransformStage> {
+    (1..=76)
+        .map(|n| {
+            let long = "x".repeat(n);
+            let cursor = "x".repeat(n.min(60));
+            ConfigurePagination::cursor(
+                OperationSelector::operation(format!("list{long}")),
+                format!("cursor{cursor}"),
+                format!("next{cursor}"),
+                "items",
+            )
+            .into()
+        })
+        .collect()
+}
+
 #[test]
 fn every_operation_statement_is_broken_where_rustfmt_breaks_it() {
     let files = generate(
         "sweep",
         &width_sweep_spec(),
-        Vec::new(),
+        width_sweep_pagination(),
         RustSdk::new().module("sweep").to("sdk"),
     );
     let root = consumer("sweep", "2021", &files, "sdk/src/", None);
@@ -1435,4 +1467,146 @@ fn the_go_fixtures_pass_the_quality_gate() {
     let gin = gin_graph("gin", "fixtures/gin-contract-regression");
     quality_gate("gin-contract", &gin, RustSdk::new());
     quality_gate("gin-contract-split", &gin, RustSdk::new().split_files());
+}
+
+// -------------------------------------------------------------------------------------------------
+// The probe: a real API's graph, when one is available to the run.
+// -------------------------------------------------------------------------------------------------
+
+/// Generate the SDK for the graph artifact `GNR8_RUST_SDK_PROBE_GRAPH` names, in both tree forms
+/// and both layouts, and hold each to the quality gate, reporting its size and how long generation
+/// and a cold `cargo check` took. `GNR8_RUST_SDK_PROBE_KEEP`, a comma-separated list of operation
+/// ids, leaves every other operation out, and `GNR8_RUST_SDK_PROBE_UNREGISTERED` stops treating
+/// the registered schemas as model roots. Without the graph the test does nothing.
+#[test]
+fn a_probe_graph_passes_the_quality_gate() {
+    let Ok(path) = std::env::var("GNR8_RUST_SDK_PROBE_GRAPH") else {
+        return;
+    };
+    let graph = serde_json::from_str::<gnr8_engine::graph_artifact::GraphArtifact>(
+        &std::fs::read_to_string(&path).unwrap(),
+    )
+    .unwrap()
+    .graph;
+    let keep: Vec<String> = std::env::var("GNR8_RUST_SDK_PROBE_KEEP")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    let unregistered = std::env::var_os("GNR8_RUST_SDK_PROBE_UNREGISTERED").is_some();
+    let restrict = |target: RustSdk| {
+        let target = if unregistered {
+            target.without_registered_schema_roots()
+        } else {
+            target
+        };
+        if keep.is_empty() {
+            target
+        } else {
+            target.exclude(OperationSelector::not(OperationSelector::any(
+                keep.iter().map(OperationSelector::operation),
+            )))
+        }
+    };
+    let forms = [
+        ("crate", true, false),
+        ("crate-split", true, true),
+        ("module", false, false),
+        ("module-split", false, true),
+    ];
+    for (label, metadata, split) in forms {
+        // The contract tests and docs are left out: their sampler checks the graph's declared
+        // examples, which is a fact about the graph every SDK target shares, not about this one.
+        let target = RustSdk::new()
+            .module("probe")
+            .to("sdk")
+            .package_metadata(metadata)
+            .without_contract_tests()
+            .without_docs();
+        let target = restrict(if split { target.split_files() } else { target });
+        let started = std::time::Instant::now();
+        let files = generate_from_graph(&graph, target)
+            .unwrap_or_else(|error| panic!("probe {label}: {error}"));
+        let generation = started.elapsed();
+        let (rust_files, lines, operations, models) = probe_size(&files);
+        let strip = if metadata { "sdk/src/" } else { "sdk/" };
+        let root = consumer(&format!("probe-{label}"), "2021", &files, strip, None);
+        let started = std::time::Instant::now();
+        let output = Command::new(env!("CARGO"))
+            .args(["check", "--quiet", "--locked"])
+            .current_dir(&root)
+            .env("CARGO_TARGET_DIR", root.join("target"))
+            .output()
+            .unwrap();
+        let check = started.elapsed();
+        assert!(
+            output.status.success(),
+            "probe {label} does not compile:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        rustfmt_check(&root);
+        clippy_check(&root);
+        if label == "crate" {
+            probe_crate_extras(&files, strip);
+        }
+        eprintln!(
+            "probe {label}: {operations} operations, {models} models, {rust_files} files, {lines} \
+             lines; generated in {generation:.2?}; cold cargo check {check:.2?}"
+        );
+    }
+}
+
+/// How many Rust files and lines `files` holds, and how many operations and models they define.
+fn probe_size(files: &[(String, String)]) -> (usize, usize, usize, usize) {
+    let rust: Vec<&(String, String)> = files
+        .iter()
+        .filter(|(path, _)| Path::new(path).extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    let lines: usize = rust.iter().map(|(_, text)| text.lines().count()).sum();
+    let operations = rust
+        .iter()
+        .flat_map(|(_, text)| text.lines())
+        .filter(|line| {
+            ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+                .iter()
+                .any(|method| line.starts_with(&format!("    /// `{method} ")))
+        })
+        .count();
+    let models = rust
+        .iter()
+        .filter(|(path, _)| path.contains("/models"))
+        .flat_map(|(_, text)| text.lines())
+        .filter(|line| {
+            ["pub struct ", "pub enum ", "pub type "]
+                .iter()
+                .any(|item| line.starts_with(item))
+        })
+        .count();
+    (rust.len(), lines, operations, models)
+}
+
+/// The crate form in edition 2024, and under every Clippy lint with the root's allowances reduced
+/// to `dead_code`.
+fn probe_crate_extras(files: &[(String, String)], strip: &str) {
+    let root = consumer("probe-crate-2024", "2024", files, strip, None);
+    cargo(
+        &root,
+        "does not compile in edition 2024",
+        &["check", "--quiet", "--locked"],
+    );
+    let files: Vec<(String, String)> = without_lint_allows(files)
+        .into_iter()
+        .map(|(path, text)| {
+            if path.ends_with("/lib.rs") {
+                let text = text.replacen("\nmod client;", "#![allow(dead_code)]\n\nmod client;", 1);
+                (path, text)
+            } else {
+                (path, text)
+            }
+        })
+        .collect();
+    let root = consumer("probe-crate-no-allows", "2021", &files, strip, None);
+    clippy_check(&root);
 }

@@ -1092,6 +1092,8 @@ fn render_body_enum(out: &mut String, plan: &Plan<'_>, name: &str, body: &Body) 
         plan.method
     );
     out.push_str("#[derive(Debug, Clone, PartialEq)]\n");
+    // How large each variant is is the API's choice of models, not the emitter's.
+    out.push_str("#[allow(clippy::large_enum_variant)]\n");
     let _ = writeln!(out, "pub enum {name} {{");
     for choice in &body.choices {
         let _ = writeln!(out, "{}/// `{}`", pad(INDENT), choice.content_type);

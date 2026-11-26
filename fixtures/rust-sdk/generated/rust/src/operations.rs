@@ -42,7 +42,8 @@ impl Iterator for ListNotesPages {
         if self.done {
             return None;
         }
-        let result = self.client.list_notes(&self.params);
+        let client = &self.client;
+        let result = client.list_notes(&self.params);
         let page = match result {
             Ok(page) => page,
             Err(error) => {
@@ -50,7 +51,8 @@ impl Iterator for ListNotesPages {
                 return Some(Err(error));
             }
         };
-        let more = super::client::advance_cursor(&mut self.params.cursor, &page.next_cursor);
+        let params = &mut self.params;
+        let more = super::client::advance_cursor(&mut params.cursor, &page.next_cursor);
         self.done = !more;
         Some(Ok(page))
     }
