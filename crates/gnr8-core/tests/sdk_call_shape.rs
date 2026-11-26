@@ -84,7 +84,8 @@ fn run_pipeline(label: &str, pipeline: Pipeline) -> BTreeMap<String, String> {
         .source(OpenApi::new().input("openapi.yaml"))
         .target(GoSdk::new().module("github.com/acme/fixture").to("go"))
         .target(PySdk::new().module("acme-fixture").to("python"))
-        .target(TsSdk::new().module("@acme/fixture").to("ts"));
+        .target(TsSdk::new().module("@acme/fixture").to("ts"))
+        .target(RustSdk::new().module("acme-fixture").to("rust"));
     let outcome = gnr8_engine::pipeline::run_in_process(&pipeline, &Cx::new(&root), None)
         .expect("pipeline must generate");
     let files = outcome
@@ -585,4 +586,101 @@ export async function drive(client: Client): Promise<void> {
     } else {
         eprintln!("sdk_call_shape: skipping tsc — node/typescript toolchain unavailable");
     }
+}
+#[test]
+fn rust_keeps_language_native_identifiers_and_one_params_struct() {
+    let files = generate_paginated();
+    let models = file(&files, "rust/src/models.rs");
+    let operations = file(&files, "rust/src/operations.rs");
+    for native in [
+        "pub step_uuids: Vec<String>,",
+        "pub label_ids: Option<Vec<String>>,",
+        "pub created_by_uuid: Option<String>,",
+        "pub owner_uuids: Option<Vec<String>>,",
+    ] {
+        assert_contains(models, native, "Rust model field");
+    }
+    for wrong in ["stepUUIDs", "step_UUIDs", "UUIDs"] {
+        assert_absent(models, wrong, "Rust models");
+    }
+    // Every query, header and cookie parameter is a field of one struct, and a name that starts
+    // with a digit gets a letter in front.
+    assert_contains(operations, "pub struct GetItemParams {", "params struct");
+    assert_contains(
+        operations,
+        "pub value_2fa: Option<bool>,",
+        "digit-led field",
+    );
+    for helper in [
+        "pub fn get_items_paginated_pages(",
+        "pub fn iter_get_items_paginated(",
+        "pub fn list_items_by_page_pages(",
+        "pub fn iter_list_items_by_offset(",
+    ] {
+        assert_contains(operations, helper, "pagination helper");
+    }
+}
+
+/// The Rust SDK compiles offline with a driver that writes each call shape a caller writes.
+#[test]
+fn generated_rust_compiles_with_a_driver() {
+    const PACKAGE: &str = "name = \"jobs-consumer\"\n";
+    let files = generate_paginated();
+    let root = temp_dir("rust-check");
+    write_files(&files, &root, "rust/");
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("read manifest")
+        .replace("name = \"acmefixture\"\n", "name = \"call-shape-rust\"\n");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        format!("{manifest}\n[workspace]\n"),
+    )
+    .expect("write manifest");
+    let lock = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/rust-models/consumer/Cargo.lock"),
+    )
+    .expect("read lockfile")
+    .replace(PACKAGE, "name = \"call-shape-rust\"\n");
+    std::fs::write(root.join("Cargo.lock"), lock).expect("write lockfile");
+    let mut lib = std::fs::read_to_string(root.join("src/lib.rs")).expect("read lib.rs");
+    lib.push_str(
+        r#"
+#[allow(dead_code, clippy::all)]
+fn drive(client: &Client) -> Result<(), Error> {
+    let mut params = GetItemsPaginatedParams::new();
+    params.page_size = Some(50);
+    params.cursor = Some("abc".to_string());
+    client.get_items_paginated(&params)?;
+    client.export_items(&ExportItemsParams::new("csv".to_string()))?;
+    let mut flags = GetItemParams::default();
+    flags.value_2fa = Some(true);
+    client.get_item("item-1", &flags)?;
+    client.get_health()?;
+    for page in client.get_items_paginated_pages(&GetItemsPaginatedParams::new()) {
+        let _ = page?.items.len();
+    }
+    for item in client.iter_list_items_by_page(&ListItemsByPageParams::new()) {
+        let _ = item?.uuid;
+    }
+    for item in client.iter_list_items_by_offset(&ListItemsByOffsetParams::new()) {
+        let _ = item?.uuid;
+    }
+    Ok(())
+}
+"#,
+    );
+    std::fs::write(root.join("src/lib.rs"), lib).expect("write lib.rs");
+    run_checked({
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.args(["check", "--quiet", "--offline", "--locked"])
+            .current_dir(&root)
+            .env(
+                "CARGO_TARGET_DIR",
+                Path::new(env!("CARGO_TARGET_TMPDIR")).join("rust-models-target"),
+            );
+        cmd
+    })
+    .expect("generated Rust SDK and driver must compile");
+    let _ = std::fs::remove_dir_all(&root);
 }

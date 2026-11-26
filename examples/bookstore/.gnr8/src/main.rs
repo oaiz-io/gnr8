@@ -19,6 +19,7 @@
 //!   output.openapi    → OpenApi31::new().to("generated/openapi.yaml")
 //!   output.sdk + module → GoSdk::new().module("example.com/bookstore/sdk").to("generated/sdk")
 //!                              .cli(SdkCli::new("bookstore").base_url("http://127.0.0.1:8080"))
+//! plus a Rust SDK crate in `generated/rust`, which the docs site prints Rust samples for,
 //! plus a Header post-process that stamps the generated banner on every .go file.
 
 use gnr8::sdk::prelude::*;
@@ -39,6 +40,12 @@ fn main() -> std::process::ExitCode {
                     .module("example.com/bookstore/sdk")
                     .to("generated/sdk")
                     .cli(bookstore_cli("http://127.0.0.1:8080")),
+            )
+            .target(
+                RustSdk::new()
+                    .module("bookstore")
+                    .to("generated/rust")
+                    .package(SdkPackageMetadata::new().name("bookstore-sdk")),
             )
             .target(StaticDocs::new().to("generated/docs"))
             .post(Header::generated()),

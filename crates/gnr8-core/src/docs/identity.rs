@@ -42,6 +42,7 @@ impl ConsumerIdentity {
             ContractTestLanguage::Go => "go get",
             ContractTestLanguage::Python => "pip install",
             ContractTestLanguage::TypeScript => "npm install",
+            ContractTestLanguage::Rust => "cargo add",
         };
         format!("{tool} {}", self.install)
     }
@@ -54,6 +55,7 @@ pub(crate) fn error_type(language: ContractTestLanguage) -> String {
         ContractTestLanguage::Go => format!("*{}", crate::gosdk::ERROR_TYPE),
         ContractTestLanguage::Python => crate::pysdk::ERROR_TYPE.to_string(),
         ContractTestLanguage::TypeScript => crate::tssdk::ERROR_TYPE.to_string(),
+        ContractTestLanguage::Rust => crate::rustsdk::ERROR_TYPE.to_string(),
     }
 }
 
@@ -104,6 +106,24 @@ pub fn consumer_identity(sdk: SiblingSdk<'_>) -> Result<Option<ConsumerIdentity>
                 import: package.clone(),
                 qualifier: String::new(),
                 install: package,
+                language,
+            }))
+        }
+        SiblingSdk::Rust(t) => {
+            if !t.effective_package_metadata() {
+                return Ok(None);
+            }
+            let name = crate::rustsdk::crate_name(
+                &t.package_info()
+                    .resolved_name(&sdk_package(t.module_name())?)?,
+            )?;
+            // A crate is installed by its package name and named in code by its library name,
+            // which Cargo spells with `_` for each `-`.
+            let import = name.replace('-', "_");
+            Ok(Some(ConsumerIdentity {
+                qualifier: import.clone(),
+                import,
+                install: name,
                 language,
             }))
         }

@@ -21,7 +21,7 @@ or operation scope: the pages document exactly what `openapi.yaml` publishes, an
 cover exactly the SDK targets the same pipeline declares.
 
 The directory must be a directory of its own. One that equals, contains or lies inside a `GoSdk`,
-`PySdk` or `TsSdk` directory is a configuration error naming both targets: pages inside an SDK
+`PySdk`, `TsSdk` or `RustSdk` directory is a configuration error naming both targets: pages inside an SDK
 directory would ship inside that SDK's published package.
 
 Declaring `StaticDocs` changes no byte of any other target's output, and `gnr8 init` does not add
@@ -186,6 +186,7 @@ import line is exactly what that manifest publishes:
 | `GoSdk` | `go.mod` (on by default) | the module path; symbols are qualified with the package name |
 | `PySdk` | `pyproject.toml` (on by default) | `from <package> import Client, …` |
 | `TsSdk` | `package.json` (off by default) | `Client` from the `package.json` name |
+| `RustSdk` | `Cargo.toml` (on by default) | `use <crate>::Client;`, the crate's library name, with a client on the reader's `transport` |
 
 A target without one has no import to name, so its section is headed by its language alone and
 prints *"No sample call: this SDK target emits no package metadata, so it has no published import

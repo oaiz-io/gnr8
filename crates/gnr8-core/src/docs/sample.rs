@@ -405,6 +405,14 @@ impl<'a> Rendered<'a> {
                 );
                 (site, client)
             }
+            SiblingSdk::Rust(_) => {
+                let site = crate::rustsdk::callsite::render_call(graph, op, &inputs, &qualify)?;
+                let credentials = crate::rustsdk::callsite::client_credentials(&sample.auth, false);
+                let client = format!(
+                    "let client = Client::builder({base_url}, recorder.clone()){credentials}.build();"
+                );
+                (site, client)
+            }
         };
         Ok(Self {
             sdk,
@@ -427,7 +435,9 @@ impl<'a> Rendered<'a> {
         let language = self.sdk.language();
         let text = match language {
             ContractTestLanguage::Go => format!("{}\n\n{body}", go_import_block(&imports)),
-            ContractTestLanguage::Python | ContractTestLanguage::TypeScript => {
+            ContractTestLanguage::Python
+            | ContractTestLanguage::TypeScript
+            | ContractTestLanguage::Rust => {
                 format!("{}\n\n{body}", imports.join("\n"))
             }
         };
@@ -583,6 +593,13 @@ fn call_sample(site: &Rendered<'_>, reply: CannedReply) -> Result<CodeSample, Co
             format!("const result = await {call};"),
             reply,
         ),
+        SiblingSdk::Rust(_) => site.sample(
+            SampleKind::Call,
+            site.call_site.imports.clone(),
+            format!("{construct}\nlet result = {call}?;\nprintln!(\"{{result:?}}\");"),
+            format!("let result = {call};"),
+            reply,
+        ),
     })
 }
 
@@ -636,6 +653,24 @@ fn typed_error_sample(
             format!("const result = await {call};"),
             canned,
         ),
+        SiblingSdk::Rust(_) => {
+            let krate = site.identity.import();
+            let mut imports = site.call_site.imports.clone();
+            imports.push(format!("use {krate}::models;"));
+            imports.push(format!("use {krate}::Error;"));
+            imports.sort();
+            imports.dedup();
+            let ident = crate::rustsdk::callsite::model_ident(model);
+            site.sample(
+                SampleKind::TypedError,
+                imports,
+                format!(
+                    "{construct}\nmatch {call} {{\n    Ok(result) => println!(\"{{result:?}}\"),\n    Err(Error::Api(error)) if error.status == {status} => {{\n        let body: models::{ident} = error.decode().map_err(Error::Decode)?;\n        println!(\"{{body:?}}\");\n    }}\n    Err(error) => return Err(error),\n}}"
+                ),
+                format!("let result = {call};"),
+                canned,
+            )
+        }
     })
 }
 
@@ -689,6 +724,21 @@ fn iterate_sample(
                 site.ts_imports("Client"),
                 format!("{construct}\n{call}"),
                 call,
+                reply,
+            )
+        }
+        SiblingSdk::Rust(_) => {
+            let iterate = crate::rustsdk::callsite::iterate_method(op);
+            let call = format!(
+                "for item in client.{iterate}({arguments}) {{\n    println!(\"{{:?}}\", item?);\n}}"
+            );
+            site.sample(
+                SampleKind::Iterate,
+                site.call_site.imports.clone(),
+                format!("{construct}\n{call}"),
+                format!(
+                    "let result: Result<Vec<_>, Error> = client.{iterate}({arguments}).collect();"
+                ),
                 reply,
             )
         }

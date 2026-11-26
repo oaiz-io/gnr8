@@ -20,14 +20,16 @@
 //! The registered-schema cases register `UnusedThing` as an input and `Order` and `AuditLog` as
 //! outputs, the way `ApiOverrides::register_input_schema` and `register_output_schema` do.
 //!
-//! Go has no sum types, so the Go SDK reads the fixture without `PaymentMethod` and its variants.
+//! Go has no sum types and the Rust SDK refuses a union, so both read the fixture without
+//! `PaymentMethod` and its variants.
 //!
 //! The `registered-schema-roots` fixture runs the whole pipeline over an `OpenAPI` document with
 //! `SupportTicket` and `Book` registered, a full target beside it, and narrow targets that leave out
 //! every operation or every operation but `getBook`.
 //!
 //! Each case also builds what it emits: `go build`, a Python import of every reached model from the
-//! package root, and `tsc` over a file importing every reached model from the index. A dangling
+//! package root, `tsc` over a file importing every reached model from the index, and `cargo check`
+//! over a crate naming every reached model. A dangling
 //! reference or a missing export fails there. A missing toolchain skips that step.
 
 // Tests legitimately use unwrap/expect/panic (rust-best-practices skill ch.4).
@@ -75,7 +77,7 @@ const EXCLUDED: [&str; 2] = ["AuditEntry", "AuditLog"];
 /// Reached by nothing.
 const UNREACHED: [&str; 2] = ["UnusedChild", "UnusedThing"];
 
-/// The union and its variants, which the Go fixture leaves out.
+/// The union and its variants, which the Go and Rust fixtures leave out.
 const UNION: [&str; 3] = ["BankTransfer", "CardPayment", "PaymentMethod"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,13 +85,19 @@ enum Sdk {
     Go,
     Python,
     TypeScript,
+    Rust,
 }
 
-const SDKS: [Sdk; 3] = [Sdk::Go, Sdk::Python, Sdk::TypeScript];
+const SDKS: [Sdk; 4] = [Sdk::Go, Sdk::Python, Sdk::TypeScript, Sdk::Rust];
+
+/// Whether `sdk` reads the fixture without the union.
+fn without_union(sdk: Sdk) -> bool {
+    matches!(sdk, Sdk::Go | Sdk::Rust)
+}
 
 fn graph(sdk: Sdk) -> ApiGraph {
     let mut graph: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-    if sdk == Sdk::Go {
+    if without_union(sdk) {
         let schemas = graph["schemas"].as_array_mut().unwrap();
         schemas.retain(|schema| !UNION.contains(&schema["name"].as_str().unwrap()));
         for schema in schemas {
@@ -107,7 +115,7 @@ fn expressible(sdk: Sdk, names: &[&'static str]) -> Vec<&'static str> {
     names
         .iter()
         .copied()
-        .filter(|name| sdk != Sdk::Go || !UNION.contains(name))
+        .filter(|name| !without_union(sdk) || !UNION.contains(name))
         .collect()
 }
 
@@ -135,6 +143,13 @@ macro_rules! sdk_target {
             }),
             Sdk::TypeScript => BuiltinTarget::TsSdk({
                 let $t = TsSdk::new()
+                    .module("shop")
+                    .to($dir)
+                    .without_contract_tests();
+                $configure
+            }),
+            Sdk::Rust => BuiltinTarget::RustSdk({
+                let $t = RustSdk::new()
                     .module("shop")
                     .to($dir)
                     .without_contract_tests();
@@ -180,6 +195,11 @@ fn declares(sdk: Sdk, files: &[(String, String)], name: &str) -> bool {
             format!("export interface {name} "),
             format!("export type {name} ="),
             format!("export const {name} ="),
+        ],
+        Sdk::Rust => vec![
+            format!("pub struct {name} "),
+            format!("pub enum {name} "),
+            format!("pub type {name} ="),
         ],
     };
     files
@@ -662,8 +682,53 @@ fn build(sdk: Sdk, files: &[(String, String)], models: &[&str]) {
                 eprintln!("skipping tsc: {tsc} is not installed");
             }
         }
+        Sdk::Rust => build_rust(files, models, &dir),
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `cargo check` the emitted crate, offline, with a function naming every model in `models`.
+///
+/// The lockfile is the `rust-models` consumer fixture's, which pins `serde` and `serde_json`. The
+/// crate takes a name of its own, because crates under one name share a build record in the
+/// target directory every Rust check here shares.
+fn build_rust(files: &[(String, String)], models: &[&str], dir: &Path) {
+    const PACKAGE: &str = "name = \"jobs-consumer\"\n";
+    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = format!("shop-reach-{seq}");
+    write(files, dir);
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml"))
+        .unwrap()
+        .replace("name = \"shop\"\n", &format!("name = \"{name}\"\n"));
+    std::fs::write(dir.join("Cargo.toml"), format!("{manifest}\n[workspace]\n")).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/rust-models/consumer/Cargo.lock");
+    let lock = std::fs::read_to_string(fixture)
+        .unwrap()
+        .replace(PACKAGE, &format!("name = \"{name}\"\n"));
+    std::fs::write(dir.join("Cargo.lock"), lock).unwrap();
+    let uses: Vec<String> = models
+        .iter()
+        .map(|name| format!("models::{name}"))
+        .collect();
+    let mut lib = std::fs::read_to_string(dir.join("src/lib.rs")).unwrap();
+    let _ = std::fmt::Write::write_fmt(
+        &mut lib,
+        format_args!("\npub fn reached(_: ({},)) {{}}\n", uses.join(", ")),
+    );
+    std::fs::write(dir.join("src/lib.rs"), lib).unwrap();
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rust-models-target");
+    let target = target.to_string_lossy().into_owned();
+    if run(
+        env!("CARGO"),
+        &["check", "--quiet", "--offline", "--locked"],
+        dir,
+        &[("CARGO_TARGET_DIR", target.as_str())],
+    )
+    .is_none()
+    {
+        eprintln!("skipping cargo check: cargo is not available");
+    }
 }
 
 /// Enough of Pydantic for a generated package to import: the class bodies run, nothing validates.

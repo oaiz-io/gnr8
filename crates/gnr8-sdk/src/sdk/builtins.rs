@@ -2991,6 +2991,351 @@ impl Default for TsSdk {
     }
 }
 
+/// A full Rust SDK target.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RustSdk {
+    module: String,
+    dir: String,
+    layout: SdkFileLayout,
+    docs: SdkDocs,
+    package_metadata: Option<bool>,
+    package_info: SdkPackageMetadata,
+    #[serde(default = "default_contract_tests")]
+    contract_tests: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    excluded_operations: Vec<OperationSelector>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    all_models: bool,
+    #[serde(
+        default = "default_registered_schema_roots",
+        skip_serializing_if = "is_registered_schema_roots"
+    )]
+    registered_schema_roots: bool,
+}
+
+impl RustSdk {
+    /// A Rust SDK target with no module/output yet (set with [`RustSdk::module`] + [`RustSdk::to`]).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            module: String::new(),
+            dir: String::new(),
+            layout: SdkFileLayout::compact(),
+            docs: SdkDocs::default(),
+            package_metadata: None,
+            package_info: SdkPackageMetadata::default(),
+            contract_tests: true,
+            excluded_operations: Vec::new(),
+            model_roots: Vec::new(),
+            all_models: false,
+            registered_schema_roots: true,
+        }
+    }
+
+    /// Set the module name for the generated SDK (e.g. `"acme-books"`). The package
+    /// name is derived from this — the single source of truth (AGENTS.md rule 3), the same derivation
+    /// `PySdk`/`GoSdk` use.
+    #[must_use]
+    pub fn module(mut self, module: impl Into<String>) -> Self {
+        self.module = module.into();
+        self
+    }
+
+    /// Set the output directory for the generated SDK files (e.g. `"generated/sdk-rust"`).
+    #[must_use]
+    pub fn to(mut self, dir: impl Into<String>) -> Self {
+        self.dir = dir.into();
+        self
+    }
+
+    /// Leave the operations `selector` matches out of this target, together with every schema
+    /// that only those operations reach. The other targets of the pipeline still emit them.
+    ///
+    /// Each call adds one selector, and an operation any of them matches is left out. A selector
+    /// that matches no operation is a configuration error, so a stale exclusion cannot stay.
+    #[must_use]
+    pub fn exclude(mut self, selector: OperationSelector) -> Self {
+        self.excluded_operations.push(selector);
+        self
+    }
+
+    /// Emit the model `schema` names, and every model it reaches, even if no operation this target
+    /// emits reaches it. `schema` is a schema id or a bare type name, as in [`RenameType`].
+    ///
+    /// The SDK emits only the models its operations reach: their request and response bodies,
+    /// parameters, headers and error bodies, everything those reference, and the schemas
+    /// [`ApiOverrides::register_input_schema`] and [`ApiOverrides::register_output_schema`]
+    /// register, unless [`RustSdk::without_registered_schema_roots`] turns those off. Declare a root
+    /// for a model reached any other way, such as a webhook payload.
+    /// Each call adds one root. A root that names no schema is a configuration error.
+    #[must_use]
+    pub fn model_root(mut self, schema: impl Into<String>) -> Self {
+        self.model_roots.push(schema.into());
+        self
+    }
+
+    /// Emit every model in the graph except those only excluded operations reach, whether or not
+    /// an operation this target emits reaches it. Declaring a [`RustSdk::model_root`] as well is a
+    /// configuration error.
+    #[must_use]
+    pub fn all_models(mut self) -> Self {
+        self.all_models = true;
+        self
+    }
+
+    /// Stop treating the schemas [`ApiOverrides::register_input_schema`] and
+    /// [`ApiOverrides::register_output_schema`] register as model roots of this target. The target
+    /// then emits the models its operations and its [`RustSdk::model_root`]s reach, and a registered
+    /// schema only when one of those reaches it. Other targets keep the registered schemas.
+    /// Declaring [`RustSdk::all_models`] as well is a configuration error.
+    #[must_use]
+    pub const fn without_registered_schema_roots(mut self) -> Self {
+        self.registered_schema_roots = false;
+        self
+    }
+
+    /// Set the generated file layout.
+    #[must_use]
+    pub fn layout(mut self, layout: SdkFileLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Use the split layout for larger SDKs.
+    #[must_use]
+    pub fn split_files(self) -> Self {
+        self.layout(
+            SdkFileLayout::split()
+                .operations_per_endpoint()
+                .model_dir("models"),
+        )
+    }
+
+    /// Configure generated SDK documentation output.
+    #[must_use]
+    pub fn docs(mut self, docs: impl Into<SdkDocs>) -> Self {
+        self.docs = docs.into();
+        self
+    }
+
+    /// Disable generated SDK README/reference docs.
+    #[must_use]
+    pub fn without_docs(self) -> Self {
+        self.docs(false)
+    }
+
+    /// Enable or disable package metadata files such as `Cargo.toml`.
+    #[must_use]
+    pub const fn package_metadata(mut self, enabled: bool) -> Self {
+        self.package_metadata = Some(enabled);
+        self
+    }
+
+    /// Configure generated package metadata and publishing recipe content.
+    #[must_use]
+    pub fn package(mut self, metadata: SdkPackageMetadata) -> Self {
+        if self.package_metadata.is_none() {
+            self.package_metadata = Some(true);
+        }
+        self.package_info = metadata;
+        self
+    }
+
+    /// Stop emitting the generated contract test `gnr8 verify` runs for this target.
+    #[must_use]
+    pub const fn without_contract_tests(mut self) -> Self {
+        self.contract_tests = false;
+        self
+    }
+
+    /// Emit source files only, without docs or package metadata.
+    #[must_use]
+    pub fn source_only(self) -> Self {
+        self.docs(false).package_metadata(false)
+    }
+
+    /// The declared module name.
+    #[must_use]
+    pub fn module_name(&self) -> &str {
+        &self.module
+    }
+    /// The output directory.
+    #[must_use]
+    pub fn dir(&self) -> &str {
+        &self.dir
+    }
+    /// The file layout.
+    #[must_use]
+    pub const fn file_layout(&self) -> &SdkFileLayout {
+        &self.layout
+    }
+    /// Excluded operation selectors.
+    #[must_use]
+    pub fn excluded_operations(&self) -> &[OperationSelector] {
+        &self.excluded_operations
+    }
+    /// Additional model roots.
+    #[must_use]
+    pub fn model_roots(&self) -> &[String] {
+        &self.model_roots
+    }
+    /// Whether all models are selected.
+    #[must_use]
+    pub const fn emits_all_models(&self) -> bool {
+        self.all_models
+    }
+    /// Whether registered schema roots are selected.
+    #[must_use]
+    pub const fn includes_registered_schema_roots(&self) -> bool {
+        self.registered_schema_roots
+    }
+
+    /// Whether package metadata files should be emitted, resolving the declaration's default.
+    #[must_use]
+    pub fn effective_package_metadata(&self) -> bool {
+        self.package_metadata.unwrap_or(true)
+    }
+    /// The package metadata `Cargo.toml` and `PUBLISHING.md` are written from.
+    #[must_use]
+    pub const fn package_info(&self) -> &SdkPackageMetadata {
+        &self.package_info
+    }
+    /// The generated documentation configuration.
+    #[must_use]
+    pub const fn docs_config(&self) -> &SdkDocs {
+        &self.docs
+    }
+    /// Whether the target emits its contract tests.
+    #[must_use]
+    pub const fn emits_contract_tests(&self) -> bool {
+        self.contract_tests
+    }
+}
+
+impl Default for RustSdk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The Rust models target: Rust types with Serde serialization for the schemas its model roots
+/// reach, written as one Rust module tree under [`RustModels::to`].
+///
+/// The target emits models only: no HTTP client, no package manifest. Its output directory is a
+/// module whose root is `mod.rs`, so a crate declares it where it wants it:
+///
+/// ```text
+/// pub mod models;
+/// ```
+///
+/// The generated source is laid out as `rustfmt` lays it out by default and passes Clippy, so the
+/// crate's `cargo fmt` and `cargo clippy` cover it like any other module. Every struct has a `new`
+/// over its required fields, and a struct with none also derives `Default`.
+///
+/// Nothing reaches a model here except a root the declaration names, because the target emits no
+/// operations: [`RustModels::model_root`] selects a schema by its id or bare type name, and the
+/// target emits it together with every model it references. [`RustModels::all_models`] emits every
+/// model in the graph instead. A declaration with neither is a configuration error.
+///
+/// Field presence and nullability follow the direction the API graph reaches each schema from,
+/// exactly as in the other SDK targets. A graph shape the target cannot represent faithfully fails
+/// generation with an error naming the schema and field; see `docs/sdk/rust-models.md` for the
+/// supported subset.
+///
+/// The declaration's facts are private: the builder sets them and the accessors read them, so no
+/// caller can build a declaration the builder could not.
+///
+/// ```compile_fail
+/// let models = gnr8::sdk::builtins::RustModels { dir: "src/models".to_string() };
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RustModels {
+    dir: String,
+    #[serde(default)]
+    layout: SdkFileLayout,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    all_models: bool,
+}
+
+impl RustModels {
+    /// A Rust models target with no output directory and no model roots yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the project-relative directory the module tree is written to (e.g. `"src/models"`). Its
+    /// root file is `<dir>/mod.rs`.
+    #[must_use]
+    pub fn to(mut self, dir: impl Into<String>) -> Self {
+        self.dir = dir.into();
+        self
+    }
+
+    /// Emit the model `schema` names, and every model it references. `schema` is a schema id or a
+    /// bare type name, as in [`RenameType`]. A name the graph splits into input and output models
+    /// selects both.
+    ///
+    /// Each call adds one root. A root that names no schema, or a bare name several schemas share,
+    /// is a configuration error.
+    #[must_use]
+    pub fn model_root(mut self, schema: impl Into<String>) -> Self {
+        self.model_roots.push(schema.into());
+        self
+    }
+
+    /// Emit every model in the graph. Declaring a [`RustModels::model_root`] as well is a
+    /// configuration error.
+    #[must_use]
+    pub const fn all_models(mut self) -> Self {
+        self.all_models = true;
+        self
+    }
+
+    /// Set the generated file layout. The compact layout (the default) writes every model into
+    /// `mod.rs`; a split layout writes one file per model, placed by the layout's model directory
+    /// and model file template. Operation settings do not apply: the target emits no operations.
+    #[must_use]
+    pub fn layout(mut self, layout: SdkFileLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Write one file per model beside `mod.rs`.
+    #[must_use]
+    pub fn split_files(self) -> Self {
+        self.layout(SdkFileLayout::split().root_models())
+    }
+
+    /// The project-relative output directory [`RustModels::to`] set; empty until it is set.
+    #[must_use]
+    pub fn dir(&self) -> &str {
+        &self.dir
+    }
+
+    /// The file layout [`RustModels::layout`] set.
+    #[must_use]
+    pub const fn file_layout(&self) -> &SdkFileLayout {
+        &self.layout
+    }
+
+    /// The model roots, in declaration order.
+    #[must_use]
+    pub fn model_roots(&self) -> &[String] {
+        &self.model_roots
+    }
+
+    /// Whether [`RustModels::all_models`] was called.
+    #[must_use]
+    pub const fn emits_all_models(&self) -> bool {
+        self.all_models
+    }
+}
+
 /// Package-manager metadata shared by generated SDK targets.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SdkPackageMetadata {

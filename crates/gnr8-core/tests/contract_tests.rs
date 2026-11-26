@@ -126,7 +126,8 @@ fn all_targets() -> Generated {
         Pipeline::new()
             .target(GoSdk::new().module("example.com/catalog/sdk").to("go"))
             .target(PySdk::new().module("example.com/catalog/sdk").to("python"))
-            .target(TsSdk::new().module("@catalog/sdk").to("ts")),
+            .target(TsSdk::new().module("@catalog/sdk").to("ts"))
+            .target(RustSdk::new().module("catalog").to("rust")),
     )
 }
 
@@ -168,6 +169,10 @@ fn every_sdk_target_emits_a_contract_test_and_declares_its_suite() {
             (
                 ContractTestLanguage::TypeScript,
                 "ts/contract.test.ts".to_string()
+            ),
+            (
+                ContractTestLanguage::Rust,
+                "rust/src/contract_test.rs".to_string()
             ),
         ]
     );
@@ -310,6 +315,38 @@ fn the_typescript_suite_exports_cases_and_imports_no_node_builtin() {
         assert!(
             !ts.contains(banned),
             "the generated TypeScript contract test must type-check without Node types, found {banned}"
+        );
+    }
+}
+
+#[test]
+fn the_rust_suite_is_a_test_module_of_the_tree_driving_a_recording_transport() {
+    let generated = all_targets();
+    let rust = file(&generated.files, "rust/src/contract_test.rs");
+    assert_contains(
+        rust,
+        "impl Transport for Recorder {",
+        "the fake transport is the SDK's own transport seam",
+    );
+    assert_contains(
+        rust,
+        "let builder = builder.api_key_for(\"ApiKeyAuth\", \"gnr8-contract-key\");",
+        "the credential the graph's scheme requires",
+    );
+    assert_contains(rust, "assert_status(&error, 404);", "the typed error");
+    assert_contains(
+        file(&generated.files, "rust/src/lib.rs"),
+        "#[cfg(test)]\nmod contract_test;\n",
+        "the contract tests are a test module of the generated tree",
+    );
+    for line in rust
+        .lines()
+        .filter(|line| line.starts_with("fn ") && !line.contains("decode"))
+    {
+        let name = line.trim_start_matches("fn ");
+        assert!(
+            !name.starts_with("contract") || name.starts_with("contract_"),
+            "{line}"
         );
     }
 }

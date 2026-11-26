@@ -137,6 +137,8 @@ pub enum SiblingSdk<'a> {
     Python(&'a PySdk),
     /// A TypeScript SDK declaration.
     TypeScript(&'a TsSdk),
+    /// A Rust SDK declaration.
+    Rust(&'a RustSdk),
 }
 
 impl<'a> SiblingSdk<'a> {
@@ -147,10 +149,12 @@ impl<'a> SiblingSdk<'a> {
             BuiltinTarget::GoSdk(t) => Some(Self::Go(t)),
             BuiltinTarget::PySdk(t) => Some(Self::Python(t)),
             BuiltinTarget::TsSdk(t) => Some(Self::TypeScript(t)),
+            BuiltinTarget::RustSdk(t) => Some(Self::Rust(t)),
             BuiltinTarget::OpenApi31(_)
             | BuiltinTarget::OpenApi31Json(_)
             | BuiltinTarget::StaticFiles(_)
-            | BuiltinTarget::StaticDocs(_) => None,
+            | BuiltinTarget::StaticDocs(_)
+            | BuiltinTarget::RustModels(_) => None,
         }
     }
 
@@ -161,6 +165,7 @@ impl<'a> SiblingSdk<'a> {
             Self::Go(_) => ContractTestLanguage::Go,
             Self::Python(_) => ContractTestLanguage::Python,
             Self::TypeScript(_) => ContractTestLanguage::TypeScript,
+            Self::Rust(_) => ContractTestLanguage::Rust,
         }
     }
 
@@ -171,6 +176,7 @@ impl<'a> SiblingSdk<'a> {
             Self::Go(t) => &t.dir,
             Self::Python(t) => &t.dir,
             Self::TypeScript(t) => &t.dir,
+            Self::Rust(t) => t.dir(),
         }
     }
 
@@ -181,6 +187,7 @@ impl<'a> SiblingSdk<'a> {
             Self::Go(t) => &t.docs,
             Self::Python(t) => &t.docs,
             Self::TypeScript(t) => &t.docs,
+            Self::Rust(t) => t.docs_config(),
         };
         !docs.is_none()
     }
@@ -192,6 +199,7 @@ impl<'a> SiblingSdk<'a> {
             Self::Go(t) => &t.excluded_operations,
             Self::Python(t) => &t.excluded_operations,
             Self::TypeScript(t) => &t.excluded_operations,
+            Self::Rust(t) => t.excluded_operations(),
         }
     }
 
@@ -202,6 +210,7 @@ impl<'a> SiblingSdk<'a> {
             Self::Go(_) => "GoSdk",
             Self::Python(_) => "PySdk",
             Self::TypeScript(_) => "TsSdk",
+            Self::Rust(_) => "RustSdk",
         }
     }
 
@@ -219,32 +228,28 @@ impl<'a> SiblingSdk<'a> {
         ir: &'g ApiGraph,
     ) -> Result<std::borrow::Cow<'g, ApiGraph>, CoreError> {
         let (roots, all_models, registered) = match self {
-            Self::Go(t) => (&t.model_roots, t.all_models, t.registered_schema_roots),
-            Self::Python(t) => (&t.model_roots, t.all_models, t.registered_schema_roots),
-            Self::TypeScript(t) => (&t.model_roots, t.all_models, t.registered_schema_roots),
+            Self::Go(t) => (
+                t.model_roots.as_slice(),
+                t.all_models,
+                t.registered_schema_roots,
+            ),
+            Self::Python(t) => (
+                t.model_roots.as_slice(),
+                t.all_models,
+                t.registered_schema_roots,
+            ),
+            Self::TypeScript(t) => (
+                t.model_roots.as_slice(),
+                t.all_models,
+                t.registered_schema_roots,
+            ),
+            Self::Rust(t) => (
+                t.model_roots(),
+                t.emits_all_models(),
+                t.includes_registered_schema_roots(),
+            ),
         };
-        let models = match (all_models, roots.as_slice(), registered) {
-            (false, roots, registered) => Models::Reached { roots, registered },
-            (true, [], true) => Models::All,
-            (true, [root, ..], _) => {
-                return Err(CoreError::Config {
-                    message: format!(
-                        "{} emits every model with `all_models()`, so its model root {root:?} \
-                         has no effect; remove one of them",
-                        self.label()
-                    ),
-                })
-            }
-            (true, [], false) => {
-                return Err(CoreError::Config {
-                    message: format!(
-                        "{} emits every model with `all_models()`, so \
-                         `without_registered_schema_roots()` has no effect; remove one of them",
-                        self.label()
-                    ),
-                })
-            }
-        };
+        let models = sdk_models(self.label(), roots, all_models, registered)?;
         target_view(ir, self.excluded_operations(), models, self.label())
     }
 
@@ -268,6 +273,37 @@ impl<'a> SiblingSdk<'a> {
             .map(|schema| schema.id.clone())
             .filter(|id| !kept.contains(id))
             .collect())
+    }
+}
+
+/// The models an SDK declaration selects: those its operations and `roots` reach, with the
+/// registered schemas unless `registered` is off, or every model with `all_models`.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when `all_models` is set beside a model root or beside
+/// `without_registered_schema_roots`.
+fn sdk_models<'r>(
+    label: &str,
+    roots: &'r [String],
+    all_models: bool,
+    registered: bool,
+) -> Result<Models<'r>, CoreError> {
+    match (all_models, roots, registered) {
+        (false, roots, registered) => Ok(Models::Reached { roots, registered }),
+        (true, [], true) => Ok(Models::All),
+        (true, [root, ..], _) => Err(CoreError::Config {
+            message: format!(
+                "{label} emits every model with `all_models()`, so its model root {root:?} has no \
+                 effect; remove one of them"
+            ),
+        }),
+        (true, [], false) => Err(CoreError::Config {
+            message: format!(
+                "{label} emits every model with `all_models()`, so \
+                 `without_registered_schema_roots()` has no effect; remove one of them"
+            ),
+        }),
     }
 }
 
@@ -306,6 +342,8 @@ impl<'a> PlanTargets<'a> {
                     BuiltinTarget::GoSdk(_)
                     | BuiltinTarget::PySdk(_)
                     | BuiltinTarget::TsSdk(_)
+                    | BuiltinTarget::RustModels(_)
+                    | BuiltinTarget::RustSdk(_)
                     | BuiltinTarget::StaticFiles(_)
                     | BuiltinTarget::StaticDocs(_) => Box::new(std::iter::empty()),
                 }
@@ -3822,6 +3860,170 @@ impl TargetExec for TsSdk {
     }
 }
 
+impl TargetExec for RustSdk {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
+        if self.module_name().is_empty() || self.dir().is_empty() {
+            return Err(CoreError::Config {
+                message: "RustSdk requires .module(...) and .to(...)".to_string(),
+            });
+        }
+        let package = sdk_package(self.module_name())?;
+        let projected = crate::graph::projection::for_generation(ir)?;
+        crate::sdk::emit_common::validate_sdk_base_path(&projected.base_path)?;
+        let selected = projected
+            .schemas
+            .iter()
+            .map(|schema| schema.id.as_str())
+            .collect();
+        let manifest = if self.effective_package_metadata() {
+            let name = crate::rustsdk::crate_name(&self.package_info().resolved_name(&package)?)?;
+            Some(crate::rustsdk::Package {
+                name,
+                metadata: self.package_info(),
+            })
+        } else {
+            None
+        };
+        let contract = if self.emits_contract_tests() {
+            Some(crate::verify::plan_contract_tests(&projected)?)
+        } else {
+            None
+        };
+        let mut files = crate::rustsdk::generate_files(
+            &projected,
+            &selected,
+            self.file_layout(),
+            manifest.as_ref(),
+            contract.as_ref(),
+        )?;
+        if let Some(manifest) = &manifest {
+            files.push(super::bundle::SdkFile {
+                name: "PUBLISHING.md".to_string(),
+                contents: publishing_recipe("Rust", &manifest.name, manifest.metadata)?,
+            });
+            files.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        write_sdk_files(out, self.dir(), files)?;
+        write_sdk_docs(out, SiblingSdk::Rust(self), ir, self.docs_config())
+    }
+
+    fn output_anchors(&self) -> Vec<String> {
+        if self.dir().is_empty() {
+            Vec::new()
+        } else {
+            vec![self.dir().trim_end_matches('/').to_string()]
+        }
+    }
+
+    fn readiness_targets(&self) -> Vec<ReadinessTarget> {
+        if self.dir().is_empty() {
+            Vec::new()
+        } else {
+            vec![ReadinessTarget::new(
+                ReadinessKind::Rust,
+                self.dir().trim_end_matches('/'),
+            )]
+        }
+    }
+
+    fn contract_test_suites(&self, ir: &ApiGraph) -> Result<Vec<ContractTestSuite>, CoreError> {
+        if !self.emits_contract_tests() || self.dir().is_empty() || self.module_name().is_empty() {
+            return Ok(Vec::new());
+        }
+        let projected = crate::graph::projection::for_generation(ir)?;
+        let plan = crate::verify::plan_contract_tests(&projected)?;
+        if plan.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dir = self.dir().trim_end_matches('/');
+        let package = sdk_package(self.module_name())?;
+        let (package, source) = if self.effective_package_metadata() {
+            let name = crate::rustsdk::crate_name(&self.package_info().resolved_name(&package)?)?;
+            (name, format!("{dir}/src"))
+        } else {
+            (package, dir.to_string())
+        };
+        Ok(vec![ContractTestSuite {
+            language: ContractTestLanguage::Rust,
+            output_path: dir.to_string(),
+            package,
+            test_file: format!("{source}/{}", crate::rustsdk::CONTRACT_TEST_FILE),
+            cases: plan.len(),
+            refused: plan.refused.len(),
+            go_verification: None,
+        }])
+    }
+}
+
+impl TargetExec for RustModels {
+    fn generate(
+        &self,
+        ir: &ApiGraph,
+        out: &mut Artifacts,
+        _cx: &Cx,
+        _store: Option<&Store>,
+    ) -> Result<(), CoreError> {
+        if self.dir().is_empty() {
+            return Err(CoreError::Config {
+                message: "RustModels target has no output dir — call .to(\"src/models\")"
+                    .to_string(),
+            });
+        }
+        // Presence and nullability are read from the directions the WHOLE graph reaches each schema
+        // from, so the projection runs before the selection, never on a graph the selection cut.
+        let projected = crate::graph::projection::for_generation(ir)?;
+        let ir = &*projected;
+        let selected = rust_models_selection(self, ir)?;
+        let files = crate::rustmodels::generate_files(ir, &selected, self.file_layout())?;
+        write_sdk_files(out, self.dir(), files)
+    }
+
+    /// The module tree may sit inside an analyzed source tree, so it is a loop-safety anchor like
+    /// every other generated directory.
+    fn output_anchors(&self) -> Vec<String> {
+        if self.dir().is_empty() {
+            Vec::new()
+        } else {
+            vec![self.dir().trim_end_matches('/').to_string()]
+        }
+    }
+}
+
+/// The schema ids a `RustModels` declaration emits: every schema with `all_models`, otherwise the
+/// schemas its model roots reach.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Config`] when the declaration names no root and does not ask for every
+/// model, sets both, or names a root that matches no schema or several.
+fn rust_models_selection<'g>(
+    target: &RustModels,
+    ir: &'g ApiGraph,
+) -> Result<BTreeSet<&'g str>, CoreError> {
+    match (target.emits_all_models(), target.model_roots()) {
+        (true, []) => Ok(ir.schemas.iter().map(|schema| schema.id.as_str()).collect()),
+        (true, [root, ..]) => Err(CoreError::Config {
+            message: format!(
+                "RustModels emits every model with `all_models()`, so its model root {root:?} has \
+                 no effect; remove one of them"
+            ),
+        }),
+        (false, []) => Err(CoreError::Config {
+            message: "RustModels selects no models — name each root with \
+                      .model_root(\"<schema id or type name>\"), or emit every model with \
+                      .all_models()"
+                .to_string(),
+        }),
+        (false, roots) => crate::graph::exclusion::schemas_rooted_at(ir, roots, "RustModels"),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------
 // PostProcess
 // ---------------------------------------------------------------------------------------------------
@@ -4440,6 +4642,12 @@ generated SDK directory after reviewing the generated files.\n\n"
 4. `npm publish --dry-run`\n\
 5. Publish with your own npm credentials when the dry run matches expectations.\n",
         ),
+        "Rust" => out.push_str(
+            "1. `cargo test`\n\
+2. `cargo package`\n\
+3. `cargo publish --dry-run`\n\
+4. Publish with your own crates.io token when the dry run matches expectations.\n",
+        ),
         _ => {}
     }
     Ok(out)
@@ -4673,6 +4881,11 @@ pub fn generate_target(
             crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::TypeScript(t), plan)?;
             t.generate(ir, out, cx, store)
         }
+        BuiltinTarget::RustModels(t) => t.generate(ir, out, cx, store),
+        BuiltinTarget::RustSdk(t) => {
+            crate::docs::patches::refuse_for_sdk_docs(SiblingSdk::Rust(t), plan)?;
+            t.generate(ir, out, cx, store)
+        }
     }
 }
 
@@ -4684,7 +4897,11 @@ fn excluded_operations(spec: &BuiltinTarget) -> &[OperationSelector] {
         BuiltinTarget::GoSdk(t) => &t.excluded_operations,
         BuiltinTarget::PySdk(t) => &t.excluded_operations,
         BuiltinTarget::TsSdk(t) => &t.excluded_operations,
-        BuiltinTarget::StaticFiles(_) | BuiltinTarget::StaticDocs(_) => &[],
+        BuiltinTarget::RustSdk(t) => t.excluded_operations(),
+        // `RustModels` emits no operations, so it has none to leave out.
+        BuiltinTarget::StaticFiles(_)
+        | BuiltinTarget::StaticDocs(_)
+        | BuiltinTarget::RustModels(_) => &[],
     }
 }
 
@@ -4738,6 +4955,8 @@ pub fn target_output_anchors(spec: &BuiltinTarget) -> Vec<String> {
         BuiltinTarget::GoSdk(t) => t.output_anchors(),
         BuiltinTarget::PySdk(t) => t.output_anchors(),
         BuiltinTarget::TsSdk(t) => t.output_anchors(),
+        BuiltinTarget::RustModels(t) => t.output_anchors(),
+        BuiltinTarget::RustSdk(t) => t.output_anchors(),
     }
 }
 
@@ -4753,6 +4972,8 @@ pub fn target_readiness_targets(spec: &BuiltinTarget) -> Vec<ReadinessTarget> {
         BuiltinTarget::GoSdk(t) => t.readiness_targets(),
         BuiltinTarget::PySdk(t) => t.readiness_targets(),
         BuiltinTarget::TsSdk(t) => t.readiness_targets(),
+        BuiltinTarget::RustModels(t) => t.readiness_targets(),
+        BuiltinTarget::RustSdk(t) => t.readiness_targets(),
     }
 }
 
@@ -4775,6 +4996,8 @@ pub fn target_contract_test_suites(
         BuiltinTarget::GoSdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::PySdk(t) => t.contract_test_suites(ir),
         BuiltinTarget::TsSdk(t) => t.contract_test_suites(ir),
+        BuiltinTarget::RustModels(t) => t.contract_test_suites(ir),
+        BuiltinTarget::RustSdk(t) => t.contract_test_suites(ir),
     }
 }
 
@@ -4820,7 +5043,9 @@ pub fn target_cli_help_suites(
         | BuiltinTarget::OpenApi31Json(_)
         | BuiltinTarget::StaticFiles(_)
         | BuiltinTarget::StaticDocs(_)
-        | BuiltinTarget::TsSdk(_) => return Ok(Vec::new()),
+        | BuiltinTarget::TsSdk(_)
+        | BuiltinTarget::RustModels(_)
+        | BuiltinTarget::RustSdk(_) => return Ok(Vec::new()),
     };
     let view = target_graph(spec, ir)?;
     let projected = crate::graph::projection::for_generation(&view)?;
@@ -4921,16 +5146,17 @@ fn docs_snippet_suites(
         .map(|(sdk, compile_unit)| {
             let (dir, module, go_verification) = match sdk {
                 SiblingSdk::Go(t) => (
-                    &t.dir,
-                    &t.module,
+                    t.dir.as_str(),
+                    t.module.as_str(),
                     Some(GoVerificationModule {
                         module: t.module.clone(),
                         go_version: t.go_version.clone(),
                         package_metadata: t.package_metadata,
                     }),
                 ),
-                SiblingSdk::Python(t) => (&t.dir, &t.module, None),
-                SiblingSdk::TypeScript(t) => (&t.dir, &t.module, None),
+                SiblingSdk::Python(t) => (t.dir.as_str(), t.module.as_str(), None),
+                SiblingSdk::TypeScript(t) => (t.dir.as_str(), t.module.as_str(), None),
+                SiblingSdk::Rust(t) => (t.dir(), t.module_name(), None),
             };
             Ok(crate::verify::DocsSnippetSuite {
                 language: sdk.language(),
@@ -9256,6 +9482,7 @@ func (s Server) create(c *gin.Context) {
                     SiblingSdk::Go(t) => t.dir.clone(),
                     SiblingSdk::Python(t) => t.dir.clone(),
                     SiblingSdk::TypeScript(t) => t.dir.clone(),
+                    SiblingSdk::Rust(t) => t.dir().to_string(),
                 };
                 (sdk.language(), dir)
             })

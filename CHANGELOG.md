@@ -11,6 +11,10 @@ must move the minor version.
 
 ### Breaking
 
+- **`BuiltinTarget` gains `RustSdk`; `ContractTestLanguage`, `ReadinessKind` and `SiblingSdk` gain
+  `Rust`.** Rust code that matches any of them exhaustively needs an arm. The host/worker protocol
+  is now version 11, so a worker and CLI cannot silently disagree about the stage-plan shape.
+
 - **Go extraction keeps a `map[K]any` field a map.** A struct field typed `map[string]any` (or any
   map of interface values) is now `Map { key, value: Any }` in the graph, where it used to be the
   free-form `Any` that a Go `any` or `json.RawMessage` field also is. `encoding/json` writes such a
@@ -25,6 +29,43 @@ must move the minor version.
   changes the document for a Python `dict[str, Any]`, a TypeScript `Record<string, unknown>`, a
   non-literal `gin.H` response, an imported open object, and a custom stage's `Map { value: Any }`;
   the OpenAPI source already imports `additionalProperties: true` as this map.
+- **`BuiltinTarget` gains `RustModels`.** Rust code that matches `BuiltinTarget` exhaustively needs
+  an arm. The host/worker protocol is now version 10, so a worker and CLI cannot silently disagree
+  about the stage-plan shape.
+
+### Added
+
+- `RustSdk` target: a blocking Rust client over a `Transport` the caller supplies, one method per
+  operation, the models, errors, `README.md`, `reference.md` and contract tests, at the breadth of
+  the Go, Python and TypeScript SDKs. The generated code depends on `serde` and `serde_json` alone:
+  no async runtime, no HTTP or TLS crate. It sends every parameter location and style, JSON, form,
+  multipart, text and binary bodies (and an `{Op}Body` enum for several media types), reads JSON,
+  text, binary and empty replies, and ports the other clients' credentials, transport-delegated
+  auth, retries, timeouts, idempotency keys, hooks and opt-in redirects that drop credentials across
+  origins. Paginated operations gain page and item iterators. The output is a crate with
+  `Cargo.toml` (default) or a module tree a hand-written crate declares (`.package_metadata(false)`),
+  laid out exactly as `rustfmt` writes it and Clippy-clean. Unions, inline objects and a byte string
+  inside JSON are refused in one error naming every position. `gnr8 verify` runs its contract tests
+  and docs samples with `cargo test` in a crate it synthesizes, `gnr8 doctor` runs `cargo check`,
+  `StaticDocs` prints Rust samples beside a `RustSdk` sibling, and `gnr8 init --sdk rust` scaffolds
+  one. See [Rust SDK](docs/sdk/rust-sdk.md).
+- `RustModels` target: Rust types with Serde serialization for the schemas its `.model_root(...)`s
+  reach, or every schema with `.all_models()`, written as one module tree whose root is `mod.rs`
+  (compact, or one file per model with `.split_files()` / a split `SdkFileLayout`). Field presence
+  and nullability follow the graph's direction rules: a required key is `T`, a required nullable key
+  `Option<T>`, an optional key `Option<T>` that reads a `null` as absent and never writes one, and
+  an optional nullable key `Option<Option<T>>` that keeps absent, `null` and a value apart. Every
+  struct has a `new` over its required fields that starts the rest as `None`, so a field the API
+  adds as optional leaves its callers compiling, and a struct with no required field derives
+  `Default`. Wire names are kept exactly while Rust names are escaped and numbered where they
+  collide; a rename is written only where Serde's own name for the field or variant is not the wire
+  name, and a struct with camel-case wire names states `rename_all = "camelCase"` once. The source
+  is laid out as `rustfmt` lays it out by default and passes `cargo clippy` with warnings denied,
+  so a consuming crate formats and lints it like its own code. An inline enum is a `String` with
+  its members in the field's docs. A union, a byte
+  string, an inline object, an integer or float of a width Rust lacks, a map keyed by
+  anything but a string, a self-referential alias, and a colliding or reserved Rust type name fail
+  generation with one error naming every schema and field. See `docs/sdk/rust-models.md`.
 
 ## 0.23.0 — 2026-11-12
 

@@ -109,6 +109,34 @@ if err != nil {
 fmt.Printf("%+v\n", result)
 ```
 
+### Rust — `bookstore_sdk`
+
+```rust
+use bookstore_sdk::Client;
+
+let client = Client::builder(base_url, transport).api_key_for("ApiKeyAuth", api_key).build();
+let result = client.get_book("gnr8")?;
+println!("{result:?}");
+```
+
+Handling the `404` reply:
+
+```rust
+use bookstore_sdk::Client;
+use bookstore_sdk::Error;
+use bookstore_sdk::models;
+
+let client = Client::builder(base_url, transport).api_key_for("ApiKeyAuth", api_key).build();
+match client.get_book("gnr8") {
+    Ok(result) => println!("{result:?}"),
+    Err(Error::Api(error)) if error.status == 404 => {
+        let body: models::ErrorResponse = error.decode().map_err(Error::Decode)?;
+        println!("{body:?}");
+    }
+    Err(error) => return Err(error),
+}
+```
+
 ### CLI — `bookstore`
 
 `bookstore books get`

@@ -168,7 +168,7 @@ fn example_doc(
 
 /// One entry per sibling SDK whose generated CLI wraps this operation, in plan order: the
 /// invocation the program prints in its usage, then the command examples the user declared,
-/// verbatim. A TypeScript SDK emits no CLI.
+/// verbatim. A TypeScript or Rust SDK emits no CLI.
 fn cli_docs(
     graph: &ApiGraph,
     op: &Operation,
@@ -179,7 +179,7 @@ fn cli_docs(
         let cli = match sdk {
             SiblingSdk::Go(t) => t.cli.as_ref(),
             SiblingSdk::Python(t) => t.cli.as_ref(),
-            SiblingSdk::TypeScript(_) => None,
+            SiblingSdk::TypeScript(_) | SiblingSdk::Rust(_) => None,
         };
         let Some(cli) = cli else {
             continue;

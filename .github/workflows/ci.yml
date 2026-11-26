@@ -75,7 +75,7 @@ jobs:
             needs_go: "true"
             needs_python: "true"
             needs_node: "true"
-            test_args: "--test determinism --test docs_snippets_compile --test operation_prose --test sdk_compile"
+            test_args: "--test determinism --test docs_snippets_compile --test operation_prose --test rust_models --test rustsdk_compile --test sdk_compile"
           # gnr8-cli is split into four entries. A cold 2-4 core runner rebuilds the engine,
           # links the host binary, then cargo-builds a `.gnr8/` worker per compiling test; one
           # combined job exceeds the 5-minute cap on a cache miss (lockfile/version bump).
@@ -107,10 +107,32 @@ jobs:
             needs_python: "false"
             needs_node: "false"
             test_args: "--test committed_outputs"
+          # The RustModels lifecycle builds one worker and the standalone consumer crate
+          # (serde + serde_json) on top of the host binary, so it gets its own entry.
+          - package: gnr8-cli
+            name: gnr8-cli rust models
+            needs_go: "true"
+            needs_python: "false"
+            needs_node: "false"
+            test_args: "--test rust_models_e2e"
+          # The RustSdk lifecycle builds one worker, the consumer crate and its Unix-socket wire
+          # tests, then runs `gnr8 verify`, so it gets its own entry too.
+          - package: gnr8-cli
+            name: gnr8-cli rust sdk
+            needs_go: "true"
+            needs_python: "false"
+            needs_node: "false"
+            test_args: "--test rust_sdk_e2e"
     steps:
       - uses: actions/checkout@v7
 
+      # `rust_models`, `rustsdk_compile`, `rust_models_e2e` and `rust_sdk_e2e` hold the generated
+      # Rust to `rustfmt` and Clippy, and
+      # each skips that gate when its tool is missing. Without the components here the gate would
+      # never run in CI, and a green run would say nothing about it.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - uses: actions/setup-go@v6
         if: matrix.needs_go == 'true'

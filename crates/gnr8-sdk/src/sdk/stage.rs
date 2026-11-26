@@ -87,7 +87,17 @@ builtin_enum! {
 
 builtin_enum! {
     /// Every built-in target, as a declaration the host executes.
-    BuiltinTarget { OpenApi31, OpenApi31Json, StaticFiles, StaticDocs, GoSdk, PySdk, TsSdk }
+    BuiltinTarget {
+        OpenApi31,
+        OpenApi31Json,
+        StaticFiles,
+        StaticDocs,
+        GoSdk,
+        PySdk,
+        TsSdk,
+        RustModels,
+        RustSdk,
+    }
 }
 
 builtin_enum! {
@@ -185,7 +195,9 @@ from_builtins!(
         StaticDocs,
         GoSdk,
         PySdk,
-        TsSdk
+        TsSdk,
+        RustModels,
+        RustSdk
     ]
 );
 from_builtins!(PostStage, BuiltinPost, [FormatCommand, Header]);

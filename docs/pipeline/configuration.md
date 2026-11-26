@@ -115,7 +115,7 @@ its kept operations, registered roots and declared `.model_root(...)` schemas re
 `.without_registered_schema_roots()` takes the registered roots out of that list; see
 [Which models an SDK emits](../sdk/generation.md#which-models-an-sdk-emits). The target's contract tests, CLI and docs samples read the same reduced graph.
 A selector that matches no operation is a configuration error. `OpenApi31`, `OpenApi31Json`,
-`GoSdk`, `PySdk` and `TsSdk` accept exclusions. `StaticDocs` samples every operation in each sibling
+`GoSdk`, `PySdk`, `TsSdk` and `RustSdk` accept exclusions. `StaticDocs` samples every operation in each sibling
 SDK, so it refuses a sibling SDK that excludes operations.
 
 ## Custom stages

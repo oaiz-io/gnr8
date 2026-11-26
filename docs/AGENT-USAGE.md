@@ -29,6 +29,7 @@ Supported targets:
 | Go SDK | `--sdk go` | `GoSdk::new().module("example.com/yourservice/sdk").to("sdk")` |
 | Python SDK | `--sdk python` | `PySdk::new().module("example.com/yourservice/sdk").to("sdk")` |
 | TypeScript SDK | `--sdk typescript` | `TsSdk::new().module("example.com/yourservice/sdk").to("sdk")` |
+| Rust SDK | `--sdk rust` | `RustSdk::new().module("yourservice").to("sdk")` |
 | Static Markdown docs | n/a (add by hand) | `StaticDocs::new().to("docs")` |
 
 ## Standard Workflow

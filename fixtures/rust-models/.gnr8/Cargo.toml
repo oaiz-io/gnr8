@@ -1,0 +1,10 @@
+[package]
+name = "rust-models-fixture-gnr8-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+gnr8 = { path = "../../../crates/gnr8-sdk" }
+
+[workspace]

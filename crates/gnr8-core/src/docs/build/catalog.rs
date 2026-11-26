@@ -248,6 +248,7 @@ fn credential_options(
             ),
             SiblingSdk::Python(_) => crate::pysdk::callsite::client_credentials(auth, true),
             SiblingSdk::TypeScript(_) => crate::tssdk::callsite::client_credentials(auth, true),
+            SiblingSdk::Rust(_) => crate::rustsdk::callsite::client_credentials(auth, true),
         };
         rows.push(vec![
             doc.heading(),
@@ -263,5 +264,6 @@ pub(crate) const fn language_name(language: crate::verify::ContractTestLanguage)
         crate::verify::ContractTestLanguage::Go => "Go",
         crate::verify::ContractTestLanguage::Python => "Python",
         crate::verify::ContractTestLanguage::TypeScript => "TypeScript",
+        crate::verify::ContractTestLanguage::Rust => "Rust",
     }
 }

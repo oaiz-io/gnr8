@@ -1,0 +1,4 @@
+# gnr8 lifecycle state — regenerated, do not commit.
+/cache/
+# Rust build output of the .gnr8 generation crate — not committed.
+/target/

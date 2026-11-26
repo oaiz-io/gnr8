@@ -1,0 +1,1019 @@
+{
+  "schema_version": 3,
+  "graph": {
+    "module": "example.com/notes",
+    "operations": [
+      {
+        "id": "listNotes",
+        "method": "GET",
+        "path": "/v1/notes",
+        "handler": "listNotes",
+        "summary": "Lists the notes, newest first.",
+        "description": "Pass the next cursor of a page to read the page after it.",
+        "group": "notes",
+        "params": [
+          {
+            "name": "X-Trace",
+            "location": "header",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          },
+          {
+            "name": "cursor",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          },
+          {
+            "name": "limit",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "int",
+                "bits": 32,
+                "signed": true
+              }
+            },
+            "constraints": {
+              "minimum": "1",
+              "maximum": "100"
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          },
+          {
+            "name": "order",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "enum",
+              "of": [
+                "newest",
+                "oldest"
+              ]
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          },
+          {
+            "name": "tag",
+            "location": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "of": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              }
+            },
+            "style": "form",
+            "explode": true,
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          }
+        ],
+        "request_body": null,
+        "responses": [
+          {
+            "status": 200,
+            "body": {
+              "ref_id": "notes.NotePage"
+            },
+            "content_types": [
+              "application/json"
+            ]
+          }
+        ],
+        "security": [
+          "ApiKeyAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "createNote",
+        "method": "POST",
+        "path": "/v1/notes",
+        "handler": "createNote",
+        "summary": "Stores a new note.",
+        "group": "notes",
+        "params": [],
+        "request_body": {
+          "ref_id": "notes.NewNote",
+          "provenance": {
+            "file": "notes/notes.go"
+          }
+        },
+        "request_body_content_type": "application/json",
+        "responses": [
+          {
+            "status": 201,
+            "body": {
+              "ref_id": "notes.Note"
+            },
+            "content_types": [
+              "application/json"
+            ]
+          },
+          {
+            "status": 400,
+            "body": {
+              "ref_id": "notes.Problem"
+            },
+            "content_types": [
+              "application/json"
+            ]
+          }
+        ],
+        "security": [
+          "BearerAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "deleteNote",
+        "method": "DELETE",
+        "path": "/v1/notes/{noteId}",
+        "handler": "deleteNote",
+        "summary": "Removes a note.",
+        "group": "notes",
+        "params": [
+          {
+            "name": "noteId",
+            "location": "path",
+            "required": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          }
+        ],
+        "request_body": null,
+        "responses": [
+          {
+            "status": 204,
+            "body": null,
+            "body_kind": "empty"
+          }
+        ],
+        "security": [
+          "BearerAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "getNote",
+        "method": "GET",
+        "path": "/v1/notes/{noteId}",
+        "handler": "getNote",
+        "summary": "Reads one note.",
+        "group": "notes",
+        "params": [
+          {
+            "name": "noteId",
+            "location": "path",
+            "required": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          }
+        ],
+        "request_body": null,
+        "responses": [
+          {
+            "status": 200,
+            "body": {
+              "ref_id": "notes.Note"
+            },
+            "content_types": [
+              "application/json"
+            ]
+          },
+          {
+            "status": 404,
+            "body": {
+              "ref_id": "notes.Problem"
+            },
+            "content_types": [
+              "application/json"
+            ]
+          }
+        ],
+        "security": [
+          "ApiKeyAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "attachment",
+        "method": "GET",
+        "path": "/v1/notes/{noteId}/attachment",
+        "handler": "attachment",
+        "summary": "Downloads a note's attachment.",
+        "group": "notes",
+        "params": [
+          {
+            "name": "noteId",
+            "location": "path",
+            "required": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          }
+        ],
+        "request_body": null,
+        "responses": [
+          {
+            "status": 200,
+            "body": null,
+            "body_kind": "binary",
+            "content_type": "application/octet-stream",
+            "content_types": [
+              "application/octet-stream"
+            ],
+            "headers": [
+              {
+                "name": "Content-Type",
+                "schema": {
+                  "type": "primitive",
+                  "of": {
+                    "prim": "string"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "security": [
+          "ApiKeyAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "noteEvents",
+        "method": "GET",
+        "path": "/v1/notes/{noteId}/events",
+        "handler": "noteEvents",
+        "summary": "Streams a note's changes.",
+        "group": "notes",
+        "params": [
+          {
+            "name": "noteId",
+            "location": "path",
+            "required": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          }
+        ],
+        "request_body": null,
+        "responses": [
+          {
+            "status": 200,
+            "body": null,
+            "body_kind": "sse",
+            "content_type": "text/event-stream",
+            "content_types": [
+              "text/event-stream"
+            ]
+          }
+        ],
+        "security": [
+          "ApiKeyAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "exportNote",
+        "method": "GET",
+        "path": "/v1/notes/{noteId}/export",
+        "handler": "exportNote",
+        "summary": "Renders a note as plain text.",
+        "group": "notes",
+        "params": [
+          {
+            "name": "noteId",
+            "location": "path",
+            "required": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          }
+        ],
+        "request_body": null,
+        "responses": [
+          {
+            "status": 200,
+            "body": null,
+            "body_kind": "binary",
+            "content_type": "text/plain",
+            "content_types": [
+              "text/plain"
+            ]
+          }
+        ],
+        "security": [
+          "ApiKeyAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "uploadFile",
+        "method": "POST",
+        "path": "/v1/notes/{noteId}/files",
+        "handler": "uploadFile",
+        "summary": "Attaches a file to a note.",
+        "group": "notes",
+        "params": [
+          {
+            "name": "noteId",
+            "location": "path",
+            "required": true,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          }
+        ],
+        "request_body": {
+          "ref_id": "__synthetic.UploadFileFormRequest",
+          "provenance": {
+            "file": "notes/notes.go"
+          }
+        },
+        "request_body_content_type": "multipart/form-data",
+        "responses": [
+          {
+            "status": 204,
+            "body": null,
+            "body_kind": "empty"
+          }
+        ],
+        "security": [
+          "BearerAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "session",
+        "method": "GET",
+        "path": "/v1/session",
+        "handler": "session",
+        "summary": "Reads the caller's session cookie.",
+        "group": "v1",
+        "params": [
+          {
+            "name": "session",
+            "location": "cookie",
+            "required": false,
+            "schema": {
+              "type": "primitive",
+              "of": {
+                "prim": "string"
+              }
+            },
+            "provenance": {
+              "file": "notes/notes.go"
+            }
+          }
+        ],
+        "request_body": null,
+        "responses": [
+          {
+            "status": 204,
+            "body": null,
+            "body_kind": "empty"
+          }
+        ],
+        "security": [
+          "ApiKeyAuth"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      }
+    ],
+    "schemas": [
+      {
+        "id": "__synthetic.UploadFileFormRequest",
+        "name": "UploadFileFormRequest",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "caption",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "file",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": false,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": true,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "bytes"
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "notes.Handler",
+        "name": "Handler",
+        "body": {
+          "type": "object",
+          "of": []
+        },
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "notes.ListQuery",
+        "name": "ListQuery",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "cursor",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "limit",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 32,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": null,
+              "meta": {
+                "constraints": {
+                  "minimum": "1",
+                  "maximum": "100"
+                }
+              }
+            },
+            {
+              "json_name": "order",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null,
+              "meta": {
+                "constraints": {
+                  "enum_values": [
+                    "newest",
+                    "oldest"
+                  ]
+                }
+              }
+            },
+            {
+              "json_name": "tag",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": false,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "primitive",
+                  "of": {
+                    "prim": "string"
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "notes.NewNote",
+        "name": "NewNote",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "body",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "tags",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "primitive",
+                  "of": {
+                    "prim": "string"
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "title",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": true,
+              "validator_rejects_null": true,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "visibility",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": true,
+              "validator_rejects_null": true,
+              "schema": {
+                "type": "named",
+                "of": "notes.Visibility"
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "notes.Note",
+        "name": "Note",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "body",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "id",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "labels",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "map",
+                "of": {
+                  "key": {
+                    "type": "primitive",
+                    "of": {
+                      "prim": "string"
+                    }
+                  },
+                  "value": {
+                    "type": "primitive",
+                    "of": {
+                      "prim": "string"
+                    }
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "score",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "float",
+                  "bits": 64
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "tags",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "primitive",
+                  "of": {
+                    "prim": "string"
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "title",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "visibility",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "named",
+                "of": "notes.Visibility"
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "notes.NotePage",
+        "name": "NotePage",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "items",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "named",
+                  "of": "notes.Note"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "next_cursor",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "notes.Problem",
+        "name": "Problem",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "hints",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "primitive",
+                  "of": {
+                    "prim": "string"
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "message",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "slug",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      },
+      {
+        "id": "notes.Visibility",
+        "name": "Visibility",
+        "body": {
+          "type": "enum",
+          "of": [
+            "private",
+            "shared"
+          ]
+        },
+        "enum_source_order": [
+          "private",
+          "shared"
+        ],
+        "provenance": {
+          "file": "notes/notes.go"
+        }
+      }
+    ],
+    "diagnostics": [],
+    "base_path": "/",
+    "title": "Notes",
+    "security": [
+      {
+        "id": "BearerAuth",
+        "kind": "http",
+        "location": "",
+        "name": "bearer",
+        "global": false
+      },
+      {
+        "id": "ApiKeyAuth",
+        "kind": "apiKey",
+        "location": "header",
+        "name": "X-API-Key",
+        "global": false
+      }
+    ],
+    "operation_runtime": [
+      {
+        "operation_id": "createNote",
+        "idempotent": true,
+        "idempotency_key_header": "Idempotency-Key"
+      }
+    ],
+    "pagination": [
+      {
+        "operation_id": "listNotes",
+        "mode": "cursor",
+        "items_field": "items",
+        "cursor_param": "cursor",
+        "next_cursor_field": "next_cursor",
+        "termination": "no_next_cursor"
+      }
+    ]
+  }
+}

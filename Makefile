@@ -7,7 +7,7 @@
 # The Go/Python/TypeScript contract snapshots are GREEN and blocking. `make gates` runs the Rust
 # contract set; `make check` adds direct sidecar tests and release-example regeneration.
 
-.PHONY: fmt fmt-check clippy test gates fixture-build goextract-build pyextract-test tsextract-deps tsextract-test action-test action-annotations-test release-notes-test red check all examples-check install invariants
+.PHONY: fmt fmt-check clippy test gates rust-models-consumer-test rust-sdk-consumer-test fixture-build goextract-build pyextract-test tsextract-deps tsextract-test action-test action-annotations-test release-notes-test red check all examples-check install invariants
 
 # Auto-format the workspace in place.
 fmt:
@@ -69,6 +69,8 @@ gates:
 	cargo test -p gnr8-engine --test snapshot_graph --test snapshot_diagnostics --test snapshot_openapi --test snapshot_sdk --test determinism --test sdk_compile --test pysdk_compile --test tssdk_compile --test sdk_pipeline --test lifecycle --test operation_prose --test cli_emit --test snapshot_docs --test docs_emit --test docs_snippets_compile
 	cargo test -p gnr8-engine --test snapshot_nestjs_graph --test snapshot_nestjs_openapi
 	cargo test -p gnr8-engine --test sdk_lint
+	cargo test -p gnr8-engine --test rust_models
+	cargo test -p gnr8-engine --test rustsdk_compile
 
 # Restore the `typescript` toolchain for gnr8's OWN test suite (the nestjs snapshot extraction +
 # the tssdk_compile typecheck). gnr8 ships NO typescript — in real use `tsextract` borrows the user's
@@ -106,6 +108,19 @@ action-annotations-test:
 # Keep release publication tied to a dated changelog section with an empty Unreleased section.
 release-notes-test:
 	python3 -m unittest discover -s scripts -p 'test_release_notes.py'
+
+# Hold the standalone consumer crate, the committed RustModels output included, to `cargo fmt
+# --check` and Clippy with warnings denied, then run its wire tests. Nothing shields the generated
+# modules from either tool: the emitter writes what rustfmt writes. The crate is its own Cargo
+# workspace (cargo never builds it from the gnr8 workspace), and its lockfile pins the serde version
+# the generated models are checked against.
+rust-models-consumer-test:
+	cd fixtures/rust-models/consumer && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
+
+# The same for the Rust SDK fixture's consumer crate: the generated module tree in src/api, the
+# hand-written Unix-socket transport, its wire tests, and the generated contract tests.
+rust-sdk-consumer-test:
+	cd fixtures/rust-sdk/consumer && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
 
 # Compile + vet the standalone Go Gin fixture module (Pitfall 5 — cargo never builds it).
 fixture-build:
@@ -161,6 +176,6 @@ invariants:
 	$(MAKE) release-notes-test
 
 # Full local gate; CI runs these confidence areas as focused jobs.
-check: invariants fmt-check clippy tsextract-deps test fixture-build goextract-build pyextract-test tsextract-test action-test examples-check
+check: invariants fmt-check clippy tsextract-deps test rust-models-consumer-test rust-sdk-consumer-test fixture-build goextract-build pyextract-test tsextract-test action-test examples-check
 
 all: check

@@ -568,6 +568,8 @@ pub enum ReadinessKind {
     /// Type-check and validate a generated TypeScript package.
     #[serde(rename = "typescript")]
     TypeScript,
+    /// Compile a generated Rust module tree with `cargo check`.
+    Rust,
 }
 
 /// A post-processor: [`Artifacts`] → [`Artifacts`], run (in order) after all targets and before the
@@ -720,7 +722,7 @@ pub mod prelude {
         Header, MarkIdempotent, NestJs, OpenApi, OpenApi31, OpenApi31Json, OpenApiFieldPatch,
         OpenApiMetadata, OpenApiSchemaPatch, OperationSelector, ParameterOverride, PySdk,
         RenameOperation, RenameType, RequestParameter, RequireOperationDocs, ResponseOverride,
-        SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
+        RustModels, RustSdk, SdkPackageMetadata, SecurityOverride, SetBasePath, SetEnumOrder,
         SetOperationSuccessResponse, SetSchemaFieldType, SetTitle, StaticDocs, StaticFiles, TsSdk,
     };
     pub use super::cli::{OwnedCommand, SdkCli};

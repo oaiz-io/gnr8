@@ -289,6 +289,7 @@ fn unit_of(
         ),
         SiblingSdk::Python(_) => (PY_UNIT_FILE, py_unit_text(identity, &samples)),
         SiblingSdk::TypeScript(_) => (TS_UNIT_FILE, ts_unit_text(identity, &samples)),
+        SiblingSdk::Rust(_) => (RS_UNIT_FILE, rs_unit_text(identity, &samples)),
     };
     Ok(Some(CompileUnit {
         file_name: file_name.to_string(),
@@ -396,6 +397,150 @@ pub(crate) const PY_UNIT_FILE: &str = "docs_snippets.py";
 
 /// The TypeScript file a compile unit is written to, beside the copied SDK.
 pub(crate) const TS_UNIT_FILE: &str = "snippets.ts";
+
+/// The Rust file a compile unit is written to: the library of a crate that depends on the SDK.
+pub const RS_UNIT_FILE: &str = "docs_snippets.rs";
+
+/// The Rust unit: one function per sample, taking the variables the page leaves to the reader and
+/// returning the SDK's `Result`, so `cargo` resolves every name the sample uses; then the rung-3
+/// test, which runs each sample's call on a recording transport answering the page's reply.
+fn rs_unit_text(identity: &ConsumerIdentity, snippets: &[UnitSample<'_>]) -> String {
+    let krate = &identity.import;
+    let mut out = format!(
+        "//! Docs samples, compiled and run by `gnr8 verify`.\n#![allow(dead_code, unused_imports, unused_variables, clippy::all)]\n\nuse {krate}::*;\n"
+    );
+    for unit in snippets {
+        let _ = write!(
+            out,
+            "\nfn {}{}(\n    base_url: &str,\n    transport: impl Transport + 'static,\n    api_key: &str,\n    token: &str,\n    username: &str,\n    password: &str,\n) -> Result<(), Error> {{\n{}\n    Ok(())\n}}\n",
+            py_wrapper_name(unit.operation),
+            unit.kind.wrapper_suffix(true),
+            indent(&unit.sample.text, "    ")
+        );
+    }
+    out.push_str(RS_WIRE_HEAD);
+    for unit in snippets {
+        let snippet = unit.sample;
+        let reply = &snippet.wire.reply;
+        let status = reply.status;
+        let _ = writeln!(
+            out,
+            "    recorder.respond({status}, {}, {});",
+            crate::rust_layout::rust_str(&reply.content_type),
+            crate::rust_layout::rust_str(&reply.body)
+        );
+        let typed = format!("expected the SDK's typed ApiError with status {status}");
+        let returned = format!("Ok(_) => \"{typed}, but the call returned\".to_string(),");
+        let other = format!("Err(error) => format!(\"{typed}, got {{error}}\"),");
+        let outcome = match &reply.expect {
+            Expect::Success => "match &result {\n            Ok(_) => String::new(),\n            Err(error) => format!(\"the call failed on the page's reply: {error}\"),\n        }".to_string(),
+            Expect::Status => format!(
+                "match &result {{\n            Err(Error::Api(error)) if error.status == {status} => String::new(),\n            {other}\n            {returned}\n        }}"
+            ),
+            Expect::TypedBody { model } => {
+                let ident = crate::rustsdk::callsite::model_ident(model);
+                let body = crate::rust_layout::rust_str(&reply.body);
+                format!(
+                    "match &result {{\n            Err(Error::Api(error)) if error.status != {status} => {{\n                format!(\"expected status {status}, got {{}}\", error.status)\n            }}\n            Err(Error::Api(error)) if error.decode::<models::{ident}>().is_err() => {{\n                format!(\"expected a {ident} body, got {{:?}}\", error.json_body())\n            }}\n            Err(Error::Api(error)) if error.json_body() != serde_json::from_str({body}).ok() => {{\n                format!(\"expected the body {{}}, got {{:?}}\", {body}, error.json_body())\n            }}\n            Err(Error::Api(_)) => String::new(),\n            {other}\n            {returned}\n        }}"
+                )
+            }
+        };
+        let _ = write!(
+            out,
+            "    {{\n{}\n{}\n        let outcome = {outcome};\n        recorder.mark({}, &outcome);\n    }}\n",
+            indent(&snippet.wire.client, "        "),
+            indent(&snippet.call, "        "),
+            crate::rust_layout::rust_str(&unit.mark)
+        );
+    }
+    out.push_str("    recorder.write(&path);\n}\n");
+    out
+}
+
+/// The rung-3 recorder and the head of the test a Rust unit runs it in.
+const RS_WIRE_HEAD: &str = r#"
+/// A transport that answers the reply a page prints and records every request.
+#[derive(Clone, Default)]
+struct Recorder {
+    state: std::sync::Arc<std::sync::Mutex<RecorderState>>,
+}
+
+#[derive(Default)]
+struct RecorderState {
+    reply: (u16, String, String),
+    records: Vec<serde_json::Value>,
+}
+
+impl Transport for Recorder {
+    fn send(&self, request: &Request) -> Result<Response, TransportError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TransportError::new("the recorder is poisoned"))?;
+        let after_scheme = request.url.split_once("://").map_or(request.url.as_str(), |(_, rest)| rest);
+        let target = after_scheme.find('/').map_or("/", |at| &after_scheme[at..]);
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let mut headers = serde_json::Map::new();
+        for (name, value) in &request.headers {
+            headers.insert(name.to_ascii_lowercase(), serde_json::Value::String(value.clone()));
+        }
+        let body = if request.body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(String::from_utf8_lossy(&request.body).into_owned())
+        };
+        state.records.push(serde_json::json!({
+            "operation": "",
+            "method": request.method,
+            "path": path,
+            "query": query,
+            "headers": headers,
+            "body": body,
+            "outcome": "",
+        }));
+        let (status, content_type, body) = state.reply.clone();
+        let mut headers = Vec::new();
+        if !content_type.is_empty() {
+            headers.push(("content-type".to_string(), content_type));
+        }
+        Ok(Response {
+            status,
+            headers,
+            body: body.into_bytes(),
+        })
+    }
+}
+
+impl Recorder {
+    fn respond(&self, status: u16, content_type: &str, body: &str) {
+        let mut state = self.state.lock().expect("the recorder is not poisoned");
+        state.reply = (status, content_type.to_string(), body.to_string());
+    }
+
+    fn mark(&self, operation: &str, outcome: &str) {
+        let mut state = self.state.lock().expect("the recorder is not poisoned");
+        for record in &mut state.records {
+            if record["operation"] == "" {
+                record["operation"] = serde_json::Value::String(operation.to_string());
+                record["outcome"] = serde_json::Value::String(outcome.to_string());
+            }
+        }
+    }
+
+    fn write(&self, path: &str) {
+        let state = self.state.lock().expect("the recorder is not poisoned");
+        let text = serde_json::to_string(&state.records).expect("the records encode");
+        std::fs::write(path, text).expect("the records are written");
+    }
+}
+
+#[test]
+fn docs_wire() {
+    let Ok(path) = std::env::var("GNR8_DOCS_WIRE") else {
+        return;
+    };
+    let recorder = Recorder::default();
+"#;
 
 /// The Python wrapper function for one operation: `docs_snippet_<snake id>`.
 fn py_wrapper_name(operation_id: &str) -> String {

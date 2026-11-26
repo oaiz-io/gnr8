@@ -168,7 +168,20 @@ fn sdk_targets_exclude_on_their_own() {
             .without_docs()
             .without_contract_tests(),
     );
-    let plan = [&python, &typescript];
+    let rust = BuiltinTarget::RustSdk(
+        RustSdk::new()
+            .module("bookstore")
+            .to("generated/rust")
+            .without_docs()
+            .without_contract_tests()
+            .exclude(admin()),
+    );
+    let plan = [&python, &typescript, &rust];
+
+    let rust_text = emit(&rust, &plan);
+    assert!(rust_text.contains("pub fn list_books("), "{rust_text}");
+    assert!(!rust_text.contains("list_operators"), "{rust_text}");
+    assert!(!rust_text.contains("OperatorRow"), "{rust_text}");
 
     let python_text = emit(&python, &plan);
     assert!(python_text.contains("list_books"), "{python_text}");

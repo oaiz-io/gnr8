@@ -77,6 +77,8 @@ pub enum ContractTestLanguage {
     Python,
     /// The project's `typescript` compiler, then `node --test`.
     TypeScript,
+    /// `cargo test` in a crate that mounts the generated module tree.
+    Rust,
 }
 
 impl ContractTestLanguage {
@@ -87,6 +89,7 @@ impl ContractTestLanguage {
             Self::Go => "go",
             Self::Python => "python",
             Self::TypeScript => "typescript",
+            Self::Rust => "rust",
         }
     }
 
@@ -97,6 +100,7 @@ impl ContractTestLanguage {
             Self::Go => "Go SDK",
             Self::Python => "Python SDK",
             Self::TypeScript => "TypeScript SDK",
+            Self::Rust => "Rust SDK",
         }
     }
 }
