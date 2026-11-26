@@ -168,6 +168,47 @@ pub(crate) fn generate_files(
     Ok(files)
 }
 
+/// One argument of a model's constructor.
+pub(crate) struct ConstructorField<'g> {
+    pub(crate) json_name: &'g str,
+    pub(crate) schema: &'g Type,
+    /// The field may be `null`, so the argument is an `Option`.
+    pub(crate) nullable: bool,
+    /// The field holds a schema that holds the model, so the argument is boxed.
+    pub(crate) boxed: bool,
+}
+
+/// The arguments the constructor of the object model `schema_id` takes, in order: its required
+/// fields, as the generated `new` declares them. `None` when the schema is not an object.
+pub(crate) fn constructor_fields<'g>(
+    graph: &'g ApiGraph,
+    schema_id: &str,
+) -> Option<Vec<ConstructorField<'g>>> {
+    let schema = graph.schemas.iter().find(|schema| schema.id == schema_id)?;
+    let Type::Object(fields) = &schema.body else {
+        return None;
+    };
+    let all: Vec<&Schema> = graph.schemas.iter().collect();
+    let by_value = by_value_reach(&all);
+    let directions = schema_directions(graph);
+    let directions = directions_of(&directions, schema_id);
+    Some(
+        fields
+            .iter()
+            .filter_map(|field| {
+                let presence = Presence::of(directions, field);
+                presence.is_required().then(|| ConstructorField {
+                    json_name: field.json_name.as_str(),
+                    schema: &field.schema,
+                    nullable: presence == Presence::RequiredNullable,
+                    boxed: matches!(&field.schema, Type::Named(id) if id == schema_id
+                        || by_value.get(id.as_str()).is_some_and(|reached| reached.contains(schema_id))),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Where the Rust SDK sends each byte string, which decides how its models carry them.
 pub(crate) struct SdkModels<'a> {
     /// The schemas sent as multipart request bodies: a byte-string field of one is a file.

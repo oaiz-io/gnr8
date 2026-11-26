@@ -183,11 +183,13 @@ pub(crate) fn rust_str(value: &str) -> String {
 /// `rustfmt`'s default `fn_call_width`: the widest argument list it keeps on one line.
 const CALL_ARGS_WIDTH: usize = 60;
 
-/// The arguments of a call on one line, when `rustfmt` keeps them there.
+/// The arguments of a call on one line, when `rustfmt` keeps them there: the line fits, and the
+/// arguments are no wider than `fn_call_width` unless there is only one.
 fn flat_call(margin: &str, head: &str, args: &[String], tail: &str) -> Option<String> {
     let joined = args.join(", ");
     let line = format!("{margin}{head}({joined}){tail}");
-    (width(&line) <= MAX_WIDTH && width(&joined) <= CALL_ARGS_WIDTH).then_some(line)
+    (width(&line) <= MAX_WIDTH && (args.len() == 1 || width(&joined) <= CALL_ARGS_WIDTH))
+        .then_some(line)
 }
 
 /// The arguments of a call one per line, each followed by a comma.
@@ -200,21 +202,45 @@ fn vertical_call(margin: &str, indent: usize, head: &str, args: &[String], tail:
     out
 }
 
+/// `head` as a receiver and a method, when `rustfmt` may break the chain between them: a call
+/// with at most two arguments (with more, the arguments one per line are what it keeps) on a
+/// receiver wider than the indent, which `rustfmt` never leaves alone on a line.
+fn chain<'h>(head: &'h str, args: &[String]) -> Option<(&'h str, &'h str)> {
+    let (receiver, method) = head.rsplit_once('.')?;
+    (args.len() <= 2 && width(receiver) > INDENT).then_some((receiver, method))
+}
+
+/// The chain broken before its method, the call on the next line, when that line holds it.
+fn broken_chain(
+    margin: &str,
+    first: &str,
+    indent: usize,
+    head: &str,
+    args: &[String],
+    tail: &str,
+) -> Option<String> {
+    let (receiver, method) = chain(head, args)?;
+    let call = flat_call(&pad(indent + INDENT), &format!(".{method}"), args, tail)?;
+    Some(format!("{margin}{first}{receiver}\n{call}"))
+}
+
 /// A call statement `head(args)tail` at `indent`, as `rustfmt` lays it out: on one line when the
-/// line fits and the arguments are no wider than `fn_call_width`, and otherwise one argument per
-/// line. Every argument must be a short expression `rustfmt` keeps whole (a literal, a path, a
-/// borrow of a field): an argument it could break or overflow, such as a closure or an array, is
-/// outside what this lays out.
+/// line fits and the arguments are no wider than `fn_call_width` (or there is only one); broken
+/// before the method when that puts the call on one line; and otherwise one argument per line.
+/// Every argument must be a short expression `rustfmt` keeps whole (a literal, a path, a borrow
+/// of a field): an argument it could break or overflow, such as a closure or an array, is outside
+/// what this lays out.
 pub(crate) fn call(indent: usize, head: &str, args: &[String], tail: &str) -> String {
     let margin = pad(indent);
     let text = flat_call(&margin, head, args, tail)
+        .or_else(|| broken_chain(&margin, "", indent, head, args, tail))
         .unwrap_or_else(|| vertical_call(&margin, indent, head, args, tail));
     format!("{text}\n")
 }
 
 /// `lhs head(args)tail` at `indent`, where `lhs` ends in `=`: the call on the same line when it
-/// fits there, on the next line when it fits there on one line, and otherwise broken on the same
-/// line as [`call`] breaks it.
+/// fits there, on the next line when it fits there on one line, broken before the method when
+/// that puts the call on one line, and otherwise one argument per line.
 pub(crate) fn let_call(
     indent: usize,
     lhs: &str,
@@ -228,6 +254,9 @@ pub(crate) fn let_call(
     }
     if let Some(line) = flat_call(&pad(indent + INDENT), head, args, tail) {
         return format!("{margin}{lhs}\n{line}\n");
+    }
+    if let Some(text) = broken_chain(&margin, &format!("{lhs} "), indent, head, args, tail) {
+        return format!("{text}\n");
     }
     format!(
         "{}\n",

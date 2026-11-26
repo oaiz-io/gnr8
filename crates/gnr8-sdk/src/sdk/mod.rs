@@ -568,6 +568,8 @@ pub enum ReadinessKind {
     /// Type-check and validate a generated TypeScript package.
     #[serde(rename = "typescript")]
     TypeScript,
+    /// Compile a generated Rust module tree with `cargo check`.
+    Rust,
 }
 
 /// A post-processor: [`Artifacts`] → [`Artifacts`], run (in order) after all targets and before the

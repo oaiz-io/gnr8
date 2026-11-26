@@ -2071,3 +2071,35 @@ fn operation_prose_keeps_trailing_spaces_and_tabs() {
         "{text:?}"
     );
 }
+
+fn rust_sdk(metadata: bool) -> BuiltinTarget {
+    BuiltinTarget::RustSdk(
+        RustSdk::new()
+            .module("bookstore")
+            .to("generated/rust")
+            .package_metadata(metadata),
+    )
+}
+
+/// A Rust SDK sibling gives every sampled operation a Rust section: a `use` of the crate by its
+/// library name, a client on the reader's `transport`, and the call. Without package metadata it has no published name, so it prints the identity note.
+#[test]
+fn a_rust_sdk_sibling_prints_rust_samples() {
+    let pages = render(&bookstore(), &[go_sdk(), rust_sdk(true)]);
+    let joined: String = pages.values().cloned().collect();
+    assert!(joined.contains("### Rust — `bookstore`"), "{joined}");
+    assert!(
+        joined.contains("```rust\nuse bookstore::models;\nuse bookstore::Client;"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("let client = Client::builder(base_url, transport)"),
+        "{joined}"
+    );
+    assert!(!joined.contains("Rust SDK target emits no CLI"), "{joined}");
+
+    let pages = render(&bookstore(), &[rust_sdk(false)]);
+    let joined: String = pages.values().cloned().collect();
+    assert!(!joined.contains("```rust"), "{joined}");
+    assert!(joined.contains("emits no package metadata"), "{joined}");
+}

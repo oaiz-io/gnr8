@@ -626,3 +626,89 @@ fn verify_runs_the_go_docs_suite_for_bookstore() {
     // (`verify::docs::tests::host_runner_go_suite_fails_on_a_page_that_prints_another_request`).
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The pipeline with a Rust SDK, its README and reference on, and optionally a post-process that
+/// makes the generated client send a path the graph never stated.
+fn rust_pipeline(bug: bool) -> String {
+    let post = if bug {
+        "\n            .post(Custom(SendTheWrongPath))"
+    } else {
+        ""
+    };
+    format!(
+        r#"use gnr8::sdk::prelude::*;
+
+struct SendTheWrongPath;
+
+impl PostProcess for SendTheWrongPath {{
+    fn run(&self, out: &mut Artifacts, _cx: &Cx) -> Result<(), gnr8::Error> {{
+        out.rewrite("sdk-rust/src/operations.rs", |text| text.replace("\"/items\"", "\"/wrong\""))
+    }}
+}}
+
+fn main() -> std::process::ExitCode {{
+    gnr8::worker::run(
+        Pipeline::new()
+            .source(OpenApi::new().input("openapi.yaml"))
+            .target(RustSdk::new().module("catalog").to("sdk-rust")){post},
+    )
+}}
+"#
+    )
+}
+
+/// `gnr8 verify` runs the Rust SDK's contract tests with `cargo test` in a crate it synthesizes,
+/// and compiles and runs the samples its README and reference print; a client that sends another
+/// request than the graph states fails both.
+#[test]
+fn verify_runs_the_rust_contract_and_docs_suites() {
+    let has_cargo = Command::new("cargo")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !has_cargo {
+        eprintln!("skipping verify_e2e: cargo unavailable");
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gnr8-verify-rust-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("openapi.yaml"), SPEC).unwrap();
+    let (ok, out, err) = run_gnr8(&root, &["init"]);
+    assert!(
+        ok,
+        "gnr8 init must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    std::fs::write(root.join(".gnr8/src/main.rs"), rust_pipeline(false)).unwrap();
+
+    let (ok, out, err) = run_gnr8(&root, &["generate"]);
+    assert!(
+        ok,
+        "gnr8 generate must succeed.\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    let contract = std::fs::read_to_string(root.join("sdk-rust/src/contract_test.rs")).unwrap();
+    assert!(contract.contains("fn contract_"), "{contract}");
+    assert!(root.join("sdk-rust/README.md").is_file());
+
+    let (ok, out, err) = run_gnr8(&root, &["--json", "verify"]);
+    assert!(ok, "gnr8 verify must pass.\nstdout:\n{out}\nstderr:\n{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("verify --json is JSON");
+    assert_eq!(report["verified"], serde_json::json!(true), "{out}");
+    assert_eq!(report["counts"]["passed"], serde_json::json!(2), "{out}");
+    let docs = report["docs_suites"].as_array().expect("docs suites");
+    assert_eq!(docs[0]["language"], serde_json::json!("rust"), "{out}");
+    assert_eq!(docs[0]["status"], serde_json::json!("passed"), "{out}");
+
+    std::fs::write(root.join(".gnr8/src/main.rs"), rust_pipeline(true)).unwrap();
+    let (ok, out, err) = run_gnr8(&root, &["--json", "verify"]);
+    assert!(
+        !ok,
+        "a client that sends the wrong path must fail verify.\n{out}\n{err}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&out).expect("verify --json is JSON");
+    assert_eq!(report["verified"], serde_json::json!(false), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -295,6 +295,7 @@ fn docs_suite_labels(suites: &[gnr8_engine::verify::DocsSnippetSuite]) -> Vec<St
                     ContractTestLanguage::Go => "Go",
                     ContractTestLanguage::Python => "Python",
                     ContractTestLanguage::TypeScript => "TypeScript",
+                    ContractTestLanguage::Rust => "Rust",
                 }
             )
         })
@@ -451,6 +452,10 @@ fn run_suite(
             "tsc && node --test".to_string(),
             run_typescript(project_root, suite, artifacts),
         ),
+        ContractTestLanguage::Rust => (
+            "cargo test".to_string(),
+            run_rust(project_root, suite, artifacts),
+        ),
     };
     let (status, reason) = match outcome {
         Ok(()) => (PASSED, None),
@@ -529,6 +534,43 @@ fn run_go(
             ("GOFLAGS", "-mod=mod"),
             ("GOWORK", "off"),
         ],
+    )
+}
+
+/// Mount the generated tree in a synthesized crate and run its contract tests with `cargo test`.
+fn run_rust(
+    project_root: &Path,
+    suite: &ContractTestSuite,
+    artifacts: &[Artifact],
+) -> Result<(), String> {
+    command_available("cargo", &["--version"])?;
+    let seed = output_dir(project_root, &suite.output_path);
+    let materialized = materialize_artifact_group(
+        &suite.output_path,
+        artifacts,
+        "verify-rust",
+        seed.as_deref(),
+    )?;
+    // The root module sits beside the contract test: `lib.rs` in a crate's `src/`, `mod.rs` in a
+    // module tree a hand-written crate declares.
+    let relative = Path::new(&suite.test_file)
+        .strip_prefix(suite.output_path.trim_end_matches('/'))
+        .map_err(|_| "the Rust contract test is outside its SDK's directory".to_string())?;
+    let source = materialized
+        .target_dir
+        .join(relative.parent().unwrap_or_else(|| Path::new("")));
+    let harness = crate::mount_rust_tree(&materialized, &source)?;
+    let target = harness.join("target");
+    run_tool(
+        "cargo",
+        &[
+            "test",
+            "--quiet",
+            "--lib",
+            gnr8_engine::rustsdk::TEST_PREFIX,
+        ],
+        &harness,
+        &[("CARGO_TARGET_DIR", &target.to_string_lossy())],
     )
 }
 

@@ -713,6 +713,7 @@ pub(crate) const fn language_fence(language: ContractTestLanguage) -> &'static s
         ContractTestLanguage::Go => "go",
         ContractTestLanguage::Python => "python",
         ContractTestLanguage::TypeScript => "ts",
+        ContractTestLanguage::Rust => "rust",
     }
 }
 

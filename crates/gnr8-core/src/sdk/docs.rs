@@ -102,6 +102,10 @@ fn sdk_readme(model: &DocsModel, sdk: SiblingSdk<'_>) -> String {
         ContractTestLanguage::Go | ContractTestLanguage::Python => {
             "2. Construct the generated `Client` with the service base URL.\n"
         }
+        ContractTestLanguage::Rust => {
+            "2. Construct the generated `Client` with the service base URL and a `Transport` that \
+             sends one HTTP exchange.\n"
+        }
     };
     text.push_str(construct);
     text.push_str(
@@ -135,6 +139,13 @@ fn sdk_readme(model: &DocsModel, sdk: SiblingSdk<'_>) -> String {
             "wall time can reach `timeoutMs x (maxRetries + 1)` plus the waits between them. ",
             "Total time spent waiting between retries is capped at 60s, so a longer `Retry-After` ",
             "is honoured only up to that cap. Pass `signal` to interrupt a retry wait.\n\n"
+        ),
+        ContractTestLanguage::Rust => concat!(
+            "## Retries and timeouts\n\n",
+            "`timeout` bounds each individual attempt, and the `Transport` enforces it: with ",
+            "retries, total wall time can reach `timeout x (max_retries + 1)` plus the waits ",
+            "between them. Total time spent waiting between retries is capped at 60s, so a longer ",
+            "`Retry-After` is honoured only up to that cap. Retry waits are not interruptible.\n\n"
         ),
     });
     text.push_str("## Quick start\n\n");

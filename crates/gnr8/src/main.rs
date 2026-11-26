@@ -878,6 +878,78 @@ fn readiness_for_target(
         ReadinessKind::Go => validate_go_target(output_path, artifacts),
         ReadinessKind::Python => validate_python_target(output_path, artifacts),
         ReadinessKind::TypeScript => validate_typescript_target(output_path, artifacts),
+        ReadinessKind::Rust => validate_rust_target(output_path, artifacts),
+    }
+}
+
+/// The manifest of the crate a generated Rust SDK tree is mounted in to check or test it.
+///
+/// The crate is synthesized, so neither readiness nor verification reads or changes the project's
+/// own manifest, lockfile or workspace, and one path serves a generated crate and a generated
+/// module tree alike.
+const RUST_MOUNT_MANIFEST: &str = "[package]\nname = \"gnr8-mount-rust\"\nversion = \"0.0.0\"\n\
+edition = \"2021\"\npublish = false\n\n[lib]\npath = \"lib.rs\"\n\n[dependencies]\n\
+serde = { version = \"1\", features = [\"derive\"] }\nserde_json = \"1\"\n\n[workspace]\n";
+
+/// Write a crate inside `materialized` that mounts the generated Rust tree, whose root module is
+/// `lib.rs` or `mod.rs` in `source`, as its module `sdk`; return the crate's directory.
+pub(crate) fn mount_rust_tree(
+    materialized: &MaterializedTarget,
+    source: &Path,
+) -> Result<PathBuf, String> {
+    let root_file = ["lib.rs", "mod.rs"]
+        .into_iter()
+        .map(|name| source.join(name))
+        .find(|path| path.is_file())
+        .ok_or_else(|| "the generated Rust SDK has no root module".to_string())?;
+    let mount = materialized.root.join("gnr8-mount-rust");
+    std::fs::create_dir_all(&mount)
+        .map_err(|err| format!("failed to create the Rust mount crate: {err}"))?;
+    std::fs::write(mount.join("Cargo.toml"), RUST_MOUNT_MANIFEST)
+        .map_err(|err| format!("failed to write the Rust mount manifest: {err}"))?;
+    let root_path = root_file.to_string_lossy();
+    std::fs::write(
+        mount.join("lib.rs"),
+        format!("#[path = {root_path:?}]\nmod sdk;\n"),
+    )
+    .map_err(|err| format!("failed to write the Rust mount crate: {err}"))?;
+    Ok(mount)
+}
+
+fn validate_rust_target(
+    anchor: &str,
+    artifacts: &[gnr8_engine::sdk::Artifact],
+) -> doctor::SdkReadiness {
+    const TOOLCHAIN: &str = "cargo check";
+    if let Err(reason) = command_available("cargo", &["--version"]) {
+        return doctor::SdkReadiness::not_ready("rust", anchor, TOOLCHAIN, reason);
+    }
+    let Ok(materialized) = materialize_artifact_group(anchor, artifacts, "rust", None) else {
+        return doctor::SdkReadiness::not_ready(
+            "rust",
+            anchor,
+            TOOLCHAIN,
+            "failed to materialize generated Rust SDK for readiness",
+        );
+    };
+    let crate_source = materialized.target_dir.join("src");
+    let source = if crate_source.join("lib.rs").is_file() {
+        crate_source
+    } else {
+        materialized.target_dir.clone()
+    };
+    let checked = mount_rust_tree(&materialized, &source).and_then(|mount| {
+        let target = mount.join("target");
+        command_success_in(
+            "cargo",
+            &["check", "--quiet"],
+            &mount,
+            &[("CARGO_TARGET_DIR", &target.to_string_lossy())],
+        )
+    });
+    match checked {
+        Ok(()) => doctor::SdkReadiness::ready("rust", anchor, TOOLCHAIN),
+        Err(reason) => doctor::SdkReadiness::not_ready("rust", anchor, TOOLCHAIN, reason),
     }
 }
 

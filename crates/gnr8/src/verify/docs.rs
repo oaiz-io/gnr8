@@ -169,6 +169,7 @@ fn run_with_runner(
         ContractTestLanguage::Go => ("go vet ./...", "go", "version"),
         ContractTestLanguage::Python => ("python3 -m unittest", "python3", "--version"),
         ContractTestLanguage::TypeScript => ("tsc -p", "node", "--version"),
+        ContractTestLanguage::Rust => ("cargo test", "cargo", "--version"),
     };
     let mut report = DocsReport {
         language: suite.language.id(),
@@ -223,7 +224,9 @@ fn run_with_runner(
                             ),
                         )
                     }),
-                ContractTestLanguage::Go | ContractTestLanguage::Python => Ok(None),
+                ContractTestLanguage::Go
+                | ContractTestLanguage::Python
+                | ContractTestLanguage::Rust => Ok(None),
             })
             .and_then(|compiler| {
                 run_unit(root, suite, unit, artifacts, runner, compiler)
@@ -473,8 +476,79 @@ fn run_unit(
             accepted(suite, unit, &spawn(runner, &mut record)?)?;
             read_records(&wire)?
         }
+        ContractTestLanguage::Rust => {
+            let seed = crate::safe_temp_artifact_path(root, &suite.sdk_output_path).ok();
+            let tree = crate::materialize_artifact_group(
+                &suite.sdk_output_path,
+                &owned,
+                "verify-docs-rust",
+                seed.as_deref(),
+            )
+            .map_err(materialization)?;
+            // A crate of its own depends on the generated crate by path, under the package name
+            // the generated manifest declares, so the unit names it exactly as a consumer does.
+            let consumer = tree.root.join("gnr8-docs-rust");
+            std::fs::create_dir_all(&consumer)
+                .map_err(|err| materialization(format!("cannot create the unit crate: {err}")))?;
+            write(
+                &consumer.join("Cargo.toml"),
+                &rust_manifest(&rust_package(&tree.target_dir)?, &tree.target_dir),
+            )?;
+            write(&consumer.join(&unit.file_name), &unit.text)?;
+            let target = consumer.join("target");
+            let cargo = |args: &[&str]| {
+                let mut command = Command::new("cargo");
+                command
+                    .args(args)
+                    .current_dir(&consumer)
+                    .env("CARGO_TARGET_DIR", &target);
+                command
+            };
+            accepted(
+                suite,
+                unit,
+                &spawn(runner, &mut cargo(&["test", "--quiet", "--no-run"]))?,
+            )?;
+            let wire = tree.root.join(WIRE_FILE);
+            let mut record = cargo(&["test", "--quiet", "--lib", "docs_wire"]);
+            record.env(WIRE_ENV, &wire);
+            accepted(suite, unit, &spawn(runner, &mut record)?)?;
+            read_records(&wire)?
+        }
     };
     compare_wire(suite, unit, &records)
+}
+
+/// The package name the generated crate's manifest declares.
+fn rust_package(sdk: &Path) -> Result<String, DocsReason> {
+    let manifest = std::fs::read_to_string(sdk.join("Cargo.toml")).map_err(|err| {
+        DocsReason::new(
+            DocsFailure::Materialization,
+            format!("the generated Rust crate has no readable Cargo.toml: {err}"),
+        )
+    })?;
+    manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("name = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            DocsReason::new(
+                DocsFailure::Materialization,
+                "the generated Rust crate's Cargo.toml names no package",
+            )
+        })
+}
+
+/// The manifest of the crate a Rust unit is the library of.
+fn rust_manifest(package: &str, sdk: &Path) -> String {
+    let path = sdk.to_string_lossy();
+    format!(
+        "[package]\nname = \"gnr8-docs-rust\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+         publish = false\n\n[lib]\npath = \"{}\"\n\n[dependencies]\n{package} = {{ path = {path:?} }}\n\
+         serde_json = \"1\"\n\n[workspace]\n",
+        gnr8_engine::docs::verify::RS_UNIT_FILE
+    )
 }
 
 /// The file a unit's rung-3 harness writes its records to, inside the temp tree.
@@ -1217,6 +1291,7 @@ mod tests {
                     has("node", &["--version"])
                         && crate::typescript_compiler(&root, &suite.sdk_output_path).is_some()
                 }
+                ContractTestLanguage::Rust => has("cargo", &["--version"]),
                 ContractTestLanguage::Go => continue,
             };
             if !available {

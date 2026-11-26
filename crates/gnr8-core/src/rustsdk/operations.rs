@@ -73,6 +73,8 @@ pub(crate) struct Unit<'g> {
 pub(crate) struct Operations<'g> {
     pub(crate) units: Vec<Unit<'g>>,
     pub(crate) features: Features,
+    /// Each operation, resolved, for the contract tests to call.
+    pub(super) plans: Vec<Plan<'g>>,
 }
 
 /// An operations module holding `units`, with the module doc `doc`.
@@ -225,7 +227,7 @@ pub(super) struct ParamField<'g> {
 
 /// One operation, resolved.
 pub(super) struct Plan<'g> {
-    op: &'g Operation,
+    pub(super) op: &'g Operation,
     pub(super) method: String,
     path_template: String,
     url_path: Option<String>,
@@ -269,6 +271,38 @@ pub(super) struct Body {
     enum_name: Option<String>,
 }
 
+/// How a method reads its reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reply {
+    Empty,
+    Json,
+    JsonOrNone,
+    Text,
+    TextOrNone,
+    Bytes,
+    BytesOrNone,
+}
+
+impl Plan<'_> {
+    /// How the method reads its reply.
+    pub(super) fn reply(&self) -> Reply {
+        match self.reply {
+            "json" => Reply::Json,
+            "json_or_none" => Reply::JsonOrNone,
+            "text" => Reply::Text,
+            "text_or_none" => Reply::TextOrNone,
+            "bytes" => Reply::Bytes,
+            "bytes_or_none" => Reply::BytesOrNone,
+            _ => Reply::Empty,
+        }
+    }
+
+    /// The body enum and the variant of the `selection`th media type, when the body has several.
+    pub(super) fn body_variant(&self, selection: usize) -> Option<(&str, &str)> {
+        self.body.as_ref()?.variant_of(selection)
+    }
+}
+
 /// What kind of value a stored body is, which decides how it is copied and lent.
 pub(super) enum BodyShape {
     Text,
@@ -277,6 +311,18 @@ pub(super) enum BodyShape {
 }
 
 impl Body {
+    /// The enum of the media types, when there are several.
+    pub(super) fn enum_name(&self) -> Option<&str> {
+        self.enum_name.as_deref()
+    }
+
+    /// The body enum and the variant of the `selection`th media type, when there are several.
+    pub(super) fn variant_of(&self, selection: usize) -> Option<(&str, &str)> {
+        let name = self.enum_name.as_deref()?;
+        let choice = self.choices.get(selection)?;
+        Some((name, choice.variant.as_str()))
+    }
+
     /// The body as an owned value, and its shape.
     pub(super) fn owned(&self) -> (RustType, BodyShape) {
         match (&self.enum_name, self.choices.as_slice()) {
@@ -354,7 +400,23 @@ pub(crate) fn render<'g>(
             exports,
         });
     }
-    Ok(Ok(Operations { units, features }))
+    Ok(Ok(Operations {
+        units,
+        features,
+        plans,
+    }))
+}
+
+/// `op` resolved alone, or `None` when the target refuses a position of it.
+///
+/// # Errors
+///
+/// Returns the shared SDK helpers' error for a graph they reject.
+pub(super) fn plan_one<'g>(
+    graph: &'g ApiGraph,
+    op: &'g Operation,
+) -> Result<Option<Plan<'g>>, CoreError> {
+    plan(graph, &Types::new(graph), op, &mut Vec::new())
 }
 
 /// Resolve `op`, recording every position the target refuses in `problems`.
