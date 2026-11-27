@@ -1,0 +1,677 @@
+{
+  "schema_version": 3,
+  "graph": {
+    "module": "example.com/jobs",
+    "operations": [],
+    "schemas": [
+      {
+        "id": "internal/jobspec.BillingInvoice",
+        "name": "BillingInvoice",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "number",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "totals_by_line",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "map",
+                "of": {
+                  "key": {
+                    "type": "primitive",
+                    "of": {
+                      "prim": "int",
+                      "bits": 32,
+                      "signed": true
+                    }
+                  },
+                  "value": {
+                    "type": "primitive",
+                    "of": {
+                      "prim": "float",
+                      "bits": 64
+                    }
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "internal/jobspec/jobspec.go"
+        }
+      },
+      {
+        "id": "internal/jobspec.Event",
+        "name": "Event",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "attachments",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "named",
+                  "of": "internal/jobspec.FileReference::output"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "attempt",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 32,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "dryRun",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "bool"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "fileId",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "file_id",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "id",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "input",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "named",
+                "of": "internal/jobspec.FileReference::output"
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "labels",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "map",
+                "of": {
+                  "key": {
+                    "type": "primitive",
+                    "of": {
+                      "prim": "string"
+                    }
+                  },
+                  "value": {
+                    "type": "primitive",
+                    "of": {
+                      "prim": "string"
+                    }
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "note",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "params",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "map",
+                "of": {
+                  "key": {
+                    "type": "primitive",
+                    "of": {
+                      "prim": "string"
+                    }
+                  },
+                  "value": {
+                    "type": "any",
+                    "of": {}
+                  }
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "payload",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "any",
+                "of": {}
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "status",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "named",
+                "of": "internal/jobspec.JobStatus"
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "type",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "internal/jobspec/jobspec.go"
+        }
+      },
+      {
+        "id": "internal/jobspec.FileReference::input",
+        "name": "FileReferenceInput",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "children",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "named",
+                  "of": "internal/jobspec.FileReference::input"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "media_type",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "parent",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "named",
+                "of": "internal/jobspec.FileReference::input"
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "path",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "size_bytes",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 64,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "internal/jobspec/jobspec.go"
+        }
+      },
+      {
+        "id": "internal/jobspec.FileReference::output",
+        "name": "FileReferenceOutput",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "children",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "named",
+                  "of": "internal/jobspec.FileReference::output"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "media_type",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "parent",
+              "serializer_may_omit": true,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "named",
+                "of": "internal/jobspec.FileReference::output"
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "path",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "size_bytes",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 64,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "internal/jobspec/jobspec.go"
+        }
+      },
+      {
+        "id": "internal/jobspec.JobOutput",
+        "name": "JobOutput",
+        "body": {
+          "type": "object",
+          "of": [
+            {
+              "json_name": "artifacts",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": true,
+              "validator_rejects_null": true,
+              "schema": {
+                "type": "array",
+                "of": {
+                  "type": "named",
+                  "of": "internal/jobspec.FileReference::input"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "exit_code",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "int",
+                  "bits": 32,
+                  "signed": true
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "result",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "any",
+                "of": {}
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "retry",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "bool"
+                }
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "status",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": false,
+              "validator_requires_presence": true,
+              "validator_rejects_null": true,
+              "schema": {
+                "type": "named",
+                "of": "internal/jobspec.JobStatus"
+              },
+              "description": null,
+              "example": null
+            },
+            {
+              "json_name": "summary",
+              "serializer_may_omit": false,
+              "deserializer_accepts_absent": true,
+              "deserializer_accepts_null": true,
+              "serializer_may_emit_null": true,
+              "validator_requires_presence": false,
+              "validator_rejects_null": false,
+              "schema": {
+                "type": "primitive",
+                "of": {
+                  "prim": "string"
+                }
+              },
+              "description": null,
+              "example": null
+            }
+          ]
+        },
+        "provenance": {
+          "file": "internal/jobspec/jobspec.go"
+        }
+      },
+      {
+        "id": "internal/jobspec.JobStatus",
+        "name": "JobStatus",
+        "body": {
+          "type": "enum",
+          "of": [
+            "IN_PROGRESS",
+            "done",
+            "in-progress",
+            "queued"
+          ]
+        },
+        "enum_source_order": [
+          "IN_PROGRESS",
+          "done",
+          "in-progress",
+          "queued"
+        ],
+        "provenance": {
+          "file": "internal/jobspec/jobspec.go"
+        }
+      }
+    ],
+    "diagnostics": [
+      {
+        "code": "schema.free_form_map",
+        "severity": "INFO",
+        "category": "schema",
+        "message": "free-form map field: Event.Params (map[string]any) lowers to additionalProperties: true (TARGET-API.md §5.1)",
+        "file": "internal/jobspec/jobspec.go",
+        "span": {
+          "file": "internal/jobspec/jobspec.go"
+        },
+        "schema": "Event",
+        "subject": "Params"
+      }
+    ],
+    "base_path": "/",
+    "title": "Jobs",
+    "security": [],
+    "schema_uses": [
+      {
+        "schema_id": "internal/jobspec.Event",
+        "use_": "output"
+      },
+      {
+        "schema_id": "internal/jobspec.JobOutput",
+        "use_": "input"
+      }
+    ]
+  }
+}

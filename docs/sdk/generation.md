@@ -7,6 +7,10 @@
 support, generated reference docs, and optional package metadata. Configure API meaning in transforms;
 configure file/public-surface policy on the target.
 
+`RustModels` renders models only: Rust types with Serde serialization for the schemas you select by
+id or name. It reads field presence and nullability from the same graph rules described below; see
+[Rust models](rust-models.md).
+
 ## Minimal targets
 
 ```rust

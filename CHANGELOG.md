@@ -25,6 +25,30 @@ must move the minor version.
   changes the document for a Python `dict[str, Any]`, a TypeScript `Record<string, unknown>`, a
   non-literal `gin.H` response, an imported open object, and a custom stage's `Map { value: Any }`;
   the OpenAPI source already imports `additionalProperties: true` as this map.
+- **`BuiltinTarget` gains `RustModels`.** Rust code that matches `BuiltinTarget` exhaustively needs
+  an arm. The host/worker protocol is now version 10, so a worker and CLI cannot silently disagree
+  about the stage-plan shape.
+
+### Added
+
+- `RustModels` target: Rust types with Serde serialization for the schemas its `.model_root(...)`s
+  reach, or every schema with `.all_models()`, written as one module tree whose root is `mod.rs`
+  (compact, or one file per model with `.split_files()` / a split `SdkFileLayout`). Field presence
+  and nullability follow the graph's direction rules: a required key is `T`, a required nullable key
+  `Option<T>`, an optional key `Option<T>` that reads a `null` as absent and never writes one, and
+  an optional nullable key `Option<Option<T>>` that keeps absent, `null` and a value apart. Every
+  struct has a `new` over its required fields that starts the rest as `None`, so a field the API
+  adds as optional leaves its callers compiling, and a struct with no required field derives
+  `Default`. Wire names are kept exactly while Rust names are escaped and numbered where they
+  collide; a rename is written only where Serde's own name for the field or variant is not the wire
+  name, and a struct with camel-case wire names states `rename_all = "camelCase"` once. The source
+  is laid out as `rustfmt` lays it out by default and passes `cargo clippy` with warnings denied,
+  so a consuming crate formats and lints it like its own code, whether it declares the tree with
+  `pub mod` or a private `mod`. An inline enum is a `String`, and a value outside its members
+  decodes like any other. A union, a byte string, an inline object, an integer or float of a width
+  Rust lacks, a map keyed by anything but a string, a self-referential alias, and a colliding or
+  reserved Rust type name fail generation with one error naming every schema and field. See
+  `docs/sdk/rust-models.md`.
 
 ## 0.23.0 — 2026-11-12
 

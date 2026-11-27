@@ -194,8 +194,14 @@ Keep dependencies narrow and reviewable:
 - prefer the standard library or existing focused dependencies when either is sufficient;
 - do not add overlapping frameworks or a second implementation path for the same concern;
 - do not use dependencies to read another generator's annotations, configuration, or output;
-- keep `gnr8-core`'s product behavior deterministic and covered by repository-owned tests; and
-- keep generated Go, Python, and TypeScript SDKs standard-library-only.
+- keep `gnr8-core`'s product behavior deterministic and covered by repository-owned tests;
+- keep generated Go and TypeScript SDKs free of third-party runtime dependencies;
+- keep Python's `dataclasses()` mode standard-library-only. The default `pydantic()` mode uses
+  Pydantic v2 for models, validation, and serialization;
+- generate Rust models with `serde` derives and use `serde_json::Value` only for free-form JSON fields.
+  Rust's standard library has no JSON support. The consuming crate manages dependency versions in
+  its lockfile. The generated models have no gnr8 runtime dependency, and gnr8 never reads `serde`
+  attributes from source.
 
 Before adding a dependency, document the bounded commodity concern it serves and verify that it does
 not weaken rules 1, 3, or 4.
@@ -220,7 +226,6 @@ The bright line:
   reads `@nestjs/swagger`, `zod`, `class-validator`, or any third-party schema/annotation tool (rule 1
   forbids those absolutely).
 - Every other sidecar uses its source language's own typed or standard-library facilities.
-- Every generated SDK (GoSdk, PySdk, TsSdk) remains dependency-free.
 - A future hand-rolled stdlib-pure TypeScript parser (FUT-04) could remove even the toolchain
   requirement.
 
