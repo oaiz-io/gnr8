@@ -200,6 +200,7 @@ Two schemas whose Rust type names collide, and a schema whose Rust name would be
 | free-form value | `serde_json::Value` |
 | named object | `pub struct` |
 | named string enum | `pub enum` of unit variants; an unlisted value is a decode error |
+| inline enum (a Python `Literal[...]` field) | `String`; an unlisted value decodes like any other |
 | named alias of any of the above | `pub type` |
 | a reference that would make a struct contain itself | `Box<T>` |
 
@@ -234,6 +235,7 @@ allows, for the generated tree only, the lints whose answer the API decides rath
 | `dead_code` | a crate need not use every model it selects |
 | `missing_docs` | the graph has prose for some fields and not for others |
 | `unreachable_pub` | the crate chooses whether `models` is public |
+| `unused_imports` | a crate that declares `models` privately may use only some of the models the split layout's `mod.rs` re-exports |
 | `clippy::style`, `clippy::complexity` | they judge names, prose and shape: a field the API calls `foo`, members sharing a prefix, a deeply nested map |
 | `clippy::pedantic`, `clippy::nursery` | opt-in groups, for the same reason |
 
@@ -258,7 +260,6 @@ See docs/sdk/rust-models.md for the shapes the target supports.
 | union (`oneOf`, a Python `A \| B`) | nothing in the graph says which variant a JSON value is | model the payload as one object, or as free-form JSON |
 | byte string (a graph `bytes` primitive: Python `bytes`, an imported `format: binary` string) | the graph does not state the JSON text encoding | carry the encoded text as a string field |
 | inline object | a Rust struct needs a name | declare a named type |
-| inline enum (a Python `Literal[...]` field) | a Rust enum needs a name | declare a named enum |
 | integer or float of another width | Rust has no such type | use a 8/16/32/64-bit integer or a 32/64-bit float |
 | map keyed by anything but a string | a JSON object key is a string | key the map by string |
 | an alias that refers to itself (`type Tree = Vec<Tree>`) | a Rust type alias cannot be recursive | declare the recursion through an object |

@@ -534,6 +534,21 @@ fn identical_input_emits_identical_bytes() {
 }
 
 #[test]
+fn inline_enum_fields_and_items_use_strings() {
+    let graph = graph(vec![object(
+        "jobs.Choice",
+        vec![
+            required("mode", Type::enumeration(["a", "b"])),
+            required("modes", Type::array(Type::enumeration(["a", "b"]))),
+        ],
+    )]);
+    let files = emit(target("m").model_root("Choice"), &graph);
+    let output = text(&files, "m/mod.rs");
+    assert!(output.contains("pub mode: String,"), "{output}");
+    assert!(output.contains("pub modes: Vec<String>,"), "{output}");
+}
+
+#[test]
 fn every_unrepresentable_shape_is_named_in_one_error() {
     let graph = graph(vec![
         object(
@@ -571,14 +586,13 @@ fn every_unrepresentable_shape_is_named_in_one_error() {
     ]);
     let message = error(target("m").model_root("jobs.Bad"), &graph);
     for expected in [
-        "RustModels cannot represent 9 graph positions faithfully:",
+        "RustModels cannot represent 8 graph positions faithfully:",
         "schema `jobs.Bad` field `blob`: a byte string: the graph does not state its JSON text encoding",
         "schema `jobs.Bad` field `blobs`: an array whose items are a byte string",
         "schema `jobs.Bad` field `by_number`: a map keyed by signed 64-bit integer: a JSON object key is a string",
         "schema `jobs.Bad` field `choice`: a union: the graph states no discriminator",
         "schema `jobs.Bad` field `huge`: a signed 128-bit integer, which has no Rust integer type",
         "schema `jobs.Bad` field `inline`: an inline object: declare it as a named type",
-        "schema `jobs.Bad` field `mode`: an inline enum: declare it as a named enum",
         "schema `jobs.Either`: a union",
         "schema `jobs.Loop`: an alias that refers to itself",
         "See docs/sdk/rust-models.md",
@@ -844,6 +858,29 @@ fn emitted_models_compile_and_pass_rustfmt_and_clippy_in_both_layouts() {
     let root = cargo_check("split", &split, "out/", Deps::SerdeAndJson);
     rustfmt_check(&root);
     clippy_check(&root);
+}
+
+#[test]
+fn a_split_tree_mounted_privately_builds_without_warnings_using_one_model() {
+    // The split layout's root re-exports every model, and a model's own file names another
+    // through that re-export. A crate that declares the tree with a private `mod` and uses one
+    // model leaves the re-export of every model no other model names unused: here, `Probe`.
+    let split = emit(
+        target("out").all_models().layout(SdkFileLayout::split()),
+        &supported(),
+    );
+    let root = consumer_crate("private", &split, "out/", Deps::SerdeAndJson);
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "#![deny(warnings)]\nmod models;\n\npub fn probe_size() -> usize {\n    \
+         std::mem::size_of::<models::Unrelated>()\n}\n",
+    )
+    .unwrap();
+    cargo(
+        &root,
+        "warns when mounted privately",
+        &["check", "--quiet", "--locked"],
+    );
 }
 
 #[test]

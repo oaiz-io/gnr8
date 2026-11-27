@@ -65,12 +65,13 @@ const NOT_RAW: [&str; 4] = ["Self", "crate", "self", "super"];
 
 /// The inner attribute every generated module tree carries. It allows only what the API, not the
 /// emitter, decides: whether a model is used (`dead_code`), whether the graph has prose for a field
-/// (`missing_docs`), how the consuming crate declares the module (`unreachable_pub`), and the
+/// (`missing_docs`), how the consuming crate declares the module (`unreachable_pub`, and
+/// `unused_imports` for the root's re-exports when it mounts the tree privately), and the
 /// Clippy groups that judge names, prose and shape (a field called `foo`, an enum whose members
 /// share a prefix, a deeply nested map). Clippy's `correctness`, `suspicious` and `perf` groups
 /// stay on, and the emitter's own code is held to all of default Clippy by `tests/rust_models.rs`.
 const LINT_ALLOWS: &str =
-    "#![allow(\n    dead_code,\n    missing_docs,\n    unreachable_pub,\n    \
+    "#![allow(\n    dead_code,\n    missing_docs,\n    unreachable_pub,\n    unused_imports,\n    \
                            clippy::style,\n    clippy::complexity,\n    clippy::pedantic,\n    \
                            clippy::nursery\n)]\n";
 
@@ -600,7 +601,7 @@ impl<'g> Plan<'g> {
                 rust_primitive(prim)
                     .ok_or_else(|| internal("", "an unsupported primitive passed validation"))?,
             ),
-            Type::WellKnown(_) => RustType::leaf("String"),
+            Type::WellKnown(_) | Type::Enum(_) => RustType::leaf("String"),
             Type::Array(items) => self.rust_type(items)?.inside("Vec"),
             Type::Map { value, .. } => RustType::generic(
                 "::std::collections::BTreeMap",
@@ -614,7 +615,7 @@ impl<'g> Plan<'g> {
                 RustType::leaf(format!("{}{ident}", self.root()))
             }
             Type::Any {} => RustType::leaf("::serde_json::Value"),
-            Type::Object(_) | Type::Enum(_) | Type::Union(_) => {
+            Type::Object(_) | Type::Union(_) => {
                 return Err(internal("", "an inline shape passed validation"));
             }
         })
@@ -945,7 +946,7 @@ fn unsupported(
                 Prim::String | Prim::Bool => "an unsupported primitive".to_string(),
             }),
         },
-        Type::WellKnown(_) | Type::Any {} => None,
+        Type::WellKnown(_) | Type::Enum(_) | Type::Any {} => None,
         Type::Array(items) => unsupported(items, bodies, selected)
             .map(|reason| format!("an array whose items are {reason}")),
         Type::Map { key, value } => {
@@ -971,9 +972,6 @@ fn unsupported(
         }
         Type::Object(_) => {
             Some("an inline object: declare it as a named type so it has a Rust name".to_string())
-        }
-        Type::Enum(_) => {
-            Some("an inline enum: declare it as a named enum so it has a Rust name".to_string())
         }
         Type::Union(_) => Some(union_reason().to_string()),
     }

@@ -43,10 +43,12 @@ must move the minor version.
   collide; a rename is written only where Serde's own name for the field or variant is not the wire
   name, and a struct with camel-case wire names states `rename_all = "camelCase"` once. The source
   is laid out as `rustfmt` lays it out by default and passes `cargo clippy` with warnings denied,
-  so a consuming crate formats and lints it like its own code. A union, a byte
-  string, an inline object or enum, an integer or float of a width Rust lacks, a map keyed by
-  anything but a string, a self-referential alias, and a colliding or reserved Rust type name fail
-  generation with one error naming every schema and field. See `docs/sdk/rust-models.md`.
+  so a consuming crate formats and lints it like its own code, whether it declares the tree with
+  `pub mod` or a private `mod`. An inline enum is a `String`, and a value outside its members
+  decodes like any other. A union, a byte string, an inline object, an integer or float of a width
+  Rust lacks, a map keyed by anything but a string, a self-referential alias, and a colliding or
+  reserved Rust type name fail generation with one error naming every schema and field. See
+  `docs/sdk/rust-models.md`.
 
 ## 0.23.0 — 2026-11-12
 

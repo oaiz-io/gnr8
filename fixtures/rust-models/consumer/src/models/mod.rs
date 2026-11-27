@@ -5,6 +5,7 @@
     dead_code,
     missing_docs,
     unreachable_pub,
+    unused_imports,
     clippy::style,
     clippy::complexity,
     clippy::pedantic,
